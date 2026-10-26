@@ -769,7 +769,7 @@ class SizeSettingsTest(support.TempDirTest):
         for rows, want in ((3, 7), (3.5, 7), (10, 0), (12, 0)):
             with self.subTest(rows=rows):
                 _, draw, regions = self.render((505, round(rows * row), 1.0))
-                self.assertEqual(regions['lyrics_scroll'], [draw['lyrics'][4], want])
+                self.assertEqual(regions['lyrics_scroll'], [draw['lyrics'][4], want, round(row, 2)])
 
     def test_lyrics_off_collapse_the_lyrics_area(self):
         text, draw, regions = self.render((505, 200, 1.0))
@@ -805,7 +805,7 @@ class SizeSettingsTest(support.TempDirTest):
     def test_static_synced_lyrics_get_the_wheel(self):
         nowplaying.lyrics_settings.set_scrolling(nowplaying.lyrics_settings.STATIC)
         _, draw, regions = self.render((505, 63, 1.0))
-        self.assertEqual(regions['lyrics_scroll'], [draw['lyrics'][4], 0])
+        self.assertEqual(regions['lyrics_scroll'], [draw['lyrics'][4], 0, round(float(draw['lyrics'][3]), 2)])
         self.assertTrue(support.read(nowplaying.LYRICS).startswith('plain\n'))
 
     def test_no_lyrics_means_no_lyrics_area(self):

@@ -897,15 +897,18 @@ def render():
         lyrics_area = [ART_LEFT, lyrics_top, MARGIN + widget_width, lyrics_top + lyrics_height]
         if static:
             # The wheel's range, in lines: from the first line at the top to the last one
-            # at the bottom. draw.lua works the same limit out.
-            lyrics_scroll = [version, max(0, math.ceil(count - lyrics_height / lyric_row - 1e-3))]
+            # at the bottom. draw.lua works the same limit out. A swipe scrolls a line
+            # for each row the finger moves.
+            lyrics_scroll = [version, max(0, math.ceil(count - lyrics_height / lyric_row - 1e-3)),
+                             round(lyric_row, 2)]
     out.append(last_gap(y, bottom))            # the lyrics and the bottom margin
     write_atomic(DRAW, '\n'.join(draw) + '\n')
 
     half = PLAY_SIZE / 2 + 4
     write_regions({
         'lyrics': lyrics_area,                  # the top and bottom edges resize only these
-        'lyrics_scroll': lyrics_scroll,         # [version, last offset] for the wheel; None: no wheel
+        'lyrics_scroll': lyrics_scroll,         # [version, last offset, row px] for the wheel and
+                                                # a swipe; None: neither
         **top_regions,
         # a little padding around each target makes them easier to hit
         'prev': [prev_cx - SKIP_SIZE / 2 - 5, mid_y - half, prev_cx + SKIP_SIZE / 2 + 5, mid_y + half],
