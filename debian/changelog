@@ -1,3 +1,15 @@
+conky-spotify-nowplaying (1.8.0) resolute; urgency=medium
+
+  * Click the album art to set the background to the colour under the
+    pointer. The choice is remembered for that artwork, so every track
+    with the same cover keeps it, also after a restart. Dragging by the
+    art still moves the widget.
+  * Taps, drags and swipes on a touchscreen work like the mouse: tap the
+    buttons or the seek bar, drag to move or resize the widget, and
+    swipe up or down over static lyrics to scroll them.
+
+ -- mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>  Mon, 26 Oct 2026 15:11:01 -0400
+
 conky-spotify-nowplaying (1.7.0) resolute; urgency=medium
 
   * Titles, artists and lyrics in Japanese, Chinese and Korean are drawn
