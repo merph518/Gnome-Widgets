@@ -433,27 +433,39 @@ class TapTest(unittest.TestCase):
 
 class PullTest(unittest.TestCase):
     REGIONS = {'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5, 20.0],
-               'seek': [278.0, 118.0, 388, 142.0], 'duration': 172.5}
+               'seek': [278.0, 118.0, 388, 142.0], 'duration': 172.5, 'art': [20, 20, 138, 138]}
 
-    def pull(self, hit, edges, swipe_at=None, regions=REGIONS):
-        calls = {}
-        names = ('seek', 'resize', 'swipe', 'drag', 'remember')
+    def pull(self, hit, edges, at=(100, 180), touch=False, regions=REGIONS, click=True):
+        names = ('seek', 'resize', 'swipe', 'drag', 'remember', 'pick_colour', 'clicked')
         with mock.patch.multiple(conky_mouse, **{n: mock.DEFAULT for n in names}) as m:
             m['resize'].return_value = m['drag'].return_value = (1, 2, 3, 4)
-            conky_mouse.pull('d', 'root', 'win', 1, regions, hit, edges, 'track', swipe_at)
-            calls = {n for n in names if m[n].called}
-        return calls
+            m['clicked'].return_value = click
+            conky_mouse.pull('d', 'root', 'win', 1, regions, hit, edges, 'track', (*at, (600, 500)), touch)
+            self.calls = m
+            return {n for n in names if m[n].called and n != 'clicked'}
 
-    def test_seek_then_edges_then_lyrics_then_a_move(self):
+    def test_seek_then_art_then_edges_then_lyrics_then_a_move(self):
         self.assertEqual(self.pull('seek', ''), {'seek'})
         self.assertEqual(self.pull('seek', 'r', regions=dict(self.REGIONS, duration=None)),
                          {'resize', 'remember'})              # no track length: the edge wins
-        self.assertEqual(self.pull(None, 'b', (100, 180, 500)), {'resize', 'remember'})
-        self.assertEqual(self.pull(None, '', (100, 180, 500)), {'swipe'})
-        self.assertEqual(self.pull(None, '', (100, 100, 500)), {'drag', 'remember'})   # above the lyrics
+        self.assertEqual(self.pull('art', ''), {'pick_colour'})
+        self.assertEqual(self.pull(None, 'b', touch=True), {'resize', 'remember'})
+        self.assertEqual(self.pull(None, '', touch=True), {'swipe'})
+        self.assertEqual(self.pull(None, '', (100, 100), touch=True), {'drag', 'remember'})   # above the lyrics
 
     def test_the_mouse_moves_the_widget_from_the_lyrics(self):
         self.assertEqual(self.pull(None, ''), {'drag', 'remember'})
+
+    def test_a_drag_from_the_art_moves_the_widget_from_the_press(self):
+        self.assertEqual(self.pull('art', '', click=False), {'drag', 'remember'})
+        self.assertEqual(self.calls['drag'].call_args.args[-1], (600, 500))
+
+    def test_a_finger_gets_more_slop_on_the_art_than_the_mouse(self):
+        self.pull('art', '')
+        self.assertEqual(self.calls['clicked'].call_args.args[-1], conky_mouse.CLICK_SLOP)
+        self.pull('art', '', touch=True)
+        self.assertEqual(self.calls['clicked'].call_args.args[-1], conky_mouse.TAP_SLOP)
+        self.assertGreater(conky_mouse.TAP_SLOP, conky_mouse.CLICK_SLOP)
 
 
 class TouchTest(unittest.TestCase):
