@@ -33,14 +33,14 @@ import widget_size as size_file
 
 CACHE = os.path.expanduser('~/.cache/conky-spotify-nowplaying')
 OUT = os.path.join(CACHE, 'widget.txt')
-COVER = os.path.join(CACHE, 'cover.jpg')
+COVER = art_colours.COVER
 # Shown for a track with no artwork at all, as while Spotify's DJ talks between songs,
 # instead of the last song's cover.
-NO_ART_URL = 'file://' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-art.png')
+NO_ART_URL = art_colours.NO_ART_URL
 REGIONS = os.path.join(CACHE, 'regions.json')
 LOG = os.path.join(CACHE, 'nowplaying.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'nowplaying.lock')   # held by the one copy that runs
-BG = os.path.join(CACHE, 'bg.txt')               # background colour from the album art, for draw.lua
+BG = art_colours.BG                              # background colour from the album art, for draw.lua
 DRAW = os.path.join(CACHE, 'draw.txt')           # geometry + playback clock for draw.lua
 LYRICS = os.path.join(CACHE, 'lyrics.txt')       # lyric lines for draw.lua, timed when synced
 LYRICS_SCROLL = os.path.join(CACHE, 'lyrics-scroll')   # plain lyrics' wheel offset (conky-mouse.py)
@@ -363,20 +363,25 @@ def update_bg(url):
             rgb = art_colour(COVER)
         except Exception:
             rgb = FALLBACK_BG
-    r, g, b = rgb
-    write_atomic(BG, f'{r:.3f} {g:.3f} {b:.3f}\n')
+    art_colours.write_bg(rgb)
 
 
 def fetch_cover(url):
-    if not url or url == _read(os.path.join(CACHE, 'cover.url')):
+    if not url or url == _read(art_colours.COVER_URL):
         if not os.path.exists(BG):
             update_bg(url)
         return
     tmp = COVER + f'.{os.getpid()}.tmp'
     try:
         urllib.request.urlretrieve(url, tmp)
+        # cover.url goes first, so a pick (art_colours.pick) that reads it before and after
+        # sampling cover.jpg sees the change and never pairs one cover's pixels with the other's URL.
+        try:
+            os.remove(art_colours.COVER_URL)
+        except FileNotFoundError:
+            pass
         os.replace(tmp, COVER)
-        with open(os.path.join(CACHE, 'cover.url'), 'w') as f:
+        with open(art_colours.COVER_URL, 'w') as f:
             f.write(url)
     except Exception:
         return

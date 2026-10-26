@@ -3,6 +3,7 @@ per artwork."""
 import json
 import os
 import unittest
+from unittest import mock
 
 import support
 
@@ -66,6 +67,26 @@ class ArtColoursTest(support.TempDirTest):
         self.cover(lambda x, y: (0, 0, 255))
         art_colours.pick(0.5, 0.5)
         self.assertEqual(art_colours.load(), {'other': [0.5, 0.5, 0.5], URL: [0.0, 0.0, 1.0]})
+
+    def test_the_placeholder_keeps_no_pick(self):
+        self.cover(lambda x, y: (0, 0, 255))
+        with open(art_colours.COVER_URL, 'w') as f:
+            f.write(art_colours.NO_ART_URL)
+        self.assertIsNone(art_colours.pick(0.5, 0.5))
+        self.assertEqual(art_colours.load(), {})
+        self.assertFalse(os.path.exists(art_colours.BG))
+
+    def test_a_cover_changing_under_the_pick_keeps_nothing(self):
+        self.cover(lambda x, y: (0, 0, 255))
+        sample = art_colours.colour_at
+
+        def changed(*args):
+            os.remove(art_colours.COVER_URL)          # as fetch_cover does before the new cover
+            return sample(*args)
+        with mock.patch.object(art_colours, 'colour_at', changed):
+            self.assertIsNone(art_colours.pick(0.5, 0.5))
+        self.assertEqual(art_colours.load(), {})
+        self.assertFalse(os.path.exists(art_colours.BG))
 
     def test_no_cover_is_no_pick(self):
         self.assertIsNone(art_colours.pick(0.5, 0.5))
