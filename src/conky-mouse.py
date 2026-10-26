@@ -6,6 +6,8 @@ helper subscribes to clicks on conky's window itself:
   - heart: like/unlike the track (or start the Spotify login if not logged in yet)
   - play/pause, previous, next buttons: control playback
   - seek bar: click or drag to change the position in the song
+  - album art: a click makes the art's colour where it was clicked the background, kept for
+    that art from then on (art_colours.py); a drag from it moves the widget like anywhere else
   - minimize: hide the widget until the tray menu or the launcher shows it again
   - close: stop the widget, like the tray menu's Quit
   - an edge or corner: resize the widget. A side edge changes its width, the top or bottom
@@ -58,6 +60,7 @@ show/hide commands also write; while it exists this helper keeps conky's window 
 """
 import ctypes, json, math, os, re, subprocess, sys, time
 
+import art_colours
 import widget_size
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +83,7 @@ CW_OVERRIDE_REDIRECT, CW_COLORMAP = 1 << 9, 1 << 13
 US_POSITION, P_POSITION = 1 << 0, 1 << 2          # XSizeHints flags
 COVER_HOLD = 0.1                                  # s: conky draws every 0.05 s
 OUTLINE, OUTLINE_WIDTH = 0x1db954, 2              # Spotify green; logical px
+CLICK_SLOP = 4                                    # logical px a press moves before it is a drag
 EDGE = 6                                          # logical px along the border that resize
 CORNER = 24                                       # how far from a corner both of its edges resize
 RESCALED = 75                                     # exit status: Xft.dpi changed (the launcher's too)
@@ -518,11 +522,26 @@ def resize(d, root, win, edges, s, regions):
     return x, y, *g[2:]
 
 
-def drag(d, root, win, s):
-    """Move the window with the pointer while the button is held; returns the card's
-    position, kept on its monitor, and size."""
+def clicked(d, root, start, s):
+    """Whether the button pressed at root (x, y) `start` comes up before the pointer moves
+    CLICK_SLOP from there: a click, not the start of a drag."""
+    mask = BUTTON1_MASK
+    while mask & BUTTON1_MASK:
+        nx, ny, mask = pointer(d, root)
+        if max(abs(nx - start[0]), abs(ny - start[1])) > CLICK_SLOP * s:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def drag(d, root, win, s, start=None):
+    """Move the window with the pointer while the button is held, from root (x, y) `start`
+    if given, else from where the pointer is; returns the card's position, kept on its
+    monitor, and size."""
     wx, wy, w, h = geometry(d, win)
     px, py, mask = pointer(d, root)
+    if start:
+        px, py = start
     log(f'drag start: window {wx},{wy} pointer {px},{py}')
     last_logged = 0.0
     while mask & BUTTON1_MASK:
@@ -584,7 +603,7 @@ def load_regions(cache={}):
 
 def region_at(regions, s, x, y):
     """The control under window-relative (x, y), if any."""
-    for name in ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek'):
+    for name in ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek', 'art'):
         r = regions.get(name)
         if r and r[0] * s <= x <= r[2] * s and r[1] * s <= y <= r[3] * s:
             return name
@@ -610,6 +629,18 @@ def scroll_lyrics(regions, s, x, y, down):
         f.write(f'{version} {offset}')
     os.replace(LYRICS_SCROLL + '.tmp', LYRICS_SCROLL)
     return offset
+
+
+def pick_colour(art, x, y):
+    """Make the art's colour at card (x, y), logical px, the background."""
+    fx, fy = (x - art[0]) / (art[2] - art[0]), (y - art[1]) / (art[3] - art[1])
+    try:
+        rgb = art_colours.pick(fx, fy)
+    except Exception as e:
+        log(f'art colour: failed at {fx:.2f},{fy:.2f}: {type(e).__name__}: {e}')
+        return
+    if rgb:
+        log(f'art colour: {fx:.2f},{fy:.2f} -> ' + ' '.join(f'{c:.3f}' for c in rgb))
 
 
 def seek(d, root, win, regions, s):
@@ -768,6 +799,12 @@ def main():
                     log('close')
                 elif hit == 'seek' and regions.get('duration'):
                     seek(d, root, win, regions, s)
+                elif hit == 'art':
+                    start = b.x_root, b.y_root
+                    if clicked(d, root, start, s):
+                        pick_colour(regions['art'], x / s, y / s)
+                    else:
+                        remember(*drag(d, root, win, s, start))
                 elif edges:
                     placed = resize(d, root, win, edges, s, regions)
                     if placed:

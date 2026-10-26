@@ -6,7 +6,8 @@ which conky.conf renders through draw.lua's ${lua_parse widget}. It covers:
   - title/artist, wrapped to the widget's fixed column width (measured with Pango,
     using the same fonts conky draws with, including the fallback fonts Pango picks for
     scripts Ubuntu Sans lacks, like CJK)
-  - album art, downloaded once per track
+  - album art, downloaded once per track; the background colour is taken from it, or is the
+    one picked by clicking that art (art_colours.py)
   - the controls row: draw.lua draws the buttons and seek bar from draw.txt; click
     regions for conky-mouse.py go to regions.json
   - the heart, minimize and close buttons at the top right (drawn by draw.lua)
@@ -25,6 +26,7 @@ gi.require_version('Pango', '1.0'); gi.require_version('PangoCairo', '1.0'); gi.
 from gi.repository import GdkPixbuf, Pango, PangoCairo
 import colorsys
 
+import art_colours
 import lyrics_settings
 import spotify_api
 import widget_size as size_file
@@ -352,18 +354,23 @@ def art_colour(path):
     return next((c for c in cell_colours(grays, floor, strict=True) if usable(c)), FALLBACK_BG)
 
 
-def update_bg():
-    try:
-        r, g, b = art_colour(COVER)
-    except Exception:
-        r, g, b = FALLBACK_BG
+def update_bg(url):
+    """bg.txt for the cover from url: the colour picked by clicking that art, if it was,
+    else art_colour's."""
+    rgb = art_colours.chosen(url)
+    if rgb is None:
+        try:
+            rgb = art_colour(COVER)
+        except Exception:
+            rgb = FALLBACK_BG
+    r, g, b = rgb
     write_atomic(BG, f'{r:.3f} {g:.3f} {b:.3f}\n')
 
 
 def fetch_cover(url):
     if not url or url == _read(os.path.join(CACHE, 'cover.url')):
         if not os.path.exists(BG):
-            update_bg()
+            update_bg(url)
         return
     tmp = COVER + f'.{os.getpid()}.tmp'
     try:
@@ -373,7 +380,7 @@ def fetch_cover(url):
             f.write(url)
     except Exception:
         return
-    update_bg()
+    update_bg(url)
 
 
 def fetch_liked(track_id):
@@ -913,6 +920,7 @@ def render():
         'next': [next_cx - SKIP_SIZE / 2 - 5, mid_y - half, next_cx + SKIP_SIZE / 2 + 5, mid_y + half],
         'seek': [bar_x0 - 6, mid_y + BAR_DROP - 12, bar_x1 + 6, mid_y + BAR_DROP + 12],
         'heart': None if heart_hidden else heart_box,
+        'art': None if not art or art == NO_ART_URL else [MARGIN, MARGIN, MARGIN + 118, MARGIN + 118],
         'bar': [bar_x0, bar_x1],
         'duration': duration,
     })

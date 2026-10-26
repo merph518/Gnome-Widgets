@@ -24,6 +24,9 @@ A Spotify "now playing" desktop widget for Linux (GNOME on Wayland), built on Co
   would carry white text, like a saturated red or orange, gives way to the cover's next
   colour, and to a black or gray from the cover only when none of its colours will do. A
   cover with no such colour gets Spotify's dark gray (#181818)
+- Click the album art to make the colour under the pointer the background instead. The
+  choice is remembered for that artwork, so every song with the same cover, a whole album
+  for one, shows it from then on. A drag that starts on the art still moves the widget
 - A rounded card with a soft drop shadow, so it stands out from any wallpaper. Clicks on the
   shadow go through to whatever is under it
 - Drag the widget anywhere, on any monitor; its position is remembered. Plugging in or
@@ -191,14 +194,15 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/conky-mouse.py` | Handles clicks, the mouse wheel over static lyrics, dragging and resizing (Conky's own mouse hook gets no button presses under XWayland), keeps the window at its saved position and always on top when set, and unmaps it while minimized |
 | `src/widget_size.py` | Reads and writes the size settings: width, lyrics height, text scale |
 | `src/lyrics_settings.py` | Reads and writes the lyrics settings: on or off, autoscroll or static |
+| `src/art_colours.py` | Takes the background colour from the spot clicked on the album art, and keeps it per artwork |
 | `src/spotify_api.py` | Minimal Spotify Web API client (PKCE login, like/unlike, Liked Songs index, rate-limit backoff) |
 | `src/spotify_local.py` | Reads the Spotify desktop app's Liked Songs from its LevelDB on disk, read-only, for the heart |
 | `src/tray.py` | Top-bar (AppIndicator) icon: current track, text scaling, lyrics on/off and scrolling, always on top, start at login, show/hide, Quit |
 | `debian/`, `packaging/` | Debian packaging (also used for the PPA), desktop entry, icons |
 
-Settings live in `~/.config/conky-spotify-nowplaying/` (`position`, `size`, `on-top`,
-`lyrics`, `lyrics-scrolling`, `spotify-client-id`, `spotify-token.json`) and runtime files/logs in
-`~/.cache/conky-spotify-nowplaying/`.
+Settings live in `~/.config/conky-spotify-nowplaying/` (`position`, `size`, `on-top`, `lyrics`,
+`lyrics-scrolling`, `art-colours.json`, `spotify-client-id`, `spotify-token.json`) and runtime
+files/logs in `~/.cache/conky-spotify-nowplaying/`.
 
 ## Notes
 
