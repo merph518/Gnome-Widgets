@@ -245,9 +245,21 @@ class ArtColourTest(support.TempDirTest):
                     self.assertIn(self.picked(path), self.pixels(path))
 
     def test_update_bg_falls_back_to_spotify_gray_without_a_cover(self):
-        self.redirect(nowplaying, COVER='missing.jpg', BG='bg.txt')
-        nowplaying.update_bg()
-        self.assertEqual(nowplaying._read(nowplaying.BG), '0.094 0.094 0.094')
+        self.redirect(nowplaying, COVER='missing.jpg')
+        self.redirect(nowplaying.art_colours, COLOURS='art-colours.json', BG='bg.txt')
+        nowplaying.update_bg('')
+        self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.094 0.094 0.094')
+
+    def test_update_bg_takes_the_colour_picked_for_that_art_over_its_own(self):
+        path = self.cover(lambda x, y: (40, 70, 140))
+        self.redirect(nowplaying.art_colours, COLOURS='art-colours.json', BG='bg.txt')
+        with open(nowplaying.art_colours.COLOURS, 'w') as f:
+            json.dump({'https://i.scdn.co/image/picked': [0.1, 0.2, 0.3]}, f)
+        with mock.patch.object(nowplaying, 'COVER', path):
+            nowplaying.update_bg('https://i.scdn.co/image/picked')
+            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.100 0.200 0.300')
+            nowplaying.update_bg('https://i.scdn.co/image/other')
+            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.157 0.275 0.549')   # the cover's own
 
 
 @unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
@@ -488,9 +500,9 @@ class WindowButtonsTest(support.TempDirTest):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def render(self, status, title='Title', artist='Artist'):
+    def render(self, status, title='Title', artist='Artist', art=''):
         answers = {'status': status,
-                   'metadata': f'track1\t{title}\t{artist}\tAlbum\t\t10000000\t200000000'}
+                   'metadata': f'track1\t{title}\t{artist}\tAlbum\t{art}\t10000000\t200000000'}
         with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                 mock.patch.object(nowplaying.threading, 'Thread'), \
                 mock.patch.object(nowplaying.spotify_api, 'write_liked'):
@@ -523,6 +535,15 @@ class WindowButtonsTest(support.TempDirTest):
         self.assertIn(f'${{font {title_font}}}\\#5${{font', text)
         self.assertIn('C\\# Collective${font', text)
         self.assertNotRegex(text, r'(?<!\\)#')
+
+    def test_the_art_is_a_click_region_only_while_a_cover_shows(self):
+        _, regions, _ = self.render('Playing', art='https://i.scdn.co/image/abc')
+        m = nowplaying.MARGIN
+        self.assertEqual(regions['art'], [m, m, m + 118, m + 118])
+        _, regions, _ = self.render('Playing')
+        self.assertIsNone(regions['art'])
+        _, regions, _ = self.render('Playing', art=nowplaying.NO_ART_URL)
+        self.assertIsNone(regions['art'])
 
     def test_heart_minimize_close_run_left_to_right_without_overlapping(self):
         text, regions, draw = self.render('Playing')
