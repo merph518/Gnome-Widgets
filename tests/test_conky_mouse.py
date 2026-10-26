@@ -220,7 +220,7 @@ class CardPlacementTest(unittest.TestCase):
         self.patch(geometry=mock.Mock(side_effect=[(100, 200, 1304, 730), (500, 600, 1304, 730)]),
                    pointer=mock.Mock(return_value=(0, 0, 0)), monitor_for=mock.Mock(return_value=self.MON),
                    log=mock.Mock())
-        self.assertEqual(conky_mouse.drag(None, 0, 1, 2), (532, 632, 1240, 666))
+        self.assertEqual(conky_mouse.drag(None, 0, 1, 2, conky_mouse.follow_pointer(None, 0)), (532, 632, 1240, 666))
 
     def test_a_drag_from_the_art_follows_the_pointer_from_the_press(self):
         # The pointer is already past the click slop when the drag starts; the window
@@ -230,7 +230,7 @@ class CardPlacementTest(unittest.TestCase):
                    pointer=mock.Mock(side_effect=[(510, 300, conky_mouse.BUTTON1_MASK), (510, 300, 0)]),
                    monitor_for=mock.Mock(return_value=self.MON), log=mock.Mock(),
                    x11=mock.Mock(XMoveWindow=lambda d, w, x, y: moves.append((x, y))))
-        conky_mouse.drag(None, 0, 1, 2, (500, 300))
+        conky_mouse.drag(None, 0, 1, 2, conky_mouse.follow_pointer(None, 0), (500, 300))
         self.assertEqual(moves, [(110, 200)])
 
     def test_a_resize_moves_the_window_round_the_resized_card_and_saves_the_card(self):
@@ -248,7 +248,8 @@ class CardPlacementTest(unittest.TestCase):
                    set_input_shape=mock.Mock(), x11=mock.Mock(XMoveWindow=lambda d, w, x, y: moves.append((x, y))))
         self.patch(widget_size=mock.Mock(load=mock.Mock(return_value=old), save=mock.Mock(),
                                          clamp=conky_mouse.widget_size.clamp, LIMITS=conky_mouse.widget_size.LIMITS))
-        placed = conky_mouse.resize(None, 0, 1, 'l', 2, {'lyrics': [0, 0, 1, 1]})
+        placed = conky_mouse.resize(None, 0, 1, 'l', 2, {'lyrics': [0, 0, 1, 1]},
+                                    conky_mouse.follow_pointer(None, 0))
         conky_mouse.widget_size.save.assert_called_once_with(new)
         conky_mouse.place_outline.assert_called_with(None, [], 932, 132, 1340, 666, 4)   # the card
         self.assertEqual(moves, [(900, 100)])                                           # the window
@@ -365,23 +366,169 @@ class ScrollLyricsTest(support.TempDirTest):
         self.assertEqual(self.wheel(True, y=400, s=2), 1)
 
 
+class SwipeTest(support.TempDirTest):
+    # Lyrics at x 22..545, y 160..223 (logical px), last offset 5, 20 px a line.
+    REGIONS = {'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5, 20.0]}
+
+    def setUp(self):
+        super().setUp()
+        self.redirect(conky_mouse, LYRICS_SCROLL='lyrics-scroll', LOG='mouse.log')
+
+    def finger(self, *ys):
+        """A tracker that is down at each y in turn (root px), then lifted at the last."""
+        steps = [(300, y, True) for y in ys] + [(300, ys[-1], False)]
+        return mock.Mock(side_effect=steps)
+
+    def swipe(self, *ys, s=1):
+        with mock.patch.object(conky_mouse.time, 'sleep'):
+            conky_mouse.swipe(self.REGIONS, s, 100 * s, 180 * s, 500, self.finger(*ys))
+        return support.read(conky_mouse.LYRICS_SCROLL).split()[1]
+
+    def test_a_line_for_each_row_the_finger_moves(self):
+        self.assertEqual([conky_mouse.swipe_lines(dy, 20) for dy in (0, -19, -20, -59, 19, 40)],
+                         [0, 0, 1, 2, 0, -2])
+        self.assertEqual(conky_mouse.swipe_lines(-50, 0), 0)
+
+    def test_up_shows_later_lines_and_back_down_earlier_ones(self):
+        self.assertEqual(self.swipe(500, 470, 440), '3')     # 60 px up: three lines on
+        self.assertEqual(self.swipe(500, 520), '2')          # 20 px down: one back
+        self.assertIn('swipe: -1 lines', support.read(conky_mouse.LOG))
+
+    def test_it_stops_at_the_last_line(self):
+        self.assertEqual(self.swipe(500, 300), '5')
+
+    def test_movement_before_the_first_read_still_scrolls(self):
+        self.assertEqual(self.swipe(440), '3')               # already 60 px up when first read
+
+    def test_rows_follow_the_display_scale(self):
+        self.assertEqual(self.swipe(500, 460, s=2), '1')     # 40 px at scale 2: one row
+
+    def test_only_static_lyrics_with_a_row_height_are_scrollable(self):
+        self.assertTrue(conky_mouse.scrollable(self.REGIONS, 1, 100, 180))
+        self.assertFalse(conky_mouse.scrollable(self.REGIONS, 1, 100, 150))       # above them
+        self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=None), 1, 100, 180))
+        self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=['1234', 5]), 1, 100, 180))
+        self.assertFalse(conky_mouse.scrollable({}, 1, 100, 180))
+
+
+class TapTest(unittest.TestCase):
+    # The play button at x 176..208, y 112..144 (logical px).
+    REGIONS = {'play': [176.0, 112.0, 208.0, 144.0], 'next': [211.0, 112.0, 235.0, 144.0]}
+
+    def tap(self, end, s=1):
+        """A finger down on play at card (190, 128), root (1190, 728), lifted at root `end`."""
+        finger = mock.Mock(side_effect=[(1190, 728, True), (*end, False)])
+        with mock.patch.object(conky_mouse.time, 'sleep'):
+            return conky_mouse.tap(self.REGIONS, s, 190 * s, 128 * s, (1190, 728), 'play', finger)
+
+    def test_lifting_on_the_control_presses_it(self):
+        self.assertTrue(self.tap((1190, 728)))
+        self.assertTrue(self.tap((1200, 740)))               # moved, but still on it
+        self.assertTrue(self.tap((1200, 750), s=2))          # 22 px at scale 2: still on it
+
+    def test_lifting_off_it_does_not(self):
+        self.assertFalse(self.tap((1190, 760)))              # below it
+        self.assertFalse(self.tap((1215, 728)))              # on next instead
+
+
+class PullTest(unittest.TestCase):
+    REGIONS = {'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5, 20.0],
+               'seek': [278.0, 118.0, 388, 142.0], 'duration': 172.5, 'art': [20, 20, 138, 138]}
+
+    def pull(self, hit, edges, at=(100, 180), touch=False, regions=REGIONS, click=True):
+        names = ('seek', 'resize', 'swipe', 'drag', 'remember', 'pick_colour', 'clicked')
+        with mock.patch.multiple(conky_mouse, **{n: mock.DEFAULT for n in names}) as m:
+            m['resize'].return_value = m['drag'].return_value = (1, 2, 3, 4)
+            m['clicked'].return_value = click
+            conky_mouse.pull('d', 'root', 'win', 1, regions, hit, edges, 'track', (*at, (600, 500)), touch)
+            self.calls = m
+            return {n for n in names if m[n].called and n != 'clicked'}
+
+    def test_seek_then_art_then_edges_then_lyrics_then_a_move(self):
+        self.assertEqual(self.pull('seek', ''), {'seek'})
+        self.assertEqual(self.pull('seek', 'r', regions=dict(self.REGIONS, duration=None)),
+                         {'resize', 'remember'})              # no track length: the edge wins
+        self.assertEqual(self.pull('art', ''), {'pick_colour'})
+        self.assertEqual(self.pull(None, 'b', touch=True), {'resize', 'remember'})
+        self.assertEqual(self.pull(None, '', touch=True), {'swipe'})
+        self.assertEqual(self.pull(None, '', (100, 100), touch=True), {'drag', 'remember'})   # above the lyrics
+
+    def test_the_mouse_moves_the_widget_from_the_lyrics(self):
+        self.assertEqual(self.pull(None, ''), {'drag', 'remember'})
+
+    def test_a_drag_from_the_art_moves_the_widget_from_the_press(self):
+        self.assertEqual(self.pull('art', '', click=False), {'drag', 'remember'})
+        self.assertEqual(self.calls['drag'].call_args.args[-1], (600, 500))
+
+    def test_a_finger_gets_more_slop_on_the_art_than_the_mouse(self):
+        self.pull('art', '')
+        self.assertEqual(self.calls['clicked'].call_args.args[-1], conky_mouse.CLICK_SLOP)
+        self.pull('art', '', touch=True)
+        self.assertEqual(self.calls['clicked'].call_args.args[-1], conky_mouse.TAP_SLOP)
+        self.assertGreater(conky_mouse.TAP_SLOP, conky_mouse.CLICK_SLOP)
+
+
+class TouchTest(unittest.TestCase):
+
+    def test_the_mask_sets_one_bit_per_event_type(self):
+        mask = conky_mouse.touch_mask(conky_mouse.XI_TOUCH_BEGIN, conky_mouse.XI_TOUCH_UPDATE,
+                                      conky_mouse.XI_TOUCH_END)
+        self.assertEqual(mask, bytes([0, 0, 0b11100]))      # bits 18, 19 and 20
+
+    def test_the_device_event_matches_the_c_layout(self):
+        # XIDeviceEvent on x86-64 (XInput2.h): root_x at byte 88, flags at 120.
+        self.assertEqual(conky_mouse.XIDeviceEvent.root_x.offset, 88)
+        self.assertEqual(conky_mouse.XIDeviceEvent.flags.offset, 120)
+        self.assertEqual(conky_mouse.XGenericEventCookie.data.offset, 48)
+
+    def track(self, events, start=(10, 20)):
+        """A Touch for touch id 7 at `start`, reading `events`: (evtype, id, x, y) each."""
+        touch = conky_mouse.Touch('d', 131, 7, *start)
+        queue = list(events)
+        pending = mock.patch.object(conky_mouse.x11, 'XPending', side_effect=lambda d: len(queue))
+        nxt = mock.patch.object(conky_mouse.x11, 'XNextEvent')
+        read = mock.patch.object(conky_mouse, 'touch_event',
+                                 side_effect=lambda d, ev, op: (lambda e: (e[0], e[1], 0, e[2], e[3], 0, 0))(queue.pop(0)))
+        with pending, nxt, read:
+            return touch()
+
+    def test_it_follows_its_own_finger_until_it_lifts(self):
+        B, U, E = conky_mouse.XI_TOUCH_BEGIN, conky_mouse.XI_TOUCH_UPDATE, conky_mouse.XI_TOUCH_END
+        self.assertEqual(self.track([]), (10, 20, True))
+        self.assertEqual(self.track([(U, 7, 15.4, 25.6)]), (15, 26, True))
+        self.assertEqual(self.track([(U, 7, 15, 25), (E, 7, 30, 40)]), (30, 40, False))
+        self.assertEqual(self.track([(B, 8, 99, 99), (U, 8, 99, 99)]), (10, 20, True))   # another finger
+
+    def test_a_finger_with_no_end_counts_as_lifted_in_the_end(self):
+        touch = conky_mouse.Touch('d', 131, 7, 10, 20)
+        touch.last -= conky_mouse.TOUCH_TIMEOUT + 1
+        with mock.patch.object(conky_mouse.x11, 'XPending', return_value=0):
+            self.assertEqual(touch(), (10, 20, False))
+
+
 class ArtClickTest(unittest.TestCase):
     HELD, UP = conky_mouse.BUTTON1_MASK, 0
 
     def test_released_in_place_is_a_click(self):
         pointer = mock.Mock(side_effect=[(102, 101, self.HELD), (103, 101, self.UP)])
         with mock.patch.object(conky_mouse, 'pointer', pointer):
-            self.assertTrue(conky_mouse.clicked(None, 0, (100, 100), 1))
+            self.assertTrue(conky_mouse.clicked((100, 100), 1, conky_mouse.follow_pointer(None, 0)))
 
     def test_moving_past_the_slop_is_a_drag(self):
         pointer = mock.Mock(side_effect=[(102, 100, self.HELD), (105, 100, self.HELD)])
         with mock.patch.object(conky_mouse, 'pointer', pointer):
-            self.assertFalse(conky_mouse.clicked(None, 0, (100, 100), 1))
+            self.assertFalse(conky_mouse.clicked((100, 100), 1, conky_mouse.follow_pointer(None, 0)))
 
     def test_the_slop_follows_the_display_scale(self):
         pointer = mock.Mock(side_effect=[(107, 100, self.HELD), (107, 100, self.UP)])
         with mock.patch.object(conky_mouse, 'pointer', pointer):
-            self.assertTrue(conky_mouse.clicked(None, 0, (100, 100), 2))
+            self.assertTrue(conky_mouse.clicked((100, 100), 2, conky_mouse.follow_pointer(None, 0)))
+
+    def test_a_tap_lifted_in_place_is_a_click(self):
+        finger = mock.Mock(side_effect=[(102, 101, True), (103, 101, False)])
+        self.assertTrue(conky_mouse.clicked((100, 100), 1, finger))
+        finger = mock.Mock(side_effect=[(110, 100, True)])
+        self.assertFalse(conky_mouse.clicked((100, 100), 1, finger))
 
     def test_the_art_is_a_region(self):
         regions = {'art': [20, 20, 138, 138], 'heart': None}

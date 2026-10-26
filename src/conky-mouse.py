@@ -18,6 +18,12 @@ helper subscribes to clicks on conky's window itself:
     synced ones under the tray menu's Static): scroll them a line at a time. draw.lua reads
     the offset from lyrics-scroll. The wheel does nothing anywhere else.
 
+A touchscreen does the same with one finger, through XInput 2 touch events selected on the
+window, which X then sends instead of the pointer events it would make up from the touch:
+a tap on a control does what a click does, once the finger lifts on that control; a drag
+seeks, resizes or moves like the mouse; and a vertical swipe over static lyrics scrolls
+them a line for each line's height the finger moves. A second finger is ignored.
+
 Hit areas come from nowplaying.py (regions.json, logical px, from the card's top left), since
 the controls move when titles wrap. Conky's window is the widget's rounded card plus a margin
 on every side (widget_size.SHADOW) that draw.lua paints the card's shadow in. Everything here
@@ -84,6 +90,7 @@ US_POSITION, P_POSITION = 1 << 0, 1 << 2          # XSizeHints flags
 COVER_HOLD = 0.1                                  # s: conky draws every 0.05 s
 OUTLINE, OUTLINE_WIDTH = 0x1db954, 2              # Spotify green; logical px
 CLICK_SLOP = 4                                    # logical px a press moves before it is a drag
+TAP_SLOP = 8                                      # the same for a finger, which rolls as it lifts
 EDGE = 6                                          # logical px along the border that resize
 CORNER = 24                                       # how far from a corner both of its edges resize
 RESCALED = 75                                     # exit status: Xft.dpi changed (the launcher's too)
@@ -92,6 +99,11 @@ RESCALED = 75                                     # exit status: Xft.dpi changed
 CURSORS = {'': 68, 'l': 70, 'r': 96, 't': 138, 'b': 16, 'lt': 134, 'rt': 136, 'lb': 12, 'rb': 14}
 SHAPE_INPUT, SHAPE_SET, UNSORTED = 2, 0, 0         # X Shape extension
 SHADOW = widget_size.SHADOW                        # logical px of shadow around the card
+BUTTONS = ('heart', 'play', 'prev', 'next', 'minimize', 'close')   # the controls a click or tap presses
+GENERIC_EVENT = 35                                 # an extension's event, XInput 2's among them
+XI_TOUCH_BEGIN, XI_TOUCH_UPDATE, XI_TOUCH_END = 18, 19, 20
+XI_ALL_MASTER_DEVICES = 1
+TOUCH_TIMEOUT = 30                                 # s without a touch event before a finger counts as lifted
 
 x11 = ctypes.CDLL('libX11.so.6')
 x11.XOpenDisplay.restype = ctypes.c_void_p
@@ -132,10 +144,18 @@ x11.XSetWMNormalHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void
 # Windows vanish when conky restarts; don't let the resulting X errors kill the helper.
 ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
 x11.XSetErrorHandler(ERROR_HANDLER)
+x11.XQueryExtension.argtypes = [ctypes.c_void_p, ctypes.c_char_p] + [ctypes.c_void_p] * 3
+x11.XGetEventData.argtypes = x11.XFreeEventData.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 xext = ctypes.CDLL('libXext.so.6')
 xext.XShapeCombineRectangles.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
                                          ctypes.c_int]
+try:
+    xi = ctypes.CDLL('libXi.so.6')
+    xi.XIQueryVersion.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    xi.XISelectEvents.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_int]
+except OSError:                                    # no touch, the mouse still works
+    xi = None
 
 
 class XButtonEvent(ctypes.Structure):
@@ -187,9 +207,31 @@ class XRectangle(ctypes.Structure):
                 ('width', ctypes.c_ushort), ('height', ctypes.c_ushort)]
 
 
+class XGenericEventCookie(ctypes.Structure):
+    _fields_ = [('type', ctypes.c_int), ('serial', ctypes.c_ulong), ('send_event', ctypes.c_int),
+                ('display', ctypes.c_void_p), ('extension', ctypes.c_int), ('evtype', ctypes.c_int),
+                ('cookie', ctypes.c_uint), ('data', ctypes.c_void_p)]
+
+
+class XIDeviceEvent(ctypes.Structure):
+    # Up to the coordinates and flags; the button, valuator and modifier state after them
+    # are not read.
+    _fields_ = [('type', ctypes.c_int), ('serial', ctypes.c_ulong), ('send_event', ctypes.c_int),
+                ('display', ctypes.c_void_p), ('extension', ctypes.c_int), ('evtype', ctypes.c_int),
+                ('time', ctypes.c_ulong), ('deviceid', ctypes.c_int), ('sourceid', ctypes.c_int),
+                ('detail', ctypes.c_int), ('root', ctypes.c_ulong), ('event', ctypes.c_ulong),
+                ('child', ctypes.c_ulong), ('root_x', ctypes.c_double), ('root_y', ctypes.c_double),
+                ('event_x', ctypes.c_double), ('event_y', ctypes.c_double), ('flags', ctypes.c_int)]
+
+
+class XIEventMask(ctypes.Structure):
+    _fields_ = [('deviceid', ctypes.c_int), ('mask_len', ctypes.c_int), ('mask', ctypes.c_void_p)]
+
+
 class XEvent(ctypes.Union):
     # A motion event has the same layout as a button event up to its x and y.
-    _fields_ = [('type', ctypes.c_int), ('xbutton', XButtonEvent), ('pad', ctypes.c_long * 24)]
+    _fields_ = [('type', ctypes.c_int), ('xbutton', XButtonEvent), ('xcookie', XGenericEventCookie),
+                ('pad', ctypes.c_long * 24)]
 
 
 def log(msg):
@@ -465,10 +507,19 @@ def near(a, b):
     return abs(a[0] - b[0]) <= 8 and abs(a[1] - b[1]) <= 8   # conky rounds, and adds its border
 
 
-def resize(d, root, win, edges, s, regions):
-    """Outline the new size while the pointer drags `edges`; on release, save it and hold a
-    copy of the widget over conky's window while it takes the new size. Returns the window's
-    new position and size, or None if nothing changed."""
+def follow_pointer(d, root):
+    """A tracker for the mouse: each call gives the pointer's root (x, y) and whether
+    button 1 is still held."""
+    def track():
+        x, y, mask = pointer(d, root)
+        return x, y, bool(mask & BUTTON1_MASK)
+    return track
+
+
+def resize(d, root, win, edges, s, regions, track):
+    """Outline the new size while `track` (follow_pointer() or a Touch) drags `edges`; on
+    release, save it and hold a copy of the widget over conky's window while it takes the
+    new size. Returns the window's new position and size, or None if nothing changed."""
     old = new = widget_size.load()
     window = geometry(d, win)
     start = wx, wy, w, h = card_of(window, s)
@@ -479,13 +530,13 @@ def resize(d, root, win, edges, s, regions):
         room_y = max(wy - my if 't' in edges else my + mh - wy - h, 0)
     else:
         room_x = room_y = math.inf
-    px, py, mask = pointer(d, root)
+    px, py, held = track()
     log(f'resize start: {edges} at {old}, card {wx},{wy} {w}x{h}')
     frame = outline(d, root)
     g = start
     try:
-        while mask & BUTTON1_MASK:
-            nx, ny, mask = pointer(d, root)
+        while held:
+            nx, ny, held = track()
             new = dragged(old, edges, nx - px, ny - py, room_x, room_y, s)
             g = resized(start, edges, old, new, s, regions.get('lyrics'))
             if (nx, ny) != (px, py):
@@ -522,35 +573,36 @@ def resize(d, root, win, edges, s, regions):
     return x, y, *g[2:]
 
 
-def clicked(d, root, start, s):
-    """Whether the button pressed at root (x, y) `start` comes up before the pointer moves
-    CLICK_SLOP from there: a click, not the start of a drag."""
-    mask = BUTTON1_MASK
-    while mask & BUTTON1_MASK:
-        nx, ny, mask = pointer(d, root)
-        if max(abs(nx - start[0]), abs(ny - start[1])) > CLICK_SLOP * s:
+def clicked(start, s, track, slop=CLICK_SLOP):
+    """Whether the press at root (x, y) `start` that `track` (follow_pointer() or a Touch)
+    follows lets go before it moves `slop` logical px from there: a click or tap, not the
+    start of a drag."""
+    held = True
+    while held:
+        nx, ny, held = track()
+        if max(abs(nx - start[0]), abs(ny - start[1])) > slop * s:
             return False
         time.sleep(0.01)
     return True
 
 
-def drag(d, root, win, s, start=None):
-    """Move the window with the pointer while the button is held, from root (x, y) `start`
-    if given, else from where the pointer is; returns the card's position, kept on its
-    monitor, and size."""
+def drag(d, root, win, s, track, start=None):
+    """Move the window with `track` (follow_pointer() or a Touch) while it is held, from
+    root (x, y) `start` if given, else from where it is first read; returns the card's
+    position, kept on its monitor, and size."""
     wx, wy, w, h = geometry(d, win)
-    px, py, mask = pointer(d, root)
+    px, py, held = track()
     if start:
         px, py = start
     log(f'drag start: window {wx},{wy} pointer {px},{py}')
     last_logged = 0.0
-    while mask & BUTTON1_MASK:
-        nx, ny, mask = pointer(d, root)
+    while held:
+        nx, ny, held = track()
         x11.XMoveWindow(d, win, wx + nx - px, wy + ny - py)
         x11.XFlush(d)
         if time.monotonic() - last_logged > 0.25:
             last_logged = time.monotonic()
-            log(f'  pointer {nx},{ny} mask {mask:#x}')
+            log(f'  pointer {nx},{ny} held {held}')
         time.sleep(0.01)
     x, y, cw, ch = card_of(geometry(d, win), s)
     cx, cy = clamp_to_monitor(x, y, cw, ch)
@@ -617,7 +669,7 @@ def scroll_lyrics(regions, s, x, y, down):
     area, static = regions.get('lyrics'), regions.get('lyrics_scroll')
     if not (area and static and area[0] * s <= x <= area[2] * s and area[1] * s <= y <= area[3] * s):
         return None
-    version, last = static
+    version, last = static[:2]
     try:
         with open(LYRICS_SCROLL) as f:
             shown, offset = f.read().split()
@@ -643,14 +695,46 @@ def pick_colour(art, x, y):
         log(f'art colour: {fx:.2f},{fy:.2f} -> ' + ' '.join(f'{c:.3f}' for c in rgb))
 
 
-def seek(d, root, win, regions, s):
-    """Follow the pointer along the bar (draw.lua shows the preview), seek on release."""
+def swipe_lines(dy, row):
+    """How many lines a finger moved `dy` px down has scrolled lyrics `row` px a line:
+    up shows later lines (positive), down earlier ones, a line for each whole row."""
+    return int(-dy / row) if row > 0 else 0
+
+
+def swipe(regions, s, x, y, y0, track):
+    """Scroll the static lyrics under window-relative (x, y) with the finger `track`
+    follows, which touched down at root y0, until it lifts."""
+    row = regions['lyrics_scroll'][2] * s
+    done, held = 0, True
+    while held:
+        _, fy, held = track()
+        lines = swipe_lines(fy - y0, row)
+        while done != lines:
+            down = lines > done
+            if scroll_lyrics(regions, s, x, y, down) is None:
+                held = False                     # the lyrics went from under it
+                break
+            done += 1 if down else -1
+        time.sleep(0.01)
+    log(f'swipe: {done} lines')
+
+
+def scrollable(regions, s, x, y):
+    """Whether window-relative (x, y) is over static lyrics a swipe scrolls."""
+    area, static = regions.get('lyrics'), regions.get('lyrics_scroll')
+    return bool(area and static and len(static) > 2 and
+                area[0] * s <= x <= area[2] * s and area[1] * s <= y <= area[3] * s)
+
+
+def seek(d, root, win, regions, s, track):
+    """Follow `track` (follow_pointer() or a Touch) along the bar (draw.lua shows the
+    preview), seek on release."""
     bx0, bx1 = regions['bar']
     duration = regions['duration']
     wx, _, _, _ = card_of(geometry(d, win), s)
-    fraction, mask = 0.0, BUTTON1_MASK
-    while mask & BUTTON1_MASK:
-        px, _, mask = pointer(d, root)
+    fraction, held = 0.0, True
+    while held:
+        px, _, held = track()
         fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
         with open(SEEK_PREVIEW + '.tmp', 'w') as f:
             f.write(f'{fraction:.4f}')
@@ -665,6 +749,138 @@ def seek(d, root, win, regions, s):
         pass
 
 
+def tap(regions, s, x, y, start, hit, track):
+    """Whether a finger that touched down on the control `hit` at window-relative (x, y),
+    root `start`, lifts on that control. Waits for it to lift."""
+    while True:
+        fx, fy, down = track()
+        if not down:
+            break
+        time.sleep(0.01)
+    return region_at(regions, s, x + fx - start[0], y + fy - start[1]) == hit
+
+
+def pull(d, root, win, s, regions, hit, edges, track, at, touch=False):
+    """What a press off the controls does, following `track` from card-relative (x, y) and
+    root (x, y) `at` until release: seek along the bar; pick the art's colour on a click or
+    tap, or move the widget from the press on a drag; resize from an edge; scroll static
+    lyrics with a finger; or else move the widget."""
+    x, y, start = at
+    if hit == 'seek' and regions.get('duration'):
+        seek(d, root, win, regions, s, track)
+    elif hit == 'art':
+        if clicked(start, s, track, TAP_SLOP if touch else CLICK_SLOP):
+            pick_colour(regions['art'], x / s, y / s)
+        else:
+            remember(*drag(d, root, win, s, track, start))
+    elif edges:
+        placed = resize(d, root, win, edges, s, regions, track)
+        if placed:
+            remember(*placed)
+    elif touch and scrollable(regions, s, x, y):
+        swipe(regions, s, x, y, start[1], track)
+    else:
+        remember(*drag(d, root, win, s, track))
+
+
+def press(d, win, hit):
+    """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
+    if hit == 'heart':
+        logged_in = os.path.exists(os.path.join(CONF, 'spotify-token.json'))
+        action = 'toggle' if logged_in else 'login'
+        subprocess.Popen([sys.executable, os.path.join(HERE, 'spotify_api.py'), action],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log(f'heart: {action}')
+    elif hit == 'play':
+        subprocess.Popen(['playerctl', '-p', 'spotify', 'play-pause'])
+        log('play-pause')
+    elif hit == 'prev':
+        subprocess.Popen(['playerctl', '-p', 'spotify', 'previous'])
+        log('previous')
+    elif hit == 'next':
+        subprocess.Popen(['playerctl', '-p', 'spotify', 'next'])
+        log('next')
+    elif hit == 'minimize':
+        open(HIDDEN, 'w').close()
+        x11.XUnmapWindow(d, win)
+        x11.XFlush(d)
+        log('minimize')
+    elif hit == 'close':
+        subprocess.Popen([LAUNCHER, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log('close')
+
+
+def touch_opcode(d):
+    """XInput's major opcode, which its touch events carry, or None when the server has no
+    XInput 2.2 (touch) or libXi is missing."""
+    if not xi:
+        return None
+    opcode, first_event, first_error = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    if not x11.XQueryExtension(d, b'XInputExtension', ctypes.byref(opcode),
+                               ctypes.byref(first_event), ctypes.byref(first_error)):
+        return None
+    major, minor = ctypes.c_int(2), ctypes.c_int(2)
+    if xi.XIQueryVersion(d, ctypes.byref(major), ctypes.byref(minor)) != 0:
+        return None
+    return opcode.value if (major.value, minor.value) >= (2, 2) else None
+
+
+def touch_mask(*evtypes):
+    """An XI event mask with the bits for `evtypes` set, as XISetMask() sets them."""
+    mask = bytearray(max(evtypes) // 8 + 1)
+    for t in evtypes:
+        mask[t // 8] |= 1 << (t % 8)
+    return bytes(mask)
+
+
+def select_touch(d, win):
+    """Ask for the window's touch events. X only takes the three together."""
+    mask = ctypes.create_string_buffer(touch_mask(XI_TOUCH_BEGIN, XI_TOUCH_UPDATE, XI_TOUCH_END))
+    em = XIEventMask(XI_ALL_MASTER_DEVICES, len(mask.raw), ctypes.cast(mask, ctypes.c_void_p))
+    xi.XISelectEvents(d, win, ctypes.byref(em), 1)
+
+
+def touch_event(d, ev, opcode):
+    """(evtype, touch id, window, root x, root y, event x, event y) for an XInput touch
+    event, or None for any other event. Frees the event's data."""
+    cookie = ev.xcookie
+    if ev.type != GENERIC_EVENT or cookie.extension != opcode:
+        return None
+    if not x11.XGetEventData(d, ctypes.byref(cookie)):
+        return None
+    try:
+        if cookie.evtype not in (XI_TOUCH_BEGIN, XI_TOUCH_UPDATE, XI_TOUCH_END):
+            return None
+        e = ctypes.cast(cookie.data, ctypes.POINTER(XIDeviceEvent)).contents
+        return cookie.evtype, e.detail, e.event, e.root_x, e.root_y, e.event_x, e.event_y
+    finally:
+        x11.XFreeEventData(d, ctypes.byref(cookie))
+
+
+class Touch:
+    """A tracker for one finger, as follow_pointer() is for the mouse: each call reads the
+    pending events and gives the finger's root (x, y) and whether it is still down. Other
+    events that arrive meanwhile, another finger's among them, are dropped, as the mouse's
+    loops leave them unread."""
+
+    def __init__(self, d, opcode, touch_id, x, y):
+        self.d, self.opcode, self.id = d, opcode, touch_id
+        self.x, self.y, self.down = x, y, True
+        self.last = time.monotonic()
+        self.ev = XEvent()
+
+    def __call__(self):
+        while self.down and x11.XPending(self.d):
+            x11.XNextEvent(self.d, ctypes.byref(self.ev))
+            t = touch_event(self.d, self.ev, self.opcode)
+            if t and t[1] == self.id and t[0] != XI_TOUCH_BEGIN:
+                self.x, self.y, self.last = t[3], t[4], time.monotonic()
+                self.down = t[0] != XI_TOUCH_END
+        if self.down and time.monotonic() - self.last > TOUCH_TIMEOUT:
+            self.down = False                    # an end that never came: let go
+        return round(self.x), round(self.y), self.down
+
+
 def main():
     try:
         os.remove(SEEK_PREVIEW)  # left behind if a previous run was killed mid-seek
@@ -677,6 +893,8 @@ def main():
     shaped, last_shape = None, 0.0               # (win, w, h, s) the input shape was set for
     above, last_on_top = None, 0.0               # the always-on-top state win has; None: not set
     logged_on_top = None
+    opcode = touch_opcode(d)
+    log('touch: XInput 2.2 present' if opcode else 'touch: no XInput 2.2, mouse only')
     s = scale()                                  # refreshed on each click; motion uses the last
     start_dpi = int(os.environ.get('CSN_DPI') or 0) or dpi()   # what nowplaying.py started at
     ev = XEvent()
@@ -701,6 +919,8 @@ def main():
                 win = current
                 above = None                           # sent again below; a no-op if it held
                 x11.XSelectInput(d, win, BUTTON_PRESS_MASK | BUTTON_RELEASE_MASK | POINTER_MOTION_MASK)
+                if opcode:
+                    select_touch(d, win)
                 # A rebuilt window has neither the cursor nor the input shape: set both again.
                 cursor = cursor or ''                  # the arrow until the pointer says otherwise
                 set_cursor(d, win, cursor)
@@ -773,44 +993,38 @@ def main():
                 hit = region_at(regions, s, x, y)
                 edges = resize_edges(x, y, w, h, s)
                 edges = without_idle_edges(edges, regions)
-                if hit == 'heart':
-                    logged_in = os.path.exists(os.path.join(CONF, 'spotify-token.json'))
-                    action = 'toggle' if logged_in else 'login'
-                    subprocess.Popen([sys.executable, os.path.join(HERE, 'spotify_api.py'), action],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    log(f'heart: {action}')
-                elif hit == 'play':
-                    subprocess.Popen(['playerctl', '-p', 'spotify', 'play-pause'])
-                    log('play-pause')
-                elif hit == 'prev':
-                    subprocess.Popen(['playerctl', '-p', 'spotify', 'previous'])
-                    log('previous')
-                elif hit == 'next':
-                    subprocess.Popen(['playerctl', '-p', 'spotify', 'next'])
-                    log('next')
-                elif hit == 'minimize':
-                    open(HIDDEN, 'w').close()
-                    x11.XUnmapWindow(d, win)
-                    x11.XFlush(d)
-                    hidden = True
-                    log('minimize')
-                elif hit == 'close':
-                    subprocess.Popen([LAUNCHER, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    log('close')
-                elif hit == 'seek' and regions.get('duration'):
-                    seek(d, root, win, regions, s)
-                elif hit == 'art':
-                    start = b.x_root, b.y_root
-                    if clicked(d, root, start, s):
-                        pick_colour(regions['art'], x / s, y / s)
-                    else:
-                        remember(*drag(d, root, win, s, start))
-                elif edges:
-                    placed = resize(d, root, win, edges, s, regions)
-                    if placed:
-                        remember(*placed)
+                if hit in BUTTONS:
+                    press(d, win, hit)
+                    if hit == 'minimize':
+                        hidden = True
                 else:
-                    remember(*drag(d, root, win, s))
+                    pull(d, root, win, s, regions, hit, edges, follow_pointer(d, root),
+                         (x, y, (b.x_root, b.y_root)))
+            elif ev.type == GENERIC_EVENT and opcode:
+                t = touch_event(d, ev, opcode)
+                if not (t and t[0] == XI_TOUCH_BEGIN and t[2] == win):
+                    continue
+                s = scale()
+                _, _, w, h = card_of(geometry(d, win), s)
+                x, y = t[5] - SHADOW * s, t[6] - SHADOW * s    # card-relative
+                if not on_card(x, y, w, h):
+                    continue
+                regions = load_regions()
+                hit = region_at(regions, s, x, y)
+                edges = without_idle_edges(resize_edges(x, y, w, h, s), regions)
+                start = round(t[3]), round(t[4])
+                finger = Touch(d, opcode, t[1], *start)
+                what = hit or edges or ('lyrics' if scrollable(regions, s, x, y) else 'card')
+                log(f'touch at {round(x)},{round(y)}: {what}')
+                if hit in BUTTONS:               # pressed once it lifts, if still on the control
+                    if tap(regions, s, x, y, start, hit, finger):
+                        press(d, win, hit)
+                        if hit == 'minimize':
+                            hidden = True
+                    else:
+                        log(f'touch: lifted off {hit}')
+                else:
+                    pull(d, root, win, s, regions, hit, edges, finger, (x, y, start), touch=True)
         time.sleep(0.02)
 
 
