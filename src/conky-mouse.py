@@ -668,19 +668,19 @@ def swipe_lines(dy, row):
     return int(-dy / row) if row > 0 else 0
 
 
-def swipe(regions, s, x, y, track):
+def swipe(regions, s, x, y, y0, track):
     """Scroll the static lyrics under window-relative (x, y) with the finger `track`
-    follows, until it lifts."""
+    follows, which touched down at root y0, until it lifts."""
     row = regions['lyrics_scroll'][2] * s
-    _, y0, held = track()
-    done = 0
+    done, held = 0, True
     while held:
         _, fy, held = track()
         lines = swipe_lines(fy - y0, row)
         while done != lines:
             down = lines > done
             if scroll_lyrics(regions, s, x, y, down) is None:
-                return
+                held = False                     # the lyrics went from under it
+                break
             done += 1 if down else -1
         time.sleep(0.01)
     log(f'swipe: {done} lines')
@@ -714,6 +714,33 @@ def seek(d, root, win, regions, s, track):
         os.remove(SEEK_PREVIEW)
     except OSError:
         pass
+
+
+def tap(regions, s, x, y, start, hit, track):
+    """Whether a finger that touched down on the control `hit` at window-relative (x, y),
+    root `start`, lifts on that control. Waits for it to lift."""
+    while True:
+        fx, fy, down = track()
+        if not down:
+            break
+        time.sleep(0.01)
+    return region_at(regions, s, x + fx - start[0], y + fy - start[1]) == hit
+
+
+def pull(d, root, win, s, regions, hit, edges, track, swipe_at=None):
+    """What a press that holds on does, off the controls: seek along the bar, resize from
+    an edge, scroll static lyrics with a finger (swipe_at: its card-relative (x, y) and
+    root y, for a touch only), or else move the widget; follows `track` until release."""
+    if hit == 'seek' and regions.get('duration'):
+        seek(d, root, win, regions, s, track)
+    elif edges:
+        placed = resize(d, root, win, edges, s, regions, track)
+        if placed:
+            remember(*placed)
+    elif swipe_at and scrollable(regions, s, *swipe_at[:2]):
+        swipe(regions, s, *swipe_at, track)
+    else:
+        remember(*drag(d, root, win, s, track))
 
 
 def press(d, win, hit):
@@ -930,14 +957,8 @@ def main():
                     press(d, win, hit)
                     if hit == 'minimize':
                         hidden = True
-                elif hit == 'seek' and regions.get('duration'):
-                    seek(d, root, win, regions, s, follow_pointer(d, root))
-                elif edges:
-                    placed = resize(d, root, win, edges, s, regions, follow_pointer(d, root))
-                    if placed:
-                        remember(*placed)
                 else:
-                    remember(*drag(d, root, win, s, follow_pointer(d, root)))
+                    pull(d, root, win, s, regions, hit, edges, follow_pointer(d, root))
             elif ev.type == GENERIC_EVENT and opcode:
                 t = touch_event(d, ev, opcode)
                 if not (t and t[0] == XI_TOUCH_BEGIN and t[2] == win):
@@ -950,30 +971,19 @@ def main():
                 regions = load_regions()
                 hit = region_at(regions, s, x, y)
                 edges = without_idle_edges(resize_edges(x, y, w, h, s), regions)
-                finger = Touch(d, opcode, t[1], t[3], t[4])
-                log(f'touch at {round(x)},{round(y)}: {hit or edges or "card"}')
-                if hit in BUTTONS:
-                    while True:                  # pressed once it lifts, if still on the control
-                        fx, fy, down = finger()
-                        if not down:
-                            break
-                        time.sleep(0.01)
-                    if region_at(regions, s, x + fx - round(t[3]), y + fy - round(t[4])) == hit:
+                start = round(t[3]), round(t[4])
+                finger = Touch(d, opcode, t[1], *start)
+                what = hit or edges or ('lyrics' if scrollable(regions, s, x, y) else 'card')
+                log(f'touch at {round(x)},{round(y)}: {what}')
+                if hit in BUTTONS:               # pressed once it lifts, if still on the control
+                    if tap(regions, s, x, y, start, hit, finger):
                         press(d, win, hit)
                         if hit == 'minimize':
                             hidden = True
                     else:
                         log(f'touch: lifted off {hit}')
-                elif hit == 'seek' and regions.get('duration'):
-                    seek(d, root, win, regions, s, finger)
-                elif edges:
-                    placed = resize(d, root, win, edges, s, regions, finger)
-                    if placed:
-                        remember(*placed)
-                elif scrollable(regions, s, x, y):
-                    swipe(regions, s, x, y, finger)
                 else:
-                    remember(*drag(d, root, win, s, finger))
+                    pull(d, root, win, s, regions, hit, edges, finger, (x, y, start[1]))
         time.sleep(0.02)
 
 

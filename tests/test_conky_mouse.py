@@ -370,7 +370,7 @@ class SwipeTest(support.TempDirTest):
 
     def swipe(self, *ys, s=1):
         with mock.patch.object(conky_mouse.time, 'sleep'):
-            conky_mouse.swipe(self.REGIONS, s, 100 * s, 180 * s, self.finger(*ys))
+            conky_mouse.swipe(self.REGIONS, s, 100 * s, 180 * s, 500, self.finger(*ys))
         return support.read(conky_mouse.LYRICS_SCROLL).split()[1]
 
     def test_a_line_for_each_row_the_finger_moves(self):
@@ -386,6 +386,9 @@ class SwipeTest(support.TempDirTest):
     def test_it_stops_at_the_last_line(self):
         self.assertEqual(self.swipe(500, 300), '5')
 
+    def test_movement_before_the_first_read_still_scrolls(self):
+        self.assertEqual(self.swipe(440), '3')               # already 60 px up when first read
+
     def test_rows_follow_the_display_scale(self):
         self.assertEqual(self.swipe(500, 460, s=2), '1')     # 40 px at scale 2: one row
 
@@ -395,6 +398,51 @@ class SwipeTest(support.TempDirTest):
         self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=None), 1, 100, 180))
         self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=['1234', 5]), 1, 100, 180))
         self.assertFalse(conky_mouse.scrollable({}, 1, 100, 180))
+
+
+class TapTest(unittest.TestCase):
+    # The play button at x 176..208, y 112..144 (logical px).
+    REGIONS = {'play': [176.0, 112.0, 208.0, 144.0], 'next': [211.0, 112.0, 235.0, 144.0]}
+
+    def tap(self, end, s=1):
+        """A finger down on play at card (190, 128), root (1190, 728), lifted at root `end`."""
+        finger = mock.Mock(side_effect=[(1190, 728, True), (*end, False)])
+        with mock.patch.object(conky_mouse.time, 'sleep'):
+            return conky_mouse.tap(self.REGIONS, s, 190 * s, 128 * s, (1190, 728), 'play', finger)
+
+    def test_lifting_on_the_control_presses_it(self):
+        self.assertTrue(self.tap((1190, 728)))
+        self.assertTrue(self.tap((1200, 740)))               # moved, but still on it
+        self.assertTrue(self.tap((1200, 750), s=2))          # 22 px at scale 2: still on it
+
+    def test_lifting_off_it_does_not(self):
+        self.assertFalse(self.tap((1190, 760)))              # below it
+        self.assertFalse(self.tap((1215, 728)))              # on next instead
+
+
+class PullTest(unittest.TestCase):
+    REGIONS = {'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5, 20.0],
+               'seek': [278.0, 118.0, 388, 142.0], 'duration': 172.5}
+
+    def pull(self, hit, edges, swipe_at=None, regions=REGIONS):
+        calls = {}
+        names = ('seek', 'resize', 'swipe', 'drag', 'remember')
+        with mock.patch.multiple(conky_mouse, **{n: mock.DEFAULT for n in names}) as m:
+            m['resize'].return_value = m['drag'].return_value = (1, 2, 3, 4)
+            conky_mouse.pull('d', 'root', 'win', 1, regions, hit, edges, 'track', swipe_at)
+            calls = {n for n in names if m[n].called}
+        return calls
+
+    def test_seek_then_edges_then_lyrics_then_a_move(self):
+        self.assertEqual(self.pull('seek', ''), {'seek'})
+        self.assertEqual(self.pull('seek', 'r', regions=dict(self.REGIONS, duration=None)),
+                         {'resize', 'remember'})              # no track length: the edge wins
+        self.assertEqual(self.pull(None, 'b', (100, 180, 500)), {'resize', 'remember'})
+        self.assertEqual(self.pull(None, '', (100, 180, 500)), {'swipe'})
+        self.assertEqual(self.pull(None, '', (100, 100, 500)), {'drag', 'remember'})   # above the lyrics
+
+    def test_the_mouse_moves_the_widget_from_the_lyrics(self):
+        self.assertEqual(self.pull(None, ''), {'drag', 'remember'})
 
 
 class TouchTest(unittest.TestCase):
