@@ -6,7 +6,8 @@ which conky.conf renders through draw.lua's ${lua_parse widget}. It covers:
   - title/artist, wrapped to the widget's fixed column width (measured with Pango,
     using the same fonts conky draws with, including the fallback fonts Pango picks for
     scripts Ubuntu Sans lacks, like CJK)
-  - album art, downloaded once per track
+  - album art, downloaded once per track; the background colour is taken from it, or is the
+    one picked by clicking that art (art_colours.py)
   - the controls row: draw.lua draws the buttons and seek bar from draw.txt; click
     regions for conky-mouse.py go to regions.json
   - the heart, minimize and close buttons at the top right (drawn by draw.lua)
@@ -25,20 +26,21 @@ gi.require_version('Pango', '1.0'); gi.require_version('PangoCairo', '1.0'); gi.
 from gi.repository import GdkPixbuf, Pango, PangoCairo
 import colorsys
 
+import art_colours
 import lyrics_settings
 import spotify_api
 import widget_size as size_file
 
 CACHE = os.path.expanduser('~/.cache/conky-spotify-nowplaying')
 OUT = os.path.join(CACHE, 'widget.txt')
-COVER = os.path.join(CACHE, 'cover.jpg')
+COVER = art_colours.COVER
 # Shown for a track with no artwork at all, as while Spotify's DJ talks between songs,
 # instead of the last song's cover.
-NO_ART_URL = 'file://' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-art.png')
+NO_ART_URL = art_colours.NO_ART_URL
 REGIONS = os.path.join(CACHE, 'regions.json')
 LOG = os.path.join(CACHE, 'nowplaying.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'nowplaying.lock')   # held by the one copy that runs
-BG = os.path.join(CACHE, 'bg.txt')               # background colour from the album art, for draw.lua
+BG = art_colours.BG                              # background colour from the album art, for draw.lua
 DRAW = os.path.join(CACHE, 'draw.txt')           # geometry + playback clock for draw.lua
 LYRICS = os.path.join(CACHE, 'lyrics.txt')       # lyric lines for draw.lua, timed when synced
 LYRICS_SCROLL = os.path.join(CACHE, 'lyrics-scroll')   # plain lyrics' wheel offset (conky-mouse.py)
@@ -352,28 +354,38 @@ def art_colour(path):
     return next((c for c in cell_colours(grays, floor, strict=True) if usable(c)), FALLBACK_BG)
 
 
-def update_bg():
-    try:
-        r, g, b = art_colour(COVER)
-    except Exception:
-        r, g, b = FALLBACK_BG
-    write_atomic(BG, f'{r:.3f} {g:.3f} {b:.3f}\n')
+def update_bg(url):
+    """bg.txt for the cover from url: the colour picked by clicking that art, if it was,
+    else art_colour's."""
+    rgb = art_colours.chosen(url)
+    if rgb is None:
+        try:
+            rgb = art_colour(COVER)
+        except Exception:
+            rgb = FALLBACK_BG
+    art_colours.write_bg(rgb)
 
 
 def fetch_cover(url):
-    if not url or url == _read(os.path.join(CACHE, 'cover.url')):
+    if not url or url == _read(art_colours.COVER_URL):
         if not os.path.exists(BG):
-            update_bg()
+            update_bg(url)
         return
     tmp = COVER + f'.{os.getpid()}.tmp'
     try:
         urllib.request.urlretrieve(url, tmp)
+        # cover.url goes first, so a pick (art_colours.pick) that reads it before and after
+        # sampling cover.jpg sees the change and never pairs one cover's pixels with the other's URL.
+        try:
+            os.remove(art_colours.COVER_URL)
+        except FileNotFoundError:
+            pass
         os.replace(tmp, COVER)
-        with open(os.path.join(CACHE, 'cover.url'), 'w') as f:
+        with open(art_colours.COVER_URL, 'w') as f:
             f.write(url)
     except Exception:
         return
-    update_bg()
+    update_bg(url)
 
 
 def fetch_liked(track_id):
@@ -916,6 +928,7 @@ def render():
         'next': [next_cx - SKIP_SIZE / 2 - 5, mid_y - half, next_cx + SKIP_SIZE / 2 + 5, mid_y + half],
         'seek': [bar_x0 - 6, mid_y + BAR_DROP - 12, bar_x1 + 6, mid_y + BAR_DROP + 12],
         'heart': None if heart_hidden else heart_box,
+        'art': None if not art or art == NO_ART_URL else [MARGIN, MARGIN, MARGIN + 118, MARGIN + 118],
         'bar': [bar_x0, bar_x1],
         'duration': duration,
     })

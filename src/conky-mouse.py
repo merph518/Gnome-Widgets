@@ -6,6 +6,8 @@ helper subscribes to clicks on conky's window itself:
   - heart: like/unlike the track (or start the Spotify login if not logged in yet)
   - play/pause, previous, next buttons: control playback
   - seek bar: click or drag to change the position in the song
+  - album art: a click makes the art's colour where it was clicked the background, kept for
+    that art from then on (art_colours.py); a drag from it moves the widget like anywhere else
   - minimize: hide the widget until the tray menu or the launcher shows it again
   - close: stop the widget, like the tray menu's Quit
   - an edge or corner: resize the widget. A side edge changes its width, the top or bottom
@@ -64,6 +66,7 @@ show/hide commands also write; while it exists this helper keeps conky's window 
 """
 import ctypes, json, math, os, re, subprocess, sys, time
 
+import art_colours
 import widget_size
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -86,6 +89,7 @@ CW_OVERRIDE_REDIRECT, CW_COLORMAP = 1 << 9, 1 << 13
 US_POSITION, P_POSITION = 1 << 0, 1 << 2          # XSizeHints flags
 COVER_HOLD = 0.1                                  # s: conky draws every 0.05 s
 OUTLINE, OUTLINE_WIDTH = 0x1db954, 2              # Spotify green; logical px
+CLICK_SLOP = 4                                    # logical px a press moves before it is a drag
 EDGE = 6                                          # logical px along the border that resize
 CORNER = 24                                       # how far from a corner both of its edges resize
 RESCALED = 75                                     # exit status: Xft.dpi changed (the launcher's too)
@@ -568,11 +572,27 @@ def resize(d, root, win, edges, s, regions, track):
     return x, y, *g[2:]
 
 
-def drag(d, root, win, s, track):
-    """Move the window with `track` (follow_pointer() or a Touch) while it is held; returns
-    the card's position, kept on its monitor, and size."""
+def clicked(start, s, track):
+    """Whether the press at root (x, y) `start` that `track` (follow_pointer() or a Touch)
+    follows lets go before it moves CLICK_SLOP from there: a click or tap, not the start of
+    a drag."""
+    held = True
+    while held:
+        nx, ny, held = track()
+        if max(abs(nx - start[0]), abs(ny - start[1])) > CLICK_SLOP * s:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def drag(d, root, win, s, track, start=None):
+    """Move the window with `track` (follow_pointer() or a Touch) while it is held, from
+    root (x, y) `start` if given, else from where it is first read; returns the card's
+    position, kept on its monitor, and size."""
     wx, wy, w, h = geometry(d, win)
     px, py, held = track()
+    if start:
+        px, py = start
     log(f'drag start: window {wx},{wy} pointer {px},{py}')
     last_logged = 0.0
     while held:
@@ -634,7 +654,7 @@ def load_regions(cache={}):
 
 def region_at(regions, s, x, y):
     """The control under window-relative (x, y), if any."""
-    for name in ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek'):
+    for name in ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek', 'art'):
         r = regions.get(name)
         if r and r[0] * s <= x <= r[2] * s and r[1] * s <= y <= r[3] * s:
             return name
@@ -660,6 +680,18 @@ def scroll_lyrics(regions, s, x, y, down):
         f.write(f'{version} {offset}')
     os.replace(LYRICS_SCROLL + '.tmp', LYRICS_SCROLL)
     return offset
+
+
+def pick_colour(art, x, y):
+    """Make the art's colour at card (x, y), logical px, the background."""
+    fx, fy = (x - art[0]) / (art[2] - art[0]), (y - art[1]) / (art[3] - art[1])
+    try:
+        rgb = art_colours.pick(fx, fy)
+    except Exception as e:
+        log(f'art colour: failed at {fx:.2f},{fy:.2f}: {type(e).__name__}: {e}')
+        return
+    if rgb:
+        log(f'art colour: {fx:.2f},{fy:.2f} -> ' + ' '.join(f'{c:.3f}' for c in rgb))
 
 
 def swipe_lines(dy, row):
@@ -957,6 +989,13 @@ def main():
                     press(d, win, hit)
                     if hit == 'minimize':
                         hidden = True
+                elif hit == 'art':
+                    start = b.x_root, b.y_root
+                    track = follow_pointer(d, root)
+                    if clicked(start, s, track):
+                        pick_colour(regions['art'], x / s, y / s)
+                    else:
+                        remember(*drag(d, root, win, s, track, start))
                 else:
                     pull(d, root, win, s, regions, hit, edges, follow_pointer(d, root))
             elif ev.type == GENERIC_EVENT and opcode:
@@ -982,6 +1021,11 @@ def main():
                             hidden = True
                     else:
                         log(f'touch: lifted off {hit}')
+                elif hit == 'art':
+                    if clicked(start, s, finger):
+                        pick_colour(regions['art'], x / s, y / s)
+                    else:
+                        remember(*drag(d, root, win, s, finger, start))
                 else:
                     pull(d, root, win, s, regions, hit, edges, finger, (x, y, start[1]))
         time.sleep(0.02)

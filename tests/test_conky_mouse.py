@@ -222,6 +222,17 @@ class CardPlacementTest(unittest.TestCase):
                    log=mock.Mock())
         self.assertEqual(conky_mouse.drag(None, 0, 1, 2, conky_mouse.follow_pointer(None, 0)), (532, 632, 1240, 666))
 
+    def test_a_drag_from_the_art_follows_the_pointer_from_the_press(self):
+        # The pointer is already past the click slop when the drag starts; the window
+        # still moves by all of it, from where the button went down.
+        moves = []
+        self.patch(geometry=mock.Mock(side_effect=[(100, 200, 1304, 730), (110, 200, 1304, 730)]),
+                   pointer=mock.Mock(side_effect=[(510, 300, conky_mouse.BUTTON1_MASK), (510, 300, 0)]),
+                   monitor_for=mock.Mock(return_value=self.MON), log=mock.Mock(),
+                   x11=mock.Mock(XMoveWindow=lambda d, w, x, y: moves.append((x, y))))
+        conky_mouse.drag(None, 0, 1, 2, conky_mouse.follow_pointer(None, 0), (500, 300))
+        self.assertEqual(moves, [(110, 200)])
+
     def test_a_resize_moves_the_window_round_the_resized_card_and_saves_the_card(self):
         # Dragging the left edge 100 px left at scale 2 widens the card by 100 and moves it left.
         moves = []
@@ -481,6 +492,50 @@ class TouchTest(unittest.TestCase):
         touch.last -= conky_mouse.TOUCH_TIMEOUT + 1
         with mock.patch.object(conky_mouse.x11, 'XPending', return_value=0):
             self.assertEqual(touch(), (10, 20, False))
+
+
+class ArtClickTest(unittest.TestCase):
+    HELD, UP = conky_mouse.BUTTON1_MASK, 0
+
+    def test_released_in_place_is_a_click(self):
+        pointer = mock.Mock(side_effect=[(102, 101, self.HELD), (103, 101, self.UP)])
+        with mock.patch.object(conky_mouse, 'pointer', pointer):
+            self.assertTrue(conky_mouse.clicked((100, 100), 1, conky_mouse.follow_pointer(None, 0)))
+
+    def test_moving_past_the_slop_is_a_drag(self):
+        pointer = mock.Mock(side_effect=[(102, 100, self.HELD), (105, 100, self.HELD)])
+        with mock.patch.object(conky_mouse, 'pointer', pointer):
+            self.assertFalse(conky_mouse.clicked((100, 100), 1, conky_mouse.follow_pointer(None, 0)))
+
+    def test_the_slop_follows_the_display_scale(self):
+        pointer = mock.Mock(side_effect=[(107, 100, self.HELD), (107, 100, self.UP)])
+        with mock.patch.object(conky_mouse, 'pointer', pointer):
+            self.assertTrue(conky_mouse.clicked((100, 100), 2, conky_mouse.follow_pointer(None, 0)))
+
+    def test_a_tap_lifted_in_place_is_a_click(self):
+        finger = mock.Mock(side_effect=[(102, 101, True), (103, 101, False)])
+        self.assertTrue(conky_mouse.clicked((100, 100), 1, finger))
+        finger = mock.Mock(side_effect=[(110, 100, True)])
+        self.assertFalse(conky_mouse.clicked((100, 100), 1, finger))
+
+    def test_the_art_is_a_region(self):
+        regions = {'art': [20, 20, 138, 138], 'heart': None}
+        self.assertEqual(conky_mouse.region_at(regions, 2, 100, 100), 'art')
+        self.assertIsNone(conky_mouse.region_at(regions, 2, 300, 100))
+        self.assertIsNone(conky_mouse.region_at({'art': None}, 1, 50, 50))
+
+    def test_a_click_picks_at_its_place_on_the_art(self):
+        with mock.patch.object(conky_mouse.art_colours, 'pick', return_value=(0.1, 0.2, 0.3)) as pick, \
+                mock.patch.object(conky_mouse, 'log') as log:
+            conky_mouse.pick_colour([20, 20, 120, 120], 45, 95)
+        pick.assert_called_once_with(0.25, 0.75)
+        log.assert_called_once_with('art colour: 0.25,0.75 -> 0.100 0.200 0.300')
+
+    def test_a_failed_pick_is_logged_not_raised(self):
+        with mock.patch.object(conky_mouse.art_colours, 'pick', side_effect=OSError('gone')), \
+                mock.patch.object(conky_mouse, 'log') as log:
+            conky_mouse.pick_colour([20, 20, 120, 120], 70, 70)
+        self.assertIn('failed', log.call_args[0][0])
 
 
 class LogTest(support.TempDirTest):
