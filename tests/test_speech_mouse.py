@@ -201,7 +201,7 @@ class VoiceMenuTest(StubSpeechctl):
         picked, shown = self.show([('move', 480, 253)], [('wheel', True)], [('move', 480, 280)],
                                  [('press', 480, 228)])
         # amy, the current voice, is in view without scrolling; the wheel then scrolls a voice
-        self.assertEqual(shown, ['0 1', '1 1', '1 3'])
+        self.assertEqual(shown, ['0 1', '1 2', '1 3'])
         self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # the second voice, once scrolled
         self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
 
@@ -212,6 +212,21 @@ class VoiceMenuTest(StubSpeechctl):
     def test_a_swipe_scrolls_by_the_rows_it_gives(self):
         _, shown = self.show([('scroll', 1)], [('scroll', 5)], [('scroll', -1)], [('escape',)])
         self.assertEqual(shown, ['1 -1', '2 -1', '1 -1'])
+
+    def test_a_wheel_step_moves_the_highlight_to_the_voice_now_under_the_pointer(self):
+        _, shown = self.show([('move', 480, 253)], [('wheel', True)], [('wheel', True)], [('escape',)])
+        self.assertEqual(shown, ['0 1', '1 2', '2 3'])
+
+    def test_each_event_starts_the_timeout_again(self):
+        # 20 s from the last event, not from opening: a wheel step at 15 s keeps it open at 30 s
+        t, calls = [0.0], []
+
+        def events():
+            calls.append(t[0])
+            t[0] = (15.0, 30.0, 34.0)[len(calls) - 1]
+            return [[('wheel', True)], [], [('press', 480, 228)]][len(calls) - 1]
+        picked = speech_mouse.run_menu(REGIONS['menu'], events, now=lambda: t[0], sleep=lambda _: None)
+        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # one voice scrolled, so the second
 
     def test_it_closes_itself_when_nothing_is_done(self):
         picked, _ = self.show(now=[0.0, 5.0, 10.0, 20.5])

@@ -160,17 +160,18 @@ def run_menu(menu, events, now=time.monotonic, sleep=time.sleep):
     `events()` gives the card-relative logical-px events that arrived since it was last
     called: ('move', x, y), ('press', x, y), ('wheel', down), ('scroll', rows) and ('escape',).
     A press on a voice picks it and one anywhere else closes the list; it closes by itself
-    after MENU_TIMEOUT. draw.lua draws it from VOICE_MENU for as long as this runs."""
+    after MENU_TIMEOUT without an event. draw.lua draws it from VOICE_MENU for as long as this
+    runs."""
     current = menu.get('current', -1)
     scroll = menu_scroll(menu, 0, current - menu['rows'] // 2 if current >= menu['rows'] else 0)
-    hover, shown = -1, None
+    pointer, hover, shown = None, -1, None
     deadline = now() + MENU_TIMEOUT
     try:
         while now() < deadline:
             for kind, *args in events():
+                deadline = now() + MENU_TIMEOUT
                 if kind == 'move':
-                    hover = menu_at(menu, *args, scroll)
-                    hover = -1 if hover is None else hover
+                    pointer = args
                 elif kind == 'wheel':
                     scroll = menu_scroll(menu, scroll, 1 if args[0] else -1)
                 elif kind == 'scroll':
@@ -180,6 +181,9 @@ def run_menu(menu, events, now=time.monotonic, sleep=time.sleep):
                     return None if i is None else menu['names'][i]
                 elif kind == 'escape':
                     return None
+                # the voice under the pointer, which a scroll moves from under it too
+                i = menu_at(menu, *pointer, scroll) if pointer else None
+                hover = -1 if i is None else i
             if (scroll, hover) != shown:
                 shown = scroll, hover
                 write_menu(scroll, hover)
