@@ -1,0 +1,16 @@
+[Unit]
+Description=Voice bridge MCP server on 127.0.0.1:8790
+
+[Service]
+# claude sits in ~/.local/bin, and start_session launches it by name.
+Environment=PATH=%h/.local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node %h/Code/Overmind/plugins/voice/bridge/voice-bridge.mjs --config %h/Code/Playwright-Testing/.claude/skills/voice-bridge-hooks/extension.json serve
+Restart=on-failure
+RestartSec=5
+# The claude daemon that start_session's first claude --bg spawns lands in this unit's control
+# group, along with every session it runs. A stop or restart ends only the bridge itself, so
+# those sessions keep running.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -19,11 +19,21 @@ python3 -m unittest discover -s tests
 luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/*.desktop
+test "$(git write-tree --prefix=.claude/att-docs/)" = "$(sed -n 's/^tree=//p' .claude/att-docs.lock)" \
+  && git diff --quiet -- .claude/att-docs \
+  && test -z "$(git ls-files --others --exclude-standard -- .claude/att-docs)"
 ```
 
 Every command must exit 0 and print nothing, apart from the test summaries
 `catchup_test.py` and `unittest` print.
 
+- The last command fails when the vendored Overmind copy differs from the tree
+  `.claude/att-docs.lock` pins, so a hand edit to it shows offline. Moving the
+  pin is `scripts/overmind-sync.sh <tag>`, followed by
+  `claude plugin update voice@att-docs`. The tree is read from the index, which
+  `overmind-sync.sh` fills, so the check passes before the sync is committed;
+  an edit, a deletion or a file added under the copy fails it. Run it from the
+  repository root.
 - `desktop-file-validate` hints count as failures to fix. It once caught a
   duplicate main category that every other check passed.
 - `luac5.3 -p` only parses; it catches syntax errors, not a bad call or a
@@ -59,7 +69,7 @@ directory, and a second session's build waits for the first.
 
 The checks cannot see a Lua runtime error or a path that only exists under
 `/usr`. A change that touches `src/`, `bin/`, `packaging/` or `debian/` has not
-been checked until it has run: from the checkout, as in `/implement` step 5 or
+been checked until it has run: from the checkout, as in `/implement` Section 6 or
 the `run` skill, or built and installed, as in `/release` step 4. Either way
 the widget's log is read afterwards:
 

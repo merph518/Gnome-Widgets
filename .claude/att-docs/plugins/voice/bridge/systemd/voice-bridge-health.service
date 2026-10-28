@@ -1,0 +1,6 @@
+[Unit]
+Description=Voice bridge health probe, with a phone alert when it stops answering
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node %h/Code/Overmind/plugins/voice/bridge/voice-bridge-health.mjs

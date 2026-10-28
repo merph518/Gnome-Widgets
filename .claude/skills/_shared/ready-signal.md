@@ -16,12 +16,47 @@ PULL REQUEST <number> IS READY FOR YOUR REVIEW
 It goes below everything else the report carries, the open questions
 included.
 
+Sending it also puts the `Manual Review Needed` label on the pull request, per
+[The ready label](#the-ready-label).
+
 The line waits on the static checks, the mergeability check, and the
 session's own review of the pull request, per [self-review.md](self-review.md).
 
 The line goes out in the turn the pull request becomes ready, even when the
 session is in the middle of something longer. When several are ready, each
 gets its own line.
+
+## The ready label
+
+The label goes on in the same turn as the line, first: the reply carrying the
+line is written only once the label call has run, and a refused call means the
+pull request is not ready, so the reply says so instead of sending the line.
+The label is made on first use and never deleted, and goes on through the
+issues endpoint, because `gh pr edit` fails on some `gh` releases:
+
+```bash
+gh label create "Manual Review Needed" --color D93F0B \
+  --description "A pull request is waiting on the user's review" 2>/dev/null || true
+gh api -X POST repos/{owner}/{repo}/issues/<number>/labels \
+  -f "labels[]=Manual Review Needed" --jq '[.[].name] | join(", ")'
+```
+
+The output is the read-back: the label is on when its name comes back in it.
+
+The label follows the line. When the user leaves feedback on the pull request,
+whether a review comment, a requested-changes review, or a word in chat that
+they reviewed it, the label comes off as soon as the session reads that
+feedback, before any work on it starts, and goes back on only with the line:
+
+```bash
+gh api -X DELETE "repos/{owner}/{repo}/issues/<number>/labels/Manual%20Review%20Needed" \
+  --jq '[.[].name] | join(", ")'
+```
+
+A pull request that no longer carries the label, because the user removed it,
+has nothing to remove, which is not a failed removal. The merge takes the pull
+request out of the user's list, so [implement](../implement/SKILL.md) section 10
+leaves it alone.
 
 ## When it is withheld
 
