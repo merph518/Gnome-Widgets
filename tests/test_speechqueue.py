@@ -98,6 +98,19 @@ class ReadState(Fixture):
         speechqueue._last = None                       # a restart reads it back from LAST
         self.assertEqual(line(ME), 'Pass 1 is pushed.')
 
+    def test_the_second_row_drops_the_hooks_speaker(self):
+        self.three()
+        line = lambda: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                            if x['id'] == ME).split('\t')[7]
+        self.f.now(ME, 'Claude Voice Widget', 'Claude Voice Widget session says: PR 110 merged.')
+        self.assertEqual(line(), 'PR 110 merged.')
+        self.assertEqual(speechqueue.last_lines(None, {ME})[ME],
+                         'Claude Voice Widget session says: PR 110 merged.')   # kept whole
+        self.f.now(ME, 'Claude Voice Widget', 'It says: nothing here, mid-line it stays.')
+        self.assertEqual(line(), 'It says: nothing here, mid-line it stays.')     # not the hook's
+        self.assertEqual(speechqueue.without_speaker('The log says nothing.'), 'The log says nothing.')
+        self.assertEqual(speechqueue.without_speaker('Overmind session says: '), 'Overmind session says: ')
+
     def test_both_markers_read_as_on(self):
         self.f.session(100, ME, 'One')
         self.f.file(ME + '.replies')

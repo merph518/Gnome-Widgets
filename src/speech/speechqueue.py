@@ -72,6 +72,7 @@ SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
+SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 # labels.json's first contents, written when it is missing; keys match without case
 DEFAULT_LABELS = {
     'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
@@ -129,6 +130,12 @@ def display_text(text):
     as one space."""
     text = ''.join(c for c in str(text) if unicodedata.category(c) != 'Cf')
     return ' '.join(text.split())
+
+
+def without_speaker(text):
+    """text without the "<name> session says:" the voice hook opens a clip with, for a row that already
+    sits under the session's name."""
+    return SPEAKER.sub('', text, count=1) or text
 
 
 def text_width(text, font):
@@ -481,7 +488,7 @@ def session_line(s):
                                         ('question', s.get('question'))) if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
                       display_text(s['name']), s.get('label', ''),
-                      (s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
+                      without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
 
 
 def write_sessions(listed):

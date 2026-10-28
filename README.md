@@ -3,8 +3,9 @@
 A bundle of desktop widgets for Linux (GNOME on Wayland), built on Conky. Each widget is a
 card of its own that you can drag, resize and minimize, on any monitor.
 
-The first, and so far the only one, is a Spotify "now playing" widget. The package that ships
-it, and every widget to come, is `conky-widgets`. The rest of this page is about it.
+There are two: a Spotify "now playing" widget, and a speech widget that shows and controls
+what Claude Code sessions read aloud. One package, `conky-widgets`, ships both, and one
+top-bar icon serves them.
 
 ## Spotify now playing
 
@@ -50,6 +51,91 @@ it, and every widget to come, is `conky-widgets`. The rest of this page is about
   Lyrics toggle; Lyrics scrolling, Autoscroll or Static; Always on top), a Speech submenu,
   a Start at login toggle and Quit
 
+## Speech widget
+
+The speech widget shows what the Claude Code sessions on this machine are reading aloud
+through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `voice` plugin
+(`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
+itself.
+
+- A header with who is speaking ("<name> says:"), ⏭ and ⏩, and a progress bar with the
+  line's elapsed time and length
+- **Sessions**: every open Claude session, the ones with speech on first, each with its
+  repository's label, its name, a **busy** or **bg** tag while it works or runs in the
+  background, how many lines it has queued, and its speech setting
+- A footer with pause / resume, the volume and the voice
+
+Each session in the speech widget's list starts with a four-letter label for its repository,
+named after its GitHub origin remote (or its folder, without one). The labels are read from
+`~/.config/conky-widgets/speech/labels.json`, repository name to label, written with a starting
+set the first time the widget runs; a repository not in it gets the first letter of each word
+of its name, filled out from the last word (`LaundryBot` reads `LBOT`).
+
+A session with speech on always has a second row under its name: the last line read aloud
+for it, without the hook's opening "<name> session says:" and cut to one line, or *Nothing
+read aloud yet* before its first. A question waiting to
+be read shows as a **question** tag after the name instead of its text.
+The header and progress bar stay put between lines: once a line ends, the header keeps
+"<name> says:" and the bar stays full at that line's length until the next one starts.
+
+The speech widget takes the Spotify widget's background: it reads that widget's
+`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, its text and controls turning
+dark on a light cover just as Spotify's do, and stays on #181818 with white text while there
+is none. To follow another colour file, put its path on the first line of
+`~/.config/conky-widgets/speech/background`.
+
+### Controls
+
+The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
+skips it and the rest of that session's queue, the round button pauses or resumes, − and +
+change the volume and ◀ ▶ the voice, and a session's **On**, **Alerts** and
+**Off** set how it is read. The mouse wheel turns the volume over the volume, steps through
+the voices over the voice, moves a session's setting a segment along over its segments, and
+scrolls the list anywhere else on it; a finger swiped up or down on the list scrolls it too.
+Taps, dragging, resizing, − and × work as they do on the Spotify widget.
+
+### Speech setting
+
+Each session's **On**, **Alerts** and **Off** say what is read from it:
+
+- **On**: its replies are read aloud from then on, and it gets a second row with its last line
+- **Alerts** (a new session's default): only its announcements
+- **Off**: nothing; a clip of it that is playing stops
+
+The voice plugin's phone feed carries on whatever the setting, and `/implement-with-speech`
+and `/implement` change it too.
+
+### speechctl
+
+Every control, the tray menu's speech items and the keyboard shortcuts below run `speechctl`,
+which ships with the Overmind `voice` plugin, not with this package. The widget uses the one
+on `PATH`, or the one whose path is the first line of
+`~/.config/conky-widgets/speech/speechctl`. With the plugin installed from its marketplace
+that is:
+
+```sh
+echo ~/.claude/plugins/marketplaces/att-docs/plugins/voice/skills/voice-bridge-hooks/speechctl \
+  > ~/.config/conky-widgets/speech/speechctl
+```
+
+Without `speechctl` the widget still shows what is said, but its controls do nothing (each
+press is logged in `~/.cache/conky-widgets/speech/mouse.log`).
+
+### Keyboard shortcuts
+
+GNOME can run `speechctl` from the keyboard. In **Settings → Keyboard → View and Customize
+Shortcuts → Custom Shortcuts**, add one shortcut per row, with `speechctl`'s full path in
+place of `speechctl`:
+
+| Shortcut | Command | Does |
+| --- | --- | --- |
+| Super+Alt+S | `speechctl skip` | Skips the line playing |
+| Super+Alt+N | `speechctl next` | Skips it and the rest of that session's queue |
+| Super+Alt+P | `speechctl toggle` | Pauses or resumes |
+| Super+Alt+↑ | `speechctl volume up` | Volume up a tenth |
+| Super+Alt+↓ | `speechctl volume down` | Volume down a tenth |
+| Super+Alt+V | `speechctl voice next` | The next installed voice |
+
 ## Install
 
 Install from the PPA, which also pulls in the dependencies (Conky, playerctl, Python GObject
@@ -92,32 +178,8 @@ The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyr
 scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
 **Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
 size, **Collapse when idle** (off by default: on, the widget shrinks to its top line while
-nothing is said or queued) and Always on top. Its speech controls run `speechctl`, found on `PATH`, or at the path
-written in `~/.config/conky-widgets/speech/speechctl`; without one they're greyed out.
-
-Each session in the speech widget's list starts with a four-letter label for its repository,
-named after its GitHub origin remote (or its folder, without one). The labels are read from
-`~/.config/conky-widgets/speech/labels.json`, repository name to label, written with a starting
-set the first time the widget runs; a repository not in it gets the first letter of each word
-of its name, filled out from the last word (`LaundryBot` reads `LBOT`).
-A session with speech on always has a second row under its name: the last line read aloud
-for it, cut to one line, or *Nothing read aloud yet* before its first. A question waiting to
-be read shows as a **question** tag after the name instead of its text.
-The header and progress bar stay put between lines: once a line ends, the header keeps
-"<name> says:" and the bar stays full at that line's length until the next one starts.
-The speech widget takes the Spotify widget's background: it reads that widget's
-`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, its text and controls turning
-dark on a light cover just as Spotify's do, and stays on #181818 with white text while there
-is none. To follow another colour file, put its path on the first line of
-`~/.config/conky-widgets/speech/background`.
-
-The speech widget's controls run `speechctl`, the same one the tray menu uses: ⏭ skips the
-line playing, ⏩ skips it and the rest of that session's queue, the round button pauses or resumes,
-− and + change the volume and ◀ ▶ the voice, and a session's **On**, **Alerts** and
-**Off** set how it is read. The mouse wheel turns the volume over the volume, steps through
-the voices over the voice, moves a session's setting a segment along over its segments, and
-scrolls the list anywhere else on it; a finger swiped up or down on the list scrolls it too.
-Taps, dragging, resizing, − and × work as they do on the Spotify widget.
+nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
+[Speech widget](#speech-widget)); without one they're greyed out.
 
 Two of the Spotify settings are about lyrics, and both are remembered:
 
