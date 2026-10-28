@@ -363,7 +363,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text)
     end
     if r.speech ~= 'on' then return 1 end
     font(cr, 11, text, s)
-    set(cr, secondary())
+    set(cr, secondary(), 0.65)                     -- a lighter grey than the name and tags
     show(cr, fit(cr, r.last, c[1] * s - 10 * s - name_x), name_x, cy + row, 'left')   -- clear of the setting
     return 2
 end
