@@ -134,6 +134,30 @@ class SpeechTest(support.TempDirTest):
         self.write('settings.json', {'volume': 'loud'})
         self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
 
+    def test_pace_from_settings_then_the_environment_then_the_default(self):
+        with mock.patch.dict(os.environ, clear=False):
+            os.environ.pop('SPEAK_PIPER_LENGTH', None)
+            self.assertEqual(tray_model.speech_pace(), tray_model.DEFAULT_PACE)
+            os.environ['SPEAK_PIPER_LENGTH'] = '0.7'
+            self.assertEqual(tray_model.speech_pace(), 0.7)
+            self.write('settings.json', {'pace': 1.2})
+            self.assertEqual(tray_model.speech_pace(), 1.2)
+            self.write('settings.json', {'pace': 'slow'})
+            self.assertEqual(tray_model.speech_pace(), 0.7)
+
+    def test_setting_the_pace_keeps_the_other_settings(self):
+        self.write('settings.json', {'voice': 'en_US-ryan-high', 'volume': 0.5})
+        tray_model.set_speech_pace(1.0)
+        with open(os.path.join(tray_model.SPEAK, 'settings.json')) as f:
+            self.assertEqual(json.load(f), {'voice': 'en_US-ryan-high', 'volume': 0.5, 'pace': 1.0})
+        self.assertEqual(tray_model.speech_settings(), ('en_US-ryan-high', 0.5))
+        self.assertEqual(tray_model.speech_pace(), 1.0)
+
+    def test_setting_the_pace_starts_a_settings_file(self):
+        tray_model.set_speech_pace(0.6)
+        self.assertEqual(tray_model.speech_pace(), 0.6)
+        self.assertEqual(sorted(f for f in os.listdir(tray_model.SPEAK) if f.startswith('.tmp')), [])
+
     def test_speechctl_from_the_configured_path_then_path(self):
         with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'):
             self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
@@ -165,3 +189,9 @@ class SpeechTest(support.TempDirTest):
         with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'), \
                 mock.patch.object(tray_model.subprocess, 'run', return_value=mock.Mock(stdout=out)):
             self.assertEqual(tray_model.voices(), ['en_US-amy-medium', 'en_US-ryan-high'])
+
+    def test_the_current_voice_is_named_not_its_marker(self):
+        out = '* en_US-amy-medium\n  en_US-lessac-medium\n  en_US-ryan-high\n'
+        with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'), \
+                mock.patch.object(tray_model.subprocess, 'run', return_value=mock.Mock(stdout=out)):
+            self.assertEqual(tray_model.voices(), ['en_US-amy-medium', 'en_US-lessac-medium', 'en_US-ryan-high'])

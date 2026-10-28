@@ -3,7 +3,7 @@
 supervisor while any widget runs. Its menu shows the current track and what speech is
 saying; shows or hides each widget on its own; holds a submenu of settings for each
 (Spotify: text scaling, size, lyrics, always on top; Speech: pause, skip, clear, voice,
-volume, text scaling, size, collapse when idle, always on top); turns start-at-login on or
+volume, pace, text scaling, size, collapse when idle, always on top); turns start-at-login on or
 off; and quits every widget. What it reads and writes is in tray_model.py."""
 import ctypes, os, signal, subprocess, sys, threading
 
@@ -102,6 +102,13 @@ class Radio:
         for value, item in self.items.items():
             item.set_active(same(value, current))
         self.syncing = False
+
+
+def pace_label(pace):
+    """A pace preset's menu label: its length scale, and what the ends and the default are."""
+    note = {tray_model.PACES[0]: ' (fastest)', tray_model.PACES[-1]: ' (slowest)',
+            tray_model.DEFAULT_PACE: ' (default)'}.get(pace, '')
+    return f'{pace:g}{note}'
 
 
 def item(label, activate):
@@ -232,15 +239,17 @@ def main():
     volume = Radio('Volume', [(v, f'{v:.0%}') for v in tray_model.VOLUMES],
                    lambda: tray_model.speech_settings()[1],
                    lambda v: tray_model.run_speechctl('volume', f'{v:g}'))
-    controls = (pause, skip, clear, volume.item)   # the voices are greyed out by having none
+    pace = Radio('Pace', [(v, pace_label(v)) for v in tray_model.PACES], tray_model.speech_pace,
+                 tray_model.set_speech_pace)
+    controls = (pause, skip, clear, volume.item, pace.item)   # the voices are greyed out by having none
     scaling, reset = size_items('speech')
     speech_on_top = on_top_check('speech')
     collapse = Check('Collapse when idle', tray_model.collapse_idle, tray_model.set_collapse_idle)
-    for entry in (pause, skip, clear, voice.item, volume.item, scaling.item, reset, collapse.item,
+    for entry in (pause, skip, clear, voice.item, volume.item, pace.item, scaling.item, reset, collapse.item,
                   speech_on_top.item):
         speech_menu.append(entry)
     checks += [collapse, speech_on_top]
-    radios += [voice, volume, scaling]
+    radios += [voice, volume, pace, scaling]
     speech = Gtk.MenuItem(label='Speech')
     speech.set_submenu(speech_menu)
     menu.append(speech)
