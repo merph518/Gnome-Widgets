@@ -1,6 +1,7 @@
 """The Spotify widget's part of the mouse helper, loaded by conky-mouse.py when it is
-started as `conky-mouse.py spotify`: what its controls do, the seek bar, the album art's
-colour pick and the wheel and swipes over static lyrics.
+started as `conky-mouse.py spotify`: what its controls do, the seek bar, the volume slider,
+the album art's colour pick, and the wheel over the volume and the wheel and swipes over
+static lyrics.
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares:
 logging, following the pointer, dragging and the card's geometry.
@@ -15,21 +16,24 @@ OUTLINE = 0x1db954                             # Spotify green: the outline a re
 BUTTONS = ('heart', 'play', 'prev', 'next')    # the controls this widget's click or tap presses
 # The regions nowplaying.py writes, in the order a press looks through them.
 HEIGHT_REGION = 'lyrics'                       # the region the second size setting is the height of
-REGIONS_ORDER = ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek', 'art')
+REGIONS_ORDER = ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'volume', 'seek', 'art')
 CONF = os.path.expanduser(f'~/.config/{NAME}')
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 SEEK_PREVIEW = os.path.join(CACHE, 'seek-preview')
+VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
+VOLUME_STEP = 0.05                             # a wheel step's change of Spotify's volume
 LYRICS_SCROLL = os.path.join(CACHE, 'lyrics-scroll')   # '<lyrics version> <line offset>', for draw.lua
 HERE = os.path.dirname(os.path.abspath(__file__))
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 
 def start():
-    """Clears what a previous run left behind if it was killed mid-seek."""
-    try:
-        os.remove(SEEK_PREVIEW)
-    except OSError:
-        pass
+    """Clears what a previous run left behind if it was killed mid-seek or mid-drag."""
+    for preview in (SEEK_PREVIEW, VOLUME_PREVIEW):
+        try:
+            os.remove(preview)
+        except OSError:
+            pass
 
 
 def press(d, win, hit):
@@ -52,13 +56,15 @@ def press(d, win, hit):
 
 
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
-    """What a press on the seek bar or the album art does, following `track` from
-    card-relative (x, y) and root (x, y) `at` until release: seek along the bar; pick the
-    art's colour on a click or tap, or move the widget from the press on a drag. Returns
-    whether the press was one of those."""
+    """What a press on the seek bar, the volume slider or the album art does, following
+    `track` from card-relative (x, y) and root (x, y) `at` until release: seek along the
+    bar; set the volume along the slider; pick the art's colour on a click or tap, or move
+    the widget from the press on a drag. Returns whether the press was one of those."""
     x, y, start = at
     if hit == 'seek' and regions.get('duration'):
         seek(d, root, win, regions, s, track)
+    elif hit == 'volume' and regions.get('volume_bar'):
+        set_volume(d, win, regions, s, track)
     elif hit == 'art':
         if core.clicked(start, s, track, core.TAP_SLOP if touch else core.CLICK_SLOP):
             pick_colour(regions['art'], x / s, y / s)
@@ -96,7 +102,17 @@ def scroll_lyrics(regions, s, x, y, down):
     return offset
 
 
-wheel = scroll_lyrics                            # what conky-mouse.py does with a wheel step
+def wheel(regions, s, x, y, down):
+    """What a wheel step down (or up) over card-relative (x, y) does: turns Spotify's volume
+    down or up a step over the volume slider, else scrolls static lyrics there. Returns
+    'volume', the lyrics' new offset, or None where the wheel does nothing."""
+    area = regions.get('volume_wheel')
+    if area and area[0] * s <= x <= area[2] * s and area[1] * s <= y <= area[3] * s:
+        # relative, so steps faster than nowplaying.py reports the level all count
+        subprocess.run(['playerctl', '-p', 'spotify', 'volume', f'{VOLUME_STEP}{"-" if down else "+"}'])
+        core.log(f'volume: wheel {"down" if down else "up"}')
+        return 'volume'
+    return scroll_lyrics(regions, s, x, y, down)
 
 
 def pick_colour(art, x, y):
@@ -164,3 +180,28 @@ def seek(d, root, win, regions, s, track):
     except OSError:
         pass
 
+
+
+def set_volume(d, win, regions, s, track):
+    """Follow `track` (follow_pointer() or a Touch) along the volume slider, setting
+    Spotify's volume as it moves (draw.lua shows the preview until nowplaying.py reports
+    the level), and once more where it is let go."""
+    bx0, bx1 = regions['volume_bar']
+    wx, _, _, _ = core.card_of(core.geometry(d, win), s)
+    fraction, sent, held = 0.0, None, True
+    while held:
+        px, _, held = track()
+        fraction = round(min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0), 2)
+        with open(VOLUME_PREVIEW + '.tmp', 'w') as f:
+            f.write(f'{fraction:.2f}')
+        os.replace(VOLUME_PREVIEW + '.tmp', VOLUME_PREVIEW)
+        if fraction != sent:
+            subprocess.run(['playerctl', '-p', 'spotify', 'volume', f'{fraction:.2f}'])
+            sent = fraction
+        time.sleep(0.02)
+    core.log(f'volume: {fraction:.2f}')
+    time.sleep(0.4)  # keep the preview until nowplaying.py reports the new level
+    try:
+        os.remove(VOLUME_PREVIEW)
+    except OSError:
+        pass

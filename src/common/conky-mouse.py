@@ -3,7 +3,8 @@
 
 <widget> is the folder under src/ whose mouse.py names the widget (its config and cache
 folders, launcher and window class) and does what its own controls do. The Spotify widget's
-are the heart, play/pause, previous and next buttons, the seek bar and the album art.
+are the heart, play/pause, previous and next buttons, the seek bar, the volume slider and
+the album art.
 
 Conky's own Lua mouse hook never receives button presses under GNOME/XWayland, so this
 helper subscribes to clicks on conky's window itself:
@@ -15,14 +16,15 @@ helper subscribes to clicks on conky's window itself:
     shows the new size while the button is held; on release it is saved (widget_size.py)
   - anywhere else: drag the widget; the position is saved on release
   - the mouse wheel: whatever the widget's mouse.py does with it there. For Spotify, over
-    static lyrics (plain ones, which have no timing to follow, or synced ones under the tray
-    menu's Static) it scrolls them a line at a time, and does nothing anywhere else.
+    the volume slider it turns Spotify's volume down or up a step; over static lyrics (plain
+    ones, which have no timing to follow, or synced ones under the tray menu's Static) it
+    scrolls them a line at a time; and it does nothing anywhere else.
 
 A touchscreen does the same with one finger, through XInput 2 touch events selected on the
 window, which X then sends instead of the pointer events it would make up from the touch:
 a tap on a control does what a click does, once the finger lifts on that control; a drag
-seeks, resizes or moves like the mouse; and a vertical swipe over static lyrics scrolls
-them a line for each line's height the finger moves. A second finger is ignored.
+seeks, sets the volume, resizes or moves like the mouse; and a vertical swipe over static
+lyrics scrolls them a line for each line's height the finger moves. A second finger is ignored.
 
 Hit areas come from nowplaying.py (regions.json, logical px, from the card's top left), since
 the controls move when titles wrap. Conky's window is the widget's rounded card plus a margin
@@ -690,8 +692,8 @@ def tap(regions, s, x, y, start, hit, track):
 def pull(d, root, win, s, regions, hit, edges, track, at, touch=False):
     """What a press off the plain buttons does, following `track` from card-relative (x, y)
     and root (x, y) `at` until release: whatever the widget does with its controls (its
-    mouse.py: seek, pick a colour from the art); resize from an edge; scroll static lyrics
-    with a finger; or else move the widget."""
+    mouse.py: seek, set the volume, pick a colour from the art); resize from an edge; scroll
+    static lyrics with a finger; or else move the widget."""
     x, y, start = at
     if hooks.pull_control(d, root, win, s, regions, hit, track, at, touch):
         pass

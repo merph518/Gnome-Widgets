@@ -502,7 +502,7 @@ class WindowButtonsTest(support.TempDirTest):
 
     def render(self, status, title='Title', artist='Artist', art=''):
         answers = {'status': status,
-                   'metadata': f'track1\t{title}\t{artist}\tAlbum\t{art}\t10000000\t200000000'}
+                   'metadata': f'track1\t{title}\t{artist}\tAlbum\t{art}\t10000000\t200000000\t0.5'}
         with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                 mock.patch.object(nowplaying.threading, 'Thread'), \
                 mock.patch.object(nowplaying.spotify_api, 'write_liked'):
@@ -593,7 +593,7 @@ class WindowButtonsTest(support.TempDirTest):
         nowplaying.state.liked_checked = time.time()        # no poll due on its own
         self.rate_limit(-1)
         answers = {'status': 'Playing',
-                   'metadata': 'track1\tTitle\tArtist\tAlbum\t\t10000000\t200000000'}
+                   'metadata': 'track1\tTitle\tArtist\tAlbum\t\t10000000\t200000000\t0.5'}
         with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                 mock.patch.object(nowplaying.threading, 'Thread') as thread, \
                 mock.patch.object(nowplaying.spotify_api, 'write_liked'):
@@ -624,7 +624,7 @@ class WindowButtonsTest(support.TempDirTest):
                 self.render('Playing')
                 nowplaying.state.liked_checked = time.time() - nowplaying.LOCAL_LIKE_POLL_SECONDS - 1
                 answers = {'status': 'Playing',
-                           'metadata': 'track1\tTitle\tArtist\tAlbum\t\t10000000\t200000000'}
+                           'metadata': 'track1\tTitle\tArtist\tAlbum\t\t10000000\t200000000\t0.5'}
                 with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                         mock.patch.object(nowplaying.threading, 'Thread') as thread, \
                         mock.patch.object(nowplaying.spotify_api, 'likes_read_locally', return_value=local):
@@ -711,11 +711,11 @@ class SizeSettingsTest(support.TempDirTest):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def render(self, settings, title='Title'):
+    def render(self, settings, title='Title', volume='0.5'):
         nowplaying.size_file.save(settings)
         nowplaying.state.lyrics_key = ('track1', title, 'Artist', 'Album', 200)   # fetched already
         answers = {'status': 'Playing',
-                   'metadata': f'track1\t{title}\tArtist\tAlbum\t\t10000000\t200000000'}
+                   'metadata': f'track1\t{title}\tArtist\tAlbum\t\t10000000\t200000000\t{volume}'}
         with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                 mock.patch.object(nowplaying.threading, 'Thread'), \
                 mock.patch.object(nowplaying.spotify_api, 'write_liked'):
@@ -807,7 +807,7 @@ class SizeSettingsTest(support.TempDirTest):
     def test_lyrics_off_are_not_looked_up_and_on_again_are(self):
         def fetches():
             nowplaying.state.track_since = 0                          # settled
-            answers = {'status': 'Playing', 'metadata': 'track2\tNew\tArtist\tAlbum\t\t0\t200000000'}
+            answers = {'status': 'Playing', 'metadata': 'track2\tNew\tArtist\tAlbum\t\t0\t200000000\t0.5'}
             with mock.patch.object(nowplaying, 'playerctl', side_effect=lambda cmd, *_: answers[cmd]), \
                     mock.patch.object(nowplaying.threading, 'Thread') as thread, \
                     mock.patch.object(nowplaying.spotify_api, 'write_liked'):
@@ -834,6 +834,34 @@ class SizeSettingsTest(support.TempDirTest):
         _, draw, regions = self.render((505, 63, 1.0))
         self.assertNotIn('lyrics', draw)
         self.assertEqual((regions['lyrics'], regions['lyrics_scroll']), (None, None))
+
+
+    def test_the_volume_slider_sits_between_the_label_and_the_heart(self):
+        _, draw, regions = self.render((505, 63, 1.0))
+        x0, x1, cy, level, icon, size = map(float, draw['volume'])
+        self.assertEqual(level, 0.5)
+        self.assertEqual(x1 - x0, nowplaying.VOLUME_WIDTH)
+        self.assertEqual(regions['volume_bar'], [x0, x1])
+        self.assertLessEqual(regions['volume'][2], regions['heart'][0])
+        self.assertGreater(icon, nowplaying.COLUMN_X + nowplaying.text_width('NOW PLAYING', nowplaying.LABEL_FONT))
+        self.assertEqual(icon + size + nowplaying.VOLUME_GAP, x0)
+        self.assertEqual(regions['volume_wheel'][0], icon - 4)       # the wheel reaches the speaker
+        self.assertEqual(regions['volume'][0], x0 - 6)               # a click does not
+
+    def test_the_level_follows_spotify_within_its_range(self):
+        for volume, want in (('0.72042420080872815', '0.7204'), ('0', '0.0000'), ('1.4', '1.0000'), ('', '0.0000')):
+            with self.subTest(volume=volume):
+                _, draw, _ = self.render((505, 63, 1.0), volume=volume)
+                self.assertEqual(draw['volume'][3], want)
+
+    def test_the_slider_shortens_then_is_left_out_as_room_runs_out(self):
+        _, narrow, _ = self.render((400, 63, 1.0))
+        x0, x1 = map(float, narrow['volume'][:2])
+        self.assertGreaterEqual(x1 - x0, nowplaying.VOLUME_MIN)
+        _, draw, regions = self.render((400, 63, 2.0))                # the label grows into it
+        self.assertNotIn('volume', draw)
+        self.assertIsNone(regions['volume'])
+        self.assertIsNone(regions['volume_wheel'])
 
 
 class FilesTest(support.TempDirTest):

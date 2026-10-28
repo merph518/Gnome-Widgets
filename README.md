@@ -15,6 +15,11 @@ top-bar icon serves them.
   Invisible characters Spotify sometimes puts in a title, like a word joiner, are left out
   rather than drawn as a box
 - Spotify-style controls: previous / play-pause / next, and a seek bar you can click or drag
+- A volume slider left of the heart that sets Spotify's own volume, not the system's: click or
+  drag along it, or turn the mouse wheel over it or its speaker, a step of 5% a notch. It
+  follows changes made in Spotify too, and its speaker shows a cross when muted, one wave
+  below half volume and two from half up. On a narrow widget with large text, it shortens,
+  and is left out when it no longer fits beside NOW PLAYING
 - Like button (♥) showing whether the track is in your Liked Songs, click to toggle
 - Minimize (–) and close (×) buttons next to the heart, both of which hide the widget
 - Smoothly scrolling synced lyrics from [LRCLIB](https://lrclib.net), as many lines as the widget
@@ -329,7 +334,7 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/speech/draw.lua`, `src/speech/mouse.py` | The speech widget's Cairo drawing, and what its controls, the wheel and swipes over its list do for `conky-mouse.py`, through `speechctl` |
 | `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, and the foreground that follows a fading background |
 | `src/common/widget_size.py` | Reads and writes a widget's size settings: width, lyrics (Spotify) or sessions list (speech) height, text scale |
-| `src/spotify/mouse.py` | What the Spotify widget's controls do for `conky-mouse.py`: the buttons, the seek bar, the album art's colour pick and the wheel and swipes over static lyrics |
+| `src/spotify/mouse.py` | What the Spotify widget's controls do for `conky-mouse.py`: the buttons, the seek bar, the volume slider (Spotify's own volume, through MPRIS), the album art's colour pick, and the wheel over the volume and the wheel and swipes over static lyrics |
 | `src/spotify/lyrics_settings.py` | Reads and writes the lyrics settings: on or off, autoscroll or static |
 | `src/spotify/art_colours.py` | Takes the background colour from the spot clicked on the album art, and keeps it per artwork |
 | `src/spotify/spotify_api.py` | Minimal Spotify Web API client (PKCE login, like/unlike, Liked Songs index, rate-limit backoff) |

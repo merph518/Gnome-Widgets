@@ -1,6 +1,6 @@
 """Tests for conky-mouse.py's placement (keeping the window on screen across monitors, and
 on its own monitor as monitors come and go and the display scale changes), resizing (which edges a press drags, and the size settings a drag leads to), and the wheel
-over plain lyrics."""
+over plain lyrics and over the volume slider."""
 import os
 import time
 import unittest
@@ -412,6 +412,62 @@ class SwipeTest(support.TempDirTest):
         self.assertFalse(spotify_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=None), 1, 100, 180))
         self.assertFalse(spotify_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=['1234', 5]), 1, 100, 180))
         self.assertFalse(spotify_mouse.scrollable({}, 1, 100, 180))
+
+
+class VolumeTest(support.TempDirTest):
+    # The track at x 280..344 on the top row's centre line y 29.5, the speaker from x 256.
+    REGIONS = {'volume': [274, 19.5, 350, 39.5], 'volume_wheel': [252, 19.5, 350, 39.5],
+               'volume_bar': [280, 344], 'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5]}
+
+    def setUp(self):
+        super().setUp()
+        self.redirect(spotify_mouse, LYRICS_SCROLL='lyrics-scroll', VOLUME_PREVIEW='volume-preview')
+        self.redirect(conky_mouse, LOG='mouse.log')
+        patcher = mock.patch.object(spotify_mouse.subprocess, 'run')
+        self.run_ = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def volumes(self):
+        return [c.args[0][4] for c in self.run_.call_args_list]
+
+    def test_the_wheel_over_the_slider_or_speaker_steps_spotifys_volume(self):
+        self.assertEqual(spotify_mouse.wheel(self.REGIONS, 1, 300, 30, True), 'volume')
+        self.assertEqual(spotify_mouse.wheel(self.REGIONS, 2, 260 * 2, 30 * 2, False), 'volume')
+        self.assertEqual(self.run_.call_args_list[0].args[0][:4], ['playerctl', '-p', 'spotify', 'volume'])
+        self.assertEqual(self.volumes(), ['0.05-', '0.05+'])
+        self.assertIn('volume: wheel up', support.read(conky_mouse.LOG))
+
+    def test_the_wheel_elsewhere_still_scrolls_static_lyrics(self):
+        self.assertEqual(spotify_mouse.wheel(self.REGIONS, 1, 100, 180, True), 1)
+        self.assertIsNone(spotify_mouse.wheel(self.REGIONS, 1, 400, 30, True))   # the heart, past it
+        self.assertIsNone(spotify_mouse.wheel({}, 1, 300, 30, True))              # no slider
+        self.run_.assert_not_called()
+
+    def drag(self, *xs, s=1):
+        """Drags along the slider at root xs (the card's left at root 1000), let go at the last."""
+        steps = [(x, 530, True) for x in xs] + [(xs[-1], 530, False)]
+        with mock.patch.object(conky_mouse, 'card_of', return_value=(1000, 500, 545, 200)), \
+                mock.patch.object(conky_mouse, 'geometry'), \
+                mock.patch.object(spotify_mouse.time, 'sleep'):
+            spotify_mouse.set_volume('d', 'win', self.REGIONS, s, mock.Mock(side_effect=steps))
+
+    def test_a_drag_sets_the_volume_as_it_moves_and_logs_where_it_ends(self):
+        self.drag(1280, 1312, 1312, 1400)
+        self.assertEqual(self.volumes(), ['0.00', '0.50', '1.00'])   # once per level, clamped
+        self.assertIn('volume: 1.00', support.read(conky_mouse.LOG))
+        self.assertFalse(os.path.exists(spotify_mouse.VOLUME_PREVIEW))  # gone once let go
+
+    def test_the_slider_follows_the_display_scale(self):
+        self.drag(1000 + 296 * 2, s=2)                    # a quarter along at scale 2
+        self.assertEqual(self.volumes(), ['0.25'])
+
+    def test_a_press_on_the_slider_sets_the_volume(self):
+        with mock.patch.object(spotify_mouse, 'set_volume') as set_volume:
+            self.assertTrue(spotify_mouse.pull_control('d', 'root', 'win', 1, self.REGIONS, 'volume',
+                                                       'track', (300, 30, (1300, 530)), False))
+        set_volume.assert_called_once()
+        self.assertEqual(conky_mouse.region_at(self.REGIONS, 1, 300, 30), 'volume')
+        self.assertIsNone(conky_mouse.region_at(self.REGIONS, 1, 260, 30))     # the speaker
 
 
 class TapTest(unittest.TestCase):
