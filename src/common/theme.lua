@@ -54,32 +54,53 @@ function theme.now()
     return tonumber(s:match('^(%S+)')) or 0
 end
 
+-- This boot's id, which bg.txt carries beside its start time, since the clock restarts at
+-- each boot. It cannot change while conky runs, so it is read once.
+theme.BOOT = (function()
+    local f = io.open('/proc/sys/kernel/random/boot_id')
+    local s = f and f:read('*l') or ''
+    if f then f:close() end
+    return s
+end)()
+
+local function numbers(words, n)
+    -- the first n of words as numbers, or nil unless every one is
+    local t = {}
+    for i = 1, n do
+        t[i] = tonumber(words[i])
+        if not t[i] then return nil end
+    end
+    return t
+end
+
 function theme.fade(bg, path)
     -- bg (changed in place) where the ~1 s fade towards the colour in path has got to by now,
     -- and the foreground for it and the colour drawn on that foreground. path is the Spotify
-    -- widget's bg.txt, 'r g b  from_r from_g from_b  start' from 0 to 1, whose fade both
-    -- widgets work out from the same three numbers and so show alike in every frame. A file
-    -- with only 'r g b' (the speech widget's background setting can name one), or none, which
-    -- fades to Spotify's #181818, starts its fade here, from the colour shown when it changed.
+    -- widget's bg.txt, 'r g b  from_r from_g from_b  start boot_id' (colours from 0 to 1),
+    -- whose fade both widgets work out from the same numbers and so show alike in every frame;
+    -- a start from another boot is long finished. A file with only 'r g b' (the speech
+    -- widget's background setting can name one), or none, which fades to Spotify's #181818,
+    -- starts its fade here, from the colour shown when it changed.
     local f = io.open(path)
     local s = f and f:read('*l') or ''
     if f then f:close() end
-    local v = {}
-    for x in s:gmatch('%S+') do v[#v + 1] = tonumber(x) end
+    local words = {}
+    for w in s:gmatch('%S+') do words[#words + 1] = w end
+    local v, now = numbers(words, 7), theme.now()
     local to, from, t0
-    if #v >= 7 then
+    if v and words[8] then
         to, from, t0 = {v[1], v[2], v[3]}, {v[4], v[5], v[6]}, v[7]
+        if words[8] ~= theme.BOOT then from = to end
+        bg.target = nil
     else
-        to = #v >= 3 and {v[1], v[2], v[3]} or {0.094, 0.094, 0.094}
+        to = numbers(words, 3) or {0.094, 0.094, 0.094}
         local key = table.concat(to, ' ')
         if bg.target ~= key then
-            bg.target, bg.from, bg.start = key, {bg[1], bg[2], bg[3]}, theme.now()
+            bg.target, bg.from, bg.start = key, {bg[1], bg[2], bg[3]}, now
         end
         from, t0 = bg.from, bg.start
     end
-    -- a start ahead of now is from before a reboot, long finished
-    local elapsed = theme.now() - t0
-    local k = elapsed < 0 and 1 or 1 - math.exp(-elapsed * 3)
+    local k = 1 - math.exp(-math.max(now - t0, 0) * 3)
     for i = 1, 3 do bg[i] = from[i] + (to[i] - from[i]) * k end
     if theme.contrast(theme.LIGHT, bg) >= theme.contrast(theme.DARK, bg) then
         return theme.LIGHT, theme.DARK
