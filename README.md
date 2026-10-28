@@ -61,8 +61,8 @@ itself.
 - A header with who is speaking ("<name> says:"), ⏭ and ⏩, and a progress bar with the
   line's elapsed time and length
 - **Sessions**: every open Claude session, the ones with speech on first, each with its
-  repository's label, its name, a **busy** or **bg** tag while it works or runs in the
-  background, how many lines it has queued, and its speech setting
+  repository's label, its name, a **busy** or **idle** tag for whether it is working, **bg** when it
+  runs in the background, how many lines it has queued, and its speech setting
 - A footer with pause / resume, the volume and the voice
 
 Each session in the speech widget's list starts with a four-letter label for its repository,

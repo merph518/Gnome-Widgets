@@ -484,8 +484,9 @@ def box(cx, cy, half_w, half_h):
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
     and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
-    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
-                                        ('question', s.get('question'))) if on) or '-'
+    flags = ','.join(f for f, on in (('busy', s['busy']), ('idle', not s['busy']),
+                                     ('bg', s['background']), ('question', s.get('question')))
+                     if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
                       display_text(s['name']), s.get('label', ''),
                       without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
