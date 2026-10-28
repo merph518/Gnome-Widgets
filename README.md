@@ -63,8 +63,13 @@ itself.
 - **Sessions**: every open Claude session, the ones with speech on first, each with its
   repository's label, its name, one tag, how many lines it has queued, and its speech setting.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
-  **waiting: ci** or **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build
-  or a pull request open), **bg** (it runs in the background), else **idle**
+  **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
+  script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
+  run open), **waiting: local ai** (it polls `systemctl --user is-active build-pack-now`, the
+  local model pipeline; another unit it polls shows by name), **waiting: ci** or
+  **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
+  open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
+  runs in the background), else **idle**
 - A footer with pause / resume, the volume and the voice
 
 Each session in the speech widget's list starts with a four-letter label for its repository,

@@ -2,7 +2,9 @@
 """Builds the speech widget's contents: what is being read aloud and what waits behind it.
 
 Four times a second this reads, and only reads:
-  - the open Claude sessions, from ~/.claude/sessions/<pid>.json (sessions.py)
+  - the open Claude sessions, from ~/.claude/sessions/<pid>.json (sessions.py), the
+    processes under each in /proc (a test run, or a wait on a systemd unit) and its
+    catchup.py ledgers
   - the speaking hook's state in $XDG_RUNTIME_DIR/speak-attention/: now.json while a clip
     plays, <session>.queue (a line per block still to read), <session>.name, <session>.replies
     (speech on) and <session>.muted (speech off), the paused flag and settings.json (voice,
@@ -51,7 +53,11 @@ LABELS = os.path.join(CONF, 'labels.json')        # {repository name: label}, be
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
 # <project>/<session id>/scratchpad/ledger: a row a line, label, key, link and state, tab apart
 LEDGERS = os.path.join(tempfile.gettempdir(), f'claude-{os.getuid()}')
-WAITS = (('lp:', 'ci'), ('pr:', 'merge'))      # an open row's key, and what the session waits on
+WAITS = (('run:', 'tests'), ('lp:', 'ci'), ('pr:', 'merge'))   # an open row's key, and the wait
+# A shell polling a systemd user unit until it stops, and the tag of the units it shows
+UNIT_WAIT = re.compile(r'systemctl --user is-active (?:-q |--quiet )?([\w@.-]+)')
+UNITS = {'build-pack-now': 'local ai'}          # build-test-pack's local model pipeline
+TEST_FILE = re.compile(r'(test_[\w.-]*|[\w.-]*_test)\.(py|sh)$')   # test_x.py, x_test.sh
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 DEFAULT_VOICE = 'en_US-amy-medium'                # speechctl's, with no setting
 DEFAULT_VOLUME = 1.2
@@ -143,16 +149,77 @@ def without_speaker(text):
 
 
 def waiting_on(sid, ledgers=None):
-    """What session `sid` waits on by its catchup.py ledger: 'ci' with a Launchpad build
-    open, else 'merge' with a pull request open, else ''."""
+    """What session `sid` waits on by its catchup.py ledgers (scratchpad/ledger, and a
+    skill's own such as scratchpad/sweep/ledger.tsv): 'tests' with a GitHub Actions run open,
+    else 'ci' with a Launchpad build open, else 'merge' with a pull request open, else ''."""
     keys = set()
-    for path in glob.glob(os.path.join(glob.escape(ledgers or LEDGERS), '*', glob.escape(sid),
-                                       'scratchpad', 'ledger')):
+    folder = os.path.join(glob.escape(ledgers or LEDGERS), '*', glob.escape(sid), 'scratchpad')
+    paths = glob.glob(os.path.join(folder, 'ledger')) + glob.glob(os.path.join(folder, '*', 'ledger.tsv'))
+    for path in paths:
         for line in (_read(path) or '').splitlines():
             f = line.split('\t')
-            if len(f) > 3 and f[3] != 'done':
-                keys.add(f[1])
+            if len(f) < 4 or 'done' in f[3:5]:
+                continue
+            # a row with a run link is a test run in CI, whatever its key
+            keys.add('run:' if any('/actions/runs/' in x for x in f) else f[1])
     return next((wait for prefix, wait in WAITS if any(k.startswith(prefix) for k in keys)), '')
+
+
+def is_test_run(argv):
+    """Whether a process's arguments are a test run: unittest or pytest, a test_*.py or
+    *_test.sh/py script, `npm|pnpm|yarn test`, `go|cargo test` or `playwright test`. A shell's
+    -c wrapper around one is not, so the run counts once, by its own process."""
+    if not argv:
+        return False
+    prog, args = os.path.basename(argv[0]), argv[1:]
+    words = [os.path.basename(a) for a in argv]
+    if prog in ('pytest', 'py.test') or TEST_FILE.match(prog):
+        return True
+    if prog.startswith('python'):
+        if '-m' in args[:-1] and args[args.index('-m') + 1] in ('unittest', 'pytest'):
+            return True
+        script = next((a for a in args if not a.startswith('-')), '')
+        return bool(TEST_FILE.match(os.path.basename(script)))
+    if prog in ('bash', 'sh', 'dash'):
+        return bool(args) and args[0] != '-c' and bool(TEST_FILE.match(os.path.basename(args[0])))
+    if prog in ('npm', 'pnpm', 'yarn'):
+        return 'test' in args[:2]
+    if prog in ('go', 'cargo'):
+        return args[:1] == ['test']
+    return any(w == 'playwright' and words[i + 1:i + 2] == ['test'] for i, w in enumerate(words))
+
+
+def children(pid, proc_dir='/proc'):
+    """The pids of `pid`'s child processes, from each of its threads' children file."""
+    kids = []
+    for path in glob.glob(os.path.join(proc_dir, str(pid), 'task', '*', 'children')):
+        kids += [int(k) for k in (_read(path) or '').split()]
+    return kids
+
+
+def process_waits(pids, proc_dir='/proc'):
+    """{session pid: 'tests' or a unit's tag} for the pids among `pids` (the sessions') with a
+    test run among their descendants, or a shell waiting on a systemd unit (UNIT_WAIT). A test
+    run comes before a unit."""
+    found = {}
+    for session in pids:
+        todo, seen = children(session, proc_dir), set()
+        while todo and found.get(session) != 'tests':
+            pid = todo.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            try:
+                with open(os.path.join(proc_dir, str(pid), 'cmdline'), 'rb') as f:
+                    argv = [a.decode(errors='replace') for a in f.read().split(b'\0') if a]
+            except OSError:
+                continue
+            if is_test_run(argv):
+                found[session] = 'tests'
+            elif len(argv) > 2 and argv[1] == '-c' and (unit := UNIT_WAIT.search(argv[2])):
+                found.setdefault(session, UNITS.get(unit[1], unit[1]))
+            todo += children(pid, proc_dir)
+    return found
 
 
 def text_width(text, font):
@@ -429,13 +496,15 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
         volume = DEFAULT_VOLUME
     listed = []
     open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
+    waits = process_waits({s['pid'] for s in open_sessions}, proc)
     said = last_lines(n, {s['id'] for s in open_sessions})
     for s in open_sessions:
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
-                           question=question, waiting=waiting_on(s['id'], ledgers),
+                           question=question,
+                           waiting=waits.get(s['pid']) or waiting_on(s['id'], ledgers),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
@@ -501,7 +570,8 @@ def box(cx, cy, half_w, half_h):
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
     and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
-    # one tag, the first that holds: a question waiting, then busy, waiting, bg, else idle
+    # one tag, the first that holds: a question waiting, then busy, waiting (on tests, a unit,
+    # ci or a merge), bg, else idle
     wait = s.get('waiting')
     flags = next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
                                  (f'waiting: {wait}', wait), ('bg', s['background']),
