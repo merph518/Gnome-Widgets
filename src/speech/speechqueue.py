@@ -41,6 +41,8 @@ DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
 LAST = os.path.join(CACHE, 'last-lines.json')     # {session id: the last line read aloud for it}
+HEARD = os.path.join(CACHE, 'last-heard.json')    # the last clip's speaker and length, kept on
+                                                  # the header and progress bar once it ends
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
@@ -365,6 +367,27 @@ def last_lines(n, live):
     return last
 
 
+_heard = None
+
+
+def last_heard(n, name, duration):
+    """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
+    header and the progress bar stay as the last line left them while nothing plays."""
+    global _heard
+    if _heard is None:
+        saved = _json(HEARD)
+        _heard = saved if isinstance(saved, dict) else {}
+    if n:
+        heard = {'name': name or 'A session', 'duration': duration or 0}
+        if heard != _heard:
+            _heard = heard
+            try:
+                write_atomic(HEARD, json.dumps(heard))
+            except OSError:
+                pass
+    return _heard
+
+
 def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
@@ -493,11 +516,13 @@ def render(state, now=None):
     next_cx = min_cx - WINDOW_BUTTON_PITCH / 2 - 8 - BUTTON_SIZE / 2
     skip_cx = next_cx - BUTTON_PITCH
     text_right = (skip_cx - BUTTON_SIZE / 2 if n else min_cx - WINDOW_BUTTON_PITCH / 2) - 8
-    if n:
-        who = state['name'] or 'A session'
-        label = fit(f'{who} says:', LABEL_FONT, text_right - MARGIN - ICON_W)
+    heard = last_heard(n, state['name'], state['duration'])
+    if paused and not n:
+        label = 'Speech paused'
+    elif heard.get('name'):
+        label = fit(f"{heard['name']} says:", LABEL_FONT, text_right - MARGIN - ICON_W)
     else:
-        label = 'Speech paused' if paused else 'Speech idle'
+        label = 'Speech idle'                     # nothing played since the cache was cleared
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -522,15 +547,18 @@ def render(state, now=None):
         write_sessions(listed)
         return out.end(out.y + MARGIN - 4)
 
-    # The current line's progress when the clip's length is known. Its row is kept while
-    # nothing plays, so the card keeps one height from line to line.
+    # The progress bar, always there: the current line's while its length is known (0:00 while
+    # Piper still renders it), else the last line's, left full where it finished.
     out.gap(HEADER_GAP)
-    if n and state['duration']:
-        elapsed = min(clock.elapsed(n, paused, now), state['duration'])
-        draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
-                    f'{elapsed:.3f} {state["duration"]:.3f} {int(not paused)}')
-    elif n:
-        clock.elapsed(n, paused, now)
+    duration, running = state['duration'] or 0, False
+    if n:
+        elapsed = clock.elapsed(n, paused, now)
+        running = bool(duration) and not paused
+        elapsed = min(elapsed, duration)
+    else:
+        duration = elapsed = float(heard.get('duration') or 0)
+    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+                f'{elapsed:.3f} {duration:.3f} {int(running)}')
     out.gap(PROGRESS_H)
 
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when

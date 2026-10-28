@@ -38,6 +38,7 @@ class Fixture(unittest.TestCase):
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
                             ('LABELS', os.path.join(self.root, 'labels.json')),
                             ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
+                            ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -255,6 +256,21 @@ class Golden(Fixture):
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
         self.f.wav(9001, 6.0)
         self.check('playing', self.state())
+
+    def test_after_a_line_the_header_and_full_bar_stay(self):
+        self.three()
+        self.f.now(ME, 'Claude Voice Widget', 'Done.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        speechqueue.render(self.state(), now=1000.0)
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        self.f.file(OTHER + '.queue', '')
+        text = speechqueue.render(self.state(), now=1010.0)
+        self.assertIn('Claude Voice Widget says:', text)
+        self.assertNotIn('Speech idle', text)
+        with open(speechqueue.DRAW) as f:
+            progress = next(l for l in f if l.startswith('progress ')).split()
+        self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 
     def test_paused(self):
         self.three()
