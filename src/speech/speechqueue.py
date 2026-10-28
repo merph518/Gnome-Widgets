@@ -44,6 +44,7 @@ LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
+LABELS = os.path.join(CONF, 'labels.json')        # {repository name: label}, before each session
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 DEFAULT_VOICE = 'en_US-amy-medium'                # speechctl's, with no setting
 DEFAULT_VOLUME = 1.2
@@ -66,6 +67,14 @@ PAUSE_SIZE = 28                               # the footer's pause/resume circle
 SMALL_PITCH = 22                              # − + and ◀ ▶, centre to centre, and their hit width
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
+LABEL_LEN = 4                                 # a repository's label, in letters
+# labels.json's first contents, written when it is missing; keys match without case
+DEFAULT_LABELS = {
+    'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
+    'fagerteam-health-coach': 'FTHC', 'LaundryBot': 'LBOT', 'Playwright-Testing': 'PWRT',
+    'TheRPGClub-api': 'RPGA', 'TheRPGClub-bot': 'RPGB', 'CalendarBot': 'CALB',
+    'ATT-Test-Pack-Gen': 'ATPG', 'eve-lectures': 'EVEL',
+}
 
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
@@ -259,15 +268,75 @@ def speech_setting(speak, sid):
     return 'off' if os.path.exists(os.path.join(speak, sid + '.muted')) else 'alerts'
 
 
+def repo_name(cwd):
+    """The GitHub name of the repository cwd is in: the last part of its origin remote's URL,
+    or the checkout's folder name without one. A worktree's .git is a file pointing into
+    the main checkout's .git, which holds the config. '' outside a repository."""
+    d = os.path.abspath(cwd) if cwd else ''
+    while d and d != os.path.dirname(d):
+        git = os.path.join(d, '.git')
+        if os.path.exists(git):
+            break
+        d = os.path.dirname(d)
+    else:
+        return ''
+    top, config = d, os.path.join(git, 'config')
+    if os.path.isfile(git):
+        m = re.match(r'gitdir:\s*(.+)', _read(git) or '')
+        if m:
+            base = m.group(1).strip()
+            common = (_read(os.path.join(base, 'commondir')) or '').strip()
+            main = os.path.normpath(os.path.join(base, common)) if common else base
+            config, top = os.path.join(main, 'config'), os.path.dirname(main)
+    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', _read(config) or '')
+    url = m.group(1).rstrip('/') if m else ''
+    name = re.sub(r'\.git$', '', url.rsplit('/', 1)[-1].rsplit(':', 1)[-1]) if url else ''
+    return name or os.path.basename(top)
+
+
+def short_label(name):
+    """A repository name as LABEL_LEN capitals: each word's first letter, filled out with the
+    last word's following letters (LaundryBot -> LBOT, Overmind -> OVER)."""
+    words = re.findall(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+', name)
+    if not words:
+        return ''
+    label = ''.join(w[0] for w in words)[:LABEL_LEN]
+    label += words[-1][1:LABEL_LEN - len(label) + 1]
+    return label[:LABEL_LEN].upper()
+
+
+_repos = {}
+
+
+def session_label(cwd, labels):
+    """The label before a session's name: labels.json's for its repository, else short_label."""
+    if cwd not in _repos:
+        _repos[cwd] = repo_name(cwd)
+    name = _repos[cwd]
+    custom = {str(k).lower(): str(v) for k, v in labels.items()}.get(name.lower())
+    return display_text(custom if custom is not None else short_label(name))[:LABEL_LEN]
+
+
+def read_labels(path=None):
+    labels = _json(path or LABELS)
+    return labels if isinstance(labels, dict) else {}
+
+
+def seed_labels():
+    if not os.path.exists(LABELS):
+        write_atomic(LABELS, json.dumps(DEFAULT_LABELS, indent=2) + '\n')
+
+
 def voice_label(voice):
     """A Piper model's speaker: 'en_US-amy-medium' -> 'amy'; another name as it is."""
     m = re.fullmatch(r'[a-z]{2,3}_[A-Za-z]{2,3}-(.+)-(x_low|low|medium|high)', voice)
     return m.group(1) if m else voice
 
 
-def read_state(speak=None, sessions_dir=None, proc_dir=None):
+def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
+    labels = read_labels(labels)
     proc = proc_dir or '/proc'
     n = now_playing(speak, proc)
     settings = _json(os.path.join(speak, 'settings.json')) or {}
@@ -287,6 +356,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None):
         question = first.lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
                            next='' if question else first, question=question,
+                           label=session_label(s['cwd'], labels),
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
     name = ''
@@ -348,11 +418,12 @@ def box(cx, cy, half_w, half_h):
 
 
 def session_line(s):
-    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, next."""
+    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, next,
+    label."""
     flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
                                         ('question', s.get('question'))) if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
-                      display_text(s['name']), s['next']))
+                      display_text(s['name']), s['next'], s.get('label', '')))
 
 
 def write_sessions(listed):
@@ -523,6 +594,7 @@ def hold_instance_lock():
 
 def main():
     lock = hold_instance_lock()  # noqa: F841  (held until the process exits)
+    seed_labels()
     last_error = None
     while True:
         try:

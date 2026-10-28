@@ -58,7 +58,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
-    -- flags, name, next}
+    -- flags, name, next, label}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -66,7 +66,7 @@ local function load_sessions(version)
         for v in (line .. '\t'):gmatch('([^\t]*)\t') do f[#f + 1] = v end
         rows[#rows + 1] = {speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
-                           name = f[6] or '', next = f[7] or ''}
+                           name = f[6] or '', next = f[7] or '', label = f[8] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -314,8 +314,22 @@ local function draw_control(cr, xs, cy, seg_h, s, text, speech)
     end
 end
 
+local function draw_label(cr, label, x, cy, w, h, s, text)
+    -- the repository's label: a tag the colours of the selected setting, less rounded, one
+    -- width for every row so the names after it line up
+    if label == '' then return end
+    cairo_new_path(cr)
+    set(cr, fg)
+    rounded_rect(cr, x, cy - h / 2, w, h, 3 * s)
+    cairo_fill(cr)
+    font(cr, 9, text, s, true)
+    set(cr, fg_back)
+    show(cr, label, x + w / 2, cy, 'centre')
+end
+
 local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
-    -- a session's row: ● while it is speaking (○ otherwise), its name, busy / bg, how many
+    -- a session's row: ● while it is speaking (○ otherwise), its repository's label, its
+    -- name, busy / bg, how many
     -- lines it has queued and its setting; then its next line as a second row when there is
     -- room for one. Returns how many rows it took.
     local cy = y + row / 2
@@ -337,7 +351,10 @@ local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
     set(cr, secondary())
     if r.queued > 0 then right = right - show(cr, r.queued .. ' queued', right, cy, 'right') - 10 * s end
     local flags_w = r.flags ~= '' and width_of(cr, r.flags) + 8 * s or 0
-    local name_x = x0 + 16 * s
+    font(cr, 9, text, s, true)
+    local label_w = width_of(cr, 'WWWW') + 10 * s
+    draw_label(cr, r.label, x0 + 16 * s, cy, label_w, c[5] * s, s, text)
+    local name_x = x0 + 16 * s + label_w + 8 * s
     font(cr, 11, text, s)
     set(cr, fg)
     local name = fit(cr, r.name, right - name_x - flags_w)

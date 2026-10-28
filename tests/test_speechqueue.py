@@ -36,6 +36,7 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
+                            ('LABELS', os.path.join(self.root, 'labels.json')),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -145,6 +146,51 @@ class ReadState(Fixture):
         self.assertEqual((state['voice'], state['volume']), ('en_GB-alan-low', 0.8))
         self.assertEqual(speechqueue.voice_label(state['voice']), 'alan')
         self.assertEqual(speechqueue.voice_label('my-voice'), 'my-voice')
+
+
+class Labels(Fixture):
+    def repo(self, name, url=None):
+        top = os.path.join(self.root, 'code', name)
+        os.makedirs(os.path.join(top, '.git'))
+        with open(os.path.join(top, '.git', 'config'), 'w') as f:
+            f.write('[core]\n\tbare = false\n')
+            if url:
+                f.write(f'[remote "origin"]\n\turl = {url}\n\tfetch = +refs/heads/*\n')
+        return top
+
+    def test_short_label_takes_initials_then_the_last_word(self):
+        for name, label in (('Overmind', 'OVER'), ('LaundryBot', 'LBOT'), ('ATT-Test-Pack-Gen', 'ATPG'),
+                            ('fagerteam-health-coach', 'FHCO'), ('a-b-c-d-e', 'ABCD'), ('', '')):
+            with self.subTest(name=name):
+                self.assertEqual(speechqueue.short_label(name), label)
+
+    def test_repo_name_is_the_origin_remote_from_a_worktree_subfolder(self):
+        top = self.repo('old-folder', 'https://github.com/someone/Gnome-Widgets.git')
+        gitdir = os.path.join(top, '.git', 'worktrees', 'wt')
+        os.makedirs(gitdir)
+        with open(os.path.join(gitdir, 'commondir'), 'w') as f:
+            f.write('../..\n')
+        wt = os.path.join(top, '.claude', 'worktrees', 'wt')
+        os.makedirs(os.path.join(wt, 'src'))
+        with open(os.path.join(wt, '.git'), 'w') as f:
+            f.write(f'gitdir: {gitdir}\n')
+        self.assertEqual(speechqueue.repo_name(os.path.join(wt, 'src')), 'Gnome-Widgets')
+
+    def test_repo_name_without_a_remote_is_the_folder(self):
+        self.assertEqual(speechqueue.repo_name(self.repo('LaundryBot')), 'LaundryBot')
+
+    def test_labels_file_wins_without_case_and_is_cut_to_length(self):
+        top = self.repo('x', 'git@github.com:someone/Overmind.git')
+        self.assertEqual(speechqueue.session_label(top, {'overmind': 'OVMD'}), 'OVMD')
+        self.assertEqual(speechqueue.session_label(top, {'Overmind': 'TOOLONG'}), 'TOOL')
+        self.assertEqual(speechqueue.session_label(top, {}), 'OVER')
+
+    def test_the_label_is_the_last_field_of_the_session_line(self):
+        self.f.session(100, ME, 'One')
+        with open(speechqueue.LABELS, 'w') as f:
+            json.dump({'One': 'ONE'}, f)
+        s = self.state()['sessions'][0]
+        self.assertEqual(speechqueue.session_line(s).split('\t')[7], s['label'])
 
 
 class ClockTest(unittest.TestCase):
