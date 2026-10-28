@@ -16,9 +16,6 @@ The self review starts once the pull request is open, the static checks in
 request is mergeable, per [ready-signal.md](ready-signal.md). The review ends
 in the signal.
 
-Move the session to the `Self Review` sidebar group as the review starts, per
-[sidebar-groups.md](sidebar-groups.md).
-
 ## One pass
 
 A pass always reads the whole pull request as it stands at the branch head,
@@ -68,8 +65,7 @@ commit alone does not show.
 3. Otherwise fix every finding that holds, on the branch, rerun the static
    checks from [static-checks.md](static-checks.md),
    and push. Each finding is fixed, none is set aside for the user to pick up
-   at review, and none is filed away for later. The session stays in
-   `Self Review` while it fixes.
+   at review, and none is filed away for later.
 4. Go back to 1.
 
 There is no cap on the number of passes. The loop ends on a clean pass and on
@@ -83,9 +79,7 @@ scratch.
 A finding that holds but whose fix is the user's call, such as a scope line
 the issue does not draw or two behaviours the README does not choose between,
 is put to the user with `AskUserQuestion` rather than guessed at. The session
-sits in `Needs Review` while the question is open, per
-[sidebar-groups.md](sidebar-groups.md), goes back to `Self Review` with the
-answer, applies it, and carries on with the loop. The question is not the
+applies the answer and carries on with the loop. The question is not the
 ready signal: the pull request is still not handed over.
 
 The findings never go up as review comments on the pull request. Comments are
@@ -112,7 +106,7 @@ gh api -X PATCH repos/{owner}/{repo}/pulls/<pr-number> -F body=@<scratchpad>/pr-
 
 Commits pushed after the ready signal, for the user's review comments or
 anything else, send the pull request back through the loop, starting with a
-full pass once the static checks pass, in `Self Review`. The signal goes out
+full pass once the static checks pass. The signal goes out
 again only on a clean pass.
 
 ## When it ends
@@ -123,7 +117,7 @@ on the branch head and the pull request still reading as mergeable, per
 sibling branch can merge while the review runs, so read it again rather than
 trusting the read from before. A conflict resolved at that point is a new
 commit, so it goes back through the loop. Then the session sends the ready
-signal and moves to `Needs Review`, per [ready-signal.md](ready-signal.md).
+signal, per [ready-signal.md](ready-signal.md).
 
 The report above the signal says in a line or two how many passes ran and what
 they found and fixed.

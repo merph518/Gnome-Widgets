@@ -16,13 +16,8 @@ PULL REQUEST <number> IS READY FOR YOUR REVIEW
 It goes below everything else the report carries, the open questions
 included.
 
-Sending it moves the session to the `Needs Review` sidebar group. The only
-other way into that group is a question to the user, per
-[sidebar-groups.md](sidebar-groups.md). The line and the move both wait on the
-static checks, the mergeability check, and the session's own review of the
-pull request, per [self-review.md](self-review.md). The merge moves it to
-`Completed` when nothing else is open, or back to `Working` when the session
-still holds work, per [sidebar-groups.md](sidebar-groups.md).
+The line waits on the static checks, the mergeability check, and the
+session's own review of the pull request, per [self-review.md](self-review.md).
 
 The line goes out in the turn the pull request becomes ready, even when the
 session is in the middle of something longer. When several are ready, each
