@@ -219,7 +219,7 @@ pass, per `<self-review>`. A fix owes `<static-checks>` in place of the
 dispatches and the pull request check job, and the Section 6 run again when it
 touches `src/`, `bin/`, `packaging/` or `debian/`. The general skill's "final
 pass" of the checks is `<static-checks>` on the branch head once the review
-ends, per `<ready-signal>`.
+ends, per [self-review.md](../_shared/self-review.md#when-it-ends).
 
 ### Section 9: Report
 
@@ -233,6 +233,14 @@ on the pull request. Then record the pull request with
 per [run-watch.md](../_shared/run-watch.md#waiting-on-a-merge).
 
 ### Section 10: After the merge
+
+Take the claim off the issue first and read it back, so a label left behind
+(by a stop below, say) does not make every later session stand down:
+
+```bash
+gh issue edit <N> --remove-label "In Progress"
+gh issue view <N> --json state,labels --jq '.state, [.labels[].name]'
+```
 
 Item 4 (leave the branch) is replaced: delete the branch on origin and locally,
 leaving the worktree in place.
@@ -251,14 +259,6 @@ checked-out branch. `-D` because the check above already proved the merge,
 whatever merge method the user picked. When `git status` lists anything, stop
 before the switch: the worktree stays on its branch, nothing is deleted, and the
 changes are reported.
-
-Take the claim off the issue and read it back, so a label left behind does not
-make every later session stand down:
-
-```bash
-gh issue edit <N> --remove-label "In Progress"
-gh issue view <N> --json state,labels --jq '.state, [.labels[].name]'
-```
 
 Item 6 (archive the session) does not apply. `closed without merging` means the
 user closed it: report it, take the label off the issue if it is still open, and
