@@ -95,11 +95,11 @@ sudo apt install ./dist/conky-spotify-nowplaying_X.Y.Z_all.deb
 Then restart and verify:
 
 ```bash
-: > ~/.cache/conky-spotify-nowplaying/run.log
-conky-spotify-nowplaying restart
+: > ~/.cache/conky-widgets/run.log
+conky-widgets restart
 pgrep -af 'conky-spotify-nowplaying|share/conky-spotify|^conky '
 xwininfo -root -tree | grep ConkySpotifyNowPlaying
-grep -iE 'error|critical|traceback|lua' ~/.cache/conky-spotify-nowplaying/run.log
+grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 gdbus call --session --dest org.kde.StatusNotifierWatcher \
   --object-path /StatusNotifierWatcher \
   --method org.freedesktop.DBus.Properties.Get \
