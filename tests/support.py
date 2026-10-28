@@ -57,7 +57,8 @@ class SpeechFixture:
         self.speak = os.path.join(root, 'speak-attention')
         self.sessions = os.path.join(root, 'sessions')
         self.proc = os.path.join(root, 'proc')
-        for d in (self.speak, self.sessions, self.proc):
+        self.ledgers = os.path.join(root, 'ledgers')
+        for d in (self.speak, self.sessions, self.proc, self.ledgers):
             os.makedirs(d)
 
     def alive(self, pid, state='S'):
@@ -87,6 +88,13 @@ class SpeechFixture:
         self.file('now.json', json.dumps({
             'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
             'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}))
+
+    def ledger(self, sid, *rows, project='-home-user-project'):
+        """Session `sid`'s catchup.py ledger under ledgers/, a (key, state) per row."""
+        folder = os.path.join(self.ledgers, project, sid, 'scratchpad')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'ledger'), 'w') as f:
+            f.writelines(f'label\t{key}\thttps://example.test\t{state}\t\n' for key, state in rows)
 
     def settings(self, **values):
         self.file('settings.json', json.dumps(values))

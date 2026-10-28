@@ -40,6 +40,7 @@ class Fixture(unittest.TestCase):
                             ('LABELS', os.path.join(self.root, 'labels.json')),
                             ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
                             ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
+                            ('LEDGERS', self.f.ledgers),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -97,6 +98,22 @@ class ReadState(Fixture):
         self.assertEqual(line(ME), 'Pass 1 is pushed.')
         speechqueue._last = None                       # a restart reads it back from LAST
         self.assertEqual(line(ME), 'Pass 1 is pushed.')
+
+    def test_waiting_on_ci_or_a_merge_by_the_sessions_ledger(self):
+        self.three()
+        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                 if x['id'] == sid).split('\t')[4].split(',')
+        self.assertEqual(flags(OTHER), ['idle'])
+        self.f.ledger(OTHER, ('pr:107', 'done'), ('pr:111', 'open'))
+        self.assertEqual(flags(OTHER), ['waiting: merge'])
+        self.f.ledger(OTHER, ('pr:111', 'open'), ('lp:2.1.0', 'open'))
+        self.assertEqual(flags(OTHER), ['waiting: ci'])
+        self.f.ledger(OTHER, ('pr:111', 'done'), ('issue:12', 'open'))
+        self.assertEqual(flags(OTHER), ['idle'])                  # nothing it shows
+        self.f.ledger(ME, ('pr:111', 'open'))
+        self.assertEqual(flags(ME), ['busy'])                     # working, not waiting
+        self.f.ledger(QUIET, ('pr:5', 'open'))
+        self.assertEqual(flags(QUIET), ['waiting: merge', 'bg'])
 
     def test_the_second_row_drops_the_hooks_speaker(self):
         self.three()
