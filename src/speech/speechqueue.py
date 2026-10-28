@@ -165,6 +165,12 @@ def waiting_on(sid, ledgers=None):
     return next((wait for prefix, wait in WAITS if any(k.startswith(prefix) for k in keys)), '')
 
 
+def first_wait(process, ledger):
+    """The one wait a row shows: tests (a run under the session or in CI), then a unit the
+    session polls, then what its ledger waits on."""
+    return 'tests' if 'tests' in (process, ledger) else process or ledger
+
+
 def is_test_run(argv):
     """Whether a process's arguments are a test run: unittest or pytest, a test_*.py or
     *_test.sh/py script, `npm|pnpm|yarn test`, `go|cargo test` or `playwright test`. A shell's
@@ -178,7 +184,9 @@ def is_test_run(argv):
     if prog.startswith('python'):
         if '-m' in args[:-1] and args[args.index('-m') + 1] in ('unittest', 'pytest'):
             return True
-        script = next((a for a in args if not a.startswith('-')), '')
+        # the first argument that is neither an option nor the value -W or -X takes
+        script = next((a for i, a in enumerate(args) if not a.startswith('-') and
+                       (i == 0 or args[i - 1] not in ('-W', '-X'))), '')
         return bool(TEST_FILE.match(os.path.basename(script)))
     if prog in ('bash', 'sh', 'dash'):
         return bool(args) and args[0] != '-c' and bool(TEST_FILE.match(os.path.basename(args[0])))
@@ -504,7 +512,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
                            question=question,
-                           waiting=waits.get(s['pid']) or waiting_on(s['id'], ledgers),
+                           waiting=first_wait(waits.get(s['pid']), waiting_on(s['id'], ledgers)),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))

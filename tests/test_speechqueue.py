@@ -150,9 +150,12 @@ class ReadState(Fixture):
         self.assertEqual(flags(QUIET), 'waiting: nightly.service')   # a unit with no tag
         self.f.process(211, 200, 'pytest')
         self.assertEqual(flags(QUIET), 'waiting: tests')          # a test run over a unit
+        self.f.sweep(OTHER, 'in_progress')
+        self.assertEqual(flags(OTHER), 'waiting: tests')          # a CI run over a unit too
 
     def test_what_counts_as_a_test_run(self):
         runs = (['pytest', '-q'], ['python3', '-I', '-m', 'pytest'], ['python3', 'tests/test_x.py'],
+                ['python3', '-W', 'ignore', 'test_x.py'],
                 ['bash', 'speechctl_test.sh'], ['./speechctl_test.sh'], ['npm', 'test'],
                 ['npm', 'run', 'test'], ['go', 'test', './...'], ['cargo', 'test'],
                 ['node', 'node_modules/.bin/playwright', 'test'])
