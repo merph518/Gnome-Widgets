@@ -179,8 +179,8 @@ local function draw_shadow(cr, x, y, w, h, rad, s)
     -- A soft black shadow around the card, SHADOW_RIGHT to the right and SHADOW_DROP lower,
     -- fading out over SHADOW_BLUR: one rounded rectangle a pixel wider per step, biggest
     -- first, each alpha chosen so the stack reaches SHADOW_ALPHA * (1 - d / blur)^2 at d px
-    -- from the card's edge. Clipped to outside the card, which is translucent and would show
-    -- it through.
+    -- from the card's edge. Clipped to outside the card, so its antialiased edge blends
+    -- with the desktop and not with shadow.
     local blur, right, drop = SHADOW_BLUR * s, SHADOW_RIGHT * s, SHADOW_DROP * s
     local function target(d) return SHADOW_ALPHA * (1 - d / blur) ^ 2 end
     cairo_save(cr)
@@ -214,7 +214,8 @@ function conky_draw_background()
     with_cairo(function(cr)
         if margin > 0 then draw_shadow(cr, margin, margin, w, h, rad, s) end
         rounded_rect(cr, margin, margin, w, h, rad)
-        cairo_set_source_rgba(cr, bg[1], bg[2], bg[3], 0.94)
+        -- opaque, so the card shows bg.txt's colour exactly and not a blend with the desktop
+        cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
         cairo_fill(cr)
     end)
 end
