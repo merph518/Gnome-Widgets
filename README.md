@@ -61,9 +61,10 @@ itself.
 - A header with who is speaking ("<name> says:"), ⏭ and ⏩, and a progress bar with the
   line's elapsed time and length
 - **Sessions**: every open Claude session, the ones with speech on first, each with its
-  repository's label, its name, a **busy** or **idle** tag for whether it is working (**waiting: merge**
-  or **waiting: ci** instead of idle while its `scripts/catchup.py` ledger has a pull request
-  or a Launchpad build open), **bg** when it runs in the background, how many lines it has queued, and its speech setting
+  repository's label, its name, one tag, how many lines it has queued, and its speech setting.
+  The tag is the first of these that holds: **question** (one waits to be read), **busy**,
+  **waiting: ci** or **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build
+  or a pull request open), **bg** (it runs in the background), else **idle**
 - A footer with pause / resume, the volume and the voice
 
 Each session in the speech widget's list starts with a four-letter label for its repository,

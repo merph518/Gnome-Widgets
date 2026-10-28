@@ -113,7 +113,18 @@ class ReadState(Fixture):
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), ['busy'])                     # working, not waiting
         self.f.ledger(QUIET, ('pr:5', 'open'))
-        self.assertEqual(flags(QUIET), ['waiting: merge', 'bg'])
+        self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over bg
+
+    def test_one_tag_a_question_first(self):
+        self.three()
+        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                 if x['id'] == sid).split('\t')[4]
+        self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'bg'))
+        self.f.queue(ME, 'Question: Merge it? Options: yes or no.')
+        self.f.ledger(ME, ('pr:111', 'open'))
+        self.assertEqual(flags(ME), 'question')                   # over busy and waiting
+        self.f.queue(QUIET, 'Question: Which one?')
+        self.assertEqual(flags(QUIET), 'question')                # over bg
 
     def test_the_second_row_drops_the_hooks_speaker(self):
         self.three()
