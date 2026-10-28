@@ -10,8 +10,8 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the header ("<name> says:"), the current line wrapped with
-                 Pango like a title, and spacer lines that give conky's window its size
+  - widget.txt   conky's markup: the header ("<name> says:"), the Sessions label and spacer
+                 lines that give conky's window its size, which stays the same while lines play
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the buttons,
                  the progress of the current line, the sessions list and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
@@ -51,14 +51,13 @@ DEFAULT_VOLUME = 1.2
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 ICON_W = 24                                   # the speaker icon left of the header text
-HEADER_GAP = 6                                # header to the current line
-LINE_GAP = 8                                  # current line (or its progress) to Sessions
+HEADER_GAP = 6                                # header to the progress bar's row
+LINE_GAP = 14                                 # the progress bar's row to Sessions
 PROGRESS_H = 14                               # the progress bar's row
-LIST_GAP = 4                                  # the Sessions label to the list
+LIST_GAP = 0                                  # the Sessions label to the list
 FOOTER_GAP = 8                                # list to the footer
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
-CURRENT_LINES = 4                             # lines of the current line before an ellipsis
 BUTTON_SIZE = 16                              # skip and next, right of the header
 BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
@@ -72,12 +71,11 @@ SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-LINE_FONT = 'Ubuntu Sans 13'                  # the current line
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, as draw.lua draws it
 FOOTER_FONT = 'Ubuntu Sans 11'                # Vol 1.2, Voice amy, as draw.lua draws it
-TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, LINE_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
+TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
 PangoCairo.context_set_resolution(_pango, 96)
@@ -120,41 +118,6 @@ def display_text(text):
     return ' '.join(text.split())
 
 
-def font_runs(text, font):
-    """text as [(family, part)], cut where Pango's font fallback changes font, since conky
-    draws one font a run and has no fallback of its own (nowplaying.py's font_runs)."""
-    lay = layout(text, font)
-    base, raw, items = font_description(font).get_family(), text.encode(), []
-    it = lay.get_iter()
-    while True:
-        run = it.get_run_readonly()
-        if run:
-            item, face = run.item, run.item.analysis.font
-            items.append((item.offset, face.describe().get_family() if face else base,
-                          raw[item.offset:item.offset + item.length].decode()))
-        if not it.next_run():
-            break
-    runs = []
-    for _, family, part in sorted(items):
-        if runs and runs[-1][0] == family:
-            runs[-1] = (family, runs[-1][1] + part)
-        else:
-            runs.append((family, part))
-    return runs
-
-
-def wrap(text, font, width, max_lines):
-    lay = layout(text, font)
-    lay.set_width(round(width * Pango.SCALE))
-    lay.set_wrap(Pango.WrapMode.WORD_CHAR)
-    raw = text.encode()
-    lines = [raw[l.start_index:l.start_index + l.length].decode().strip() for l in lay.get_lines_readonly()]
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip() + '…'
-    return lines
-
-
 def text_width(text, font):
     return layout(text, font).get_pixel_size()[0]
 
@@ -180,15 +143,6 @@ def line_height(*fonts):
     return max(_height(font_description(font)) for font in fonts)
 
 
-def text_height(runs, font):
-    heights = [line_height(font)]
-    for family, _ in runs:
-        description = font_description(font)
-        description.set_family(family)
-        heights.append(_height(description))
-    return max(heights)
-
-
 def esc(text):
     """text as conky draws it literally: '$' starts a variable and '#' a comment."""
     return text.replace('$', '$$').replace('#', '\\#')
@@ -200,10 +154,6 @@ def conky_font(pango_font, family=None):
     bold = 'Bold' in name
     name = family or ' '.join(n for n in name if n != 'Bold')
     return f"{name}{':bold' if bold else ''}:size={pt}"
-
-
-def conky_text(runs, font):
-    return ''.join(f"${{font {conky_font(font, family)}}}{esc(part)}" for family, part in runs or [(None, '')])
 
 
 def plain():
@@ -446,7 +396,7 @@ def render(state, now=None):
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
             f"state {'paused' if paused else 'playing' if n else 'idle'}",
-            f'header {MARGIN + ICON_W / 2 - 2} {cy}']
+            f'header {MARGIN + ICON_W / 2 - 4} {cy}']
     g = f'${{goto {SHADOW + MARGIN + ICON_W}}}'
     out = Markup(MARGIN)
     out.text(f"{g}${{lua_parse fg {'title' if n else 'text'}}}${{font {conky_font(LABEL_FONT)}}}{esc(label)}{plain()}",
@@ -462,22 +412,16 @@ def render(state, now=None):
         write_sessions(listed)
         return out.end(out.y + MARGIN - 4)
 
-    # The current line, wrapped like a title, and its progress when the clip's length is known
-    if n:
-        out.gap(HEADER_GAP)
-        g = f'${{goto {SHADOW + MARGIN}}}'
-        text = display_text(n.get('text') or '')
-        for line in wrap(text, LINE_FONT, widget_width, CURRENT_LINES) or ['']:
-            runs = font_runs(line, LINE_FONT)
-            out.text(f"{g}${{lua_parse fg title}}{conky_text(runs, LINE_FONT)}{plain()}",
-                     text_height(runs, LINE_FONT))
-        if state['duration']:
-            elapsed = min(clock.elapsed(n, paused, now), state['duration'])
-            draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
-                        f'{elapsed:.3f} {state["duration"]:.3f} {int(not paused)}')
-            out.gap(PROGRESS_H)
-        else:
-            clock.elapsed(n, paused, now)
+    # The current line's progress when the clip's length is known. Its row is kept while
+    # nothing plays, so the card keeps one height from line to line.
+    out.gap(HEADER_GAP)
+    if n and state['duration']:
+        elapsed = min(clock.elapsed(n, paused, now), state['duration'])
+        draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+                    f'{elapsed:.3f} {state["duration"]:.3f} {int(not paused)}')
+    elif n:
+        clock.elapsed(n, paused, now)
+    out.gap(PROGRESS_H)
 
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
     # they run longer than the list's height. A session with lines queued shows the next one
