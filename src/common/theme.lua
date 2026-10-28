@@ -56,6 +56,22 @@ function theme.fade_step(bg, target, dt)
     return theme.DARK, theme.LIGHT
 end
 
+function theme.fade(bg, path, dt)
+    -- one step of the fade of bg towards the colour in path (the Spotify widget's bg.txt, 'r g
+    -- b' from 0 to 1), or towards Spotify's #181818 while it has none; returns fade_step's two
+    local f = io.open(path)
+    local s = f and f:read('*a') or ''
+    if f then f:close() end
+    local r, g, b = s:match('(%S+) (%S+) (%S+)')
+    return theme.fade_step(bg, {tonumber(r) or 0.094, tonumber(g) or 0.094, tonumber(b) or 0.094}, dt)
+end
+
+function theme.conky_colour(c)
+    -- c as conky markup, for a widget's ${lua_parse fg ...}
+    return string.format('${color %02x%02x%02x}', math.floor(c[1] * 255 + 0.5),
+                         math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
+end
+
 function theme.rounded_rect(cr, x, y, w, h, rad)
     cairo_new_sub_path(cr)
     cairo_arc(cr, x + w - rad, y + rad, rad, -math.pi / 2, 0)

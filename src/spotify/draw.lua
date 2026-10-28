@@ -107,9 +107,7 @@ local function secondary() return theme.secondary(fg, bg) end
 
 local function fade()
     -- one step of the ~1 s fade towards bg.txt's colour, and the foreground for it
-    local r, g, b = (read('bg.txt') or ''):match('(%S+) (%S+) (%S+)')
-    local target = {tonumber(r) or 0.094, tonumber(g) or 0.094, tonumber(b) or 0.094}
-    fg, fg_back = theme.fade_step(bg, target, dt())
+    fg, fg_back = theme.fade(bg, cache .. 'bg.txt', dt())
 end
 
 function conky_widget()
@@ -123,9 +121,7 @@ end
 function conky_fg(which)
     -- ${lua_parse fg title} and ${lua_parse fg text} in nowplaying.py's markup: conky's own
     -- text in the foreground that follows the fading background
-    local c = which == 'title' and fg or secondary()
-    return string.format('${color %02x%02x%02x}', math.floor(c[1] * 255 + 0.5),
-                         math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
+    return theme.conky_colour(which == 'title' and fg or secondary())
 end
 
 function conky_draw_background()

@@ -105,6 +105,11 @@ for it, cut to one line, or *Nothing read aloud yet* before its first. A questio
 be read shows as a **question** tag after the name instead of its text.
 The header and progress bar stay put between lines: once a line ends, the header keeps
 "<name> says:" and the bar stays full at that line's length until the next one starts.
+The speech widget takes the Spotify widget's background: it reads that widget's
+`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, its text and controls turning
+dark on a light cover just as Spotify's do, and stays on #181818 with white text while there
+is none. To follow another colour file, put its path on the first line of
+`~/.config/conky-widgets/speech/background`.
 
 Two of the Spotify settings are about lyrics, and both are remembered:
 
