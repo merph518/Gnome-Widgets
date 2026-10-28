@@ -8,11 +8,11 @@ show/hide all write. A Show tick is ticked while that widget runs and has no fla
 ticks follow the flags whichever of the three changed them.
 
 Speech is read from the files the speaking hook keeps in $XDG_RUNTIME_DIR/speak-attention/:
-now.json while a clip plays, paused while paused, settings.json for the voice and volume.
+now.json while a clip plays, paused while paused, settings.json for the voice, volume and pace.
 The commands go through speechctl, from ~/.config/conky-widgets/speech/speechctl when that
 file names one, otherwise from PATH.
 """
-import json, os, shutil, subprocess
+import fcntl, json, os, shutil, subprocess, tempfile
 
 # Each widget's name in its Show item, its config and cache folders as the launcher keeps
 # them, and its autostart entry.
@@ -31,6 +31,8 @@ SPEECH_LINE = 60                                          # characters of the sp
 VOLUMES = (0.25, 0.5, 0.75, 1.0, 1.2, 1.5, 2.0)          # the Volume menu's presets
 DEFAULT_VOLUME = 1.2                                      # what speech plays at with no setting
 DEFAULT_VOICE = 'en_US-amy-medium'                        # and the voice it uses (speechctl's)
+PACES = (0.6, 0.7, 0.85, 1.0, 1.2, 1.4)                  # the Pace menu's presets: Piper's length scale, lower is faster
+DEFAULT_PACE = 0.85                                       # what speech speaks at with no setting
 
 
 def conf_dir(widget):
@@ -161,6 +163,31 @@ def speech_settings():
     return str(settings.get('voice') or DEFAULT_VOICE), volume
 
 
+def speech_pace():
+    """The pace from settings.json, else SPEAK_PIPER_LENGTH as the hook reads it, else DEFAULT_PACE."""
+    for value in (_json(os.path.join(SPEAK, 'settings.json')).get('pace'), os.environ.get('SPEAK_PIPER_LENGTH')):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_PACE
+
+
+def set_speech_pace(pace):
+    """Writes the pace into settings.json, which the hook reads before each clip. speechctl
+    has no command for it, so this does what its settings writes do: under the lock the hook
+    shares, replacing the file whole."""
+    os.makedirs(SPEAK, exist_ok=True)
+    with open(os.path.join(SPEAK, 'settings.lock'), 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        settings = _json(os.path.join(SPEAK, 'settings.json'))
+        settings['pace'] = pace
+        fd, tmp = tempfile.mkstemp(dir=SPEAK, prefix='.tmp.')
+        with os.fdopen(fd, 'w') as f:
+            json.dump(settings, f)
+        os.replace(tmp, os.path.join(SPEAK, 'settings.json'))
+
+
 def speechctl():
     """The speechctl to run: the one SPEECHCTL names when it is there, else PATH's; None
     when there is none."""
@@ -175,7 +202,8 @@ def speechctl():
 
 
 def voices():
-    """The voices `speechctl voices` lists, one a line, its first word the name."""
+    """The voices `speechctl voices` lists, one a line, the name its first word after the *
+    that marks the current voice."""
     ctl = speechctl()
     if not ctl:
         return []
@@ -183,7 +211,8 @@ def voices():
         out = subprocess.run([ctl, 'voices'], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.TimeoutExpired):
         return []
-    return [line.split()[0] for line in out.splitlines() if line.strip()]
+    names = [line.split() for line in out.splitlines()]
+    return [words[1] if words[0] == '*' and len(words) > 1 else words[0] for words in names if words]
 
 
 def run_speechctl(*args):

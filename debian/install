@@ -1,5 +1,6 @@
 bin/conky-widgets usr/bin
 bin/conky-spotify-nowplaying usr/bin
+bin/conky-widgets-voices usr/bin
 src/common/conky-mouse.py usr/share/conky-widgets/common
 src/common/widget_size.py usr/share/conky-widgets/common
 src/common/theme.lua usr/share/conky-widgets/common
