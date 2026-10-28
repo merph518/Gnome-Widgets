@@ -73,7 +73,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # What a widget's name sets, in configure(): the folders and files below, and `hooks`, the
 # widget's own mouse.py.
 hooks = None
-CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = None
+CONF = POSITION = SIZE = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = None
 WM_CLASS, OUTLINE, BUTTONS = None, None, ()
 BUTTON_PRESS, MOTION_NOTIFY, BUTTON1_MASK = 4, 6, 1 << 8
 WHEEL_UP, WHEEL_DOWN = 4, 5                       # X reports the wheel as button presses
@@ -104,7 +104,7 @@ def configure(widget):
     """Sets this helper up for the widget in src/<widget>/, whose mouse.py says its name
     (the config and cache folders, the launcher, the window class), its controls and what
     they do. Run before anything else here."""
-    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP
+    global hooks, CONF, POSITION, SIZE, CACHE, REGIONS, LOG, HIDDEN, ON_TOP
     global WM_CLASS, OUTLINE, BUTTONS
     folder = os.path.join(HERE, '..', widget)
     sys.path.insert(0, folder)
@@ -114,6 +114,7 @@ def configure(widget):
     hooks.core = sys.modules[__name__]
     CONF = os.path.expanduser(f'~/.config/{hooks.NAME}')
     POSITION = os.path.join(CONF, 'position')
+    SIZE = os.path.join(CONF, 'size')             # widget_size.py's settings
     CACHE = os.path.expanduser(f'~/.cache/{hooks.NAME}')
     REGIONS = os.path.join(CACHE, 'regions.json')
     LOG = os.path.join(CACHE, 'mouse.log')
@@ -532,7 +533,7 @@ def resize(d, root, win, edges, s, regions, track):
     """Outline the new size while `track` (follow_pointer() or a Touch) drags `edges`; on
     release, save it and hold a copy of the widget over conky's window while it takes the
     new size. Returns the window's new position and size, or None if nothing changed."""
-    old = new = widget_size.load()
+    old = new = widget_size.load(SIZE)
     window = geometry(d, win)
     start = wx, wy, w, h = card_of(window, s)
     mon = monitor_for(wx, wy, w, h)
@@ -564,7 +565,7 @@ def resize(d, root, win, edges, s, regions, track):
     shade = cover(d, root, win, window, (0, 0))
     goal = window_of(g, s)
     try:
-        widget_size.save(new)
+        widget_size.save(new, SIZE)
         # nowplaying.py lays the widget out again and conky resizes its window, from its top
         # left corner; move it into place, then keep the copy up while conky draws there.
         deadline, shown = time.monotonic() + 1, None

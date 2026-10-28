@@ -8,6 +8,7 @@ import atexit
 import ctypes
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -15,11 +16,13 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import wave
 from unittest import mock
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
 sys.path.insert(0, os.path.join(SRC, 'common'))
 sys.path.insert(0, os.path.join(SRC, 'spotify'))
+sys.path.insert(0, os.path.join(SRC, 'speech'))
 
 HOME = tempfile.mkdtemp(prefix='conky-spotify-nowplaying-test-home-')
 atexit.register(shutil.rmtree, HOME, ignore_errors=True)
@@ -33,6 +36,63 @@ def load_nowplaying():
         with mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='')):
             import nowplaying  # noqa: F401
     return sys.modules['nowplaying']
+
+
+def load_speechqueue():
+    """speechqueue runs `xrdb -query` at import, like nowplaying: answered with nothing."""
+    if 'speechqueue' not in sys.modules:
+        with mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='')):
+            import speechqueue  # noqa: F401
+    return sys.modules['speechqueue']
+
+
+class SpeechFixture:
+    """A speaking hook's state folder, Claude's sessions folder and a /proc, under `root`,
+    for speechqueue and the speech widget's mouse helper to read. Sessions are added with
+    session(), the hook's files with the other methods; every pid added is alive unless
+    stale=True."""
+
+    def __init__(self, root):
+        self.speak = os.path.join(root, 'speak-attention')
+        self.sessions = os.path.join(root, 'sessions')
+        self.proc = os.path.join(root, 'proc')
+        for d in (self.speak, self.sessions, self.proc):
+            os.makedirs(d)
+
+    def alive(self, pid, state='S'):
+        os.makedirs(os.path.join(self.proc, str(pid)), exist_ok=True)
+        with open(os.path.join(self.proc, str(pid), 'stat'), 'w') as f:
+            f.write(f'{pid} (proc) {state} 1 1')
+
+    def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True):
+        entry = {'pid': pid, 'sessionId': sid, 'name': name, 'cwd': f'/home/user/{name}',
+                 'kind': kind, 'status': status}
+        if socket:
+            entry['messagingSocketPath'] = f'/tmp/{sid}.sock'
+        with open(os.path.join(self.sessions, f'{pid}.json'), 'w') as f:
+            json.dump(entry, f)
+        if not stale:
+            self.alive(pid)
+
+    def file(self, name, text=''):
+        with open(os.path.join(self.speak, name), 'w') as f:
+            f.write(text)
+
+    def queue(self, sid, *lines):
+        self.file(f'{sid}.queue', ''.join(line + '\n' for line in lines))
+
+    def now(self, sid, name, text, hook_pid=9001, player_pid=9002, engine='piper', clip='1'):
+        self.alive(hook_pid)
+        self.file('now.json', json.dumps({
+            'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
+            'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}))
+
+    def wav(self, hook_pid, seconds, rate=22050):
+        with wave.open(os.path.join(self.speak, f'{hook_pid}.wav'), 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b'\0\0' * round(seconds * rate))
 
 
 def load_conky_mouse():

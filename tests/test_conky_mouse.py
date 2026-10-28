@@ -251,7 +251,8 @@ class CardPlacementTest(unittest.TestCase):
                                          clamp=conky_mouse.widget_size.clamp, LIMITS=conky_mouse.widget_size.LIMITS))
         placed = conky_mouse.resize(None, 0, 1, 'l', 2, {'lyrics': [0, 0, 1, 1]},
                                     conky_mouse.follow_pointer(None, 0))
-        conky_mouse.widget_size.save.assert_called_once_with(new)
+        conky_mouse.widget_size.load.assert_called_once_with(conky_mouse.SIZE)    # this widget's file
+        conky_mouse.widget_size.save.assert_called_once_with(new, conky_mouse.SIZE)
         conky_mouse.place_outline.assert_called_with(None, [], 932, 132, 1340, 666, 4)   # the card
         self.assertEqual(moves, [(900, 100)])                                           # the window
         conky_mouse.set_input_shape.assert_called_once_with(None, 1, 1404, 730, 2)
