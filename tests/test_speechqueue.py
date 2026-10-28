@@ -443,6 +443,100 @@ class ClockTest(unittest.TestCase):
         self.assertEqual(c.elapsed(dict(n, clip='2', published=105.0), False, 106.0), 1.0)
 
 
+VOICES = ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
+          'en_US-hfc_female-medium', 'en_US-joe-medium', 'en_US-lessac-medium',
+          'en_US-libritts-high', 'en_US-ryan-high']
+
+
+class VoiceDropDown(Fixture):
+    def render(self, voices, voice='en_GB-jenny_dioco-medium'):
+        self.three()
+        self.f.file('settings.json', json.dumps({'voice': voice}))
+        speechqueue.render(dict(self.state(), voices=voices), now=1000.0)
+        with open(speechqueue.DRAW) as f:
+            draw = f.read().splitlines()
+        with open(speechqueue.REGIONS) as f:
+            return draw, json.load(f)
+
+    def test_the_drop_down_names_the_voice_and_the_list_has_every_voice_with_the_current_marked(self):
+        draw, regions = self.render(VOICES)
+        self.assertTrue(next(l for l in draw if l.startswith('voice ')).endswith(' Voice: jenny_dioco'))
+        self.assertEqual([l for l in draw if l.startswith('item ')],
+                         ['item 0 alan', 'item 1 jenny_dioco', 'item 0 amy', 'item 0 hfc_female',
+                          'item 0 joe', 'item 0 lessac', 'item 0 libritts', 'item 0 ryan'])
+        self.assertEqual((regions['menu']['names'], regions['menu']['current']), (VOICES, 1))
+
+    def test_the_arrows_are_gone(self):
+        _, regions = self.render(VOICES)
+        self.assertFalse({'voice_prev', 'voice_next'} & set(regions))
+
+    def test_the_list_opens_upward_from_the_drop_downs_right_edge(self):
+        _, regions = self.render(VOICES)
+        drop, (x0, top, x1, bottom) = regions['voice'], regions['menu']['box']
+        self.assertEqual(x1, drop[2])
+        self.assertLess(bottom, drop[1])                      # clear of the drop down, above it
+        self.assertLess(x0, drop[2])
+        self.assertGreater(top, 0)
+        self.assertEqual(round(bottom - top - 2 * regions['menu']['pad'], 2),
+                         round(regions['menu']['rows'] * regions['menu']['item_h'], 2))
+
+    def test_a_list_longer_than_fits_shows_the_rows_that_fit(self):
+        many = [f'en_US-voice{i:02d}-medium' for i in range(40)]
+        draw, regions = self.render(many, voice=many[20])
+        menu = regions['menu']
+        self.assertTrue(speechqueue.MENU_MIN_ROWS <= menu['rows'] < len(many))
+        self.assertEqual(len([l for l in draw if l.startswith('item ')]), len(many))
+        self.assertGreater(menu['box'][1], 0)                          # inside the card
+        self.assertEqual(menu['current'], 20)
+        narrow = self.render(VOICES)[1]['menu']['box']
+        self.assertGreater(menu['box'][2] - menu['box'][0], 0)
+        self.assertEqual(menu['box'][2], narrow[2])
+
+    def test_a_short_list_shows_only_its_voices(self):
+        _, regions = self.render(VOICES[:2])
+        self.assertEqual(regions['menu']['rows'], 2)
+
+    def test_without_voices_there_is_no_list_but_the_drop_down_stays(self):
+        draw, regions = self.render([])
+        self.assertNotIn('menu', regions)
+        self.assertFalse([l for l in draw if l.startswith(('menu ', 'item '))])
+        self.assertIn('voice', regions)
+
+    def test_a_voice_that_is_not_installed_marks_none(self):
+        _, regions = self.render(VOICES, voice='de_DE-thorsten-medium')
+        self.assertEqual(regions['menu']['current'], -1)
+
+    def test_a_long_name_is_cut_to_the_room_left_of_the_volume(self):
+        draw, regions = self.render(VOICES, voice='en_US-' + 'x' * 120 + '-medium')
+        self.assertIn('…', next(l for l in draw if l.startswith('voice ')))
+        self.assertGreater(regions['voice'][0], regions['volume'][2])
+
+
+class InstalledVoices(unittest.TestCase):
+    def setUp(self):
+        for name, value in (('names', []), ('asked', None), ('busy', False)):
+            speechqueue._voices[name] = value
+        p = mock.patch.object(speechqueue.threading, 'Thread', side_effect=lambda target, daemon: mock.Mock(
+            start=target))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_it_asks_speechctl_at_most_every_so_often_and_keeps_the_last_answer(self):
+        with mock.patch.object(speechqueue.tray_model, 'voices', side_effect=[['a'], ['a', 'b'], []]) as voices:
+            self.assertEqual(speechqueue.installed_voices(100.0), ['a'])
+            self.assertEqual(speechqueue.installed_voices(105.0), ['a'])
+            self.assertEqual(voices.call_count, 1)
+            self.assertEqual(speechqueue.installed_voices(100.0 + speechqueue.VOICES_EVERY), ['a', 'b'])
+            self.assertEqual(speechqueue.installed_voices(100.0 + 2 * speechqueue.VOICES_EVERY),
+                             ['a', 'b'])                  # an empty answer is speechctl failing
+
+    def test_a_slow_ask_is_not_asked_again_while_it_runs(self):
+        speechqueue._voices['busy'] = True
+        with mock.patch.object(speechqueue.tray_model, 'voices') as voices:
+            speechqueue.installed_voices(100.0)
+        voices.assert_not_called()
+
+
 class Golden(Fixture):
     def check(self, case, state, now=1000.0):
         text = speechqueue.render(state, now=now)
@@ -497,6 +591,11 @@ class Golden(Fixture):
             self.f.session(100 + i, f'{i:08d}-eeee', f'Session {i}')
             self.f.queue(f'{i:08d}-eeee', f'Line {i}')
         self.check('scroll', self.state())
+
+    def test_the_voice_drop_down_and_its_open_list(self):
+        self.three()
+        self.f.file('settings.json', json.dumps({'voice': 'en_GB-jenny_dioco-medium'}))
+        self.check('voices', dict(self.state(), voices=VOICES))
 
     def test_collapse_when_idle(self):
         self.three()
