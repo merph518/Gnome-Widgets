@@ -217,7 +217,9 @@ loop, minor findings and settled decisions are the general skill's. Every pass r
 whole pull request at the branch head, not only the commits since the last
 pass, per `<self-review>`. A fix owes `<static-checks>` in place of the
 dispatches and the pull request check job, and the Section 6 run again when it
-touches `src/`, `bin/`, `packaging/` or `debian/`.
+touches `src/`, `bin/`, `packaging/` or `debian/`. The general skill's "final
+pass" of the checks is `<static-checks>` on the branch head once the review
+ends, per `<ready-signal>`.
 
 ### Section 9: Report
 
