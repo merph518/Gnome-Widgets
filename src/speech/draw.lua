@@ -173,10 +173,13 @@ local function shade(cr, cx, cy, half)
     set(cr, fg, hovered(cx - half, cy - half, cx + half, cy + half) and 1 or 0.7)
 end
 
+local face = ''                           -- the font font() last set, which fit's cache keys on
+
 local function font(cr, pt, text, s, bold)
     cairo_select_font_face(cr, FONT, CAIRO_FONT_SLANT_NORMAL,
                            bold and CAIRO_FONT_WEIGHT_BOLD or CAIRO_FONT_WEIGHT_NORMAL)
     cairo_set_font_size(cr, pt * text * 96 / 72 * s)
+    face = (bold and 'b' or '') .. pt * text * s
 end
 
 local ext = cairo_text_extents_t:create()
@@ -187,17 +190,29 @@ local function width_of(cr, str)
     return ext.x_advance
 end
 
+local fitted, fitted_count = {}, 0        -- fit's answers, as the same rows ask every frame
+
 local function fit(cr, str, width)
-    -- str, cut a character at a time with an ellipsis until it fits in width
-    if width_of(cr, str) <= width then return str end
-    local chars = {}
-    for _, c in utf8.codes(str) do chars[#chars + 1] = utf8.char(c) end
-    while #chars > 0 do
-        chars[#chars] = nil
-        local cut = table.concat(chars):gsub('%s+$', '') .. '…'
-        if width_of(cr, cut) <= width then return cut end
+    -- str, cut with an ellipsis to the longest start that fits in width, found by halving
+    -- (a last line can run to a thousand characters) and kept, since the list asks again
+    -- each frame
+    local key = face .. '\0' .. width .. '\0' .. str
+    if fitted[key] then return fitted[key] end
+    local out = str
+    if width_of(cr, str) > width then
+        local chars = {}
+        for _, c in utf8.codes(str) do chars[#chars + 1] = utf8.char(c) end
+        local function cut(n) return table.concat(chars, '', 1, n):gsub('%s+$', '') .. '…' end
+        local lo, hi = 0, #chars - 1               -- the longest start that fits is lo or above
+        while lo < hi do
+            local mid = (lo + hi + 1) // 2
+            if width_of(cr, cut(mid)) <= width then lo = mid else hi = mid - 1 end
+        end
+        out = (lo > 0 or width_of(cr, cut(0)) <= width) and cut(lo) or ''
     end
-    return ''
+    if fitted_count >= 64 then fitted, fitted_count = {}, 0 end
+    fitted[key], fitted_count = out, fitted_count + 1
+    return out
 end
 
 local function show(cr, str, x, cy, align)
