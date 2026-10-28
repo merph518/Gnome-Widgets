@@ -19,11 +19,22 @@ python3 -m unittest discover -s tests
 luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/*.desktop
+test "$(git write-tree --prefix=.claude/att-docs/)" = "$(sed -n 's/^tree=//p' .claude/att-docs.lock)" \
+  && git diff --quiet -- .claude/att-docs
 ```
 
 Every command must exit 0 and print nothing, apart from the test summaries
 `catchup_test.py` and `unittest` print.
 
+- The last command fails when the vendored Overmind copy differs from the tree
+  `.claude/att-docs.lock` pins, so a hand edit to it shows offline. Moving the
+  pin is `scripts/overmind-sync.sh <tag>`, followed by
+  `claude plugin update voice@att-docs`.
+- The last command fails when the vendored Overmind copy differs from the tree
+  `.claude/att-docs.lock` pins, so a hand edit to it shows offline. Moving the
+  pin is `scripts/overmind-sync.sh <tag>`, followed by
+  `claude plugin update voice@att-docs`. The tree is read from the index, so
+  `git add` the copy first.
 - `desktop-file-validate` hints count as failures to fix. It once caught a
   duplicate main category that every other check passed.
 - `luac5.3 -p` only parses; it catches syntax errors, not a bad call or a

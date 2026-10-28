@@ -1,0 +1,14 @@
+{
+  "base": "voice-bridge-hooks",
+  "reviewLabel": "Manual Review Needed",
+  "reviewAnnouncement": "ready for manual review",
+  "inProgressLabel": "In Progress",
+  "mainBranch": "main",
+  "startRequest": "/implement <N>",
+  "readyLine": "PULL REQUEST <N> IS READY FOR YOUR REVIEW",
+  "spokenTerms": {
+    "PPA": "P P A",
+    "LRCLIB": "L R C lib",
+    "GNOME": "gnome"
+  }
+}
