@@ -282,8 +282,11 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None):
     listed = []
     for s in sessions_mod.list_sessions(sessions_dir, proc_dir):
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
+        first = display_text(lines[0]) if lines else ''
+        # A question the hook reads out waits as a "question" tag on the row, not its text
+        question = first.lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
-                           next=display_text(lines[0]) if lines else '',
+                           next='' if question else first, question=question,
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
     name = ''
@@ -346,7 +349,8 @@ def box(cx, cy, half_w, half_h):
 
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, next."""
-    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background'])) if on) or '-'
+    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
+                                        ('question', s.get('question'))) if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
                       display_text(s['name']), s['next']))
 
@@ -434,7 +438,7 @@ def render(state, now=None):
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
-    second = len(listed) + sum(1 for s in listed if s['queued']) <= rows_fit + 1e-3
+    second = len(listed) + sum(1 for s in listed if s['next']) <= rows_fit + 1e-3
     count = len(listed)
     last = 0 if second else max(0, round(count - rows_fit + 0.4999))
     version = write_sessions(listed)
@@ -449,7 +453,7 @@ def render(state, now=None):
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
     for s in listed:
-        span = row * (2 if second and s['queued'] else 1)
+        span = row * (2 if second and s['next'] else 1)
         entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]

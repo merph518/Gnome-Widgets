@@ -73,6 +73,13 @@ class ReadState(Fixture):
         self.assertTrue(s[0]['busy'])
         self.assertTrue(s[2]['background'])
 
+    def test_a_queued_question_is_a_tag_not_a_line(self):
+        self.f.session(100, ME, 'One')
+        self.f.queue(ME, 'Question: Open the pull request? Options: yes or no.')
+        s = self.state()['sessions'][0]
+        self.assertEqual((s['queued'], s['next'], s['question']), (1, '', True))
+        self.assertIn('question', speechqueue.session_line(s).split('\t')[4].split(','))
+
     def test_both_markers_read_as_on(self):
         self.f.session(100, ME, 'One')
         self.f.file(ME + '.replies')

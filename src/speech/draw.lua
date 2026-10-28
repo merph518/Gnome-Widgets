@@ -347,7 +347,7 @@ local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
         set(cr, secondary())
         show(cr, r.flags, name_x + nw + 8 * s, cy, 'left')
     end
-    if second and r.queued > 0 then
+    if second and r.next ~= '' then
         font(cr, 11, text, s)
         set(cr, secondary())
         show(cr, fit(cr, r.next, x1 - name_x), name_x, cy + row, 'left')
