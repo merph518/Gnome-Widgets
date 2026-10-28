@@ -14,9 +14,9 @@ helper subscribes to clicks on conky's window itself:
     edge the height of the lyrics, and a corner both; the text keeps its size. An outline
     shows the new size while the button is held; on release it is saved (widget_size.py)
   - anywhere else: drag the widget; the position is saved on release
-  - the mouse wheel over the widget's scrollable text (for Spotify, static lyrics: plain ones,
-    which have no timing to follow, or synced ones under the tray menu's Static): its mouse.py
-    scrolls it a line at a time. The wheel does nothing anywhere else.
+  - the mouse wheel: whatever the widget's mouse.py does with it there. For Spotify, over
+    static lyrics (plain ones, which have no timing to follow, or synced ones under the tray
+    menu's Static) it scrolls them a line at a time, and does nothing anywhere else.
 
 A touchscreen does the same with one finger, through XInput 2 touch events selected on the
 window, which X then sends instead of the pointer events it would make up from the touch:
@@ -887,7 +887,7 @@ def main(widget):
                     set_cursor(d, win, edges)
                     cursor = edges
             elif ev.type == BUTTON_PRESS and b.button in (WHEEL_UP, WHEEL_DOWN) and b.window == win:
-                hooks.scroll_lyrics(load_regions(), s, b.x - SHADOW * s, b.y - SHADOW * s, b.button == WHEEL_DOWN)
+                hooks.wheel(load_regions(), s, b.x - SHADOW * s, b.y - SHADOW * s, b.button == WHEEL_DOWN)
             elif ev.type == BUTTON_PRESS and b.button == 1 and b.window == win:
                 s = scale()
                 _, _, w, h = card_of(geometry(d, win), s)
