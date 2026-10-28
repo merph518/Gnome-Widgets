@@ -102,10 +102,13 @@ fade of the same length each time its colour changes.
 ### Controls
 
 The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
-skips it and the rest of that session's queue, the round button pauses or resumes, − and +
-change the volume and ◀ ▶ the voice, and a session's **On**, **Alerts** and
-**Off** set how it is read. The mouse wheel turns the volume over the volume, steps through
-the voices over the voice, moves a session's setting a segment along over its segments, and
+skips it and the rest of that session's queue, the round button pauses or resumes, ◀ ▶ step
+through the voices, and a session's **On**, **Alerts** and **Off** set how it is read. The
+volume slider, drawn like the Spotify widget's, sets the speech volume where you click, tap
+or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
+shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
+from the tray or the keyboard. The mouse wheel turns the volume a tenth a notch over the
+slider or its speaker, steps through the voices over the voice, moves a session's setting a segment along over its segments, and
 scrolls the list anywhere else on it; a finger swiped up or down on the list scrolls it too.
 Taps, dragging, resizing, − and × work as they do on the Spotify widget.
 

@@ -123,6 +123,59 @@ function theme.rounded_rect(cr, x, y, w, h, rad)
     cairo_close_path(cr)
 end
 
+local function rounded_line(cr, x0, y0, x1, y1, width)
+    cairo_set_line_width(cr, width)
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
+    cairo_move_to(cr, x0, y0)
+    cairo_line_to(cr, x1, y1)
+    cairo_stroke(cr)
+end
+
+function theme.draw_volume(cr, x0, x1, cy, fraction, ix, size, s, fg, active, lit)
+    -- A volume slider, in window px: a speaker of width size at ix and a slim track from x0
+    -- to x1 drawn like a seek bar, filled to fraction (0 to 1), its knob shown while active
+    -- (hovered or dragged). The speaker's body stays in place at every level; to its right,
+    -- inside its fixed box, it shows a cross when muted, one wave below half and two from
+    -- half up. Shaded at 0.7, full while lit.
+    local fx = x0 + (x1 - x0) * math.min(math.max(fraction, 0), 1)
+    theme.set(cr, fg, 0.3)                                              -- track
+    rounded_line(cr, x0, cy, x1, cy, 4 * s)
+    theme.set(cr, fg)                                                   -- level, knob
+    if fx > x0 then rounded_line(cr, x0, cy, fx, cy, 4 * s) end
+    if active then
+        cairo_arc(cr, fx, cy, 5 * s, 0, 2 * math.pi)
+        cairo_fill(cr)
+    end
+
+    theme.set(cr, fg, lit and 1 or 0.7)
+    cairo_new_path(cr)                                                  -- body and cone
+    cairo_move_to(cr, ix, cy - 0.17 * size)
+    cairo_line_to(cr, ix + 0.22 * size, cy - 0.17 * size)
+    cairo_line_to(cr, ix + 0.5 * size, cy - 0.4 * size)
+    cairo_line_to(cr, ix + 0.5 * size, cy + 0.4 * size)
+    cairo_line_to(cr, ix + 0.22 * size, cy + 0.17 * size)
+    cairo_line_to(cr, ix, cy + 0.17 * size)
+    cairo_close_path(cr)
+    cairo_fill(cr)
+    cairo_set_line_width(cr, 1.5 * s)
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
+    local wx = ix + 0.5 * size
+    if fraction < 0.005 then                                            -- muted: a cross
+        cairo_move_to(cr, ix + 0.64 * size, cy - 0.15 * size)
+        cairo_line_to(cr, ix + 0.94 * size, cy + 0.15 * size)
+        cairo_move_to(cr, ix + 0.64 * size, cy + 0.15 * size)
+        cairo_line_to(cr, ix + 0.94 * size, cy - 0.15 * size)
+        cairo_stroke(cr)
+    else
+        local waves = fraction < 0.5 and {0.2} or {0.2, 0.42}
+        for _, r in ipairs(waves) do
+            cairo_new_sub_path(cr)
+            cairo_arc(cr, wx, cy, r * size, -0.9, 0.9)
+            cairo_stroke(cr)
+        end
+    end
+end
+
 -- logical px; logical px right and down; alpha at the card's edge. The blur plus each offset
 -- stays within widget_size.py's SHADOW margin (16).
 local SHADOW_BLUR, SHADOW_RIGHT, SHADOW_DROP, SHADOW_ALPHA = 7, 5, 4, 0.32

@@ -3,10 +3,12 @@ as `conky-mouse.py speech`: its name, window class and controls, every one of wh
 speechctl (tray_model.py's, from PATH or the path ~/.config/conky-widgets/speech/speechctl
 holds).
 
-  - skip, next, pause/resume, volume − +, voice ◀ ▶: a click or tap runs `speechctl skip`,
-    `next`, `toggle`, `volume down|up` and `voice prev|next`
+  - skip, next, pause/resume, voice ◀ ▶: a click or tap runs `speechctl skip`, `next`,
+    `toggle` and `voice prev|next`
+  - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
+    is let go, a tenth at a time from 0 to 2.0
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
-  - the wheel: over the volume it turns it down or up, over the voice it steps through the
+  - the wheel: over the volume slider or its speaker it turns it down or up, over the voice it steps through the
     voices, over a session's setting it moves it a segment along, and over the rest of the
     list it scrolls the list a row at a time; a finger swiped over the list scrolls it too
 
@@ -23,14 +25,15 @@ WM_CLASS = 'ConkySpeechQueue'                  # conky.conf's own_window_class
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 # The buttons speechqueue.py writes the regions of, and what each runs.
 COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',),
-            'vol_down': ('volume', 'down'), 'vol_up': ('volume', 'up'),
             'voice_prev': ('voice', 'prev'), 'voice_next': ('voice', 'next')}
 BUTTONS = tuple(COMMANDS)                      # the controls a click or tap presses
-REGIONS_ORDER = BUTTONS + ('minimize', 'close')   # the regions a press looks through, in order
+REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume')   # the regions a press looks through, in order
+VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
 SETTINGS = ('on', 'alerts', 'off')             # a session's segments, left to right
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
+VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 
@@ -90,10 +93,39 @@ def segment_at(regions, s, x, y):
     return None
 
 
+def set_volume(d, win, regions, s, track):
+    """Follow `track` (follow_pointer() or a Touch) along the volume slider, showing the level
+    under it (draw.lua draws the preview until speechqueue.py reports the level), and set the
+    speech volume where it is let go. speechctl runs unwaited, so it runs once, at the end,
+    where runs along the way could land out of order."""
+    bx0, bx1 = regions['volume_bar']
+    wx, _, _, _ = core.card_of(core.geometry(d, win), s)
+    os.makedirs(CACHE, exist_ok=True)
+    level, held = 0.0, True
+    while held:
+        px, _, held = track()
+        fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
+        level = round(fraction * VOLUME_TOP, 1)
+        with open(VOLUME_PREVIEW + '.tmp', 'w') as f:
+            f.write(f'{level / VOLUME_TOP:.4f}')
+        os.replace(VOLUME_PREVIEW + '.tmp', VOLUME_PREVIEW)
+        time.sleep(0.02)
+    speechctl('volume', f'{level:.1f}')
+    time.sleep(0.6)  # keep the preview until speechqueue.py reports the new level
+    try:
+        os.remove(VOLUME_PREVIEW)
+    except OSError:
+        pass
+
+
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
-    """A press on a session's segment: a click or tap sets the setting; a drag from it moves
-    the widget, or with a finger scrolls the list. Returns whether the press was on one."""
+    """A press on the volume slider sets the volume along it. A press on a session's segment:
+    a click or tap sets the setting; a drag from it moves the widget, or with a finger scrolls
+    the list. Returns whether the press was on either."""
     x, y, start = at
+    if hit == 'volume' and regions.get('volume_bar'):
+        set_volume(d, win, regions, s, track)
+        return True
     segment = segment_at(regions, s, x, y)
     if not segment:
         return False
@@ -122,10 +154,10 @@ def scroll_list(regions, down):
 
 
 def wheel(regions, s, x, y, down):
-    """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down,
-    the next voice, the setting a segment right, or the list a row down. Returns what it did,
+    """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down
+    over the slider or its speaker, the next voice, the setting a segment right, or the list a row down. Returns what it did,
     or None where the wheel does nothing."""
-    if inside(regions.get('volume'), s, x, y):
+    if inside(regions.get('volume_wheel'), s, x, y):
         speechctl('volume', 'down' if down else 'up')
         return 'volume'
     if inside(regions.get('voice'), s, x, y):

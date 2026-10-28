@@ -77,7 +77,11 @@ BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle
-SMALL_PITCH = 22                              # − + and ◀ ▶, centre to centre, and their hit width
+SMALL_PITCH = 22                              # ◀ ▶, centre to centre, and their hit width
+VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
+VOLUME_ICON = 16                              # the speaker and its waves, left of the track
+VOLUME_GAP = 8                                # speaker to track
+VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
@@ -98,7 +102,7 @@ LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, as draw.lua draws it
-FOOTER_FONT = 'Ubuntu Sans 11'                # Vol 1.2, Voice amy, as draw.lua draws it
+FOOTER_FONT = 'Ubuntu Sans 11'                # Voice amy, as draw.lua draws it
 TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
@@ -703,30 +707,30 @@ def render(state, now=None):
     regions['list_scroll'] = [last, round(row, 2)]
     out.gap(list_height)
 
-    # The footer: pause or resume, the volume with − and +, the voice with ◀ and ▶
+    # The footer: pause or resume, the volume slider, the voice with ◀ and ▶
     out.gap(FOOTER_GAP)
     fy = out.y + FOOTER_H / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2
-    vol_x = pause_cx + PAUSE_SIZE / 2 + 16
-    vol_text = f"Vol {state['volume']:.1f}"
-    minus_cx = vol_x + text_width(vol_text, FOOTER_FONT) + 4 + SMALL_PITCH / 2
-    plus_cx = minus_cx + SMALL_PITCH
+    vol_icon = pause_cx + PAUSE_SIZE / 2 + 16
+    vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
+    vol_x1 = vol_x0 + VOLUME_WIDTH
+    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     voice_next_cx = right - SMALL_PITCH / 2
     voice_prev_cx = voice_next_cx - SMALL_PITCH
     voice_right = voice_prev_cx - SMALL_PITCH / 2 - 4
     voice = fit(f"Voice {voice_label(state['voice'])}", FOOTER_FONT,
-                voice_right - (plus_cx + SMALL_PITCH / 2 + 16))
+                voice_right - (vol_x1 + 6 + 16))
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
-    draw.append(f'volume {vol_x} {minus_cx} {plus_cx} {fy} {SMALL_PITCH} {vol_text}')
+    draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
     draw.append(f'voice {voice_right} {voice_prev_cx} {voice_next_cx} {fy} {SMALL_PITCH} {voice}')
     small = SMALL_PITCH / 2
     regions.update({
         'pause': box(pause_cx, fy, PAUSE_SIZE / 2 + 4, PAUSE_SIZE / 2 + 4),
-        'vol_down': box(minus_cx, fy, small, small),
-        'vol_up': box(plus_cx, fy, small, small),
         'voice_prev': box(voice_prev_cx, fy, small, small),
         'voice_next': box(voice_next_cx, fy, small, small),
-        'volume': [vol_x, fy - small, plus_cx + small, fy + small],
+        'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
+        'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
+        'volume_bar': [vol_x0, vol_x1],
         'voice': [voice_right - text_width(voice, FOOTER_FONT), fy - small, voice_next_cx + small, fy + small],
     })
     out.gap(FOOTER_H)

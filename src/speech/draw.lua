@@ -4,6 +4,7 @@
 --   widget.txt    conky's markup (the header and the Sessions label), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
+--   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 -- and, read only, the Spotify widget's bg.txt (or the file ~/.config/conky-widgets/speech/
 -- background names), whose colour the card fades to with it. Everything drawn is the
 -- foreground or a share of it, as the Spotify widget's controls are, so the widget follows
@@ -41,7 +42,7 @@ end
 
 local function load_draw()
     -- {key = {numbers...}}, and each line's own text in d.text[key] for the ones that end in a
-    -- label ("Vol 1.2", "Voice amy")
+    -- label ("Voice amy")
     local d = {text = {}}
     for line in (read('draw.txt') or ''):gmatch('[^\n]+') do
         local key, rest = line:match('^(%S+)%s+(.*)$')
@@ -446,18 +447,16 @@ local function draw_footer(cr, f, s)
     end
 end
 
-local function draw_volume(cr, v, label, s, text)
-    -- "Vol 1.2", then − and +
-    local x, minus_cx, plus_cx, cy, pitch = v[1] * s, v[2] * s, v[3] * s, v[4] * s, v[5] * s
-    font(cr, 11, text, s)
-    set(cr, fg)
-    show(cr, label, x, cy, 'left')
-    local h = 4.5 * s
-    shade(cr, minus_cx, cy, pitch / 2)
-    rounded_line(cr, minus_cx - h, cy, minus_cx + h, cy, 2 * s)
-    shade(cr, plus_cx, cy, pitch / 2)
-    rounded_line(cr, plus_cx - h, cy, plus_cx + h, cy, 2 * s)
-    rounded_line(cr, plus_cx, cy - h, plus_cx, cy + h, 2 * s)
+local function draw_volume(cr, v, s)
+    -- the speech volume: theme.draw_volume's slider, as the Spotify widget draws its own, its
+    -- fraction the volume over speechctl's top of 2.0; while conky-mouse.py drags it, the
+    -- level under the pointer from volume-preview
+    local x0, x1, cy, fraction, ix, size = v[1] * s, v[2] * s, v[3] * s, v[4], v[5] * s, v[6] * s
+    local preview = tonumber(read('volume-preview') or '')
+    if preview then fraction = preview end
+    local active = preview ~= nil or hovered(x0 - 6 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s)
+    theme.draw_volume(cr, x0, x1, cy, fraction, ix, size, s, fg, active,
+                      active or hovered(ix - 4 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s))
 end
 
 local function draw_voice(cr, v, label, s, text)
@@ -495,7 +494,7 @@ function conky_draw_widget()
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end
-        if d.volume then draw_volume(cr, d.volume, label_after(d.text.volume, 5), s, text) end
+        if d.volume then draw_volume(cr, d.volume, s) end
         if d.voice then draw_voice(cr, d.voice, label_after(d.text.voice, 5), s, text) end
     end)
 end
