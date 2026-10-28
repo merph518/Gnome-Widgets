@@ -1,3 +1,14 @@
+conky-spotify-nowplaying (2.0.0) UNRELEASED; urgency=medium
+
+  * The package is now called conky-widgets, after the bundle of widgets
+    it ships. Upgrading from the PPA moves over on its own:
+    conky-spotify-nowplaying stays as a transitional package that pulls
+    in conky-widgets and can be removed afterwards. Settings and the
+    autostart entry carry over, and a running widget restarts from the
+    new files.
+
+ -- mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>  Wed, 28 Oct 2026 10:33:38 -0400
+
 conky-spotify-nowplaying (1.8.0) resolute; urgency=medium
 
   * Click the album art to set the background to the colour under the
