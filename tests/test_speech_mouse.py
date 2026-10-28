@@ -2,7 +2,6 @@
 wheel step on each region runs, checked against a stub speechctl that records its arguments,
 and the wheel and swipes that scroll the session list."""
 import os
-import stat
 import subprocess
 import unittest
 from unittest import mock
@@ -37,11 +36,7 @@ class StubSpeechctl(support.TempDirTest):
 
     def setUp(self):
         super().setUp()
-        self.calls = os.path.join(self.dir, 'calls')
-        ctl = os.path.join(self.dir, 'speechctl')
-        with open(ctl, 'w') as f:
-            f.write(f'#!/bin/sh\necho "$*" >> {self.calls}\n')
-        os.chmod(ctl, os.stat(ctl).st_mode | stat.S_IXUSR)
+        ctl, self.calls = support.stub_speechctl(self.dir)
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')

@@ -30,6 +30,7 @@ SPEECHCTL = os.path.expanduser('~/.config/conky-widgets/speech/speechctl')   # a
 SPEECH_LINE = 60                                          # characters of the spoken line the menu shows
 VOLUMES = (0.25, 0.5, 0.75, 1.0, 1.2, 1.5, 2.0)          # the Volume menu's presets
 DEFAULT_VOLUME = 1.2                                      # what speech plays at with no setting
+DEFAULT_VOICE = 'en_US-amy-medium'                        # and the voice it uses (speechctl's)
 
 
 def conf_dir(widget):
@@ -151,13 +152,13 @@ def paused():
 
 
 def speech_settings():
-    """(voice, volume) from settings.json; '' and DEFAULT_VOLUME when it has none."""
+    """(voice, volume) from settings.json; DEFAULT_VOICE and DEFAULT_VOLUME when it has none."""
     settings = _json(os.path.join(SPEAK, 'settings.json'))
     try:
         volume = float(settings.get('volume', DEFAULT_VOLUME))
     except (TypeError, ValueError):
         volume = DEFAULT_VOLUME
-    return str(settings.get('voice') or ''), volume
+    return str(settings.get('voice') or DEFAULT_VOICE), volume
 
 
 def speechctl():

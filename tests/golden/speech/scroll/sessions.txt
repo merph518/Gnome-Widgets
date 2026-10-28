@@ -1,8 +1,8 @@
-00000000-eeee	alerts	0	1	-	Session 0		
-00000001-eeee	alerts	0	1	-	Session 1		
-00000002-eeee	alerts	0	1	-	Session 2		
-00000003-eeee	alerts	0	1	-	Session 3		
-00000004-eeee	alerts	0	1	-	Session 4		
-00000005-eeee	alerts	0	1	-	Session 5		
-00000006-eeee	alerts	0	1	-	Session 6		
-00000007-eeee	alerts	0	1	-	Session 7		
+00000000-eeee	alerts	0	1	idle	Session 0		
+00000001-eeee	alerts	0	1	idle	Session 1		
+00000002-eeee	alerts	0	1	idle	Session 2		
+00000003-eeee	alerts	0	1	idle	Session 3		
+00000004-eeee	alerts	0	1	idle	Session 4		
+00000005-eeee	alerts	0	1	idle	Session 5		
+00000006-eeee	alerts	0	1	idle	Session 6		
+00000007-eeee	alerts	0	1	idle	Session 7		

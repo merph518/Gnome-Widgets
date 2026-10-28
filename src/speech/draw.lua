@@ -351,7 +351,7 @@ end
 
 local function draw_row(cr, r, x0, y, row, c, s, text)
     -- a session's row: its repository's label (filled while it is speaking), its name,
-    -- busy / bg / question, how many lines it has queued and its setting; with speech on, a
+    -- busy / idle / waiting / bg / question, how many lines it has queued and its setting; with speech on, a
     -- second row of its last line read aloud. Returns how many rows it took.
     local cy = y + row / 2
     draw_control(cr, c, cy, c[5], s, text, r.speech)

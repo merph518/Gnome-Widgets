@@ -22,7 +22,7 @@ Each session has a speech setting, read from its files the way speechctl reads i
 plays), Alerts only with neither (only its announcements play). Sessions with speech on sort
 first, then by process id, so the ones being read aloud are at the top.
 """
-import fcntl, hashlib, json, os, re, subprocess, sys, time, unicodedata, wave
+import fcntl, glob, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata, wave
 import gi
 gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
@@ -48,6 +48,10 @@ INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
 LABELS = os.path.join(CONF, 'labels.json')        # {repository name: label}, before each session
+# Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
+# <project>/<session id>/scratchpad/ledger: a row a line, label, key, link and state, tab apart
+LEDGERS = os.path.join(tempfile.gettempdir(), f'claude-{os.getuid()}')
+WAITS = (('lp:', 'ci'), ('pr:', 'merge'))      # an open row's key, and what the session waits on
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 DEFAULT_VOICE = 'en_US-amy-medium'                # speechctl's, with no setting
 DEFAULT_VOLUME = 1.2
@@ -72,6 +76,7 @@ SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
+SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 # labels.json's first contents, written when it is missing; keys match without case
 DEFAULT_LABELS = {
     'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
@@ -129,6 +134,25 @@ def display_text(text):
     as one space."""
     text = ''.join(c for c in str(text) if unicodedata.category(c) != 'Cf')
     return ' '.join(text.split())
+
+
+def without_speaker(text):
+    """text without the "<name> session says:" the voice hook opens a clip with, for a row that already
+    sits under the session's name."""
+    return SPEAKER.sub('', text, count=1) or text
+
+
+def waiting_on(sid, ledgers=None):
+    """What session `sid` waits on by its catchup.py ledger: 'ci' with a Launchpad build
+    open, else 'merge' with a pull request open, else ''."""
+    keys = set()
+    for path in glob.glob(os.path.join(glob.escape(ledgers or LEDGERS), '*', glob.escape(sid),
+                                       'scratchpad', 'ledger')):
+        for line in (_read(path) or '').splitlines():
+            f = line.split('\t')
+            if len(f) > 3 and f[3] != 'done':
+                keys.add(f[1])
+    return next((wait for prefix, wait in WAITS if any(k.startswith(prefix) for k in keys)), '')
 
 
 def text_width(text, font):
@@ -388,7 +412,7 @@ def last_heard(n, name, duration):
     return _heard
 
 
-def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
+def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledgers=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
     labels = read_labels(labels)
@@ -411,7 +435,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
-                           question=question,
+                           question=question, waiting=waiting_on(s['id'], ledgers),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
@@ -477,11 +501,14 @@ def box(cx, cy, half_w, half_h):
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
     and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
-    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
-                                        ('question', s.get('question'))) if on) or '-'
+    # one tag, the first that holds: a question waiting, then busy, waiting, bg, else idle
+    wait = s.get('waiting')
+    flags = next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
+                                 (f'waiting: {wait}', wait), ('bg', s['background']),
+                                 ('idle', True)) if on)
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
                       display_text(s['name']), s.get('label', ''),
-                      (s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
+                      without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
 
 
 def write_sessions(listed):

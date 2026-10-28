@@ -100,12 +100,11 @@ class SpeechTest(support.TempDirTest):
 
     def setUp(self):
         super().setUp()
-        self.redirect(tray_model, SPEAK='speak', SPEECHCTL='speechctl-path')
-        os.makedirs(tray_model.SPEAK)
+        self.f = support.SpeechFixture(self.dir)
+        self.redirect(tray_model, SPEAK='speak-attention', SPEECHCTL='speechctl-path')
 
     def write(self, name, content):
-        with open(os.path.join(tray_model.SPEAK, name), 'w') as f:
-            f.write(content if isinstance(content, str) else json.dumps(content))
+        self.f.file(name, content if isinstance(content, str) else json.dumps(content))
 
     def executable(self, name):
         path = os.path.join(self.dir, name)
@@ -129,11 +128,11 @@ class SpeechTest(support.TempDirTest):
         self.assertEqual(tray_model.speech_line(), 'Speech idle')
 
     def test_settings_and_their_defaults(self):
-        self.assertEqual(tray_model.speech_settings(), ('', tray_model.DEFAULT_VOLUME))
+        self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
         self.write('settings.json', {'voice': 'en_US-ryan-high', 'volume': 0.5})
         self.assertEqual(tray_model.speech_settings(), ('en_US-ryan-high', 0.5))
         self.write('settings.json', {'volume': 'loud'})
-        self.assertEqual(tray_model.speech_settings(), ('', tray_model.DEFAULT_VOLUME))
+        self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
 
     def test_speechctl_from_the_configured_path_then_path(self):
         with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'):

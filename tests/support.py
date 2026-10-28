@@ -11,6 +11,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,8 @@ class SpeechFixture:
         self.speak = os.path.join(root, 'speak-attention')
         self.sessions = os.path.join(root, 'sessions')
         self.proc = os.path.join(root, 'proc')
-        for d in (self.speak, self.sessions, self.proc):
+        self.ledgers = os.path.join(root, 'ledgers')
+        for d in (self.speak, self.sessions, self.proc, self.ledgers):
             os.makedirs(d)
 
     def alive(self, pid, state='S'):
@@ -87,6 +89,19 @@ class SpeechFixture:
             'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
             'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}))
 
+    def ledger(self, sid, *rows, project='-home-user-project'):
+        """Session `sid`'s catchup.py ledger under ledgers/, a (key, state) per row."""
+        folder = os.path.join(self.ledgers, project, sid, 'scratchpad')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'ledger'), 'w') as f:
+            f.writelines(f'label\t{key}\thttps://example.test\t{state}\t\n' for key, state in rows)
+
+    def settings(self, **values):
+        self.file('settings.json', json.dumps(values))
+
+    def pause(self):
+        self.file('paused')
+
     def wav(self, hook_pid, seconds, rate=22050):
         with wave.open(os.path.join(self.speak, f'{hook_pid}.wav'), 'wb') as w:
             w.setnchannels(1)
@@ -111,6 +126,16 @@ def load_conky_mouse():
 def load_spotify_mouse():
     """The Spotify widget's part of the mouse helper, which conky-mouse.py loads."""
     return load_conky_mouse().hooks
+
+
+def stub_speechctl(folder):
+    """A speechctl in `folder` that appends its arguments, a line a run, to the file it
+    returns beside its own path: (speechctl, calls)."""
+    ctl, calls = os.path.join(folder, 'speechctl'), os.path.join(folder, 'speechctl-calls')
+    with open(ctl, 'w') as f:
+        f.write(f'#!/bin/sh\necho "$*" >> {calls}\n')
+    os.chmod(ctl, os.stat(ctl).st_mode | stat.S_IXUSR)
+    return ctl, calls
 
 
 def load_speech_mouse():
