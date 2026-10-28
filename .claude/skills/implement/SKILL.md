@@ -12,7 +12,7 @@ description: >-
 # Implement
 
 Takes one argument: the issue number. `/implement 12`, `/implement #12` and
-`/implement https://github.com/mfagerstrom/conky-spotify-nowplaying/issues/12`
+`/implement https://github.com/merph518/conky-widgets/issues/12`
 all mean issue 12. With no number, ask for one with `AskUserQuestion`; do not
 guess from the open issues.
 
@@ -58,8 +58,8 @@ gh issue list --state open --label "In Progress" --json number,title
 gh pr list --state open --json number,headRefName,files \
   --jq '.[]|"\(.number) \(.headRefName): \([.files[].path]|join(", "))"'
 git branch -r --list "origin/*issue-<N>-*"
-gh api graphql -F n=<N> -f query='query($n: Int!) { repository(owner: "mfagerstrom",
-  name: "conky-spotify-nowplaying") { issue(number: $n) {
+gh api graphql -F n=<N> -f query='query($n: Int!) { repository(owner: "merph518",
+  name: "conky-widgets") { issue(number: $n) {
   closedByPullRequestsReferences(first: 10) { nodes { number headRefName } } } } }' \
   --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
 ```

@@ -4,9 +4,9 @@ Priority: optional
 Maintainer: mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.7.0
-Homepage: https://github.com/mfagerstrom/conky-spotify-nowplaying
-Vcs-Browser: https://github.com/mfagerstrom/conky-spotify-nowplaying
-Vcs-Git: https://github.com/mfagerstrom/conky-spotify-nowplaying.git
+Homepage: https://github.com/merph518/conky-widgets
+Vcs-Browser: https://github.com/merph518/conky-widgets
+Vcs-Git: https://github.com/merph518/conky-widgets.git
 Rules-Requires-Root: no
 
 Package: conky-spotify-nowplaying
