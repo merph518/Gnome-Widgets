@@ -15,7 +15,7 @@ usage: conky-widgets <widget> [command]
 With no widget, show and hide act on every widget that is running, and stop, restart
 and status on every widget.
 """
-import os, re, shutil, signal, subprocess, sys, time
+import fcntl, os, re, shutil, signal, subprocess, sys, time
 
 NAME = 'conky-widgets'
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -159,21 +159,26 @@ def start(widget):
     if not installed(widget):
         print(f'{widget} is not installed')
         return
-    if legacy_pid(widget):
-        terminate(legacy_pid(widget))           # its own supervisor, now the bundle's job
-    elif is_running(widget):
-        print('already running')
-        return
-    migrate(widget)
-    os.makedirs(cache_dir(widget), exist_ok=True)
-    flag(os.path.join(WANTED, widget), True)
-    if not running_pid():
-        os.makedirs(SHARED_CACHE, exist_ok=True)
-        me = os.path.realpath(__file__)
-        with open(os.path.join(SHARED_CACHE, 'run.log'), 'a') as log:
-            subprocess.Popen([sys.executable, me, '_run'],
-                             start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                             env=dict(os.environ, CSN_DIR=APP_DIR, CSN_LAUNCHER=me))
+    os.makedirs(SHARED_CACHE, exist_ok=True)
+    with open(os.path.join(SHARED_CACHE, 'lock'), 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)        # two starts at login take turns
+        if legacy_pid(widget):
+            terminate(legacy_pid(widget))       # its own supervisor, now the bundle's job
+        elif is_running(widget):
+            print('already running')
+            return
+        migrate(widget)
+        os.makedirs(cache_dir(widget), exist_ok=True)
+        if not running_pid():
+            shutil.rmtree(WANTED, ignore_errors=True)   # left by a supervisor that did not exit cleanly
+            me = os.path.realpath(__file__)
+            with open(os.path.join(SHARED_CACHE, 'run.log'), 'a') as log:
+                proc = subprocess.Popen([sys.executable, me, '_run'],
+                                        start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                        env=dict(os.environ, CSN_DIR=APP_DIR, CSN_LAUNCHER=me))
+            with open(PIDFILE, 'w') as f:       # now, so the next start finds it before it writes its own
+                f.write(str(proc.pid))
+        flag(os.path.join(WANTED, widget), True)
     print('started')
 
 
@@ -223,7 +228,7 @@ def processes(widget):
         ('tray', [py, os.path.join(folder, 'tray.py')]),
     ]
     return [(name, cmd) for name, cmd in specs
-            if name == 'conky' or name == 'mouse' or os.path.isfile(cmd[1])]
+            if name in ('conky', 'mouse') or os.path.isfile(cmd[1])]
 
 
 def supervise():
@@ -245,8 +250,7 @@ def supervise():
 
     def release(widget):
         for proc in children.pop(widget, {}).values():
-            if proc and proc.poll() is None:
-                proc.terminate()
+            end(proc)
         flag(os.path.join(UP, widget), False)
 
     signal.signal(signal.SIGTERM, shutdown)

@@ -73,7 +73,7 @@ class LauncherTest(support.TempDirTest):
     def popen(self, cmd, **kwargs):
         self.spawned.append(cmd)
         self.supervisor = 4242
-        return mock.Mock()
+        return mock.Mock(pid=4242)
 
     def terminate(self, pid):
         self.killed.append(pid)
@@ -107,6 +107,15 @@ class CommandsTest(LauncherTest):
         self.run_main('speech', 'start')
         self.assertEqual(len(self.spawned), 1)
         self.assertEqual(launcher.wanted(), ['spotify', 'speech'])
+
+    def test_the_supervisor_is_findable_before_it_writes_its_own_pid(self):
+        self.run_main('spotify', 'start')
+        self.assertEqual(open(launcher.PIDFILE).read(), '4242')
+
+    def test_flags_left_by_a_supervisor_that_did_not_exit_are_not_started(self):
+        launcher.flag(os.path.join(launcher.WANTED, 'speech'), True)
+        self.run_main('spotify', 'start')
+        self.assertEqual(launcher.wanted(), ['spotify'])
 
     def test_start_twice_is_already_running(self):
         self.run_main('spotify', 'start')
