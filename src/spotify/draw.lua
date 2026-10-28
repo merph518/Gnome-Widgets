@@ -9,6 +9,7 @@
 --   bg.txt        background colour picked from the album art
 --   widget.txt    conky's markup, which conky.conf shows through conky_widget
 --   seek-preview  fraction under the pointer while conky-mouse.py drags the seek bar
+--   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 -- conky redraws every update_interval (0.05 s); between draw.txt updates the playback
 -- position is advanced locally so the seek bar and lyrics move smoothly.
 require 'cairo'
@@ -262,6 +263,54 @@ local function draw_bar(cr, b, s, pos)
     end
 end
 
+local function draw_volume(cr, v, s)
+    -- Spotify's volume, left of the heart: a speaker and a slim track drawn like the seek
+    -- bar, its knob shown on hover or while dragged. The speaker's body stays in place at
+    -- every level; to its right, inside its fixed box, it shows a cross when muted, one wave
+    -- below half volume and two from half up. Shaded like the heart, full on hover.
+    local x0, x1, cy, fraction, ix, size = v[1] * s, v[2] * s, v[3] * s, v[4], v[5] * s, v[6] * s
+    local preview = tonumber(read('volume-preview') or '')
+    if preview then fraction = preview end
+    local active = preview ~= nil or hovered(x0 - 6 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s)
+    local fx = x0 + (x1 - x0) * math.min(math.max(fraction, 0), 1)
+    set(cr, fg, 0.3)                                                    -- track
+    rounded_line(cr, x0, cy, x1, cy, 4 * s)
+    set(cr, fg)                                                         -- level, knob
+    if fx > x0 then rounded_line(cr, x0, cy, fx, cy, 4 * s) end
+    if active then
+        cairo_arc(cr, fx, cy, 5 * s, 0, 2 * math.pi)
+        cairo_fill(cr)
+    end
+
+    set(cr, fg, (active or hovered(ix - 4 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s)) and 1 or 0.7)
+    cairo_new_path(cr)                                                  -- body and cone
+    cairo_move_to(cr, ix, cy - 0.17 * size)
+    cairo_line_to(cr, ix + 0.22 * size, cy - 0.17 * size)
+    cairo_line_to(cr, ix + 0.5 * size, cy - 0.4 * size)
+    cairo_line_to(cr, ix + 0.5 * size, cy + 0.4 * size)
+    cairo_line_to(cr, ix + 0.22 * size, cy + 0.17 * size)
+    cairo_line_to(cr, ix, cy + 0.17 * size)
+    cairo_close_path(cr)
+    cairo_fill(cr)
+    cairo_set_line_width(cr, 1.5 * s)
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
+    local wx = ix + 0.5 * size
+    if fraction < 0.005 then                                            -- muted: a cross
+        cairo_move_to(cr, ix + 0.64 * size, cy - 0.15 * size)
+        cairo_line_to(cr, ix + 0.94 * size, cy + 0.15 * size)
+        cairo_move_to(cr, ix + 0.64 * size, cy + 0.15 * size)
+        cairo_line_to(cr, ix + 0.94 * size, cy - 0.15 * size)
+        cairo_stroke(cr)
+    else
+        local waves = fraction < 0.5 and {0.2} or {0.2, 0.42}
+        for _, r in ipairs(waves) do
+            cairo_new_sub_path(cr)
+            cairo_arc(cr, wx, cy, r * size, -0.9, 0.9)
+            cairo_stroke(cr)
+        end
+    end
+end
+
 local function draw_label(cr, l, s, text)
     -- NOW PLAYING in the foreground, 10 pt Ubuntu Sans Bold at its text scale (like
     -- nowplaying.py's LABEL_FONT), the tops of its capitals on the given line
@@ -473,6 +522,7 @@ function conky_draw_bar()
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.heart then draw_heart(cr, d.heart, s) end
+        if d.volume then draw_volume(cr, d.volume, s) end
         if d.label then draw_label(cr, d.label, s, times_text) end
         if not d.bar then return end                -- Spotify not playing: top buttons only
         if d.controls then draw_controls(cr, d.controls, s) end

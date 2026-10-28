@@ -10,7 +10,8 @@ which conky.conf renders through draw.lua's ${lua_parse widget}. It covers:
     one picked by clicking that art (art_colours.py)
   - the controls row: draw.lua draws the buttons and seek bar from draw.txt; click
     regions for conky-mouse.py go to regions.json
-  - the heart, minimize and close buttons at the top right (drawn by draw.lua)
+  - the heart, minimize and close buttons at the top right, and Spotify's volume slider
+    left of them (drawn by draw.lua); the volume is read through MPRIS with the rest
   - like state (heart), via spotify_api.py; refreshed on track change, then every 5 s from
     the Spotify app's files, or every 2 minutes through the Web API where those cannot be read
   - lyrics from LRCLIB (lrclib.net) -> lyrics.txt. draw.lua scrolls synced ones smoothly
@@ -89,6 +90,10 @@ WINDOW_BUTTON_SIZE = 10                       # minimize / close icons, right of
 WINDOW_BUTTON_PITCH = 22                      # centre to centre, and each one's hit width
 HEART_PITCH = 25                              # heart centre to minimize centre
 HEART_WIDTH = 16                              # the heart draw.lua strokes, as wide as HEART_FONT's ♡
+VOLUME_WIDTH = 64                             # the volume slider's track, left of the heart
+VOLUME_MIN = 32                               # its shortest track; with less room it is left out
+VOLUME_ICON = 16                              # the speaker and its waves, left of the track
+VOLUME_GAP = 8                                # speaker to track
 LIKE_POLL_SECONDS = 120                       # through the Web API
 LOCAL_LIKE_POLL_SECONDS = 5                   # read from the Spotify app's files, which costs nothing
 LIBRARY_PAGE_SECONDS = 15                     # between Liked Songs pages of a full scan
@@ -777,13 +782,17 @@ def render():
         return message('Spotify not playing')
 
     meta = playerctl('metadata', '--format',
-                     '{{mpris:trackid}}\t{{title}}\t{{artist}}\t{{album}}\t{{mpris:artUrl}}\t{{position}}\t{{mpris:length}}')
+                     '{{mpris:trackid}}\t{{title}}\t{{artist}}\t{{album}}\t{{mpris:artUrl}}\t{{position}}\t{{mpris:length}}\t{{volume}}')
     parts = meta.split('\t')
-    if len(parts) != 7:
+    if len(parts) != 8:
         return message('Loading…')
-    track_id, title, artist, album, art, pos_us, len_us = parts
+    track_id, title, artist, album, art, pos_us, len_us, vol = parts
     position = int(pos_us or 0) / 1e6
     duration = int(len_us or 0) / 1e6
+    try:
+        volume = min(max(float(vol), 0.0), 1.0)
+    except ValueError:
+        volume = 0.0
 
     now = time.time()
     lyrics_on, lyrics_scrolling = lyrics_settings.shown(), lyrics_settings.scrolling()
@@ -850,6 +859,14 @@ def render():
     heart_size = line_height(HEART_FONT)
     heart_box = [heart_cx - heart_size / 2 - 8, MARGIN - 8, min_cx - WINDOW_BUTTON_PITCH / 2,
                  MARGIN + heart_size + 6]
+    # The volume slider ends left of the heart's click area and starts, speaker first, past
+    # NOW PLAYING; as the label grows with the text or the widget narrows, the track gets
+    # shorter, and below VOLUME_MIN it is left out.
+    vol_x1 = heart_box[0] - 6
+    label_end = COLUMN_X + text_width('NOW PLAYING', LABEL_FONT) + 12
+    vol_x0 = max(vol_x1 - VOLUME_WIDTH, label_end + VOLUME_ICON + VOLUME_GAP)
+    vol_icon = vol_x0 - VOLUME_GAP - VOLUME_ICON
+    has_volume = vol_x1 - vol_x0 >= VOLUME_MIN
 
     total = fmt_time(duration)                # measured for the bar; draw.lua draws both times
     mid_offset = controls_mid(total)
@@ -899,6 +916,8 @@ def render():
             f'times {time_x} {MARGIN + widget_width} {mid_y + BAR_DROP}',
             f'clock {time.monotonic():.3f} {position:.3f} {int(status == "Playing")}',
             f'label {COLUMN_X} {ART_TOP}']
+    if has_volume:
+        draw.append(f'volume {vol_x0} {vol_x1} {top_cy} {volume:.4f} {vol_icon} {VOLUME_ICON}')
     if not heart_hidden:
         draw.append(f'heart {heart_cx} {top_cy} {HEART_WIDTH} {heart_state} ' + ' '.join(map(str, heart_box)))
     lyrics_area = lyrics_scroll = None
@@ -931,6 +950,10 @@ def render():
         'next': [next_cx - SKIP_SIZE / 2 - 5, mid_y - half, next_cx + SKIP_SIZE / 2 + 5, mid_y + half],
         'seek': [bar_x0 - 6, mid_y + BAR_DROP - 12, bar_x1 + 6, mid_y + BAR_DROP + 12],
         'heart': None if heart_hidden else heart_box,
+        # the track takes clicks and drags, the speaker too the wheel
+        'volume': [vol_x0 - 6, top_cy - 10, vol_x1 + 6, top_cy + 10] if has_volume else None,
+        'volume_wheel': [vol_icon - 4, top_cy - 10, vol_x1 + 6, top_cy + 10] if has_volume else None,
+        'volume_bar': [vol_x0, vol_x1] if has_volume else None,
         'art': None if not art or art == NO_ART_URL else [MARGIN, MARGIN, MARGIN + 118, MARGIN + 118],
         'bar': [bar_x0, bar_x1],
         'duration': duration,
