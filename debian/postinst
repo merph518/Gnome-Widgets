@@ -1,0 +1,27 @@
+#!/bin/sh
+# After an upgrade, starts again any widget that is running, so it picks up the new files
+# instead of respawning from paths this version no longer ships. The restart runs as the
+# widget's user, in that user's session: the supervisor's own environment says which.
+set -e
+
+restart_running_widgets() {
+    for dir in /proc/[0-9]*; do
+        args=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null) || continue
+        printf '%s\n' "$args" | grep -qx '_run' || continue
+        printf '%s\n' "$args" | grep -qx '/usr/bin/conky-spotify-nowplaying' || continue   # not a checkout's copy
+        user=$(stat -c %U "$dir") || continue
+        set --
+        for var in HOME PATH LANG DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
+                   XDG_CURRENT_DESKTOP XDG_DATA_DIRS DBUS_SESSION_BUS_ADDRESS; do
+            value=$(tr '\0' '\n' < "$dir/environ" | grep "^$var=" | head -n 1) || true
+            [ -n "$value" ] && set -- "$@" "$value"
+        done
+        runuser -u "$user" -- env "$@" /usr/bin/conky-spotify-nowplaying restart || true
+    done
+}
+
+if [ "$1" = configure ] && [ -n "$2" ]; then
+    restart_running_widgets || true
+fi
+
+#DEBHELPER#

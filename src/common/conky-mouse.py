@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Mouse handling and placement for the conky now-playing widget.
+"""Mouse handling and placement for a conky widget: conky-mouse.py <widget>.
+
+<widget> is the folder under src/ whose mouse.py names the widget (its config and cache
+folders, launcher and window class) and does what its own controls do. The Spotify widget's
+are the heart, play/pause, previous and next buttons, the seek bar and the album art.
 
 Conky's own Lua mouse hook never receives button presses under GNOME/XWayland, so this
 helper subscribes to clicks on conky's window itself:
-  - heart: like/unlike the track (or start the Spotify login if not logged in yet)
-  - play/pause, previous, next buttons: control playback
-  - seek bar: click or drag to change the position in the song
-  - album art: a click makes the art's colour where it was clicked the background, kept for
-    that art from then on (art_colours.py); a drag from it moves the widget like anywhere else
+  - the widget's controls: pressed by a click or a tap (its mouse.py)
   - minimize: hide the widget until the tray menu or the launcher shows it again
   - close: stop the widget, like the tray menu's Quit
   - an edge or corner: resize the widget. A side edge changes its width, the top or bottom
     edge the height of the lyrics, and a corner both; the text keeps its size. An outline
     shows the new size while the button is held; on release it is saved (widget_size.py)
   - anywhere else: drag the widget; the position is saved on release
-  - the mouse wheel over static lyrics (plain ones, which have no timing to follow, or
-    synced ones under the tray menu's Static): scroll them a line at a time. draw.lua reads
-    the offset from lyrics-scroll. The wheel does nothing anywhere else.
+  - the mouse wheel over the widget's scrollable text (for Spotify, static lyrics: plain ones,
+    which have no timing to follow, or synced ones under the tray menu's Static): its mouse.py
+    scrolls it a line at a time. The wheel does nothing anywhere else.
 
 A touchscreen does the same with one finger, through XInput 2 touch events selected on the
 window, which X then sends instead of the pointer events it would make up from the touch:
@@ -36,7 +36,7 @@ cursors are, never the X server's root cursor: under XWayland with native scalin
 loaded at the unscaled cursor size, and shows at half the size or less (Xcursor.size, which
 X font cursors load at, carries the scale).
 
-The position lives in ~/.config/conky-spotify-nowplaying/position, not in conky.conf:
+The position lives in ~/.config/<name>/position, not in conky.conf:
 rewriting conky.conf makes conky reload and flash. Instead this helper keeps the window
 at the saved spot, moving it back whenever conky places it elsewhere (startup, reloads).
 The file holds 'x y monitor dx dy width scale': the root-window x y conky.conf starts the
@@ -58,28 +58,22 @@ shows a blank frame when it resizes, so a copy of the widget's pixels covers it 
 has drawn at the new size.
 
 Always on top is the window manager's state for conky's regular window, set and cleared
-here as ~/.config/conky-spotify-nowplaying/on-top (the tray menu's toggle) changes, so conky
+here as ~/.config/<name>/on-top (the tray menu's toggle) changes, so conky
 never restarts for it.
 
-Minimized is a flag file (~/.cache/conky-spotify-nowplaying/hidden) that the launcher's
+Minimized is a flag file (~/.cache/<name>/hidden) that the launcher's
 show/hide commands also write; while it exists this helper keeps conky's window unmapped.
 """
-import ctypes, json, math, os, re, subprocess, sys, time
+import ctypes, importlib.util, json, math, os, re, subprocess, sys, time
 
-import art_colours
 import widget_size
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONF = os.path.expanduser('~/.config/conky-spotify-nowplaying')
-POSITION = os.path.join(CONF, 'position')
-CACHE = os.path.expanduser('~/.cache/conky-spotify-nowplaying')
-REGIONS = os.path.join(CACHE, 'regions.json')
-SEEK_PREVIEW = os.path.join(CACHE, 'seek-preview')
-LYRICS_SCROLL = os.path.join(CACHE, 'lyrics-scroll')   # '<lyrics version> <line offset>', for draw.lua
-LOG = os.path.join(CACHE, 'mouse.log')
-HIDDEN = os.path.join(CACHE, 'hidden')
-ON_TOP = os.path.join(CONF, 'on-top')             # 'off': not always on top
-LAUNCHER = os.environ.get('CSN_LAUNCHER') or 'conky-spotify-nowplaying'
+# What a widget's name sets, in configure(): the folders and files below, and `hooks`, the
+# widget's own mouse.py.
+hooks = None
+CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = LAUNCHER = None
+WM_CLASS, OUTLINE, BUTTONS = None, None, ()
 BUTTON_PRESS, MOTION_NOTIFY, BUTTON1_MASK = 4, 6, 1 << 8
 WHEEL_UP, WHEEL_DOWN = 4, 5                       # X reports the wheel as button presses
 BUTTON_PRESS_MASK, BUTTON_RELEASE_MASK, POINTER_MOTION_MASK = 1 << 2, 1 << 3, 1 << 6
@@ -88,7 +82,7 @@ CW_BACK_PIXMAP, CW_BACK_PIXEL, CW_BORDER_PIXEL = 1 << 0, 1 << 1, 1 << 3
 CW_OVERRIDE_REDIRECT, CW_COLORMAP = 1 << 9, 1 << 13
 US_POSITION, P_POSITION = 1 << 0, 1 << 2          # XSizeHints flags
 COVER_HOLD = 0.1                                  # s: conky draws every 0.05 s
-OUTLINE, OUTLINE_WIDTH = 0x1db954, 2              # Spotify green; logical px
+OUTLINE_WIDTH = 2                                 # logical px
 CLICK_SLOP = 4                                    # logical px a press moves before it is a drag
 TAP_SLOP = 8                                      # the same for a finger, which rolls as it lifts
 EDGE = 6                                          # logical px along the border that resize
@@ -99,11 +93,34 @@ RESCALED = 75                                     # exit status: Xft.dpi changed
 CURSORS = {'': 68, 'l': 70, 'r': 96, 't': 138, 'b': 16, 'lt': 134, 'rt': 136, 'lb': 12, 'rb': 14}
 SHAPE_INPUT, SHAPE_SET, UNSORTED = 2, 0, 0         # X Shape extension
 SHADOW = widget_size.SHADOW                        # logical px of shadow around the card
-BUTTONS = ('heart', 'play', 'prev', 'next', 'minimize', 'close')   # the controls a click or tap presses
 GENERIC_EVENT = 35                                 # an extension's event, XInput 2's among them
 XI_TOUCH_BEGIN, XI_TOUCH_UPDATE, XI_TOUCH_END = 18, 19, 20
 XI_ALL_MASTER_DEVICES = 1
 TOUCH_TIMEOUT = 30                                 # s without a touch event before a finger counts as lifted
+
+def configure(widget):
+    """Sets this helper up for the widget in src/<widget>/, whose mouse.py says its name
+    (the config and cache folders, the launcher, the window class), its controls and what
+    they do. Run before anything else here."""
+    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP, LAUNCHER
+    global WM_CLASS, OUTLINE, BUTTONS
+    folder = os.path.join(HERE, '..', widget)
+    sys.path.insert(0, folder)
+    spec = importlib.util.spec_from_file_location(f'{widget}_mouse', os.path.join(folder, 'mouse.py'))
+    hooks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks)
+    hooks.core = sys.modules[__name__]
+    CONF = os.path.expanduser(f'~/.config/{hooks.NAME}')
+    POSITION = os.path.join(CONF, 'position')
+    CACHE = os.path.expanduser(f'~/.cache/{hooks.NAME}')
+    REGIONS = os.path.join(CACHE, 'regions.json')
+    LOG = os.path.join(CACHE, 'mouse.log')
+    HIDDEN = os.path.join(CACHE, 'hidden')
+    ON_TOP = os.path.join(CONF, 'on-top')         # 'off': not always on top
+    LAUNCHER = os.environ.get('CSN_LAUNCHER') or hooks.NAME
+    WM_CLASS, OUTLINE = hooks.WM_CLASS, hooks.OUTLINE
+    BUTTONS = hooks.BUTTONS + ('minimize', 'close')   # the controls a click or tap presses
+
 
 x11 = ctypes.CDLL('libX11.so.6')
 x11.XOpenDisplay.restype = ctypes.c_void_p
@@ -243,7 +260,7 @@ def log(msg):
 def conky_window():
     tree = subprocess.run(['xwininfo', '-root', '-tree'], capture_output=True, text=True).stdout
     for line in tree.splitlines():
-        if '"ConkySpotifyNowPlaying")' in line:
+        if f'"{WM_CLASS}")' in line:
             return int(line.split()[0], 16)
     return None
 
@@ -432,12 +449,6 @@ def dragged(settings, edges, dx, dy, room_x, room_y, s):
         out = min(dy if 'b' in edges else -dy, room_y)
         height = widget_size.clamp(height + math.floor(out / s), *limits[1])
     return width, height, text
-
-
-def without_idle_edges(edges, regions):
-    """With no lyrics shown the height has nothing to change: the top and bottom edges move
-    the widget like anywhere else, and a corner only changes the width."""
-    return edges if regions.get('lyrics') else edges.replace('t', '').replace('b', '')
 
 
 def set_cursor(d, win, edges, cache={}):
@@ -655,98 +666,11 @@ def load_regions(cache={}):
 
 def region_at(regions, s, x, y):
     """The control under window-relative (x, y), if any."""
-    for name in ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek', 'art'):
+    for name in hooks.REGIONS_ORDER:
         r = regions.get(name)
         if r and r[0] * s <= x <= r[2] * s and r[1] * s <= y <= r[3] * s:
             return name
     return None
-
-
-def scroll_lyrics(regions, s, x, y, down):
-    """Moves static lyrics under window-relative (x, y) a line down or up, between their
-    first line at the top and their last at the bottom. Returns the new offset, or None
-    when (x, y) is not over lyrics the wheel scrolls."""
-    area, static = regions.get('lyrics'), regions.get('lyrics_scroll')
-    if not (area and static and area[0] * s <= x <= area[2] * s and area[1] * s <= y <= area[3] * s):
-        return None
-    version, last = static[:2]
-    try:
-        with open(LYRICS_SCROLL) as f:
-            shown, offset = f.read().split()
-        offset = int(offset) if shown == version else 0     # other lyrics: from the top
-    except (OSError, ValueError):
-        offset = 0
-    offset = min(max(min(offset, last) + (1 if down else -1), 0), last)   # last shrinks when the area grows
-    with open(LYRICS_SCROLL + '.tmp', 'w') as f:
-        f.write(f'{version} {offset}')
-    os.replace(LYRICS_SCROLL + '.tmp', LYRICS_SCROLL)
-    return offset
-
-
-def pick_colour(art, x, y):
-    """Make the art's colour at card (x, y), logical px, the background."""
-    fx, fy = (x - art[0]) / (art[2] - art[0]), (y - art[1]) / (art[3] - art[1])
-    try:
-        rgb = art_colours.pick(fx, fy)
-    except Exception as e:
-        log(f'art colour: failed at {fx:.2f},{fy:.2f}: {type(e).__name__}: {e}')
-        return
-    if rgb:
-        log(f'art colour: {fx:.2f},{fy:.2f} -> ' + ' '.join(f'{c:.3f}' for c in rgb))
-
-
-def swipe_lines(dy, row):
-    """How many lines a finger moved `dy` px down has scrolled lyrics `row` px a line:
-    up shows later lines (positive), down earlier ones, a line for each whole row."""
-    return int(-dy / row) if row > 0 else 0
-
-
-def swipe(regions, s, x, y, y0, track):
-    """Scroll the static lyrics under window-relative (x, y) with the finger `track`
-    follows, which touched down at root y0, until it lifts."""
-    row = regions['lyrics_scroll'][2] * s
-    done, held = 0, True
-    while held:
-        _, fy, held = track()
-        lines = swipe_lines(fy - y0, row)
-        while done != lines:
-            down = lines > done
-            if scroll_lyrics(regions, s, x, y, down) is None:
-                held = False                     # the lyrics went from under it
-                break
-            done += 1 if down else -1
-        time.sleep(0.01)
-    log(f'swipe: {done} lines')
-
-
-def scrollable(regions, s, x, y):
-    """Whether window-relative (x, y) is over static lyrics a swipe scrolls."""
-    area, static = regions.get('lyrics'), regions.get('lyrics_scroll')
-    return bool(area and static and len(static) > 2 and
-                area[0] * s <= x <= area[2] * s and area[1] * s <= y <= area[3] * s)
-
-
-def seek(d, root, win, regions, s, track):
-    """Follow `track` (follow_pointer() or a Touch) along the bar (draw.lua shows the
-    preview), seek on release."""
-    bx0, bx1 = regions['bar']
-    duration = regions['duration']
-    wx, _, _, _ = card_of(geometry(d, win), s)
-    fraction, held = 0.0, True
-    while held:
-        px, _, held = track()
-        fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
-        with open(SEEK_PREVIEW + '.tmp', 'w') as f:
-            f.write(f'{fraction:.4f}')
-        os.replace(SEEK_PREVIEW + '.tmp', SEEK_PREVIEW)
-        time.sleep(0.02)
-    subprocess.run(['playerctl', '-p', 'spotify', 'position', f'{fraction * duration:.2f}'])
-    log(f'seek: {fraction:.3f} of {duration:.0f}s')
-    time.sleep(0.4)  # keep the preview until nowplaying.py reports the new position
-    try:
-        os.remove(SEEK_PREVIEW)
-    except OSError:
-        pass
 
 
 def tap(regions, s, x, y, start, hit, track):
@@ -761,46 +685,26 @@ def tap(regions, s, x, y, start, hit, track):
 
 
 def pull(d, root, win, s, regions, hit, edges, track, at, touch=False):
-    """What a press off the controls does, following `track` from card-relative (x, y) and
-    root (x, y) `at` until release: seek along the bar; pick the art's colour on a click or
-    tap, or move the widget from the press on a drag; resize from an edge; scroll static
-    lyrics with a finger; or else move the widget."""
+    """What a press off the plain buttons does, following `track` from card-relative (x, y)
+    and root (x, y) `at` until release: whatever the widget does with its controls (its
+    mouse.py: seek, pick a colour from the art); resize from an edge; scroll static lyrics
+    with a finger; or else move the widget."""
     x, y, start = at
-    if hit == 'seek' and regions.get('duration'):
-        seek(d, root, win, regions, s, track)
-    elif hit == 'art':
-        if clicked(start, s, track, TAP_SLOP if touch else CLICK_SLOP):
-            pick_colour(regions['art'], x / s, y / s)
-        else:
-            remember(*drag(d, root, win, s, track, start))
+    if hooks.pull_control(d, root, win, s, regions, hit, track, at, touch):
+        pass
     elif edges:
         placed = resize(d, root, win, edges, s, regions, track)
         if placed:
             remember(*placed)
-    elif touch and scrollable(regions, s, x, y):
-        swipe(regions, s, x, y, start[1], track)
+    elif touch and hooks.scrollable(regions, s, x, y):
+        hooks.swipe(regions, s, x, y, start[1], track)
     else:
         remember(*drag(d, root, win, s, track))
 
 
 def press(d, win, hit):
     """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
-    if hit == 'heart':
-        logged_in = os.path.exists(os.path.join(CONF, 'spotify-token.json'))
-        action = 'toggle' if logged_in else 'login'
-        subprocess.Popen([sys.executable, os.path.join(HERE, 'spotify_api.py'), action],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log(f'heart: {action}')
-    elif hit == 'play':
-        subprocess.Popen(['playerctl', '-p', 'spotify', 'play-pause'])
-        log('play-pause')
-    elif hit == 'prev':
-        subprocess.Popen(['playerctl', '-p', 'spotify', 'previous'])
-        log('previous')
-    elif hit == 'next':
-        subprocess.Popen(['playerctl', '-p', 'spotify', 'next'])
-        log('next')
-    elif hit == 'minimize':
+    if hit == 'minimize':
         open(HIDDEN, 'w').close()
         x11.XUnmapWindow(d, win)
         x11.XFlush(d)
@@ -808,6 +712,8 @@ def press(d, win, hit):
     elif hit == 'close':
         subprocess.Popen([LAUNCHER, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log('close')
+    else:
+        hooks.press(d, win, hit)
 
 
 def touch_opcode(d):
@@ -881,11 +787,9 @@ class Touch:
         return round(self.x), round(self.y), self.down
 
 
-def main():
-    try:
-        os.remove(SEEK_PREVIEW)  # left behind if a previous run was killed mid-seek
-    except OSError:
-        pass
+def main(widget):
+    configure(widget)
+    hooks.start()
     d = ctypes.c_void_p(x11.XOpenDisplay(None))
     root = x11.XDefaultRootWindow(d)
     win, last_check, hidden = None, 0.0, None   # None: not known, e.g. after a restart
@@ -977,12 +881,12 @@ def main():
                     if region_at(regions, s, x, y):
                         edges = ''               # a control reaching the border wins
                     else:
-                        edges = without_idle_edges(edges, regions)
+                        edges = hooks.without_idle_edges(edges, regions)
                 if edges != cursor:
                     set_cursor(d, win, edges)
                     cursor = edges
             elif ev.type == BUTTON_PRESS and b.button in (WHEEL_UP, WHEEL_DOWN) and b.window == win:
-                scroll_lyrics(load_regions(), s, b.x - SHADOW * s, b.y - SHADOW * s, b.button == WHEEL_DOWN)
+                hooks.scroll_lyrics(load_regions(), s, b.x - SHADOW * s, b.y - SHADOW * s, b.button == WHEEL_DOWN)
             elif ev.type == BUTTON_PRESS and b.button == 1 and b.window == win:
                 s = scale()
                 _, _, w, h = card_of(geometry(d, win), s)
@@ -992,7 +896,7 @@ def main():
                 regions = load_regions()
                 hit = region_at(regions, s, x, y)
                 edges = resize_edges(x, y, w, h, s)
-                edges = without_idle_edges(edges, regions)
+                edges = hooks.without_idle_edges(edges, regions)
                 if hit in BUTTONS:
                     press(d, win, hit)
                     if hit == 'minimize':
@@ -1011,10 +915,10 @@ def main():
                     continue
                 regions = load_regions()
                 hit = region_at(regions, s, x, y)
-                edges = without_idle_edges(resize_edges(x, y, w, h, s), regions)
+                edges = hooks.without_idle_edges(resize_edges(x, y, w, h, s), regions)
                 start = round(t[3]), round(t[4])
                 finger = Touch(d, opcode, t[1], *start)
-                what = hit or edges or ('lyrics' if scrollable(regions, s, x, y) else 'card')
+                what = hit or edges or ('lyrics' if hooks.scrollable(regions, s, x, y) else 'card')
                 log(f'touch at {round(x)},{round(y)}: {what}')
                 if hit in BUTTONS:               # pressed once it lifts, if still on the control
                     if tap(regions, s, x, y, start, hit, finger):
@@ -1029,4 +933,6 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) != 2:
+        sys.exit('usage: conky-mouse.py <widget>')
+    main(sys.argv[1])

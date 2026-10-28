@@ -13,11 +13,11 @@ before `/release` builds.
 ## The list
 
 ```bash
-python3 -m py_compile src/*.py bin/conky-spotify-nowplaying scripts/*.py
+python3 -m py_compile src/*/*.py bin/conky-spotify-nowplaying scripts/*.py
 python3 scripts/catchup_test.py
 python3 -m unittest discover -s tests
-luac5.3 -p src/draw.lua src/conky.conf
-sh -n build-deb.sh release-ppa.sh
+luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
+sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/conky-spotify-nowplaying.desktop
 ```
 
@@ -27,7 +27,7 @@ Every command must exit 0 and print nothing, apart from the test summaries
 - `desktop-file-validate` hints count as failures to fix. It once caught a
   duplicate main category that every other check passed.
 - `luac5.3 -p` only parses; it catches syntax errors, not a bad call or a
-  misspelt name. `src/conky.conf` is Lua too (conky reads its config with its
+  misspelt name. `src/spotify/conky.conf` is Lua too (conky reads its config with its
   embedded interpreter), and conky links Lua 5.3, so `luac5.3` reads both
   files with the grammar conky uses. After a conky upgrade,
   `ldd "$(command -v conky)" | grep liblua` shows the version it links; when

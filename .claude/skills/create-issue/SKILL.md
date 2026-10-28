@@ -53,13 +53,13 @@ The area is where the user meets the problem, not the file the fix lands in:
 - `lyrics`: fetching lyrics from LRCLIB, matching them to the track, syncing
   and scrolling them.
 - `likes`: the heart, Spotify login, the Liked Songs index and the rate-limit
-  backoff (`src/spotify_api.py`).
+  backoff (`src/spotify/spotify_api.py`).
 - `controls`: clicks, the seek bar, the playback buttons, dragging and the
-  saved position (`src/conky-mouse.py`).
+  saved position (`src/common/conky-mouse.py`).
 - `layout`: what the widget draws and where: text, fonts, cover art,
-  background colour, scaling (`src/conky.conf`, `src/draw.lua`, the render in
-  `src/nowplaying.py`).
-- `tray`: the top-bar icon and its menu (`src/tray.py`).
+  background colour, scaling (`src/spotify/conky.conf`, `src/spotify/draw.lua`, the render in
+  `src/spotify/nowplaying.py`).
+- `tray`: the top-bar icon and its menu (`src/spotify/tray.py`).
 - `packaging`: `debian/`, `packaging/`, `build-deb.sh`, `release-ppa.sh`, the
   PPA, and the launcher's install, start, stop and autostart (`bin/`).
 - `tooling`: the skills under `.claude/`, `scripts/`, `CLAUDE.md`, and tests;

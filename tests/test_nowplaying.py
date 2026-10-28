@@ -264,21 +264,21 @@ class ArtColourTest(support.TempDirTest):
 
 @unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
 class LuaContrastTest(unittest.TestCase):
-    """draw.lua picks the foreground with its own copy of contrast(); it must agree with the
-    one nowplaying.py picks backgrounds with, or text lands on the wrong side of the floor."""
+    """theme.lua, which draw.lua picks the foreground with, has its own copy of contrast(); it
+    must agree with the one nowplaying.py picks backgrounds with, or text lands on the wrong
+    side of the floor."""
 
-    def test_draw_lua_contrast_matches_nowplaying(self):
-        with open(os.path.join(support.SRC, 'draw.lua')) as f:
-            src = f.read()
-        consts = re.search(r'^local LIGHT, DARK = .*$', src, re.M).group(0)
-        funcs = src[src.index('local function apca_y'):src.index('local function mix')]
+    def test_theme_lua_contrast_matches_nowplaying(self):
+        common = os.path.join(support.SRC, 'common')
+        setup = f"package.path = '{common}/?.lua;' .. package.path\nlocal theme = require 'theme'\n" \
+                "local LIGHT, DARK, contrast = theme.LIGHT, theme.DARK, theme.contrast"
         colours = [(0xf2, 0x23, 0x13), (0xe2, 0x47, 0x07), (0xfa, 0xe1, 0x3c), (0x28, 0x5a, 0xdc),
                    (0x1e, 0xb9, 0x54), (0x77, 0x77, 0x77), (0, 0, 0), (255, 255, 255)]
         calls = ["print(string.format('%.6f %.6f %.6f %.6f %.6f %.6f', "
                  "LIGHT[1], LIGHT[2], LIGHT[3], DARK[1], DARK[2], DARK[3]))"]
         calls += [f"print(string.format('%.6f %.6f', contrast(LIGHT, {{{r}/255, {g}/255, {b}/255}}),"
                   f" contrast(DARK, {{{r}/255, {g}/255, {b}/255}})))" for r, g, b in colours]
-        out = subprocess.run(['lua5.3', '-'], input='\n'.join([consts, funcs] + calls),
+        out = subprocess.run(['lua5.3', '-'], input='\n'.join([setup] + calls),
                              capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual(len(out), 1 + len(colours))
         for got, want in zip(map(float, out[0].split()), nowplaying.LIGHT_FG + nowplaying.DARK_FG):
@@ -302,7 +302,7 @@ class LuaLyricRunsTest(unittest.TestCase):
     its font, notes in Noto Music."""
 
     def parts(self, line):
-        with open(os.path.join(support.SRC, 'draw.lua')) as f:
+        with open(os.path.join(support.SRC, 'spotify', 'draw.lua')) as f:
             src = f.read()
         consts = re.search(r'^local FONT = .*$', src, re.M).group(0)
         funcs = src[src.index('local function lyric_runs'):src.index('local function load_lyrics')]
@@ -330,7 +330,7 @@ class LuaLyricRunsTest(unittest.TestCase):
 
     def ellipsized(self, runs, width):
         """draw.lua's ellipsize on runs, with every character one unit wide."""
-        with open(os.path.join(support.SRC, 'draw.lua')) as f:
+        with open(os.path.join(support.SRC, 'spotify', 'draw.lua')) as f:
             src = f.read()
         consts = re.search(r'^local FONT = .*$', src, re.M).group(0)
         stub = ("local function advance(cr, runs) local w = 0 for _, r in ipairs(runs) do "
