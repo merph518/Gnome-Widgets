@@ -21,9 +21,9 @@ REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0,
                      'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]},
                     {'id': 'bbbb', 'speech': 'alerts', 'top': 48.0, 'bottom': 72.0,
                      'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]}],
-           'pause': [12.0, 339.0, 48.0, 375.0], 'vol_down': [109.0, 346.0, 131.0, 368.0],
-           'vol_up': [131.0, 346.0, 153.0, 368.0], 'voice_prev': [478.0, 346.0, 500.0, 368.0],
-           'voice_next': [500.0, 346.0, 522.0, 368.0], 'volume': [60.0, 346.0, 153.0, 368.0],
+           'pause': [12.0, 339.0, 48.0, 375.0], 'voice_prev': [478.0, 346.0, 500.0, 368.0],
+           'voice_next': [500.0, 346.0, 522.0, 368.0], 'volume': [78.0, 347.0, 170.0, 367.0],
+           'volume_wheel': [56.0, 347.0, 170.0, 367.0], 'volume_bar': [84.0, 164.0],
            'voice': [406.0, 346.0, 522.0, 368.0]}
 
 
@@ -64,8 +64,8 @@ class StubSpeechctl(support.TempDirTest):
 
 class ButtonsTest(StubSpeechctl):
     def test_each_button_runs_its_command(self):
-        want = {'skip': 'skip', 'next': 'next', 'pause': 'toggle', 'vol_down': 'volume down',
-                'vol_up': 'volume up', 'voice_prev': 'voice prev', 'voice_next': 'voice next'}
+        want = {'skip': 'skip', 'next': 'next', 'pause': 'toggle',
+                'voice_prev': 'voice prev', 'voice_next': 'voice next'}
         for name, args in want.items():
             with self.subTest(name=name):
                 x, y = centre(REGIONS[name])
@@ -79,6 +79,58 @@ class ButtonsTest(StubSpeechctl):
         with mock.patch.object(tray_model.shutil, 'which', return_value=None):
             speech_mouse.press(None, None, 'skip')
         self.assertIn('speechctl skip: no speechctl', support.read(conky_mouse.LOG))
+
+
+class VolumeSliderTest(StubSpeechctl):
+    def setUp(self):
+        super().setUp()
+        self.redirect(speech_mouse, VOLUME_PREVIEW='volume-preview')
+
+    def drag(self, *xs, s=1):
+        """Drags along the slider at root xs (the card's left at root 1000), let go at the last,
+        and returns the previews draw.lua was shown along the way."""
+        steps = [(x, 857, True) for x in xs] + [(xs[-1], 857, False)]
+        shown = []
+
+        def sleep(_):
+            if os.path.exists(speech_mouse.VOLUME_PREVIEW):
+                shown.append(support.read(speech_mouse.VOLUME_PREVIEW))
+        with mock.patch.object(conky_mouse, 'card_of', return_value=(1000, 500, 545, 400)), \
+                mock.patch.object(conky_mouse, 'geometry'), \
+                mock.patch.object(speech_mouse.time, 'sleep', side_effect=sleep):
+            speech_mouse.set_volume('d', 'win', REGIONS, s, mock.Mock(side_effect=steps))
+        return shown
+
+    def test_a_drag_previews_each_level_and_sets_where_it_is_let_go(self):
+        shown = self.drag(1050, 1124, 1200)
+        self.assertEqual(shown[:3], ['0.0000', '0.5000', '1.0000'])      # clamped at the ends
+        self.assertEqual(self.ran(), ['volume 2.0'])                      # once, at the end
+        self.assertIn('speechctl volume 2.0', support.read(conky_mouse.LOG))
+        self.assertFalse(os.path.exists(speech_mouse.VOLUME_PREVIEW))   # gone once let go
+
+    def test_a_click_sets_a_tenth_at_a_time(self):
+        self.drag(1084 + 49)                       # 0.6125 along: 1.225, a tenth is 1.2
+        self.assertEqual(self.ran(), ['volume 1.2'])
+
+    def test_the_slider_follows_the_display_scale(self):
+        self.drag(1000 + 104 * 2, s=2)                    # a quarter along at scale 2
+        self.assertEqual(self.ran(), ['volume 0.5'])
+
+    def test_a_preview_a_killed_run_left_is_cleared_at_start(self):
+        with open(speech_mouse.VOLUME_PREVIEW, 'w') as f:
+            f.write('0.5000')
+        speech_mouse.start()
+        self.assertFalse(os.path.exists(speech_mouse.VOLUME_PREVIEW))
+
+    def test_a_press_on_the_slider_sets_the_volume_and_the_speaker_does_not(self):
+        x, y = centre(REGIONS['volume'])
+        self.assertEqual(speech_mouse_region(x, y), 'volume')
+        self.assertNotIn('volume', speech_mouse.BUTTONS)
+        self.assertIsNone(speech_mouse_region(64, 357))                 # the speaker
+        with mock.patch.object(speech_mouse, 'set_volume') as set_volume:
+            self.assertTrue(speech_mouse.pull_control('d', 'root', 'win', 1, REGIONS, 'volume',
+                                                      'track', (x, y, (1000 + x, 500 + y)), False))
+        set_volume.assert_called_once()
 
 
 def speech_mouse_region(x, y, s=1):
@@ -133,7 +185,7 @@ class WheelTest(StubSpeechctl):
         return speech_mouse.wheel(REGIONS, s, x * s, y * s, down)
 
     def test_over_the_volume_and_the_voice(self):
-        self.assertEqual([self.wheel('volume', True), self.wheel((70, 357), False),
+        self.assertEqual([self.wheel('volume', True), self.wheel((64, 357), False),
                           self.wheel('voice', True), self.wheel((420, 357), False)],
                          ['volume', 'volume', 'voice', 'voice'])
         self.assertEqual(self.ran(), ['volume down', 'volume up', 'voice next', 'voice prev'])
@@ -160,7 +212,7 @@ class WheelTest(StubSpeechctl):
 
     def test_the_areas_follow_the_display_scale(self):
         self.assertEqual(self.wheel('volume', True, s=2), 'volume')
-        self.assertIsNone(speech_mouse.wheel(REGIONS, 2, 100, 357, True))   # left of it at 2x
+        self.assertIsNone(speech_mouse.wheel(REGIONS, 2, 100, 357 * 2, True))   # left of it at 2x
 
 
 class SwipeTest(StubSpeechctl):
