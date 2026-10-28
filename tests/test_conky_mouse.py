@@ -9,6 +9,7 @@ from unittest import mock
 import support
 
 conky_mouse = support.load_conky_mouse()
+spotify_mouse = support.load_spotify_mouse()
 
 W, H = 545, 200   # about the widget's size
 # Two 1920x1080 monitors side by side, and a third above the first one.
@@ -313,9 +314,9 @@ class WithoutIdleEdgesTest(unittest.TestCase):
     def test_no_lyrics_leaves_only_the_width_to_change(self):
         for edges, want in (('t', ''), ('b', ''), ('rb', 'r'), ('lt', 'l'), ('r', 'r')):
             with self.subTest(edges=edges):
-                self.assertEqual(conky_mouse.without_idle_edges(edges, {'lyrics': False}), want)
-                self.assertEqual(conky_mouse.without_idle_edges(edges, {'lyrics': True}), edges)
-                self.assertEqual(conky_mouse.without_idle_edges(edges, {}), want)   # not written yet
+                self.assertEqual(spotify_mouse.without_idle_edges(edges, {'lyrics': False}), want)
+                self.assertEqual(spotify_mouse.without_idle_edges(edges, {'lyrics': True}), edges)
+                self.assertEqual(spotify_mouse.without_idle_edges(edges, {}), want)   # not written yet
 
 
 class ScrollLyricsTest(support.TempDirTest):
@@ -324,13 +325,13 @@ class ScrollLyricsTest(support.TempDirTest):
 
     def setUp(self):
         super().setUp()
-        self.redirect(conky_mouse, LYRICS_SCROLL='lyrics-scroll')
+        self.redirect(spotify_mouse, LYRICS_SCROLL='lyrics-scroll')
 
     def wheel(self, down, regions=REGIONS, x=100, y=180, s=1):
-        return conky_mouse.scroll_lyrics(regions, s, x, y, down)
+        return spotify_mouse.scroll_lyrics(regions, s, x, y, down)
 
     def shown(self):
-        return support.read(conky_mouse.LYRICS_SCROLL)
+        return support.read(spotify_mouse.LYRICS_SCROLL)
 
     def test_the_wheel_moves_a_line_at_a_time_from_the_top(self):
         self.assertEqual([self.wheel(True), self.wheel(True), self.wheel(False)], [1, 2, 1])
@@ -343,12 +344,12 @@ class ScrollLyricsTest(support.TempDirTest):
         self.assertEqual(self.shown(), '1234 5')
 
     def test_an_offset_past_a_shrunken_range_steps_back_from_its_end(self):
-        with open(conky_mouse.LYRICS_SCROLL, 'w') as f:
+        with open(spotify_mouse.LYRICS_SCROLL, 'w') as f:
             f.write('1234 34')
         self.assertEqual(self.wheel(False), 4)
 
     def test_an_offset_for_other_lyrics_starts_from_the_top(self):
-        with open(conky_mouse.LYRICS_SCROLL, 'w') as f:
+        with open(spotify_mouse.LYRICS_SCROLL, 'w') as f:
             f.write('999 4')
         self.assertEqual(self.wheel(True), 1)
         self.assertEqual(self.shown(), '1234 1')
@@ -359,7 +360,7 @@ class ScrollLyricsTest(support.TempDirTest):
                               ({'lyrics': None, 'lyrics_scroll': None}, 100, 180), ({}, 100, 180)):
             with self.subTest(regions=regions, x=x, y=y):
                 self.assertIsNone(self.wheel(True, regions, x, y))
-        self.assertFalse(os.path.exists(conky_mouse.LYRICS_SCROLL))
+        self.assertFalse(os.path.exists(spotify_mouse.LYRICS_SCROLL))
 
     def test_the_area_follows_the_display_scale(self):
         self.assertIsNone(self.wheel(True, y=400))          # below the lyrics at scale 1
@@ -372,7 +373,8 @@ class SwipeTest(support.TempDirTest):
 
     def setUp(self):
         super().setUp()
-        self.redirect(conky_mouse, LYRICS_SCROLL='lyrics-scroll', LOG='mouse.log')
+        self.redirect(spotify_mouse, LYRICS_SCROLL='lyrics-scroll')
+        self.redirect(conky_mouse, LOG='mouse.log')
 
     def finger(self, *ys):
         """A tracker that is down at each y in turn (root px), then lifted at the last."""
@@ -381,13 +383,13 @@ class SwipeTest(support.TempDirTest):
 
     def swipe(self, *ys, s=1):
         with mock.patch.object(conky_mouse.time, 'sleep'):
-            conky_mouse.swipe(self.REGIONS, s, 100 * s, 180 * s, 500, self.finger(*ys))
-        return support.read(conky_mouse.LYRICS_SCROLL).split()[1]
+            spotify_mouse.swipe(self.REGIONS, s, 100 * s, 180 * s, 500, self.finger(*ys))
+        return support.read(spotify_mouse.LYRICS_SCROLL).split()[1]
 
     def test_a_line_for_each_row_the_finger_moves(self):
-        self.assertEqual([conky_mouse.swipe_lines(dy, 20) for dy in (0, -19, -20, -59, 19, 40)],
+        self.assertEqual([spotify_mouse.swipe_lines(dy, 20) for dy in (0, -19, -20, -59, 19, 40)],
                          [0, 0, 1, 2, 0, -2])
-        self.assertEqual(conky_mouse.swipe_lines(-50, 0), 0)
+        self.assertEqual(spotify_mouse.swipe_lines(-50, 0), 0)
 
     def test_up_shows_later_lines_and_back_down_earlier_ones(self):
         self.assertEqual(self.swipe(500, 470, 440), '3')     # 60 px up: three lines on
@@ -404,11 +406,11 @@ class SwipeTest(support.TempDirTest):
         self.assertEqual(self.swipe(500, 460, s=2), '1')     # 40 px at scale 2: one row
 
     def test_only_static_lyrics_with_a_row_height_are_scrollable(self):
-        self.assertTrue(conky_mouse.scrollable(self.REGIONS, 1, 100, 180))
-        self.assertFalse(conky_mouse.scrollable(self.REGIONS, 1, 100, 150))       # above them
-        self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=None), 1, 100, 180))
-        self.assertFalse(conky_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=['1234', 5]), 1, 100, 180))
-        self.assertFalse(conky_mouse.scrollable({}, 1, 100, 180))
+        self.assertTrue(spotify_mouse.scrollable(self.REGIONS, 1, 100, 180))
+        self.assertFalse(spotify_mouse.scrollable(self.REGIONS, 1, 100, 150))       # above them
+        self.assertFalse(spotify_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=None), 1, 100, 180))
+        self.assertFalse(spotify_mouse.scrollable(dict(self.REGIONS, lyrics_scroll=['1234', 5]), 1, 100, 180))
+        self.assertFalse(spotify_mouse.scrollable({}, 1, 100, 180))
 
 
 class TapTest(unittest.TestCase):
@@ -437,7 +439,10 @@ class PullTest(unittest.TestCase):
 
     def pull(self, hit, edges, at=(100, 180), touch=False, regions=REGIONS, click=True):
         names = ('seek', 'resize', 'swipe', 'drag', 'remember', 'pick_colour', 'clicked')
-        with mock.patch.multiple(conky_mouse, **{n: mock.DEFAULT for n in names}) as m:
+        theirs = ('seek', 'swipe', 'pick_colour')          # the Spotify widget's own
+        with mock.patch.multiple(conky_mouse, **{n: mock.DEFAULT for n in names if n not in theirs}) as m, \
+                mock.patch.multiple(spotify_mouse, **{n: mock.DEFAULT for n in theirs}) as t:
+            m.update(t)
             m['resize'].return_value = m['drag'].return_value = (1, 2, 3, 4)
             m['clicked'].return_value = click
             conky_mouse.pull('d', 'root', 'win', 1, regions, hit, edges, 'track', (*at, (600, 500)), touch)
@@ -537,17 +542,37 @@ class ArtClickTest(unittest.TestCase):
         self.assertIsNone(conky_mouse.region_at({'art': None}, 1, 50, 50))
 
     def test_a_click_picks_at_its_place_on_the_art(self):
-        with mock.patch.object(conky_mouse.art_colours, 'pick', return_value=(0.1, 0.2, 0.3)) as pick, \
+        with mock.patch.object(spotify_mouse.art_colours, 'pick', return_value=(0.1, 0.2, 0.3)) as pick, \
                 mock.patch.object(conky_mouse, 'log') as log:
-            conky_mouse.pick_colour([20, 20, 120, 120], 45, 95)
+            spotify_mouse.pick_colour([20, 20, 120, 120], 45, 95)
         pick.assert_called_once_with(0.25, 0.75)
         log.assert_called_once_with('art colour: 0.25,0.75 -> 0.100 0.200 0.300')
 
     def test_a_failed_pick_is_logged_not_raised(self):
-        with mock.patch.object(conky_mouse.art_colours, 'pick', side_effect=OSError('gone')), \
+        with mock.patch.object(spotify_mouse.art_colours, 'pick', side_effect=OSError('gone')), \
                 mock.patch.object(conky_mouse, 'log') as log:
-            conky_mouse.pick_colour([20, 20, 120, 120], 70, 70)
+            spotify_mouse.pick_colour([20, 20, 120, 120], 70, 70)
         self.assertIn('failed', log.call_args[0][0])
+
+
+class ConfigureTest(unittest.TestCase):
+
+    def test_the_widget_names_its_folders_launcher_and_window(self):
+        self.assertEqual(spotify_mouse.NAME, 'conky-spotify-nowplaying')
+        self.assertTrue(conky_mouse.POSITION.endswith('/.config/conky-spotify-nowplaying/position'))
+        self.assertTrue(conky_mouse.REGIONS.endswith('/.cache/conky-spotify-nowplaying/regions.json'))
+        self.assertEqual(conky_mouse.WM_CLASS, 'ConkySpotifyNowPlaying')
+
+    def test_its_buttons_come_with_minimize_and_close(self):
+        self.assertEqual(set(conky_mouse.BUTTONS), {'heart', 'play', 'prev', 'next', 'minimize', 'close'})
+
+    def test_the_widget_gets_the_helper_to_share_its_window_handling(self):
+        self.assertIs(spotify_mouse.core, conky_mouse)
+        self.assertIs(conky_mouse.hooks, spotify_mouse)
+
+    def test_controls_are_looked_through_in_the_widgets_order(self):
+        regions = {'seek': [0, 0, 100, 100], 'art': [0, 0, 100, 100]}
+        self.assertEqual(conky_mouse.region_at(regions, 1, 50, 50), 'seek')
 
 
 class LogTest(support.TempDirTest):

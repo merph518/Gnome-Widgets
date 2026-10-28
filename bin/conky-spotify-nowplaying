@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 # (Check for our own file: installed in /usr/bin, ../src is /usr/src, which always exists.)
 CHECKOUT_SRC = os.path.join(HERE, '..', 'src')
 APP_DIR = os.environ.get('CSN_DIR') or (
-    CHECKOUT_SRC if os.path.isfile(os.path.join(CHECKOUT_SRC, 'nowplaying.py'))
+    CHECKOUT_SRC if os.path.isfile(os.path.join(CHECKOUT_SRC, 'spotify', 'nowplaying.py'))
     else f'/usr/share/{NAME}')
 APP_DIR = os.path.realpath(APP_DIR)
 CONF = os.path.expanduser(f'~/.config/{NAME}')
@@ -121,10 +121,10 @@ def supervise():
         f.write(str(os.getpid()))
     py = sys.executable
     specs = [
-        ('nowplaying', [py, os.path.join(APP_DIR, 'nowplaying.py')]),
-        ('conky', ['conky', '-c', os.path.join(APP_DIR, 'conky.conf')]),
-        ('mouse', [py, os.path.join(APP_DIR, 'conky-mouse.py')]),
-        ('tray', [py, os.path.join(APP_DIR, 'tray.py')]),
+        ('nowplaying', [py, os.path.join(APP_DIR, 'spotify', 'nowplaying.py')]),
+        ('conky', ['conky', '-c', os.path.join(APP_DIR, 'spotify', 'conky.conf')]),
+        ('mouse', [py, os.path.join(APP_DIR, 'common', 'conky-mouse.py'), 'spotify']),
+        ('tray', [py, os.path.join(APP_DIR, 'spotify', 'tray.py')]),
     ]
     children = {}
     given_up = set()   # exited with 78: can't run here (e.g. tray library missing)
@@ -219,7 +219,7 @@ def main():
               else 'not running')
         print('starts at login' if os.path.exists(AUTOSTART) else 'does not start at login')
     elif cmd == 'login':
-        os.execv(sys.executable, [sys.executable, os.path.join(APP_DIR, 'spotify_api.py'), 'login'])
+        os.execv(sys.executable, [sys.executable, os.path.join(APP_DIR, 'spotify', 'spotify_api.py'), 'login'])
     elif cmd == 'autostart' and len(args) == 2 and args[1] in ('on', 'off'):
         autostart(args[1] == 'on')
     elif cmd == '_run':

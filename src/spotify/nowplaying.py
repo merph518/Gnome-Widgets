@@ -20,11 +20,14 @@ which conky.conf renders through draw.lua's ${lua_parse widget}. It covers:
     menu's settings (lyrics_settings.py) turn lyrics off, which collapses their area and
     looks nothing up, or show synced ones statically too.
 """
-import fcntl, functools, hashlib, json, math, os, re, subprocess, threading, time, unicodedata, urllib.error, urllib.parse, urllib.request
+import fcntl, functools, hashlib, json, math, os, re, subprocess, sys, threading, time, unicodedata, urllib.error, urllib.parse, urllib.request
 import gi
 gi.require_version('Pango', '1.0'); gi.require_version('PangoCairo', '1.0'); gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf, Pango, PangoCairo
 import colorsys
+
+# The shared modules sit in ../common next to this directory, installed or in a checkout.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'common'))
 
 import art_colours
 import lyrics_settings

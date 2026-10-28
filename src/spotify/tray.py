@@ -17,6 +17,9 @@ except (ValueError, ImportError):
     sys.exit(78)   # tells the supervisor not to keep restarting us
 from gi.repository import Gdk, GLib, Gtk
 
+# The shared modules sit in ../common next to this directory, installed or in a checkout.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'common'))
+
 import lyrics_settings
 import widget_size
 
@@ -92,7 +95,7 @@ def main():
         no_fallback()
     indicator = Indicator(id=NAME, icon_name=f'{NAME}-symbolic', category='ApplicationStatus')
     # Running from a checkout the icon isn't installed; point at the repo's copy.
-    repo_icons = os.path.join(HERE, '..', 'packaging', 'icons')
+    repo_icons = os.path.join(HERE, '..', '..', 'packaging', 'icons')
     if os.path.isdir(repo_icons):
         indicator.set_icon_theme_path(os.path.realpath(repo_icons))
     indicator.set_title('Spotify Now Playing')

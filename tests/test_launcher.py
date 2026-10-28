@@ -52,7 +52,7 @@ class SuperviseTest(support.TempDirTest):
 
         def popen(cmd, cwd, env):
             self.envs.append(env.get('CSN_DPI'))
-            name = os.path.basename(cmd[-1]).split('.')[0] if cmd[0] != 'conky' else 'conky'
+            name = os.path.basename(cmd[1]).split('.')[0] if cmd[0] != 'conky' else 'conky'
             started.append(Proc(name))
             return started[-1]
 

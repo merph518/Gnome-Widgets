@@ -18,7 +18,8 @@ import urllib.error
 from unittest import mock
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
-sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.join(SRC, 'common'))
+sys.path.insert(0, os.path.join(SRC, 'spotify'))
 
 HOME = tempfile.mkdtemp(prefix='conky-spotify-nowplaying-test-home-')
 atexit.register(shutil.rmtree, HOME, ignore_errors=True)
@@ -36,14 +37,20 @@ def load_nowplaying():
 
 def load_conky_mouse():
     """conky-mouse.py has a hyphen in its name, and loads libX11 at import: load it by
-    path, with a stand-in for the library."""
+    path, with a stand-in for the library, set up for the Spotify widget."""
     if 'conky_mouse' not in sys.modules:
-        spec = importlib.util.spec_from_file_location('conky_mouse', os.path.join(SRC, 'conky-mouse.py'))
+        spec = importlib.util.spec_from_file_location('conky_mouse', os.path.join(SRC, 'common', 'conky-mouse.py'))
         module = importlib.util.module_from_spec(spec)
         with mock.patch.object(ctypes, 'CDLL', return_value=mock.MagicMock()):
             spec.loader.exec_module(module)
         sys.modules['conky_mouse'] = module
+        module.configure('spotify')
     return sys.modules['conky_mouse']
+
+
+def load_spotify_mouse():
+    """The Spotify widget's part of the mouse helper, which conky-mouse.py loads."""
+    return load_conky_mouse().hooks
 
 
 class TempDirTest(unittest.TestCase):

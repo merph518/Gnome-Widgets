@@ -14,16 +14,19 @@
 require 'cairo'
 pcall(require, 'cairo_xlib')
 
+-- The shared drawing helpers sit in ../common, installed or in a checkout.
+local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
+    or (os.getenv('CSN_DIR') or '/usr/share/conky-spotify-nowplaying') .. '/spotify'
+package.path = here .. '/../common/?.lua;' .. package.path
+local theme = require 'theme'
+local set, rounded_rect, draw_shadow = theme.set, theme.rounded_rect, theme.draw_shadow
+
 local cache = os.getenv('HOME') .. '/.cache/conky-spotify-nowplaying/'
 local hover_x, hover_y = -1, -1          -- window px
 local margin = 0                          -- the shadow margin around the card, in window px
 local frame = nil                         -- draw.txt as the background hook read it this frame
 local bg = {0.094, 0.094, 0.094}          -- current (fading) colour; starts at Spotify's #181818
--- Foreground: white on dark or saturated backgrounds, near-black on light ones, whichever
--- contrasts more with the background as it fades (nowplaying.py's LIGHT_FG and DARK_FG).
--- nowplaying.py only picks backgrounds on which one of the two reaches APCA Lc 60.
-local LIGHT, DARK = {1, 1, 1}, {0.07, 0.07, 0.07}
-local fg, fg_back = LIGHT, DARK           -- fg_back: drawn on fg, like the play icon
+local fg, fg_back = theme.LIGHT, theme.DARK   -- fg_back: drawn on fg, like the play icon
 local clock = {stamp = nil, pos = 0, playing = false}
 local lyrics = {version = nil, lines = {}, plain = false}
 local scroll = nil                        -- eased lyric scroll position (line index, or offset)
@@ -100,50 +103,13 @@ end
 
 -- Background ---------------------------------------------------------------------------
 
-local function apca_y(c)
-    -- APCA's screen luminance, soft-clamped near black (nowplaying.py's apca_y)
-    local y = 0.2126729 * c[1] ^ 2.4 + 0.7151522 * c[2] ^ 2.4 + 0.0721750 * c[3] ^ 2.4
-    if y < 0.022 then y = y + (0.022 - y) ^ 1.414 end
-    return y
-end
-
-local function contrast(text, back)
-    -- APCA lightness contrast of text on back as |Lc|, as nowplaying.py's contrast
-    local yt, yb = apca_y(text), apca_y(back)
-    if math.abs(yb - yt) < 0.0005 then return 0 end
-    if yb > yt then
-        local sapc = (yb ^ 0.56 - yt ^ 0.57) * 1.14
-        return sapc < 0.1 and 0 or (sapc - 0.027) * 100
-    end
-    local sapc = (yb ^ 0.65 - yt ^ 0.62) * 1.14
-    return sapc > -0.1 and 0 or -(sapc + 0.027) * 100
-end
-
-local function mix(a, b, t)
-    return {a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t}
-end
-
-local function secondary()
-    -- the artist and the times: the foreground up to a fifth of the way into the background
-    -- (on Spotify's #181818 that is d0d0d0), less where that would drop it under Lc 60
-    for t = 0.2, 0.01, -0.02 do
-        local c = mix(fg, bg, t)
-        if contrast(c, bg) >= 60 then return c end
-    end
-    return fg
-end
-
-local function set(cr, c, a)
-    cairo_set_source_rgba(cr, c[1], c[2], c[3], a or 1)
-end
+local function secondary() return theme.secondary(fg, bg) end
 
 local function fade()
     -- one step of the ~1 s fade towards bg.txt's colour, and the foreground for it
     local r, g, b = (read('bg.txt') or ''):match('(%S+) (%S+) (%S+)')
     local target = {tonumber(r) or 0.094, tonumber(g) or 0.094, tonumber(b) or 0.094}
-    local k = 1 - math.exp(-dt() * 3)
-    for i = 1, 3 do bg[i] = bg[i] + (target[i] - bg[i]) * k end
-    if contrast(LIGHT, bg) >= contrast(DARK, bg) then fg, fg_back = LIGHT, DARK else fg, fg_back = DARK, LIGHT end
+    fg, fg_back = theme.fade_step(bg, target, dt())
 end
 
 function conky_widget()
@@ -160,43 +126,6 @@ function conky_fg(which)
     local c = which == 'title' and fg or secondary()
     return string.format('${color %02x%02x%02x}', math.floor(c[1] * 255 + 0.5),
                          math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
-end
-
-local function rounded_rect(cr, x, y, w, h, rad)
-    cairo_new_sub_path(cr)
-    cairo_arc(cr, x + w - rad, y + rad, rad, -math.pi / 2, 0)
-    cairo_arc(cr, x + w - rad, y + h - rad, rad, 0, math.pi / 2)
-    cairo_arc(cr, x + rad, y + h - rad, rad, math.pi / 2, math.pi)
-    cairo_arc(cr, x + rad, y + rad, rad, math.pi, 3 * math.pi / 2)
-    cairo_close_path(cr)
-end
-
--- logical px; logical px right and down; alpha at the card's edge. The blur plus each offset
--- stays within widget_size.py's SHADOW margin (16).
-local SHADOW_BLUR, SHADOW_RIGHT, SHADOW_DROP, SHADOW_ALPHA = 7, 5, 4, 0.32
-
-local function draw_shadow(cr, x, y, w, h, rad, s)
-    -- A soft black shadow around the card, SHADOW_RIGHT to the right and SHADOW_DROP lower,
-    -- fading out over SHADOW_BLUR: one rounded rectangle a pixel wider per step, biggest
-    -- first, each alpha chosen so the stack reaches SHADOW_ALPHA * (1 - d / blur)^2 at d px
-    -- from the card's edge. Clipped to outside the card, so its antialiased edge blends
-    -- with the desktop and not with shadow.
-    local blur, right, drop = SHADOW_BLUR * s, SHADOW_RIGHT * s, SHADOW_DROP * s
-    local function target(d) return SHADOW_ALPHA * (1 - d / blur) ^ 2 end
-    cairo_save(cr)
-    cairo_rectangle(cr, 0, 0, conky_window.width, conky_window.height)
-    rounded_rect(cr, x, y, w, h, rad)
-    cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD)
-    cairo_clip(cr)
-    cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING)
-    for k = blur, 1, -1 do
-        local a = 1 - (1 - target(k - 1)) / (1 - target(k))
-        local e = k - 1                            -- how far this layer reaches past the card
-        rounded_rect(cr, x + right - e, y + drop - e, w + 2 * e, h + 2 * e, rad + e)
-        cairo_set_source_rgba(cr, 0, 0, 0, a)
-        cairo_fill(cr)
-    end
-    cairo_restore(cr)
 end
 
 function conky_draw_background()

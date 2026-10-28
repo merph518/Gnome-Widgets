@@ -13,10 +13,10 @@ before `/release` builds.
 ## The list
 
 ```bash
-python3 -m py_compile src/*.py bin/conky-spotify-nowplaying scripts/*.py
+python3 -m py_compile src/*/*.py bin/conky-spotify-nowplaying scripts/*.py
 python3 scripts/catchup_test.py
 python3 -m unittest discover -s tests
-luac5.3 -p src/draw.lua src/conky.conf
+luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
 sh -n build-deb.sh release-ppa.sh
 desktop-file-validate packaging/conky-spotify-nowplaying.desktop
 ```
