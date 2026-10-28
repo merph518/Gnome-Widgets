@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Save the running widget's window as a PNG.
 
-usage: scripts/capture-widget.py <out.png>
+usage: scripts/capture-widget.py <out.png> [spotify|speech]
 
 The widget is an X window (Conky runs under XWayland), so its pixels can be read
 straight from the X server through libX11 without a screenshot portal or any tool
@@ -23,15 +23,16 @@ import gi
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf, GLib  # noqa: E402
 
-WM_CLASS = 'ConkySpotifyNowPlaying'   # own_window_class in src/spotify/conky.conf
+WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying',   # own_window_class in src/<widget>/conky.conf
+            'speech': 'ConkySpeechQueue'}
 
 
-def find_window():
+def find_window(wm_class):
     run = subprocess.run(['xwininfo', '-root', '-tree'], capture_output=True, text=True)
     if run.returncode != 0:
         sys.exit(f'xwininfo failed: {run.stderr.strip()}')
     tree = run.stdout
-    m = re.search(rf'^\s*(0x[0-9a-f]+) .*"{WM_CLASS}"', tree, re.MULTILINE)
+    m = re.search(rf'^\s*(0x[0-9a-f]+) .*"{wm_class}"', tree, re.MULTILINE)
     return int(m.group(1), 16) if m else None
 
 
@@ -86,11 +87,12 @@ def read_window(xid):
 
 
 def main(argv):
-    if len(argv) != 2:
+    if len(argv) not in (2, 3) or argv[2:] and argv[2] not in WM_CLASS:
         sys.exit(__doc__.strip().splitlines()[2])
-    xid = find_window()
+    wm_class = WM_CLASS[argv[2] if argv[2:] else 'spotify']
+    xid = find_window(wm_class)
     if xid is None:
-        sys.exit(f'no {WM_CLASS} window; is the widget running?')
+        sys.exit(f'no {wm_class} window; is the widget running?')
     width, height, pixels = read_window(xid)
     pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(pixels), GdkPixbuf.Colorspace.RGB,
                                              True, 8, width, height, width * 4)
