@@ -176,6 +176,17 @@ class Labels(Fixture):
             f.write(f'gitdir: {gitdir}\n')
         self.assertEqual(speechqueue.repo_name(os.path.join(wt, 'src')), 'Gnome-Widgets')
 
+    def test_repo_name_follows_a_relative_gitdir(self):
+        top = self.repo('Overmind')
+        os.makedirs(os.path.join(top, '.git', 'worktrees', 'wt'))
+        with open(os.path.join(top, '.git', 'worktrees', 'wt', 'commondir'), 'w') as f:
+            f.write('../..\n')
+        wt = os.path.join(top, 'wt')
+        os.makedirs(wt)
+        with open(os.path.join(wt, '.git'), 'w') as f:
+            f.write('gitdir: ../.git/worktrees/wt\n')
+        self.assertEqual(speechqueue.repo_name(wt), 'Overmind')
+
     def test_repo_name_without_a_remote_is_the_folder(self):
         self.assertEqual(speechqueue.repo_name(self.repo('LaundryBot')), 'LaundryBot')
 

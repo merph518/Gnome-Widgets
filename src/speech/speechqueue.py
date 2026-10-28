@@ -284,7 +284,7 @@ def repo_name(cwd):
     if os.path.isfile(git):
         m = re.match(r'gitdir:\s*(.+)', _read(git) or '')
         if m:
-            base = m.group(1).strip()
+            base = os.path.join(d, m.group(1).strip())     # relative to the worktree, when it is
             common = (_read(os.path.join(base, 'commondir')) or '').strip()
             main = os.path.normpath(os.path.join(base, common)) if common else base
             config, top = os.path.join(main, 'config'), os.path.dirname(main)
@@ -323,8 +323,12 @@ def read_labels(path=None):
 
 
 def seed_labels():
+    """labels.json with DEFAULT_LABELS when it is missing; the widget runs without it."""
     if not os.path.exists(LABELS):
-        write_atomic(LABELS, json.dumps(DEFAULT_LABELS, indent=2) + '\n')
+        try:
+            write_atomic(LABELS, json.dumps(DEFAULT_LABELS, indent=2) + '\n')
+        except OSError as e:
+            log(f'labels.json not written: {e}')
 
 
 def voice_label(voice):
