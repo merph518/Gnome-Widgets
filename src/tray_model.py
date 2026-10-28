@@ -147,7 +147,7 @@ def speechctl():
     try:
         with open(SPEECHCTL) as f:
             path = os.path.expanduser(f.read().strip())
-        if path and os.access(path, os.X_OK):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     except OSError:
         pass
@@ -171,5 +171,8 @@ def run_speechctl(*args):
     ctl = speechctl()
     if not ctl:
         return False
-    subprocess.Popen([ctl, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen([ctl, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
     return True

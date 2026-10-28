@@ -74,7 +74,7 @@ class FlagsTest(support.TempDirTest):
                 self.mouse.x11.XMapWindow.assert_not_called()
                 self.assertFalse(os.path.exists(tray_model.hidden_file('speech')))
                 hook.assert_not_called()
-                popen.assert_not_called()                  # × no longer stops anything
+                popen.assert_not_called()                  # × starts nothing, stopping included
                 tray_model.show('spotify', True)
 
     def test_a_tick_starts_a_widget_that_is_not_running(self):
@@ -143,6 +143,9 @@ class SpeechTest(support.TempDirTest):
                 f.write(configured + '\n')
             self.assertEqual(tray_model.speechctl(), configured)
             os.remove(configured)                          # configured but gone: PATH's
+            self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
+            with open(tray_model.SPEECHCTL, 'w') as f:
+                f.write(self.dir + '\n')                   # a folder is not a speechctl
             self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
 
     def test_without_speechctl_nothing_runs(self):

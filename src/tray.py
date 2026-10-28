@@ -5,7 +5,7 @@ saying; shows or hides each widget on its own; holds a submenu of settings for e
 (Spotify: text scaling, size, lyrics, always on top; Speech: pause, skip, clear, voice,
 volume, text scaling, size, always on top); turns start-at-login on or off; and quits
 every widget. What it reads and writes is in tray_model.py."""
-import ctypes, os, signal, subprocess, sys
+import ctypes, os, signal, subprocess, sys, threading
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -205,7 +205,11 @@ def main():
     # off), and always on top.
     spotify_menu = Gtk.Menu()
     scaling, reset = size_items('spotify')
-    lyrics = Check('Lyrics', lyrics_settings.shown, lyrics_settings.set_shown)
+    def set_lyrics(on):
+        lyrics_settings.set_shown(on)
+        scrolling.item.set_sensitive(on)
+
+    lyrics = Check('Lyrics', lyrics_settings.shown, set_lyrics)
     scrolling = Radio('Lyrics scrolling',
                       [(lyrics_settings.AUTOSCROLL, 'Autoscroll'), (lyrics_settings.STATIC, 'Static')],
                       lyrics_settings.scrolling, lyrics_settings.set_scrolling)
@@ -249,6 +253,14 @@ def main():
 
     refreshes = 0
 
+    def show_voices(names):
+        if list(voice.items) != names:
+            voice.set_choices([(name, name) for name in names])
+
+    def ask_voices():                           # off the main loop: speechctl can be slow
+        names = tray_model.voices()
+        GLib.idle_add(show_voices, names)
+
     def refresh():
         nonlocal refreshes
         track.set_label(now_playing())
@@ -257,10 +269,8 @@ def main():
         has_speechctl = bool(tray_model.speechctl())
         for control in controls:
             control.set_sensitive(has_speechctl)
-        if refreshes % VOICES_EVERY == 0:       # a voice installed meanwhile; speechctl is slow-ish
-            choices = [(name, name) for name in tray_model.voices()]
-            if list(voice.items) != [name for name, _ in choices]:
-                voice.set_choices(choices)
+        if refreshes % VOICES_EVERY == 0:       # a voice installed meanwhile
+            threading.Thread(target=ask_voices, daemon=True).start()
         refreshes += 1
         for check in checks:                    # changed outside the menu: a button, the launcher,
             check.sync()                        # a drag, the app menu or a terminal
