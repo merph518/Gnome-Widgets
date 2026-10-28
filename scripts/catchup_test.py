@@ -54,23 +54,20 @@ class Ledger(unittest.TestCase):
 class LaunchpadRow(Ledger):
     """A Launchpad row waits for the PPA to build and publish a version."""
 
-    def test_a_building_version_stays_open_and_names_tests_running(self):
+    def test_a_building_version_stays_open(self):
         code, out, _ = self.run_main('add-lp', self.ledger, '1.0.2',
                                      lp=launchpad([SOURCE], [build('Currently building')]))
         self.assertEqual(code, 0, out)
         self.assertIn('waiting: Launchpad build of 1.0.2 - https://lp.test/+build/1', out)
-        self.assertIn('sidebar: a Launchpad build is open; move this session to Tests Running',
-                      out)
         self.assertEqual(catchup.open_builds(self.ledger), {'lp:1.0.2'})
 
-    def test_published_and_built_settles_and_names_the_move_back(self):
+    def test_published_and_built_settles(self):
         self.run_main('add-lp', self.ledger, '1.0.2', lp=launchpad([]))
         code, out, _ = self.run_main('check', self.ledger,
                                      lp=launchpad([SOURCE], [build('Successfully built')]))
         self.assertEqual(code, 0, out)
         self.assertIn('lp: 1.0.2 published', out)
-        self.assertIn('sidebar: no Launchpad builds open; move this session from Tests Running',
-                      out)
+        self.assertEqual(catchup.open_builds(self.ledger), set())
 
     def test_a_failed_build_settles_with_its_log(self):
         self.run_main('add-lp', self.ledger, '1.0.2', lp=launchpad([]))
@@ -85,7 +82,6 @@ class LaunchpadRow(Ledger):
                                   lp=launchpad([SOURCE], [build('Uploading build')]))
         self.assertIn('still waiting: Launchpad build of 1.0.2: source Published; '
                       'Uploading build', out)
-        self.assertNotIn('sidebar', out)
 
     def test_a_version_missing_past_the_limit_settles_as_rejected(self):
         with open(self.ledger, 'w') as f:
@@ -134,9 +130,8 @@ class IssueRow(Ledger):
         self.assertEqual(code, 0, out)
         gh.assert_not_called()
         self.assertEqual(catchup.open_builds(self.ledger), set())
-        self.assertNotIn('sidebar', out)
 
-    def test_a_closed_issue_names_the_move_out_of_blocked(self):
+    def test_a_closed_issue_is_reported_finished(self):
         self.run_main('add-issue', self.ledger, '9')
         before = catchup.done_rows(self.ledger)
         out = io.StringIO()
@@ -144,9 +139,7 @@ class IssueRow(Ledger):
                 contextlib.redirect_stdout(out):
             self.assertEqual(catchup.reconcile_rows(self.ledger, issues_only=True), set())
             self.assertTrue(catchup.report_finished(self.ledger, before))
-        self.assertIn('sidebar: a blocking issue closed; move this session from Blocked',
-                      out.getvalue())
-        self.assertNotIn('Tests Running', out.getvalue())
+        self.assertIn('wait: 1 finished; 0 still open', out.getvalue())
 
     def test_issues_only_leaves_pull_request_rows_unread(self):
         with open(self.ledger, 'w') as f:

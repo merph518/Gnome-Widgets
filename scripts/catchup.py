@@ -45,12 +45,6 @@ runs it again on the rows still open. `--all` waits for every row instead. The
 add commands and `check` take a lock beside the ledger to rewrite it, so a row
 recorded while `wait` is checking keeps its place.
 
-A `sidebar:` line names the move the session makes in the Code tab sidebar. `add-lp`
-prints one when its build is the only one open, and `check`, or a `wait` that exits
-on a finished build, prints one when no build is left open. Pull request and issue
-rows never count as builds. A `wait` that exits on a closed pull request or a
-closed issue prints the move that goes with it.
-
 `wait` also listens for GitHub's pull_request and issues events through
 `gh webhook forward` (the cli/gh-webhook extension), so a merge or a close is seen
 within seconds. The extension is not installed from here: this machine installs
@@ -202,10 +196,6 @@ def open_builds(path):
     return {key for key in open_rows(path) if is_lp(key)}
 
 
-def is_pr(key):
-    return key.startswith(PR_PREFIX)
-
-
 def is_issue(key):
     return key.startswith(ISSUE_PREFIX)
 
@@ -226,13 +216,6 @@ def since(stamp):
         return 0
 
 
-def sidebar_cue(path):
-    """Name the sidebar move once the ledger holds builds and none is still open."""
-    if any(is_lp(r['key']) for r in read_ledger(path)) and not open_builds(path):
-        print('sidebar: no Launchpad builds open; move this session from Tests Running '
-              'to Working')
-
-
 def handed_back(path, before, every):
     """Whether wait stops now: a row finished since it started, unless it waits for all."""
     if every:
@@ -241,23 +224,13 @@ def handed_back(path, before, every):
 
 
 def report_finished(path, before):
-    """Print the rows finished since wait started and the sidebar move. False if none."""
+    """Print the rows finished since wait started. False if none."""
     finished = done_rows(path) - before
     if not finished:
         return False
     left = len(open_rows(path))
     print(f'wait: {len(finished)} finished; {left} still open'
           + ('; act on the result, then run wait again' if left else ''))
-    if any(is_lp(key) for key in finished):
-        sidebar_cue(path)
-    if any(is_pr(key) for key in finished):
-        print('sidebar: a pull request closed; move this session to Working if it still '
-              'holds work (open rows, running agents, an unfinished task), to Needs Review '
-              'if another pull request of its own waits on the user, or to Completed once '
-              'nothing is left')
-    if any(is_issue(key) for key in finished):
-        print('sidebar: a blocking issue closed; move this session from Blocked to Working, '
-              'then start the deferred task again from its first step')
     return True
 
 
@@ -314,8 +287,6 @@ def add_lp(path, version, label):
     print(f'waiting: {label} - {link}')
     if shut:
         settle_row(path, key, *shut)
-    elif open_builds(path) == {key}:
-        print('sidebar: a Launchpad build is open; move this session to Tests Running')
 
 
 def check(path):
@@ -778,7 +749,7 @@ def wait(path, interval, every=False):
                     if push.usable:
                         print('push: reached GitHub, push is on')
         # The loop test skips handed_back once nothing is open, so the last row's
-        # sidebar move is printed here.
+        # result is printed here.
         if not open_rows(path):
             report_finished(path, before)
     finally:
@@ -799,7 +770,6 @@ def main(argv):
             return 1
     elif len(argv) == 3 and argv[1] == 'check':
         check(argv[2])
-        sidebar_cue(argv[2])
     elif len(argv) >= 3 and argv[1] == 'wait':
         interval = MIN_INTERVAL
         if '--interval' in argv:

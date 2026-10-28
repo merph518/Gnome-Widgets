@@ -1,7 +1,7 @@
 # Waiting on something
 
-Shared by `/release`, by any pull request a session opens, and by
-[sidebar-groups.md](sidebar-groups.md) and [ready-signal.md](ready-signal.md).
+Shared by `/release`, by `/implement`, by any pull request a session opens,
+and by [ready-signal.md](ready-signal.md).
 This file is the only place the catch-up script, the one-watcher rule and the
 three minute floor are written out. A skill that needs any of them points
 here rather than restating them.
@@ -61,24 +61,6 @@ Never start a second one.
 `wait --all` exits only when every row is done. Use it only when no single
 result could change what the session does next.
 
-## The sidebar lines
-
-The script names each sidebar move in its output, so none of them depends on
-the session remembering it:
-
-```
-sidebar: a Launchpad build is open; move this session to Tests Running
-sidebar: no Launchpad builds open; move this session from Tests Running to Working
-sidebar: a pull request closed; move this session to Working if it still holds work ...
-sidebar: a blocking issue closed; move this session from Blocked to Working, then start the deferred task again from its first step
-```
-
-A `sidebar:` line is acted on as soon as it is read, before anything else the
-output asks for, per [sidebar-groups.md](sidebar-groups.md). A session that
-reads a failed build and goes straight into its log without moving sits under
-`Tests Running` for the whole triage, which tells the user a build is still out
-when none is.
-
 ## Waiting on a Launchpad build
 
 `/release` records the version it uploaded as soon as `release-ppa.sh` prints
@@ -123,24 +105,39 @@ done: <label> - <pull request url>
 pr: <number> merged
 ```
 
-and exits. That exit is the cue to report the merge and pick the sidebar group
-straight away, without waiting for the user to mention it. `closed without
+and exits. That exit is the cue to report the merge straight away, without
+waiting for the user to mention it. `closed without
 merging` means the user closed it: report that and do nothing else to the
 branch.
 
-## Waiting on a blocking issue
+## Blocked by another session
 
-A session that defers its task to another session, per
-[sidebar-groups.md](sidebar-groups.md#blocked-by-another-session), records the
-blocker's issue and lets the watcher wait for it to close:
+A session is blocked when the work it was asked for is held by another
+session: the issue already has a branch or pull request from someone else, or
+a change it needs sits in a pull request that has not merged.
 
-```bash
-scripts/catchup.py add-issue <ledger> <issue-number> "<short label>"
-```
+1. Report who holds the work and what it is waiting on.
+2. Record the blocker in the session's ledger, and make sure one `wait` is
+   running on it:
 
-When it closes, `wait` prints `issue: <number> closed` and the `sidebar:` line
-out of `Blocked`, and exits. That exit is the cue to move to `Working` and
-start the deferred task over from the skill's first step.
+   ```bash
+   scripts/catchup.py add-issue <ledger> <blocking issue> "<short label>"
+   ```
+
+   The blocking issue is the one whose close means the way is clear. When the
+   blocker is a pull request with no issue behind it, record the pull request
+   with `add-pr` instead, and read its `pr: <number> merged` the same way.
+3. End the turn. The watcher is the only thing running.
+
+When `wait` prints `issue: <number> closed` and exits, the session starts the
+deferred task over from the skill's first step, because the blocker may have
+already done some or all of it. When the deferred task's own issue is now
+closed, the holder finished it: report that and stop. A blocker closed as not
+planned frees the work the same way; the session says so in its report.
+
+A blocker whose hold ends without a close or a merge cannot be watched this
+way. The session records no row, says so, and picks the task up when the user
+invokes it again.
 
 ## Push notices
 
