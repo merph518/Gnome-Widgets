@@ -117,7 +117,7 @@ The body is not hand-wrapped.
   left out.
 - **Acceptance criteria** - what done means, as checks `/implement` can follow
   literally. A change to the widget ends with it running from the checkout and
-  showing the fixed behaviour, per `/implement` step 5; a visual one with a
+  showing the fixed behaviour, per `/implement` Section 6; a visual one with a
   capture from `scripts/capture-widget.py`.
 
 ## 4. Kind

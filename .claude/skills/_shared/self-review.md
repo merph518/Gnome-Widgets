@@ -70,7 +70,8 @@ commit alone does not show.
 1. Run a pass.
 2. No real bug holds: the loop is over. Go to [When it ends](#when-it-ends).
 3. Otherwise fix every real bug, on the branch, rerun the static checks from
-   [static-checks.md](static-checks.md), and push. None is set aside for the
+   [static-checks.md](static-checks.md), run the widget again when the fix
+   touches `src/`, `bin/`, `packaging/` or `debian/`, and push. None is set aside for the
    user to pick up at review, and none is filed away for later.
 4. Go back to 1, for at most three passes. The third pass's fixes get no
    fourth review: the static checks and the run for what they touch stand in

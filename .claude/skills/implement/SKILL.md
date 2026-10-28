@@ -27,12 +27,12 @@ apply and what replaces them.
 | `<asking-note>` | None. Questions go through `AskUserQuestion` directly |
 | `<in-progress-label>` | `In Progress` |
 | `<ready-label>` | `Manual Review Needed`, per [ready-signal.md](../_shared/ready-signal.md) |
-| `<label-script>` | None. The inline `gh issue edit` and read-back under Overrides, Section 2 |
+| `<label-script>` | None. The inline `gh issue edit` and read-back, under Overrides, Section 2 (add) and Section 10 (remove) |
 | `<labels-note>` | Under Overrides, Section 2 |
 | `<area-label-rule>` | The area and kind labels of [/create-issue](../create-issue/SKILL.md): one area label and one kind label on every issue. An issue missing its area label gets it from `/create-issue` section 5 before work starts |
 | `<reference-docs>` | `README.md` and the code, under Overrides, Section 1 |
 | `<ownership-unit>` | The files the issue's diff changes |
-| `<ownership-rules>` | Under Overrides, Section 3, Find out what other sessions own |
+| `<ownership-rules>` | Under Overrides, Section 2, which replaces the general skill's "Find out what other sessions own" |
 | `<main-checkout>` | `~/Code/conky-spotify-nowplaying` |
 | `<worktree-script>` | `/new-branch`, inside the worktree the app made, under Overrides, Section 3 |
 | `<edit-guard>` | None |
@@ -41,6 +41,8 @@ apply and what replaces them.
 | `<branch-types>` | `fix`, `feat`, `chore`, `docs` |
 | `<default-branch>` | `main` |
 | `<follow-up-note>` | [/create-issue](../create-issue/SKILL.md) |
+| `<branch-age-note>` | None. The mergeability check in `<mergeability-note>` stands in |
+| `<post-merge-checks>` | None |
 | `<writing-rules>` | Comments say how the code works now and why, never its history or which issue asked for it |
 | `<repo-constraints>` | Under Overrides, Section 4 |
 | `<static-checks>` | [static-checks.md](../_shared/static-checks.md) |
@@ -73,7 +75,9 @@ Section 6 run is done, except for a change to documentation, skills or
 ### Section 1: Read the issue
 
 The code, the README and the issue's own evidence decide what the issue means;
-there is no functional specification to search. The repository name in any
+there is no functional specification to search. An issue found closed by a
+session restarting after a block means the holder finished it: report that and
+stop, instead of going on with other issues. The repository name in any
 GitHub query comes from `{owner}` and `{repo}` or the current checkout, never a
 literal.
 
@@ -208,14 +212,17 @@ the mergeability check in `<mergeability-note>` and resolve any conflict before
 going on. Never `gh pr merge`, and never commit to `main`. The user merges.
 
 "Review it yourself before handing it over" follows `<self-review>`, whose
-loop, minor findings and settled decisions are the general skill's. A pass
-rechecks only what its fixes touch, with `<static-checks>` in place of the
-dispatches and the pull request check job.
+loop, minor findings and settled decisions are the general skill's. Every pass reads the
+whole pull request at the branch head, not only the commits since the last
+pass, per `<self-review>`. A fix owes `<static-checks>` in place of the
+dispatches and the pull request check job, and the Section 6 run again when it
+touches `src/`, `bin/`, `packaging/` or `debian/`.
 
 ### Section 9: Report
 
 Void the paragraphs on skips, the skip ledger and deviations. Report instead
-what was run and what it showed, anything not verified, and, after a run from
+what was run and what it showed, anything not verified, the judgment calls
+one line each, and, after a run from
 the checkout, that the checkout copy was left running. End with the ready
 signal from `<ready-signal>`, which also puts the `Manual Review Needed` label
 on the pull request. Then record the pull request with
