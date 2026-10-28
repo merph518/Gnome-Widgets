@@ -8,6 +8,7 @@ and read the diff before committing it.
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -218,6 +219,85 @@ class Labels(Fixture):
             json.dump({'One': 'ONE'}, f)
         s = self.state()['sessions'][0]
         self.assertEqual(speechqueue.session_line(s).split('\t')[6], s['label'])
+
+
+@unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
+class SharedColours(unittest.TestCase):
+    """Both widgets' draw.lua, loaded side by side, with the Spotify widget's bg.txt driven
+    through a light colour, a dark one and away again: each frame they give conky the same
+    title and text colours, white on Spotify's #181818 while there is no bg.txt."""
+
+    HARNESS = """
+package.preload['cairo'] = function() return true end
+cairo_text_extents_t = {create = function() return {} end}
+cairo_font_extents_t = cairo_text_extents_t
+conky_info = {update_interval = 0.05}
+local function load(path)
+    dofile(path)
+    return conky_widget, conky_fg
+end
+local spotify_widget, spotify_fg = load(SPOTIFY)
+local speech_widget, speech_fg = load(SPEECH)
+local function put(path, text)
+    if text then local f = assert(io.open(path, 'w')); f:write(text); f:close()
+    else os.remove(path) end
+end
+for _, step in ipairs(STEPS) do
+    put(step.path, step.text)
+    for _ = 1, step.frames do
+        spotify_widget(); speech_widget()
+        print(table.concat({spotify_fg('title'), spotify_fg('text'),
+                            speech_fg('title'), speech_fg('text')}, '\\t'))
+    end
+end
+"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='speech-colours-')
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.spotify = os.path.join(self.home, '.cache', 'conky-spotify-nowplaying')
+        self.setting = os.path.join(self.home, '.config', 'conky-widgets', 'speech', 'background')
+        os.makedirs(self.spotify)
+        os.makedirs(os.path.dirname(self.setting))
+        self.bg = os.path.join(self.spotify, 'bg.txt')
+
+    def frames(self, steps):
+        """Each frame's colours, as (Spotify's title, its text, speech's title, its text)."""
+        lua = ', '.join('{path = %s, text = %s, frames = %d}' % (
+            json.dumps(path), json.dumps(text) if text is not None else 'nil', n)
+            for path, text, n in steps)
+        script = (self.HARNESS
+                  .replace('SPOTIFY', json.dumps(os.path.join(support.SRC, 'spotify', 'draw.lua')))
+                  .replace('SPEECH', json.dumps(os.path.join(support.SRC, 'speech', 'draw.lua')))
+                  .replace('STEPS', '{' + lua + '}'))
+        out = subprocess.run(['lua5.3', '-'], input=script, capture_output=True, text=True,
+                             check=True, env=dict(os.environ, HOME=self.home)).stdout
+        return [tuple(line.split('\t')) for line in out.splitlines()]
+
+    def test_both_widgets_pick_the_same_colours(self):
+        frames = self.frames([(self.bg, None, 20),               # no bg.txt yet
+                              (self.bg, '0.950 0.900 0.800', 40),  # a light cover
+                              (self.bg, '0.157 0.275 0.549', 40),  # a dark one
+                              (self.bg, None, 40)])              # gone again
+        self.assertEqual(len(frames), 140)
+        for i, f in enumerate(frames):
+            self.assertEqual(f[:2], f[2:], f'frame {i}')
+        self.assertEqual(frames[0][0], '${color ffffff}')       # white on #181818
+        self.assertEqual(frames[59][0], '${color 121212}')      # near-black on the light cover
+        self.assertEqual(frames[99][0], '${color ffffff}')
+        self.assertEqual(frames[-1][0], '${color ffffff}')      # back to the fallback
+        with open(self.bg, 'w') as f:
+            f.write('0.188 0.424 0.463')
+        self.frames([(self.bg, '0.188 0.424 0.463', 5)])
+        with open(self.bg) as f:
+            self.assertEqual(f.read(), '0.188 0.424 0.463')     # read, never written
+
+    def test_the_setting_names_another_file(self):
+        other = os.path.join(self.home, 'other.txt')
+        frames = self.frames([(self.setting, '~/other.txt\n', 0),
+                              (other, '0.950 0.900 0.800', 40)])
+        self.assertEqual(frames[-1][0], '${color ffffff}')      # Spotify's still on #181818
+        self.assertEqual(frames[-1][2], '${color 121212}')      # speech follows other.txt
 
 
 class ClockTest(unittest.TestCase):

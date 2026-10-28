@@ -4,8 +4,10 @@
 --   widget.txt    conky's markup (the header and the Sessions label), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
--- Everything drawn is the foreground or a share of it, as the Spotify widget's controls are,
--- so the widget follows its background.
+-- and, read only, the Spotify widget's bg.txt (or the file ~/.config/conky-widgets/speech/
+-- background names), whose colour the card fades to with it. Everything drawn is the
+-- foreground or a share of it, as the Spotify widget's controls are, so the widget follows
+-- its background.
 require 'cairo'
 pcall(require, 'cairo_xlib')
 
@@ -17,11 +19,13 @@ local theme = require 'theme'
 local set, rounded_rect = theme.set, theme.rounded_rect
 
 local cache = os.getenv('HOME') .. '/.cache/conky-widgets/speech/'
+local BG_SETTING = os.getenv('HOME') .. '/.config/conky-widgets/speech/background'
+local BG_FILE = os.getenv('HOME') .. '/.cache/conky-spotify-nowplaying/bg.txt'
 local FONT = 'Ubuntu Sans'
 local hover_x, hover_y = -1, -1           -- window px
 local margin = 0                          -- the shadow margin around the card, in window px
 local frame = nil                         -- draw.txt as the background hook read it this frame
-local bg = {0.094, 0.094, 0.094}          -- Spotify's #181818
+local bg = {0.094, 0.094, 0.094}          -- current (fading) colour; starts at Spotify's #181818
 local fg, fg_back = theme.LIGHT, theme.DARK   -- fg_back: drawn on fg, like the pause icon
 local clock = {stamp = nil, pos = 0, running = false}
 local sessions = {version = nil, rows = {}}
@@ -96,18 +100,26 @@ end
 
 local function secondary() return theme.secondary(fg, bg) end
 
+local function bg_file()
+    -- the background setting's path, its first line, else the Spotify widget's bg.txt
+    local f = io.open(BG_SETTING)
+    local path = f and (f:read('*l') or ''):match('^%s*(.-)%s*$') or ''
+    if f then f:close() end
+    if path == '' then return BG_FILE end
+    return (path:gsub('^~/', os.getenv('HOME') .. '/'))
+end
+
 function conky_widget()
     -- conky.text: speechqueue.py's markup. Conky reads it before the draw hooks run, so the
-    -- foreground is worked out here, for the markup's colours and everything drawn alike.
-    fg, fg_back = theme.fade_step(bg, bg, 0)
+    -- fade steps here, as the Spotify widget's does, and the markup's colours and everything
+    -- the hooks draw share one foreground in every frame.
+    fg, fg_back = theme.fade(bg, bg_file(), dt())
     return read('widget.txt') or ''
 end
 
 function conky_fg(which)
     -- ${lua_parse fg title} and ${lua_parse fg text} in speechqueue.py's markup
-    local c = which == 'title' and fg or secondary()
-    return string.format('${color %02x%02x%02x}', math.floor(c[1] * 255 + 0.5),
-                         math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
+    return theme.conky_colour(which == 'title' and fg or secondary())
 end
 
 function conky_draw_background()
