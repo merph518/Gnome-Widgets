@@ -314,37 +314,33 @@ local function draw_control(cr, xs, cy, seg_h, s, text, speech)
     end
 end
 
-local function draw_label(cr, label, x, cy, w, h, s, text)
-    -- the repository's label: a tag the colours of the selected setting, less rounded, one
-    -- width for every row so the names after it line up
+local function draw_label(cr, label, x, cy, w, h, s, text, speaking)
+    -- the repository's label, one width for every row so the names after it line up: the
+    -- card's colour with the foreground's text, outlined on a dark card, and filled with the
+    -- foreground (the selected setting's colours) while its session is speaking
     if label == '' then return end
+    local r = 3 * s
     cairo_new_path(cr)
-    set(cr, fg)
-    rounded_rect(cr, x, cy - h / 2, w, h, 3 * s)
-    cairo_fill(cr)
+    if speaking then
+        set(cr, fg)
+        rounded_rect(cr, x, cy - h / 2, w, h, r)
+        cairo_fill(cr)
+    elseif theme.apca_y(fg) > theme.apca_y(bg) then
+        set(cr, fg, 0.6)
+        cairo_set_line_width(cr, 1 * s)
+        rounded_rect(cr, x + 0.5 * s, cy - h / 2 + 0.5 * s, w - s, h - s, r)
+        cairo_stroke(cr)
+    end
     font(cr, 9, text, s, true)
-    set(cr, fg_back)
+    set(cr, speaking and fg_back or fg)
     show(cr, label, x + w / 2, cy, 'centre')
 end
 
 local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
-    -- a session's row: ● while it is speaking (○ otherwise), its repository's label, its
-    -- name, busy / bg, how many
-    -- lines it has queued and its setting; then its next line as a second row when there is
-    -- room for one. Returns how many rows it took.
+    -- a session's row: its repository's label (filled while it is speaking), its name,
+    -- busy / bg, how many lines it has queued and its setting; then its next line as a second
+    -- row when there is room for one. Returns how many rows it took.
     local cy = y + row / 2
-    local dot = 3.5 * s
-    cairo_new_path(cr)                             -- not joined to the text before it
-    if r.speaking then
-        set(cr, fg)
-        cairo_arc(cr, x0 + 5 * s, cy, dot, 0, 2 * math.pi)
-        cairo_fill(cr)
-    else
-        set(cr, secondary(), 0.8)
-        cairo_set_line_width(cr, 1.2 * s)
-        cairo_arc(cr, x0 + 5 * s, cy, dot - 0.6 * s, 0, 2 * math.pi)
-        cairo_stroke(cr)
-    end
     draw_control(cr, c, cy, c[5], s, text, r.speech)
     local right = c[6] * s
     font(cr, 9, text, s)
@@ -353,8 +349,8 @@ local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
     local flags_w = r.flags ~= '' and width_of(cr, r.flags) + 8 * s or 0
     font(cr, 9, text, s, true)
     local label_w = width_of(cr, 'WWWW') + 10 * s
-    draw_label(cr, r.label, x0 + 16 * s, cy, label_w, c[5] * s, s, text)
-    local name_x = x0 + 16 * s + label_w + 8 * s
+    draw_label(cr, r.label, x0, cy, label_w, c[5] * s, s, text, r.speaking)
+    local name_x = x0 + label_w + 8 * s
     font(cr, 11, text, s)
     set(cr, fg)
     local name = fit(cr, r.name, right - name_x - flags_w)
