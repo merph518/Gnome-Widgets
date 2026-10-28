@@ -1,6 +1,7 @@
 """Tests for art_colours.py: the colour taken from a click on the album art, and keeping it
 per artwork."""
 import json
+import math
 import os
 import unittest
 from unittest import mock
@@ -55,10 +56,32 @@ class ArtColoursTest(support.TempDirTest):
     def test_a_pick_sets_the_background_and_is_kept_for_the_art(self):
         self.cover(lambda x, y: (0, 0, 255))
         self.assertEqual(art_colours.pick(0.5, 0.5), (0.0, 0.0, 1.0))
-        self.assertEqual(support.read(art_colours.BG), '0.000 0.000 1.000\n')
+        self.assertEqual(support.read(art_colours.BG).split()[:3], ['0.000', '0.000', '1.000'])
         self.assertEqual(art_colours.chosen(URL), (0.0, 0.0, 1.0))
         self.assertIsNone(art_colours.chosen('https://i.scdn.co/image/other'))
         self.assertEqual(os.listdir(os.path.dirname(art_colours.COLOURS)), ['art-colours.json'])
+
+    def write_at(self, now, rgb):
+        with mock.patch.object(art_colours.time, 'clock_gettime', return_value=now):
+            art_colours.write_bg(rgb)
+        return support.read(art_colours.BG)
+
+    def test_the_fade_starts_from_the_colour_shown(self):
+        # no bg.txt: from #181818; the next change, half a second in, from where that fade is
+        self.assertEqual(self.write_at(100.0, (1, 1, 1)),
+                         '1.000 1.000 1.000 0.094 0.094 0.094 100.000\n')
+        mid = 0.094 + (1 - 0.094) * (1 - math.exp(-1.5))
+        self.assertAlmostEqual(art_colours.shown_bg(100.5)[0], mid)
+        self.assertEqual(self.write_at(100.5, (0, 0, 0)),
+                         '0.000 0.000 0.000 {0:.3f} {0:.3f} {0:.3f} 100.500\n'.format(mid))
+
+    def test_a_finished_or_old_bg_is_shown_as_its_target(self):
+        self.write_at(100.0, (0.2, 0.4, 0.6))
+        self.assertEqual(art_colours.shown_bg(130.0), (0.2, 0.4, 0.6))
+        self.assertEqual(art_colours.shown_bg(5.0), (0.2, 0.4, 0.6))     # written before a reboot
+        with open(art_colours.BG, 'w') as f:
+            f.write('0.300 0.300 0.300\n')                              # no fade in it
+        self.assertEqual(art_colours.shown_bg(100.0), (0.3, 0.3, 0.3))
 
     def test_a_later_pick_replaces_the_earlier_and_others_stay(self):
         os.makedirs(os.path.dirname(art_colours.COLOURS))

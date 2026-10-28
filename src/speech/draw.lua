@@ -111,9 +111,9 @@ end
 
 function conky_widget()
     -- conky.text: speechqueue.py's markup. Conky reads it before the draw hooks run, so the
-    -- fade steps here, as the Spotify widget's does, and the markup's colours and everything
+    -- fade is worked out here, as the Spotify widget's is, and the markup's colours and everything
     -- the hooks draw share one foreground in every frame.
-    fg, fg_back = theme.fade(bg, bg_file(), dt())
+    fg, fg_back = theme.fade(bg, bg_file())
     return read('widget.txt') or ''
 end
 
