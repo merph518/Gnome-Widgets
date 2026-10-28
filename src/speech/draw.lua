@@ -7,7 +7,7 @@ pcall(require, 'cairo_xlib')
 
 -- The shared drawing helpers sit in ../common, installed or in a checkout.
 local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
-    or (os.getenv('CSN_DIR') or '/usr/share/conky-spotify-nowplaying') .. '/speech'
+    or (os.getenv('CSN_DIR') or '/usr/share/conky-widgets') .. '/speech'
 package.path = here .. '/../common/?.lua;' .. package.path
 local theme = require 'theme'
 

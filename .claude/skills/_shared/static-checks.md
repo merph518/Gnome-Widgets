@@ -57,7 +57,7 @@ build script that parses but does not run:
 
 ```bash
 ./build-deb.sh
-dpkg-deb --contents "dist/conky-spotify-nowplaying_$(dpkg-parsechangelog -S Version)_all.deb"
+dpkg-deb --contents "dist/conky-widgets_$(dpkg-parsechangelog -S Version)_all.deb"
 ```
 
 `dist/` is ignored by git and keeps every version built in it, so the listing

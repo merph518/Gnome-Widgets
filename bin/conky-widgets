@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 CHECKOUT_SRC = os.path.join(HERE, '..', 'src')
 APP_DIR = os.environ.get('CSN_DIR') or (
     CHECKOUT_SRC if os.path.isfile(os.path.join(CHECKOUT_SRC, 'common', 'conky-mouse.py'))
-    else '/usr/share/conky-spotify-nowplaying')
+    else '/usr/share/conky-widgets')
 APP_DIR = os.path.realpath(APP_DIR)
 SHARED_CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 PIDFILE = os.path.join(SHARED_CACHE, 'run.pid')    # the one supervisor for every widget

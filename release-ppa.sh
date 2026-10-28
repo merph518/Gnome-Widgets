@@ -5,6 +5,8 @@
 # Launchpad then builds the binary package; watch it on the PPA page.
 set -e
 cd "$(dirname "$0")"
+# The PPA and the source package keep their first name, so PPA users upgrade in place; the
+# source builds conky-widgets and the transitional conky-spotify-nowplaying that pulls it in.
 PPA=${PPA:-ppa:mfagerstrom/conky-spotify-nowplaying}
 # Signing key registered on Launchpad (the maintainer address in debian/ is a no-reply one,
 # so debsign can't pick the key from it).
