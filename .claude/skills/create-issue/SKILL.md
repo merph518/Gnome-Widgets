@@ -59,7 +59,7 @@ The area is where the user meets the problem, not the file the fix lands in:
 - `layout`: what the widget draws and where: text, fonts, cover art,
   background colour, scaling (`src/spotify/conky.conf`, `src/spotify/draw.lua`, the render in
   `src/spotify/nowplaying.py`).
-- `tray`: the top-bar icon and its menu (`src/spotify/tray.py`).
+- `tray`: the top-bar icon and its menu (`src/tray.py`).
 - `packaging`: `debian/`, `packaging/`, `build-deb.sh`, `release-ppa.sh`, the
   PPA, and the launcher's install, start, stop and autostart (`bin/`).
 - `tooling`: the skills under `.claude/`, `scripts/`, `CLAUDE.md`, and tests;

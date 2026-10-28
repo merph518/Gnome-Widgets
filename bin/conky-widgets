@@ -5,15 +5,15 @@ usage: conky-widgets <widget> [command]
        conky-widgets show | hide | stop | restart | status    (every widget)
 
   <widget>         spotify | speech
-  (no command)     start the widget, show it if it is minimized, or minimize it
-  start | stop | restart | status
-  show | hide      bring back a minimized widget, or minimize it
+  (no command)     start the widget and show it, or hide it when it is showing
+  start | stop | restart | status    (a hidden widget starts hidden)
+  show | hide      show a hidden widget, or hide it; a hidden one keeps running
   login            log in to Spotify for the like button (spotify)
   autostart on     start the widget when you log in
   autostart off    don't
 
 With no widget, show and hide act on every widget that is running, and stop, restart
-and status on every widget.
+and status on every widget. While any widget runs, one tray icon serves them all.
 """
 import fcntl, os, re, shutil, signal, subprocess, sys, time
 
@@ -36,6 +36,7 @@ STATE_FILES = ('position', 'spotify-client-id', 'spotify-token.json')
 # conky-mouse.py exits with this when Xft.dpi changes (a monitor added or removed can
 # change XWayland's scale); these read it once at start, so they start again.
 RESCALED, SCALED = 75, ('nowplaying', 'conky')
+BUNDLE = ''        # what processes() calls the processes every widget shares: the tray icon
 
 # The Spotify widget keeps the folders and the autostart entry it had before there was a
 # bundle, so a saved position, client id and token carry over an upgrade.
@@ -62,7 +63,7 @@ def cache_dir(widget):
 
 
 def hidden_file(widget):
-    return os.path.join(cache_dir(widget), 'hidden')   # minimized; conky-mouse.py unmaps the window
+    return os.path.join(cache_dir(widget), 'hidden')   # hidden; conky-mouse.py unmaps the window
 
 
 def autostart_file(widget):
@@ -155,7 +156,8 @@ def terminate(pid):
 
 
 def start(widget):
-    set_hidden(widget, False)                   # a widget started or started again is visible
+    """Starts the widget, hidden when its hidden flag is set: hidden or shown is kept
+    across a restart and a login."""
     if not installed(widget):
         print(f'{widget} is not installed')
         return
@@ -218,27 +220,29 @@ def end(proc):
 
 
 def processes(widget):
-    """The processes that make up `widget`: its contents generator, conky, the mouse helper
-    and the tray icon, those of them it ships."""
+    """The processes that make up `widget`: its contents generator, conky and the mouse
+    helper, the generator when it ships one. BUNDLE's is the tray icon every widget shares."""
     py, folder = sys.executable, os.path.join(APP_DIR, widget)
-    specs = [
-        ('nowplaying', [py, os.path.join(folder, WIDGETS[widget]['contents'])]),
-        ('conky', ['conky', '-c', os.path.join(folder, 'conky.conf')]),
-        ('mouse', [py, os.path.join(APP_DIR, 'common', 'conky-mouse.py'), widget]),
-        ('tray', [py, os.path.join(folder, 'tray.py')]),
-    ]
+    if widget == BUNDLE:
+        specs = [('tray', [py, os.path.join(APP_DIR, 'tray.py')])]
+    else:
+        specs = [
+            ('nowplaying', [py, os.path.join(folder, WIDGETS[widget]['contents'])]),
+            ('conky', ['conky', '-c', os.path.join(folder, 'conky.conf')]),
+            ('mouse', [py, os.path.join(APP_DIR, 'common', 'conky-mouse.py'), widget]),
+        ]
     return [(name, cmd) for name, cmd in specs
             if name in ('conky', 'mouse') or os.path.isfile(cmd[1])]
 
 
 def supervise():
     """Runs, for every widget that is wanted, its contents generator, conky and the mouse
-    helper; restarts any that exit, and the ones that read the display scale when it
-    changes."""
+    helper, and while any is wanted the one tray icon; restarts any that exit, and the ones
+    that read the display scale when it changes."""
     os.makedirs(SHARED_CACHE, exist_ok=True)
     with open(PIDFILE, 'w') as f:
         f.write(str(os.getpid()))
-    children = {}      # widget -> {process name -> Popen}
+    children = {}      # widget, or BUNDLE -> {process name -> Popen}
     given_up = set()   # (widget, name) exited with 78: can't run here (e.g. tray library missing)
     last_start = {}
     started_dpi = {}   # Xft.dpi as the widget's generator started, which conky-mouse.py watches for a change
@@ -255,19 +259,22 @@ def supervise():
                 proc.terminate()
         for proc in procs:
             end(proc)
-        flag(os.path.join(UP, widget), False)
+        if widget != BUNDLE:
+            flag(os.path.join(UP, widget), False)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     while not stopping:
         want = wanted()
+        want += [BUNDLE] if want else []        # the tray goes with the last widget
         for widget in list(children):
             if widget not in want:
                 release(widget)
         for widget in want:
             if widget not in children:
                 children[widget] = {}
-                flag(os.path.join(UP, widget), True)
+                if widget != BUNDLE:
+                    flag(os.path.join(UP, widget), True)
             procs = children[widget]
             for name, cmd in processes(widget):
                 proc = procs.get(name)
@@ -324,8 +331,9 @@ def autostart(widget, on):
 
 def toggle(widget):
     """What the widget's app-grid entry does: shows it, starting it first if need be, or
-    minimizes it when it is already showing."""
+    hides it when it is already showing."""
     if not is_running(widget):
+        set_hidden(widget, False)
         start(widget)
         if not installed(widget):
             notify(widget, f'The {widget} widget is not installed.')
@@ -336,7 +344,7 @@ def toggle(widget):
 
 
 def status(widget):
-    print(f'{widget}: ' + (('running, minimized' if os.path.exists(hidden_file(widget)) else 'running')
+    print(f'{widget}: ' + (('running, hidden' if os.path.exists(hidden_file(widget)) else 'running')
                            if is_running(widget) else 'not running'))
     print('starts at login' if os.path.exists(autostart_file(widget)) else 'does not start at login')
 
