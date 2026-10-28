@@ -96,6 +96,9 @@ def scroll_lyrics(regions, s, x, y, down):
     return offset
 
 
+wheel = scroll_lyrics                            # what conky-mouse.py does with a wheel step
+
+
 def pick_colour(art, x, y):
     """Make the art's colour at card (x, y), logical px, the background."""
     fx, fy = (x - art[0]) / (art[2] - art[0]), (y - art[1]) / (art[3] - art[1])

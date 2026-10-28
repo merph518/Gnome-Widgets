@@ -113,6 +113,20 @@ def load_spotify_mouse():
     return load_conky_mouse().hooks
 
 
+def load_speech_mouse():
+    """The speech widget's part of the mouse helper, loaded as conky-mouse.py loads it, with
+    conky-mouse.py (set up for the Spotify widget) as its core."""
+    if 'speech_mouse' not in sys.modules:
+        core = load_conky_mouse()
+        sys.path.insert(0, os.path.join(SRC, 'speech'))
+        spec = importlib.util.spec_from_file_location('speech_mouse', os.path.join(SRC, 'speech', 'mouse.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.core = core
+        sys.modules['speech_mouse'] = module
+    return sys.modules['speech_mouse']
+
+
 class TempDirTest(unittest.TestCase):
     """Gives each test its own directory in self.dir, removed afterwards."""
 

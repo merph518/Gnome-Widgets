@@ -587,7 +587,8 @@ def render(state, now=None):
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
     for s, span in zip(listed, spans):
-        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + row * span, 2)}
+        entry = {'id': s['id'], 'speech': s['speech'], 'top': round(top, 2),
+                 'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
         rows.append(entry)
