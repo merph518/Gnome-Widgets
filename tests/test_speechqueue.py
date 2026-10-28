@@ -502,6 +502,18 @@ class VoiceDropDown(Fixture):
         self.assertFalse([l for l in draw if l.startswith(('menu ', 'item '))])
         self.assertIn('voice', regions)
 
+    def test_the_drop_down_and_the_footer_grow_with_the_text(self):
+        heights = {}
+        for scale in (1.0, 2.0):
+            with mock.patch.object(speechqueue.size_file, 'load', return_value=(660, 128, scale)):
+                _, regions = self.render(VOICES)
+            drop = regions['voice']
+            heights[scale] = (drop[3] - drop[1], regions['pause'][1])
+            line = speechqueue.line_height(speechqueue.FOOTER_FONT)
+            self.assertGreaterEqual(drop[3] - drop[1], line)         # the label fits its pill
+        self.assertEqual(heights[1.0][0], speechqueue.DROPDOWN_H)    # as before at scale 1
+        self.assertGreater(heights[2.0][0], heights[1.0][0])
+
     def test_a_voice_that_is_not_installed_marks_none(self):
         _, regions = self.render(VOICES, voice='de_DE-thorsten-medium')
         self.assertEqual(regions['menu']['current'], -1)

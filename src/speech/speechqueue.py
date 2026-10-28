@@ -79,7 +79,7 @@ BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle
-DROPDOWN_H = 24                               # the voice drop down's height
+DROPDOWN_H = 24                               # the voice drop down's height, at least
 DROPDOWN_PAD = 10                             # either side of its label
 DROPDOWN_ARROW = 10                           # the arrow's width, after the label
 DROPDOWN_GAP = 6                              # label to arrow
@@ -744,7 +744,9 @@ def render(state, now=None):
     # drawn above the footer, over the progress bar and the sessions, when conky-mouse.py has it open.
     footer_top = out.y
     out.gap(FOOTER_GAP)
-    fy = out.y + FOOTER_H / 2
+    drop_h = max(DROPDOWN_H, line_height(FOOTER_FONT) + 6)   # taller with the text scale
+    footer_h = max(FOOTER_H, drop_h + 6)
+    fy = out.y + footer_h / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2
     vol_icon = pause_cx + PAUSE_SIZE / 2 + 16
     vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
@@ -754,10 +756,10 @@ def render(state, now=None):
     voice = fit(f"Voice: {voice_label(state['voice'])}", FOOTER_FONT,
                 right - (vol_x1 + 6 + 16) - chrome)
     drop_x0 = right - (text_width(voice, FOOTER_FONT) + chrome)
-    drop = [drop_x0, fy - DROPDOWN_H / 2, right, fy + DROPDOWN_H / 2]
+    drop = [drop_x0, fy - drop_h / 2, right, fy + drop_h / 2]
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
     draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
-    draw.append(f'voice {drop_x0} {right} {fy} {DROPDOWN_H} {DROPDOWN_PAD} {DROPDOWN_ARROW} {voice}')
+    draw.append(f'voice {drop_x0} {right} {fy} {drop_h:g} {DROPDOWN_PAD} {DROPDOWN_ARROW} {voice}')
     half = PAUSE_SIZE / 2 + 4
     regions.update({
         'pause': box(pause_cx, fy, half, half),
@@ -772,7 +774,7 @@ def render(state, now=None):
                                       progress_top)
         draw.extend(menu_lines)
         regions['menu'] = menu
-    out.gap(FOOTER_H)
+    out.gap(footer_h)
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
     return out.end(out.y + MARGIN - 4)
