@@ -345,12 +345,13 @@ _last = None
 def last_lines(n, live):
     """{session id: the last line read aloud for it}, kept in LAST across restarts: the line
     now.json plays is recorded once it starts, a question excepted (it shows as a tag while it
-    waits, and its text is not listed). Sessions no longer open are dropped."""
+    waits, and its text is not listed). Sessions no longer open are dropped, unless none is
+    listed at all, which is a sessions folder that could not be read as often as it is none."""
     global _last
     if _last is None:
         saved = _json(LAST)
         _last = {str(k): str(v) for k, v in saved.items()} if isinstance(saved, dict) else {}
-    last = {k: v for k, v in _last.items() if k in live}
+    last = {k: v for k, v in _last.items() if k in live} if live else dict(_last)
     text = display_text((n or {}).get('text') or '')
     sid = str((n or {}).get('session') or '')
     if sid in live and text and not text.lower().startswith('question:'):

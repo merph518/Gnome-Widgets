@@ -100,6 +100,9 @@ named after its GitHub origin remote (or its folder, without one). The labels ar
 `~/.config/conky-widgets/speech/labels.json`, repository name to label, written with a starting
 set the first time the widget runs; a repository not in it gets the first letter of each word
 of its name, filled out from the last word (`LaundryBot` reads `LBOT`).
+A session with speech on always has a second row under its name: the last line read aloud
+for it, cut to one line, or *Nothing read aloud yet* before its first. A question waiting to
+be read shows as a **question** tag after the name instead of its text.
 
 Two of the Spotify settings are about lyrics, and both are remembered:
 
