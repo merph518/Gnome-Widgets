@@ -13,7 +13,7 @@ before `/release` builds.
 ## The list
 
 ```bash
-python3 -m py_compile src/*/*.py bin/conky-widgets scripts/*.py
+python3 -m py_compile src/*.py src/*/*.py bin/conky-widgets scripts/*.py
 python3 scripts/catchup_test.py
 python3 -m unittest discover -s tests
 luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf

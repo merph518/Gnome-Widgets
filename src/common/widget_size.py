@@ -1,5 +1,5 @@
-"""The widget's size settings, kept in ~/.config/conky-spotify-nowplaying/size as
-'<width> <lyrics height> <text scale>'.
+"""A widget's size settings, kept in size in its config folder (the Spotify widget's is
+~/.config/conky-spotify-nowplaying/size) as '<width> <lyrics height> <text scale>'.
 
   - width: the width inside the margins, in logical px (dragging a side edge or a corner)
   - lyrics height: the height of the lyrics area, in logical px (dragging the top or bottom
@@ -27,11 +27,11 @@ def clamp(v, low, high):
     return min(max(v, low), high)
 
 
-def load():
+def load(path=None):
     """(width, lyrics height, text scale), each within its limits; a missing or bad value
-    is its default."""
+    is its default. `path` is the widget's size file, the Spotify widget's by default."""
     try:
-        with open(PATH) as f:
+        with open(path or PATH) as f:
             fields = f.read().split()
     except OSError:
         fields = []
@@ -45,9 +45,10 @@ def load():
     return round(settings[0]), round(settings[1]), round(settings[2], 2)
 
 
-def save(settings):
-    os.makedirs(os.path.dirname(PATH), exist_ok=True)
-    tmp = f'{PATH}.{os.getpid()}.tmp'              # the tray and conky-mouse.py both write it
+def save(settings, path=None):
+    path = path or PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.{os.getpid()}.tmp'              # the tray and conky-mouse.py both write it
     with open(tmp, 'w') as f:
         f.write('{} {} {:g}\n'.format(*settings))
-    os.replace(tmp, PATH)
+    os.replace(tmp, path)

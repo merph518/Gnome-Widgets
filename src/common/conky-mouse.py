@@ -8,8 +8,8 @@ are the heart, play/pause, previous and next buttons, the seek bar and the album
 Conky's own Lua mouse hook never receives button presses under GNOME/XWayland, so this
 helper subscribes to clicks on conky's window itself:
   - the widget's controls: pressed by a click or a tap (its mouse.py)
-  - minimize: hide the widget until the tray menu or the launcher shows it again
-  - close: stop the widget, like the tray menu's Quit
+  - minimize and close: hide this widget, and only this one, until the tray menu or the
+    launcher shows it again. The tray menu's Quit is what stops the widgets.
   - an edge or corner: resize the widget. A side edge changes its width, the top or bottom
     edge the height of the lyrics, and a corner both; the text keeps its size. An outline
     shows the new size while the button is held; on release it is saved (widget_size.py)
@@ -61,8 +61,9 @@ Always on top is the window manager's state for conky's regular window, set and 
 here as ~/.config/<name>/on-top (the tray menu's toggle) changes, so conky
 never restarts for it.
 
-Minimized is a flag file (~/.cache/<name>/hidden) that the launcher's
-show/hide commands also write; while it exists this helper keeps conky's window unmapped.
+Hidden is a flag file (~/.cache/<name>/hidden), one per widget, that the tray menu's
+Show ticks and the launcher's show/hide commands also write; while it exists this helper
+keeps conky's window unmapped and keeps running, so showing it again is instant.
 """
 import ctypes, importlib.util, json, math, os, re, subprocess, sys, time
 
@@ -72,7 +73,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # What a widget's name sets, in configure(): the folders and files below, and `hooks`, the
 # widget's own mouse.py.
 hooks = None
-CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = LAUNCHER = WIDGET = None
+CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = None
 WM_CLASS, OUTLINE, BUTTONS = None, None, ()
 BUTTON_PRESS, MOTION_NOTIFY, BUTTON1_MASK = 4, 6, 1 << 8
 WHEEL_UP, WHEEL_DOWN = 4, 5                       # X reports the wheel as button presses
@@ -88,6 +89,7 @@ TAP_SLOP = 8                                      # the same for a finger, which
 EDGE = 6                                          # logical px along the border that resize
 CORNER = 24                                       # how far from a corner both of its edges resize
 RESCALED = 75                                     # exit status: Xft.dpi changed (the launcher's too)
+HIDES = ('minimize', 'close')                     # the controls that hide the widget
 # X cursor font shapes (X11/cursorfont.h), by the edges a press there resizes.
 # '' is the arrow anywhere else on the card (left_ptr).
 CURSORS = {'': 68, 'l': 70, 'r': 96, 't': 138, 'b': 16, 'lt': 134, 'rt': 136, 'lb': 12, 'rb': 14}
@@ -102,7 +104,7 @@ def configure(widget):
     """Sets this helper up for the widget in src/<widget>/, whose mouse.py says its name
     (the config and cache folders, the launcher, the window class), its controls and what
     they do. Run before anything else here."""
-    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP, LAUNCHER, WIDGET
+    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP
     global WM_CLASS, OUTLINE, BUTTONS
     folder = os.path.join(HERE, '..', widget)
     sys.path.insert(0, folder)
@@ -117,9 +119,8 @@ def configure(widget):
     LOG = os.path.join(CACHE, 'mouse.log')
     HIDDEN = os.path.join(CACHE, 'hidden')
     ON_TOP = os.path.join(CONF, 'on-top')         # 'off': not always on top
-    LAUNCHER, WIDGET = os.environ.get('CSN_LAUNCHER') or 'conky-widgets', widget
     WM_CLASS, OUTLINE = hooks.WM_CLASS, hooks.OUTLINE
-    BUTTONS = hooks.BUTTONS + ('minimize', 'close')   # the controls a click or tap presses
+    BUTTONS = hooks.BUTTONS + HIDES               # the controls a click or tap presses
 
 
 x11 = ctypes.CDLL('libX11.so.6')
@@ -704,14 +705,12 @@ def pull(d, root, win, s, regions, hit, edges, track, at, touch=False):
 
 def press(d, win, hit):
     """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
-    if hit == 'minimize':
+    if hit in HIDES:
+        os.makedirs(CACHE, exist_ok=True)
         open(HIDDEN, 'w').close()
         x11.XUnmapWindow(d, win)
         x11.XFlush(d)
-        log('minimize')
-    elif hit == 'close':
-        subprocess.Popen([LAUNCHER, WIDGET, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log('close')
+        log(hit)
     else:
         hooks.press(d, win, hit)
 
@@ -899,7 +898,7 @@ def main(widget):
                 edges = hooks.without_idle_edges(edges, regions)
                 if hit in BUTTONS:
                     press(d, win, hit)
-                    if hit == 'minimize':
+                    if hit in HIDES:
                         hidden = True
                 else:
                     pull(d, root, win, s, regions, hit, edges, follow_pointer(d, root),
@@ -923,7 +922,7 @@ def main(widget):
                 if hit in BUTTONS:               # pressed once it lifts, if still on the control
                     if tap(regions, s, x, y, start, hit, finger):
                         press(d, win, hit)
-                        if hit == 'minimize':
+                        if hit in HIDES:
                             hidden = True
                     else:
                         log(f'touch: lifted off {hit}')

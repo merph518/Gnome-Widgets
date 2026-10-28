@@ -122,9 +122,17 @@ class CommandsTest(LauncherTest):
         self.run_main('spotify', 'start')
         self.assertEqual(len(self.spawned), 1)
 
-    def test_start_shows_a_minimized_widget(self):
+    def test_start_and_restart_keep_a_hidden_widget_hidden(self):
         launcher.set_hidden('spotify', True)
         self.run_main('spotify', 'start')
+        self.assertTrue(self.hidden('spotify'))
+        self.run_main('restart')
+        self.assertTrue(self.hidden('spotify'))
+
+    def test_the_app_grid_entry_starts_a_hidden_widget_shown(self):
+        launcher.set_hidden('spotify', True)
+        self.run_main('spotify')
+        self.assertEqual(launcher.wanted(), ['spotify'])
         self.assertFalse(self.hidden('spotify'))
 
     def test_a_widget_that_is_not_installed_is_not_started(self):
@@ -331,7 +339,7 @@ class SuperviseTest(LauncherTest):
         def at_pass(n, procs):
             if n == 5:
                 launcher.flag(os.path.join(launcher.WANTED, 'speech'), False)
-        with mock.patch.object(launcher, 'processes', lambda w: [
+        with mock.patch.object(launcher, 'processes', lambda w: [] if w == launcher.BUNDLE else [
                 ('nowplaying', ['py', f'{w}-contents.py']), ('conky', ['conky', '-c', w])]):
             started = self.run_supervisor(8, at_pass, widgets=('spotify', 'speech'))
         self.assertEqual(self.names(started), ['spotify-contents', 'conky', 'speech-contents', 'conky'])
@@ -343,7 +351,7 @@ class SuperviseTest(LauncherTest):
         def at_pass(n, procs):
             if n == 5:
                 procs[5].returncode = launcher.RESCALED          # speech's mouse helper
-        with mock.patch.object(launcher, 'processes', lambda w: [
+        with mock.patch.object(launcher, 'processes', lambda w: [] if w == launcher.BUNDLE else [
                 ('nowplaying', ['py', f'{w}-contents.py']), ('conky', ['conky', '-c', w]),
                 ('mouse', ['py', f'{w}-mouse.py'])]):
             started = self.run_supervisor(8, at_pass, widgets=('spotify', 'speech'))
@@ -351,6 +359,28 @@ class SuperviseTest(LauncherTest):
                          ['spotify-contents', 'conky', 'spotify-mouse', 'speech-contents', 'conky', 'speech-mouse'])
         self.assertEqual([p.ended for p in started[:6]], [False, False, False, True, True, False])
         self.assertEqual(self.names(started[6:]), ['speech-contents', 'conky', 'speech-mouse'])
+
+    def test_one_tray_serves_every_widget_and_goes_with_the_last(self):
+        tray_ended = {}
+
+        def at_pass(n, procs):
+            tray = next((p for p in procs if p.name == 'tray'), None)
+            tray_ended[n] = tray and tray.ended
+            if n == 3:
+                launcher.flag(os.path.join(launcher.WANTED, 'spotify'), False)
+            if n == 5:
+                launcher.flag(os.path.join(launcher.WANTED, 'speech'), False)
+        with mock.patch.object(launcher, 'processes', lambda w: [
+                ('tray', ['py', 'tray.py'])] if w == launcher.BUNDLE else [('conky', ['conky', '-c', w])]):
+            started = self.run_supervisor(7, at_pass, widgets=('spotify', 'speech'))
+        self.assertEqual(self.names(started), ['conky', 'conky', 'tray'])
+        self.assertEqual((tray_ended[4], tray_ended[6]), (False, True))   # kept for speech, then gone
+        self.assertEqual(os.listdir(launcher.UP), [])
+
+    def test_the_tray_is_the_bundles_not_a_widgets(self):
+        self.assertEqual([name for name, _ in launcher.processes(launcher.BUNDLE)], ['tray'])
+        self.assertTrue(launcher.processes(launcher.BUNDLE)[0][1][1].endswith(os.path.join('src', 'tray.py')))
+        self.assertNotIn('tray', [name for name, _ in launcher.processes('spotify')])
 
     def test_shutting_down_ends_every_process_and_removes_its_files(self):
         def at_pass(n, procs):
