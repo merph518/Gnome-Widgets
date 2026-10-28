@@ -1,6 +1,7 @@
--- Drawing and colour helpers every conky widget here shares: the card and its shadow, and the
--- foreground that follows a fading background by APCA contrast. A widget's draw.lua loads it
--- with require, from this directory, and keeps its own state (the background, the foreground).
+-- Drawing and colour helpers every conky widget here shares: the card and its shadow, the volume
+-- slider, and the foreground that follows a fading background by APCA contrast. A widget's
+-- draw.lua loads it with require, from this directory, and keeps its own state (the
+-- background, the foreground).
 local theme = {}
 
 -- Foreground: white on dark or saturated backgrounds, near-black on light ones, whichever

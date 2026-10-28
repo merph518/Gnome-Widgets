@@ -362,7 +362,7 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/speech/speechqueue.py` | Reads the open Claude sessions and the speaking hook's state (read only), lays the speech widget out, and writes its text, geometry for its `draw.lua`, click areas and the sessions list |
 | `src/speech/sessions.py` | Lists the open Claude sessions from `~/.claude/sessions`, as `speechctl` finds them |
 | `src/speech/draw.lua`, `src/speech/mouse.py` | The speech widget's Cairo drawing, and what its controls, the wheel and swipes over its list do for `conky-mouse.py`, through `speechctl` |
-| `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, and the foreground that follows a fading background |
+| `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, the volume slider, and the foreground that follows a fading background |
 | `src/common/widget_size.py` | Reads and writes a widget's size settings: width, lyrics (Spotify) or sessions list (speech) height, text scale |
 | `src/spotify/mouse.py` | What the Spotify widget's controls do for `conky-mouse.py`: the buttons, the seek bar, the volume slider (Spotify's own volume, through MPRIS), the album art's colour pick, and the wheel over the volume and the wheel and swipes over static lyrics |
 | `src/spotify/lyrics_settings.py` | Reads and writes the lyrics settings: on or off, autoscroll or static |

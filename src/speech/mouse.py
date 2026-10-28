@@ -102,20 +102,23 @@ def set_volume(d, win, regions, s, track):
     wx, _, _, _ = core.card_of(core.geometry(d, win), s)
     os.makedirs(CACHE, exist_ok=True)
     level, held = 0.0, True
-    while held:
-        px, _, held = track()
-        fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
-        level = round(fraction * VOLUME_TOP, 1)
-        with open(VOLUME_PREVIEW + '.tmp', 'w') as f:
-            f.write(f'{level / VOLUME_TOP:.4f}')
-        os.replace(VOLUME_PREVIEW + '.tmp', VOLUME_PREVIEW)
-        time.sleep(0.02)
-    speechctl('volume', f'{level:.1f}')
-    time.sleep(0.6)  # keep the preview until speechqueue.py reports the new level
     try:
-        os.remove(VOLUME_PREVIEW)
-    except OSError:
-        pass
+        while held:
+            px, _, held = track()
+            fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
+            level = round(fraction * VOLUME_TOP, 1)
+            with open(VOLUME_PREVIEW + '.tmp', 'w') as f:
+                f.write(f'{level / VOLUME_TOP:.4f}')
+            os.replace(VOLUME_PREVIEW + '.tmp', VOLUME_PREVIEW)
+            time.sleep(0.02)
+        speechctl('volume', f'{level:.1f}')
+        time.sleep(0.6)  # keep the preview until speechqueue.py reports the new level
+    finally:
+        # a preview left behind would hold the slider at it, so it goes however the drag ends
+        try:
+            os.remove(VOLUME_PREVIEW)
+        except OSError:
+            pass
 
 
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
