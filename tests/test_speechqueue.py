@@ -37,6 +37,7 @@ class Fixture(unittest.TestCase):
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
                             ('LABELS', os.path.join(self.root, 'labels.json')),
+                            ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -70,7 +71,6 @@ class ReadState(Fixture):
         self.assertEqual([x['id'] for x in s], [ME, OTHER, QUIET])
         self.assertEqual([x['speech'] for x in s], ['on', 'alerts', 'off'])
         self.assertEqual([x['queued'] for x in s], [0, 1, 0])
-        self.assertEqual(s[1]['next'], 'The build is green.')
         self.assertTrue(s[0]['busy'])
         self.assertTrue(s[2]['background'])
 
@@ -78,8 +78,23 @@ class ReadState(Fixture):
         self.f.session(100, ME, 'One')
         self.f.queue(ME, 'Question: Open the pull request? Options: yes or no.')
         s = self.state()['sessions'][0]
-        self.assertEqual((s['queued'], s['next'], s['question']), (1, '', True))
+        self.assertEqual((s['queued'], s['question']), (1, True))
         self.assertIn('question', speechqueue.session_line(s).split('\t')[4].split(','))
+
+    def test_an_on_session_keeps_its_last_line_and_others_have_none(self):
+        self.three()
+        line = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                if x['id'] == sid).split('\t')[7]
+        self.assertEqual(line(ME), speechqueue.NOTHING_SAID)
+        self.assertEqual(line(OTHER), '')
+        self.f.now(ME, 'Claude Voice Widget', 'Pass 1 is pushed.')
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        self.f.now(ME, 'Claude Voice Widget', 'Question: Open it? Options: yes or no.')
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        speechqueue._last = None                       # a restart reads it back from LAST
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
 
     def test_both_markers_read_as_on(self):
         self.f.session(100, ME, 'One')
@@ -201,7 +216,7 @@ class Labels(Fixture):
         with open(speechqueue.LABELS, 'w') as f:
             json.dump({'One': 'ONE'}, f)
         s = self.state()['sessions'][0]
-        self.assertEqual(speechqueue.session_line(s).split('\t')[7], s['label'])
+        self.assertEqual(speechqueue.session_line(s).split('\t')[6], s['label'])
 
 
 class ClockTest(unittest.TestCase):

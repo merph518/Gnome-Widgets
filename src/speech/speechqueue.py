@@ -40,6 +40,7 @@ OUT = os.path.join(CACHE, 'widget.txt')
 DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
+LAST = os.path.join(CACHE, 'last-lines.json')     # {session id: the last line read aloud for it}
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
@@ -68,6 +69,7 @@ SMALL_PITCH = 22                              # − + and ◀ ▶, centre to cen
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
+NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
 # labels.json's first contents, written when it is missing; keys match without case
 DEFAULT_LABELS = {
     'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
@@ -337,6 +339,31 @@ def voice_label(voice):
     return m.group(1) if m else voice
 
 
+_last = None
+
+
+def last_lines(n, live):
+    """{session id: the last line read aloud for it}, kept in LAST across restarts: the line
+    now.json plays is recorded once it starts, a question excepted (it shows as a tag while it
+    waits, and its text is not listed). Sessions no longer open are dropped."""
+    global _last
+    if _last is None:
+        saved = _json(LAST)
+        _last = {str(k): str(v) for k, v in saved.items()} if isinstance(saved, dict) else {}
+    last = {k: v for k, v in _last.items() if k in live}
+    text = display_text((n or {}).get('text') or '')
+    sid = str((n or {}).get('session') or '')
+    if sid in live and text and not text.lower().startswith('question:'):
+        last[sid] = text
+    if last != _last:
+        _last = last
+        try:
+            write_atomic(LAST, json.dumps(last))
+        except OSError:
+            pass
+    return last
+
+
 def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
@@ -353,14 +380,16 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
     except (TypeError, ValueError):
         volume = DEFAULT_VOLUME
     listed = []
-    for s in sessions_mod.list_sessions(sessions_dir, proc_dir):
+    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
+    said = last_lines(n, {s['id'] for s in open_sessions})
+    for s in open_sessions:
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
-        first = display_text(lines[0]) if lines else ''
-        # A question the hook reads out waits as a "question" tag on the row, not its text
-        question = first.lower().startswith('question:')
+        # A question waiting to be read out shows as a "question" tag on the row
+        question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
-                           next='' if question else first, question=question,
+                           question=question,
                            label=session_label(s['cwd'], labels),
+                           last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
     name = ''
@@ -422,12 +451,13 @@ def box(cx, cy, half_w, half_h):
 
 
 def session_line(s):
-    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, next,
-    label."""
+    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
+    and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
     flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
                                         ('question', s.get('question'))) if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
-                      display_text(s['name']), s['next'], s.get('label', '')))
+                      display_text(s['name']), s.get('label', ''),
+                      (s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
 
 
 def write_sessions(listed):
@@ -503,8 +533,8 @@ def render(state, now=None):
     out.gap(PROGRESS_H)
 
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
-    # they run longer than the list's height. A session with lines queued shows the next one
-    # as a second row, while every session's rows fit without scrolling.
+    # they run longer than the list's height. A session with speech on always takes two rows,
+    # the second its last line read aloud, so the list's layout doesn't change as lines play.
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
     out.text(f"${{goto {SHADOW + MARGIN}}}${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}Sessions{plain()}",
@@ -513,9 +543,9 @@ def render(state, now=None):
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
-    second = len(listed) + sum(1 for s in listed if s['next']) <= rows_fit + 1e-3
     count = len(listed)
-    last = 0 if second else max(0, round(count - rows_fit + 0.4999))
+    spans = [2 if s['speech'] == 'on' else 1 for s in listed]
+    last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed)
     # The setting's three segments at the right of each row, as wide as their labels
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
@@ -524,16 +554,15 @@ def render(state, now=None):
         xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
     queued_right = xs[0] - 10
     draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
-                f'{last} {int(second)}')
+                f'{last}')
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
-    for s in listed:
-        span = row * (2 if second and s['next'] else 1)
-        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + span, 2)}
+    for s, span in zip(listed, spans):
+        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
         rows.append(entry)
-        top += span
+        top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
     regions['rows'] = rows
     regions['list_scroll'] = [last, round(row, 2)]

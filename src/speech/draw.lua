@@ -58,7 +58,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
-    -- flags, name, next, label}
+    -- flags, name, label, last}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -66,7 +66,8 @@ local function load_sessions(version)
         for v in (line .. '\t'):gmatch('([^\t]*)\t') do f[#f + 1] = v end
         rows[#rows + 1] = {speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
-                           name = f[6] or '', next = f[7] or '', label = f[8] or ''}
+                           name = f[6] or '', label = f[7] or '',
+                           last = f[8] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -336,10 +337,10 @@ local function draw_label(cr, label, x, cy, w, h, s, text, speaking)
     show(cr, label, x + w / 2, cy, 'centre')
 end
 
-local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
+local function draw_row(cr, r, x0, x1, y, row, c, s, text)
     -- a session's row: its repository's label (filled while it is speaking), its name,
-    -- busy / bg, how many lines it has queued and its setting; then its next line as a second
-    -- row when there is room for one. Returns how many rows it took.
+    -- busy / bg / question, how many lines it has queued and its setting; with speech on, a
+    -- second row of its last line read aloud. Returns how many rows it took.
     local cy = y + row / 2
     draw_control(cr, c, cy, c[5], s, text, r.speech)
     local right = c[6] * s
@@ -360,18 +361,16 @@ local function draw_row(cr, r, x0, x1, y, row, c, s, text, second)
         set(cr, secondary())
         show(cr, r.flags, name_x + nw + 8 * s, cy, 'left')
     end
-    if second and r.next ~= '' then
-        font(cr, 11, text, s)
-        set(cr, secondary())
-        show(cr, fit(cr, r.next, x1 - name_x), name_x, cy + row, 'left')
-        return 2
-    end
-    return 1
+    if r.speech ~= 'on' then return 1 end
+    font(cr, 11, text, s)
+    set(cr, secondary())
+    show(cr, fit(cr, r.last, x1 - name_x), name_x, cy + row, 'left')
+    return 2
 end
 
 local function draw_list(cr, l, version, c, s, text)
     local x0, x1, top, row, height = l[1] * s, l[2] * s, l[3] * s, l[4] * s, l[5] * s
-    local last, second = l[8], l[9] == 1
+    local last = l[8]
     load_sessions(version)
     local rows = sessions.rows
     if #rows == 0 then
@@ -385,7 +384,9 @@ local function draw_list(cr, l, version, c, s, text)
     if scroll == nil then scroll = target end
     scroll = scroll + (target - scroll) * (1 - math.exp(-dt() * 12 / 1.1))   -- ~0.33 s glide
     if last > 0 then
-        draw_scrollbar(cr, x1 + 8 * s, top, height, s, height / row, #rows, scroll, last)
+        local total = 0                            -- in rows: a session with speech on takes two
+        for _, r in ipairs(rows) do total = total + (r.speech == 'on' and 2 or 1) end
+        draw_scrollbar(cr, x1 + 8 * s, top, height, s, height / row, total, scroll, last)
     end
     cairo_save(cr)
     cairo_rectangle(cr, x0, top, x1 - x0, height)
@@ -394,7 +395,7 @@ local function draw_list(cr, l, version, c, s, text)
     for _, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
-        at = at + draw_row(cr, r, x0, x1, y, row, c, s, text, second)
+        at = at + draw_row(cr, r, x0, x1, y, row, c, s, text)
     end
     cairo_restore(cr)
 end
