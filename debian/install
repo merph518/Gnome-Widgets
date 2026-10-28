@@ -1,3 +1,4 @@
+bin/conky-widgets usr/bin
 bin/conky-spotify-nowplaying usr/bin
 src/common/conky-mouse.py usr/share/conky-spotify-nowplaying/common
 src/common/widget_size.py usr/share/conky-spotify-nowplaying/common
@@ -13,5 +14,6 @@ src/spotify/art_colours.py usr/share/conky-spotify-nowplaying/spotify
 src/spotify/no-art.png usr/share/conky-spotify-nowplaying/spotify
 src/spotify/tray.py usr/share/conky-spotify-nowplaying/spotify
 packaging/conky-spotify-nowplaying.desktop usr/share/applications
+packaging/conky-widgets-speech.desktop usr/share/applications
 packaging/conky-spotify-nowplaying.svg usr/share/icons/hicolor/scalable/apps
 packaging/icons/conky-spotify-nowplaying-symbolic.svg usr/share/icons/hicolor/symbolic/apps

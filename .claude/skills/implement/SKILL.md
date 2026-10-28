@@ -144,11 +144,11 @@ while the copy that was running is still up.
 ```bash
 pgrep -af 'nowplaying.py'               # which copy runs, if any: note it
 scripts/capture-widget.py <scratchpad>/widget-before.png   # visual changes only
-bin/conky-spotify-nowplaying stop
-: > ~/.cache/conky-spotify-nowplaying/run.log
-bin/conky-spotify-nowplaying start
-pgrep -af 'conky-spotify-nowplaying|nowplaying.py|conky-mouse.py|^conky '
-grep -iE 'error|critical|traceback|lua' ~/.cache/conky-spotify-nowplaying/run.log
+bin/conky-widgets spotify stop
+: > ~/.cache/conky-widgets/run.log
+bin/conky-widgets spotify start
+pgrep -af 'conky-widgets|nowplaying.py|conky-mouse.py|^conky '
+grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 ```
 
 The processes should run from this worktree's `src/`, and the log should hold

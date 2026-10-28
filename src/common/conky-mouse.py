@@ -72,7 +72,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # What a widget's name sets, in configure(): the folders and files below, and `hooks`, the
 # widget's own mouse.py.
 hooks = None
-CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = LAUNCHER = None
+CONF = POSITION = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = LAUNCHER = WIDGET = None
 WM_CLASS, OUTLINE, BUTTONS = None, None, ()
 BUTTON_PRESS, MOTION_NOTIFY, BUTTON1_MASK = 4, 6, 1 << 8
 WHEEL_UP, WHEEL_DOWN = 4, 5                       # X reports the wheel as button presses
@@ -102,7 +102,7 @@ def configure(widget):
     """Sets this helper up for the widget in src/<widget>/, whose mouse.py says its name
     (the config and cache folders, the launcher, the window class), its controls and what
     they do. Run before anything else here."""
-    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP, LAUNCHER
+    global hooks, CONF, POSITION, CACHE, REGIONS, LOG, HIDDEN, ON_TOP, LAUNCHER, WIDGET
     global WM_CLASS, OUTLINE, BUTTONS
     folder = os.path.join(HERE, '..', widget)
     sys.path.insert(0, folder)
@@ -117,7 +117,7 @@ def configure(widget):
     LOG = os.path.join(CACHE, 'mouse.log')
     HIDDEN = os.path.join(CACHE, 'hidden')
     ON_TOP = os.path.join(CONF, 'on-top')         # 'off': not always on top
-    LAUNCHER = os.environ.get('CSN_LAUNCHER') or hooks.NAME
+    LAUNCHER, WIDGET = os.environ.get('CSN_LAUNCHER') or 'conky-widgets', widget
     WM_CLASS, OUTLINE = hooks.WM_CLASS, hooks.OUTLINE
     BUTTONS = hooks.BUTTONS + ('minimize', 'close')   # the controls a click or tap presses
 
@@ -710,7 +710,7 @@ def press(d, win, hit):
         x11.XFlush(d)
         log('minimize')
     elif hit == 'close':
-        subprocess.Popen([LAUNCHER, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([LAUNCHER, WIDGET, 'stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log('close')
     else:
         hooks.press(d, win, hit)

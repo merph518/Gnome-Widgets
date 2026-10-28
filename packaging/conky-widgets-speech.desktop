@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=Speech
+GenericName=Speech Widget
+Comment=Desktop widget for speech
+Exec=conky-widgets speech
+Icon=audio-input-microphone
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;Audio;
+Keywords=speech;conky;widget;
+Actions=autostart-on;autostart-off;
+
+[Desktop Action autostart-on]
+Name=Start at login
+Exec=conky-widgets speech autostart on
+
+[Desktop Action autostart-off]
+Name=Don't start at login
+Exec=conky-widgets speech autostart off

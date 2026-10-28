@@ -110,8 +110,8 @@ The body is not hand-wrapped.
   give the command that shows it, or write that it does not apply and why.
 - **Logs** - relevant lines from `~/.cache/conky-spotify-nowplaying/`:
   `nowplaying.log` (lyrics, likes, rendering), `mouse.log` (clicks, drag,
-  position) and `run.log` (launcher, Conky, Lua errors). Quote them in a code
-  block, trimmed to the lines around the problem, and only lines actually read
+  position) and, in `~/.cache/conky-widgets/`, `run.log` (launcher, Conky, Lua
+  errors). Quote them in a code block, trimmed to the lines around the problem, and only lines actually read
   from those files. None read says so.
 - **Scope** - the files a fix is expected to touch, and anything deliberately
   left out.
