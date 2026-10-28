@@ -115,6 +115,57 @@ class ReadState(Fixture):
         self.f.ledger(QUIET, ('pr:5', 'open'))
         self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over bg
 
+    def test_waiting_on_tests_while_a_test_run_is_under_the_session(self):
+        self.three()
+        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                 if x['id'] == sid).split('\t')[4]
+        self.f.process(110, 100, 'bash', '-c', 'python3 -m unittest discover -s tests')
+        self.assertEqual(flags(OTHER), 'idle')                    # the shell's -c is not one
+        self.f.process(111, 110, '/usr/bin/python3', '-m', 'unittest', 'discover', '-s', 'tests')
+        self.f.ledger(OTHER, ('pr:111', 'open'))
+        self.assertEqual(flags(OTHER), 'waiting: tests')          # over waiting on a merge
+        self.f.process(210, 200, 'python3', 'scripts/catchup_test.py')
+        self.assertEqual(flags(QUIET), 'waiting: tests')          # over bg
+        self.f.process(310, 300, 'npx', 'playwright', 'test')
+        self.assertEqual(flags(ME), 'busy')                       # its own turn runs them
+
+    def test_waiting_on_tests_while_a_ci_run_is_open_in_a_skills_ledger(self):
+        self.three()
+        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                 if x['id'] == sid).split('\t')[4]
+        self.f.sweep(OTHER, 'done', 'done')
+        self.assertEqual(flags(OTHER), 'idle')
+        self.f.ledger(OTHER, ('pr:111', 'open'))
+        self.f.sweep(OTHER, 'done', 'in_progress', 'waiting')
+        self.assertEqual(flags(OTHER), 'waiting: tests')          # over waiting on a merge
+
+    def test_waiting_on_a_systemd_unit_a_shell_polls(self):
+        self.three()
+        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                 if x['id'] == sid).split('\t')[4]
+        loop = 'while systemctl --user is-active -q {} ; do sleep 60; done'
+        self.f.process(110, 100, '/bin/bash', '-c', loop.format('build-pack-now'))
+        self.assertEqual(flags(OTHER), 'waiting: local ai')
+        self.f.process(210, 200, '/bin/bash', '-c', loop.format('nightly.service'))
+        self.assertEqual(flags(QUIET), 'waiting: nightly.service')   # a unit with no tag
+        self.f.process(211, 200, 'pytest')
+        self.assertEqual(flags(QUIET), 'waiting: tests')          # a test run over a unit
+        self.f.sweep(OTHER, 'in_progress')
+        self.assertEqual(flags(OTHER), 'waiting: tests')          # a CI run over a unit too
+
+    def test_what_counts_as_a_test_run(self):
+        runs = (['pytest', '-q'], ['python3', '-I', '-m', 'pytest'], ['python3', 'tests/test_x.py'],
+                ['python3', '-W', 'ignore', 'test_x.py'],
+                ['bash', 'speechctl_test.sh'], ['./speechctl_test.sh'], ['npm', 'test'],
+                ['npm', 'run', 'test'], ['go', 'test', './...'], ['cargo', 'test'],
+                ['node', 'node_modules/.bin/playwright', 'test'])
+        others = ([], ['grep', 'unittest'], ['bash', '-c', 'pytest'], ['python3', 'speechqueue.py'],
+                  ['python3', '-m'], ['npm', 'install'], ['go', 'build'], ['playwright', 'show-report'])
+        for argv in runs:
+            self.assertTrue(speechqueue.is_test_run(argv), argv)
+        for argv in others:
+            self.assertFalse(speechqueue.is_test_run(argv), argv)
+
     def test_one_tag_a_question_first(self):
         self.three()
         flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']

@@ -66,6 +66,16 @@ class SpeechFixture:
         with open(os.path.join(self.proc, str(pid), 'stat'), 'w') as f:
             f.write(f'{pid} (proc) {state} 1 1')
 
+    def process(self, pid, ppid, *argv):
+        """A live process `pid` under `ppid`, running `argv`."""
+        self.alive(pid)
+        task = os.path.join(self.proc, str(ppid), 'task', str(ppid))
+        os.makedirs(task, exist_ok=True)
+        with open(os.path.join(task, 'children'), 'a') as f:
+            f.write(f'{pid} ')
+        with open(os.path.join(self.proc, str(pid), 'cmdline'), 'wb') as f:
+            f.write(b''.join(a.encode() + b'\0' for a in argv))
+
     def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True):
         entry = {'pid': pid, 'sessionId': sid, 'name': name, 'cwd': f'/home/user/{name}',
                  'kind': kind, 'status': status}
@@ -95,6 +105,15 @@ class SpeechFixture:
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, 'ledger'), 'w') as f:
             f.writelines(f'label\t{key}\thttps://example.test\t{state}\t\n' for key, state in rows)
+
+    def sweep(self, sid, *states, project='-home-user-project'):
+        """A skill's own ledger for session `sid`, scratchpad/sweep/ledger.tsv: a GitHub
+        Actions run per state, in that format's columns."""
+        folder = os.path.join(self.ledgers, project, sid, 'scratchpad', 'sweep')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'ledger.tsv'), 'w') as f:
+            f.writelines(f'spec {i}\tbranch\t{i}\thttps://github.com/o/r/actions/runs/{i}/job/1'
+                         f'\t{state}\t\tlabel\n' for i, state in enumerate(states))
 
     def settings(self, **values):
         self.file('settings.json', json.dumps(values))
