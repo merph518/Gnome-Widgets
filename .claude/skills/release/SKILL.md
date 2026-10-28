@@ -38,8 +38,14 @@ step.
 
 ## 1. Pick the version
 
-If the user gave one, use it. Otherwise list what changed since the last tag and
-propose one:
+When the top entry of `debian/changelog` is `UNRELEASED`, its version is the
+release's, since a change already depends on it (`dpkg-parsechangelog -S
+Distribution` prints `UNRELEASED`). The package rename's `Breaks` and
+`Replaces` name `2.0.0~`, so a lower version would ship two packages that
+cannot be installed together. Say so if the user asks for another one.
+
+Otherwise, if the user gave one, use it. Otherwise list what changed since the
+last tag and propose one:
 
 ```bash
 git describe --tags --abbrev=0
