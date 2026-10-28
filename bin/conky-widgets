@@ -249,7 +249,11 @@ def supervise():
         stopping = True
 
     def release(widget):
-        for proc in children.pop(widget, {}).values():
+        procs = [p for p in children.pop(widget, {}).values() if p]
+        for proc in procs:                      # all asked first, so they exit together
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in procs:
             end(proc)
         flag(os.path.join(UP, widget), False)
 
@@ -288,14 +292,8 @@ def supervise():
                 if name == 'nowplaying':
                     time.sleep(1)   # let it write the first widget.txt before conky reads it
         time.sleep(0.5)
-    everything = [p for procs in children.values() for p in procs.values() if p]
     for widget in list(children):
         release(widget)
-    for proc in everything:
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
     try:
         os.remove(PIDFILE)
     except OSError:
