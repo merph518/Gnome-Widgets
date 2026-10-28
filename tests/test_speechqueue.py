@@ -36,6 +36,9 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
+                            ('LABELS', os.path.join(self.root, 'labels.json')),
+                            ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
+                            ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -69,9 +72,30 @@ class ReadState(Fixture):
         self.assertEqual([x['id'] for x in s], [ME, OTHER, QUIET])
         self.assertEqual([x['speech'] for x in s], ['on', 'alerts', 'off'])
         self.assertEqual([x['queued'] for x in s], [0, 1, 0])
-        self.assertEqual(s[1]['next'], 'The build is green.')
         self.assertTrue(s[0]['busy'])
         self.assertTrue(s[2]['background'])
+
+    def test_a_queued_question_is_a_tag_not_a_line(self):
+        self.f.session(100, ME, 'One')
+        self.f.queue(ME, 'Question: Open the pull request? Options: yes or no.')
+        s = self.state()['sessions'][0]
+        self.assertEqual((s['queued'], s['question']), (1, True))
+        self.assertIn('question', speechqueue.session_line(s).split('\t')[4].split(','))
+
+    def test_an_on_session_keeps_its_last_line_and_others_have_none(self):
+        self.three()
+        line = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+                                if x['id'] == sid).split('\t')[7]
+        self.assertEqual(line(ME), speechqueue.NOTHING_SAID)
+        self.assertEqual(line(OTHER), '')
+        self.f.now(ME, 'Claude Voice Widget', 'Pass 1 is pushed.')
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        self.f.now(ME, 'Claude Voice Widget', 'Question: Open it? Options: yes or no.')
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
+        speechqueue._last = None                       # a restart reads it back from LAST
+        self.assertEqual(line(ME), 'Pass 1 is pushed.')
 
     def test_both_markers_read_as_on(self):
         self.f.session(100, ME, 'One')
@@ -140,6 +164,62 @@ class ReadState(Fixture):
         self.assertEqual(speechqueue.voice_label('my-voice'), 'my-voice')
 
 
+class Labels(Fixture):
+    def repo(self, name, url=None):
+        top = os.path.join(self.root, 'code', name)
+        os.makedirs(os.path.join(top, '.git'))
+        with open(os.path.join(top, '.git', 'config'), 'w') as f:
+            f.write('[core]\n\tbare = false\n')
+            if url:
+                f.write(f'[remote "origin"]\n\turl = {url}\n\tfetch = +refs/heads/*\n')
+        return top
+
+    def test_short_label_takes_initials_then_the_last_word(self):
+        for name, label in (('Overmind', 'OVER'), ('LaundryBot', 'LBOT'), ('ATT-Test-Pack-Gen', 'ATPG'),
+                            ('fagerteam-health-coach', 'FHCO'), ('a-b-c-d-e', 'ABCD'), ('', '')):
+            with self.subTest(name=name):
+                self.assertEqual(speechqueue.short_label(name), label)
+
+    def test_repo_name_is_the_origin_remote_from_a_worktree_subfolder(self):
+        top = self.repo('old-folder', 'https://github.com/someone/Gnome-Widgets.git')
+        gitdir = os.path.join(top, '.git', 'worktrees', 'wt')
+        os.makedirs(gitdir)
+        with open(os.path.join(gitdir, 'commondir'), 'w') as f:
+            f.write('../..\n')
+        wt = os.path.join(top, '.claude', 'worktrees', 'wt')
+        os.makedirs(os.path.join(wt, 'src'))
+        with open(os.path.join(wt, '.git'), 'w') as f:
+            f.write(f'gitdir: {gitdir}\n')
+        self.assertEqual(speechqueue.repo_name(os.path.join(wt, 'src')), 'Gnome-Widgets')
+
+    def test_repo_name_follows_a_relative_gitdir(self):
+        top = self.repo('Overmind')
+        os.makedirs(os.path.join(top, '.git', 'worktrees', 'wt'))
+        with open(os.path.join(top, '.git', 'worktrees', 'wt', 'commondir'), 'w') as f:
+            f.write('../..\n')
+        wt = os.path.join(top, 'wt')
+        os.makedirs(wt)
+        with open(os.path.join(wt, '.git'), 'w') as f:
+            f.write('gitdir: ../.git/worktrees/wt\n')
+        self.assertEqual(speechqueue.repo_name(wt), 'Overmind')
+
+    def test_repo_name_without_a_remote_is_the_folder(self):
+        self.assertEqual(speechqueue.repo_name(self.repo('LaundryBot')), 'LaundryBot')
+
+    def test_labels_file_wins_without_case_and_is_cut_to_length(self):
+        top = self.repo('x', 'git@github.com:someone/Overmind.git')
+        self.assertEqual(speechqueue.session_label(top, {'overmind': 'OVMD'}), 'OVMD')
+        self.assertEqual(speechqueue.session_label(top, {'Overmind': 'TOOLONG'}), 'TOOL')
+        self.assertEqual(speechqueue.session_label(top, {}), 'OVER')
+
+    def test_the_label_is_the_last_field_of_the_session_line(self):
+        self.f.session(100, ME, 'One')
+        with open(speechqueue.LABELS, 'w') as f:
+            json.dump({'One': 'ONE'}, f)
+        s = self.state()['sessions'][0]
+        self.assertEqual(speechqueue.session_line(s).split('\t')[6], s['label'])
+
+
 class ClockTest(unittest.TestCase):
     def test_paused_time_is_not_counted(self):
         c = speechqueue.Clock()
@@ -176,6 +256,21 @@ class Golden(Fixture):
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
         self.f.wav(9001, 6.0)
         self.check('playing', self.state())
+
+    def test_after_a_line_the_header_and_full_bar_stay(self):
+        self.three()
+        self.f.now(ME, 'Claude Voice Widget', 'Done.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        speechqueue.render(self.state(), now=1000.0)
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        self.f.file(OTHER + '.queue', '')
+        text = speechqueue.render(self.state(), now=1010.0)
+        self.assertIn('Claude Voice Widget says:', text)
+        self.assertNotIn('Speech idle', text)
+        with open(speechqueue.DRAW) as f:
+            progress = next(l for l in f if l.startswith('progress ')).split()
+        self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 
     def test_paused(self):
         self.three()

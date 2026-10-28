@@ -1,12 +1,10 @@
 ${font Ubuntu Sans:size=1} ${goto 724}${voffset 30}
 ${goto 56}${lua_parse fg title}${font Ubuntu Sans:bold:size=11}Claude Voice Widget says:${font Ubuntu Sans:size=13}
 ${font Ubuntu Sans:size=1} ${voffset -16}
-${goto 32}${lua_parse fg title}${font Ubuntu Sans:size=13}The data layer is in: speechqueue.py writes the widget, draw and regions files four${font Ubuntu Sans:size=13}
-${goto 32}${lua_parse fg title}${font Ubuntu Sans:size=13}times a second.${font Ubuntu Sans:size=13}
-${font Ubuntu Sans:size=1} ${voffset -8}
-${font Ubuntu Sans:size=1} ${voffset 6}
+${font Ubuntu Sans:size=1} ${voffset 12}
+${font Ubuntu Sans:size=1} ${voffset 12}
 ${goto 32}${lua_parse fg text}${font Ubuntu Sans:bold:size=9}Sessions${font Ubuntu Sans:size=13}
-${font Ubuntu Sans:size=1} ${voffset -18}
+${font Ubuntu Sans:size=1} ${voffset -22}
 ${font Ubuntu Sans:size=1} ${voffset 126}
 ${font Ubuntu Sans:size=1} ${voffset 6}
 ${font Ubuntu Sans:size=1} ${voffset 28}

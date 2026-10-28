@@ -10,8 +10,8 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the header ("<name> says:"), the current line wrapped with
-                 Pango like a title, and spacer lines that give conky's window its size
+  - widget.txt   conky's markup: the header ("<name> says:"), the Sessions label and spacer
+                 lines that give conky's window its size, which stays the same while lines play
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the buttons,
                  the progress of the current line, the sessions list and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
@@ -40,10 +40,14 @@ OUT = os.path.join(CACHE, 'widget.txt')
 DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
+LAST = os.path.join(CACHE, 'last-lines.json')     # {session id: the last line read aloud for it}
+HEARD = os.path.join(CACHE, 'last-heard.json')    # the last clip's speaker and length, kept on
+                                                  # the header and progress bar once it ends
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
+LABELS = os.path.join(CONF, 'labels.json')        # {repository name: label}, before each session
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 DEFAULT_VOICE = 'en_US-amy-medium'                # speechctl's, with no setting
 DEFAULT_VOLUME = 1.2
@@ -51,14 +55,13 @@ DEFAULT_VOLUME = 1.2
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 ICON_W = 24                                   # the speaker icon left of the header text
-HEADER_GAP = 6                                # header to the current line
-LINE_GAP = 8                                  # current line (or its progress) to Sessions
+HEADER_GAP = 6                                # header to the progress bar's row
+LINE_GAP = 14                                 # the progress bar's row to Sessions
 PROGRESS_H = 14                               # the progress bar's row
-LIST_GAP = 4                                  # the Sessions label to the list
+LIST_GAP = 0                                  # the Sessions label to the list
 FOOTER_GAP = 8                                # list to the footer
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
-CURRENT_LINES = 4                             # lines of the current line before an ellipsis
 BUTTON_SIZE = 16                              # skip and next, right of the header
 BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
@@ -67,17 +70,25 @@ PAUSE_SIZE = 28                               # the footer's pause/resume circle
 SMALL_PITCH = 22                              # − + and ◀ ▶, centre to centre, and their hit width
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
+LABEL_LEN = 4                                 # a repository's label, in letters
+NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
+# labels.json's first contents, written when it is missing; keys match without case
+DEFAULT_LABELS = {
+    'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
+    'fagerteam-health-coach': 'FTHC', 'LaundryBot': 'LBOT', 'Playwright-Testing': 'PWRT',
+    'TheRPGClub-api': 'RPGA', 'TheRPGClub-bot': 'RPGB', 'CalendarBot': 'CALB',
+    'ATT-Test-Pack-Gen': 'ATPG', 'eve-lectures': 'EVEL',
+}
 
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-LINE_FONT = 'Ubuntu Sans 13'                  # the current line
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, as draw.lua draws it
 FOOTER_FONT = 'Ubuntu Sans 11'                # Vol 1.2, Voice amy, as draw.lua draws it
-TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, LINE_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
+TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
 PangoCairo.context_set_resolution(_pango, 96)
@@ -120,41 +131,6 @@ def display_text(text):
     return ' '.join(text.split())
 
 
-def font_runs(text, font):
-    """text as [(family, part)], cut where Pango's font fallback changes font, since conky
-    draws one font a run and has no fallback of its own (nowplaying.py's font_runs)."""
-    lay = layout(text, font)
-    base, raw, items = font_description(font).get_family(), text.encode(), []
-    it = lay.get_iter()
-    while True:
-        run = it.get_run_readonly()
-        if run:
-            item, face = run.item, run.item.analysis.font
-            items.append((item.offset, face.describe().get_family() if face else base,
-                          raw[item.offset:item.offset + item.length].decode()))
-        if not it.next_run():
-            break
-    runs = []
-    for _, family, part in sorted(items):
-        if runs and runs[-1][0] == family:
-            runs[-1] = (family, runs[-1][1] + part)
-        else:
-            runs.append((family, part))
-    return runs
-
-
-def wrap(text, font, width, max_lines):
-    lay = layout(text, font)
-    lay.set_width(round(width * Pango.SCALE))
-    lay.set_wrap(Pango.WrapMode.WORD_CHAR)
-    raw = text.encode()
-    lines = [raw[l.start_index:l.start_index + l.length].decode().strip() for l in lay.get_lines_readonly()]
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip() + '…'
-    return lines
-
-
 def text_width(text, font):
     return layout(text, font).get_pixel_size()[0]
 
@@ -180,15 +156,6 @@ def line_height(*fonts):
     return max(_height(font_description(font)) for font in fonts)
 
 
-def text_height(runs, font):
-    heights = [line_height(font)]
-    for family, _ in runs:
-        description = font_description(font)
-        description.set_family(family)
-        heights.append(_height(description))
-    return max(heights)
-
-
 def esc(text):
     """text as conky draws it literally: '$' starts a variable and '#' a comment."""
     return text.replace('$', '$$').replace('#', '\\#')
@@ -200,10 +167,6 @@ def conky_font(pango_font, family=None):
     bold = 'Bold' in name
     name = family or ' '.join(n for n in name if n != 'Bold')
     return f"{name}{':bold' if bold else ''}:size={pt}"
-
-
-def conky_text(runs, font):
-    return ''.join(f"${{font {conky_font(font, family)}}}{esc(part)}" for family, part in runs or [(None, '')])
 
 
 def plain():
@@ -309,15 +272,126 @@ def speech_setting(speak, sid):
     return 'off' if os.path.exists(os.path.join(speak, sid + '.muted')) else 'alerts'
 
 
+def repo_name(cwd):
+    """The GitHub name of the repository cwd is in: the last part of its origin remote's URL,
+    or the checkout's folder name without one. A worktree's .git is a file pointing into
+    the main checkout's .git, which holds the config. '' outside a repository."""
+    d = os.path.abspath(cwd) if cwd else ''
+    while d and d != os.path.dirname(d):
+        git = os.path.join(d, '.git')
+        if os.path.exists(git):
+            break
+        d = os.path.dirname(d)
+    else:
+        return ''
+    top, config = d, os.path.join(git, 'config')
+    if os.path.isfile(git):
+        m = re.match(r'gitdir:\s*(.+)', _read(git) or '')
+        if m:
+            base = os.path.join(d, m.group(1).strip())     # relative to the worktree, when it is
+            common = (_read(os.path.join(base, 'commondir')) or '').strip()
+            main = os.path.normpath(os.path.join(base, common)) if common else base
+            config, top = os.path.join(main, 'config'), os.path.dirname(main)
+    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', _read(config) or '')
+    url = m.group(1).rstrip('/') if m else ''
+    name = re.sub(r'\.git$', '', url.rsplit('/', 1)[-1].rsplit(':', 1)[-1]) if url else ''
+    return name or os.path.basename(top)
+
+
+def short_label(name):
+    """A repository name as LABEL_LEN capitals: each word's first letter, filled out with the
+    last word's following letters (LaundryBot -> LBOT, Overmind -> OVER)."""
+    words = re.findall(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+', name)
+    if not words:
+        return ''
+    label = ''.join(w[0] for w in words)[:LABEL_LEN]
+    label += words[-1][1:LABEL_LEN - len(label) + 1]
+    return label[:LABEL_LEN].upper()
+
+
+_repos = {}
+
+
+def session_label(cwd, labels):
+    """The label before a session's name: labels.json's for its repository, else short_label."""
+    if cwd not in _repos:
+        _repos[cwd] = repo_name(cwd)
+    name = _repos[cwd]
+    custom = {str(k).lower(): str(v) for k, v in labels.items()}.get(name.lower())
+    return display_text(custom if custom is not None else short_label(name))[:LABEL_LEN]
+
+
+def read_labels(path=None):
+    labels = _json(path or LABELS)
+    return labels if isinstance(labels, dict) else {}
+
+
+def seed_labels():
+    """labels.json with DEFAULT_LABELS when it is missing; the widget runs without it."""
+    if not os.path.exists(LABELS):
+        try:
+            write_atomic(LABELS, json.dumps(DEFAULT_LABELS, indent=2) + '\n')
+        except OSError as e:
+            log(f'labels.json not written: {e}')
+
+
 def voice_label(voice):
     """A Piper model's speaker: 'en_US-amy-medium' -> 'amy'; another name as it is."""
     m = re.fullmatch(r'[a-z]{2,3}_[A-Za-z]{2,3}-(.+)-(x_low|low|medium|high)', voice)
     return m.group(1) if m else voice
 
 
-def read_state(speak=None, sessions_dir=None, proc_dir=None):
+_last = None
+
+
+def last_lines(n, live):
+    """{session id: the last line read aloud for it}, kept in LAST across restarts: the line
+    now.json plays is recorded once it starts, a question excepted (it shows as a tag while it
+    waits, and its text is not listed). Sessions no longer open are dropped, unless none is
+    listed at all, which is a sessions folder that could not be read as often as it is none."""
+    global _last
+    if _last is None:
+        saved = _json(LAST)
+        _last = {str(k): str(v) for k, v in saved.items()} if isinstance(saved, dict) else {}
+    last = {k: v for k, v in _last.items() if k in live} if live else dict(_last)
+    text = display_text((n or {}).get('text') or '')
+    sid = str((n or {}).get('session') or '')
+    if sid in live and text and not text.lower().startswith('question:'):
+        last[sid] = text
+    if last != _last:
+        _last = last
+        try:
+            write_atomic(LAST, json.dumps(last))
+        except OSError:
+            pass
+    return last
+
+
+_heard = None
+
+
+def last_heard(n, name, duration):
+    """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
+    header and the progress bar stay as the last line left them while nothing plays."""
+    global _heard
+    if _heard is None:
+        saved = _json(HEARD)
+        _heard = saved if isinstance(saved, dict) else {}
+    if n:
+        heard = {'name': name or 'A session', 'duration': duration or 0}
+        if heard != _heard:
+            _heard = heard
+            try:
+                write_atomic(HEARD, json.dumps(heard))
+            except OSError:
+                pass
+    return _heard
+
+
+def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
+    labels = read_labels(labels)
     proc = proc_dir or '/proc'
     n = now_playing(speak, proc)
     settings = _json(os.path.join(speak, 'settings.json')) or {}
@@ -330,10 +404,16 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None):
     except (TypeError, ValueError):
         volume = DEFAULT_VOLUME
     listed = []
-    for s in sessions_mod.list_sessions(sessions_dir, proc_dir):
+    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
+    said = last_lines(n, {s['id'] for s in open_sessions})
+    for s in open_sessions:
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
+        # A question waiting to be read out shows as a "question" tag on the row
+        question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
-                           next=display_text(lines[0]) if lines else '',
+                           question=question,
+                           label=session_label(s['cwd'], labels),
+                           last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
     name = ''
@@ -395,10 +475,13 @@ def box(cx, cy, half_w, half_h):
 
 
 def session_line(s):
-    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, next."""
-    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background'])) if on) or '-'
+    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
+    and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
+    flags = ','.join(f for f, on in (('busy', s['busy']), ('bg', s['background']),
+                                        ('question', s.get('question'))) if on) or '-'
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
-                      display_text(s['name']), s['next']))
+                      display_text(s['name']), s.get('label', ''),
+                      (s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
 
 
 def write_sessions(listed):
@@ -433,11 +516,13 @@ def render(state, now=None):
     next_cx = min_cx - WINDOW_BUTTON_PITCH / 2 - 8 - BUTTON_SIZE / 2
     skip_cx = next_cx - BUTTON_PITCH
     text_right = (skip_cx - BUTTON_SIZE / 2 if n else min_cx - WINDOW_BUTTON_PITCH / 2) - 8
-    if n:
-        who = state['name'] or 'A session'
-        label = fit(f'{who} says:', LABEL_FONT, text_right - MARGIN - ICON_W)
+    heard = last_heard(n, state['name'], state['duration'])
+    if paused and not n:
+        label = 'Speech paused'
+    elif heard.get('name'):
+        label = fit(f"{heard['name']} says:", LABEL_FONT, text_right - MARGIN - ICON_W)
     else:
-        label = 'Speech paused' if paused else 'Speech idle'
+        label = 'Speech idle'                     # nothing played since the cache was cleared
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -446,7 +531,7 @@ def render(state, now=None):
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
             f"state {'paused' if paused else 'playing' if n else 'idle'}",
-            f'header {MARGIN + ICON_W / 2 - 2} {cy}']
+            f'header {MARGIN + ICON_W / 2 - 4} {cy}']
     g = f'${{goto {SHADOW + MARGIN + ICON_W}}}'
     out = Markup(MARGIN)
     out.text(f"{g}${{lua_parse fg {'title' if n else 'text'}}}${{font {conky_font(LABEL_FONT)}}}{esc(label)}{plain()}",
@@ -462,26 +547,23 @@ def render(state, now=None):
         write_sessions(listed)
         return out.end(out.y + MARGIN - 4)
 
-    # The current line, wrapped like a title, and its progress when the clip's length is known
+    # The progress bar, always there: the current line's while its length is known (0:00 while
+    # Piper still renders it), else the last line's, left full where it finished.
+    out.gap(HEADER_GAP)
+    duration, running = state['duration'] or 0, False
     if n:
-        out.gap(HEADER_GAP)
-        g = f'${{goto {SHADOW + MARGIN}}}'
-        text = display_text(n.get('text') or '')
-        for line in wrap(text, LINE_FONT, widget_width, CURRENT_LINES) or ['']:
-            runs = font_runs(line, LINE_FONT)
-            out.text(f"{g}${{lua_parse fg title}}{conky_text(runs, LINE_FONT)}{plain()}",
-                     text_height(runs, LINE_FONT))
-        if state['duration']:
-            elapsed = min(clock.elapsed(n, paused, now), state['duration'])
-            draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
-                        f'{elapsed:.3f} {state["duration"]:.3f} {int(not paused)}')
-            out.gap(PROGRESS_H)
-        else:
-            clock.elapsed(n, paused, now)
+        elapsed = clock.elapsed(n, paused, now)
+        running = bool(duration) and not paused
+        elapsed = min(elapsed, duration)
+    else:
+        duration = elapsed = float(heard.get('duration') or 0)
+    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+                f'{elapsed:.3f} {duration:.3f} {int(running)}')
+    out.gap(PROGRESS_H)
 
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
-    # they run longer than the list's height. A session with lines queued shows the next one
-    # as a second row, while every session's rows fit without scrolling.
+    # they run longer than the list's height. A session with speech on always takes two rows,
+    # the second its last line read aloud, so the list's layout doesn't change as lines play.
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
     out.text(f"${{goto {SHADOW + MARGIN}}}${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}Sessions{plain()}",
@@ -490,9 +572,9 @@ def render(state, now=None):
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
-    second = len(listed) + sum(1 for s in listed if s['queued']) <= rows_fit + 1e-3
     count = len(listed)
-    last = 0 if second else max(0, round(count - rows_fit + 0.4999))
+    spans = [2 if s['speech'] == 'on' else 1 for s in listed]
+    last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed)
     # The setting's three segments at the right of each row, as wide as their labels
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
@@ -501,16 +583,15 @@ def render(state, now=None):
         xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
     queued_right = xs[0] - 10
     draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
-                f'{last} {int(second)}')
+                f'{last}')
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
-    for s in listed:
-        span = row * (2 if second and s['queued'] else 1)
-        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + span, 2)}
+    for s, span in zip(listed, spans):
+        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
         rows.append(entry)
-        top += span
+        top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
     regions['rows'] = rows
     regions['list_scroll'] = [last, round(row, 2)]
@@ -575,6 +656,7 @@ def hold_instance_lock():
 
 def main():
     lock = hold_instance_lock()  # noqa: F841  (held until the process exits)
+    seed_labels()
     last_error = None
     while True:
         try:
