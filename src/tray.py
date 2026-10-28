@@ -3,8 +3,8 @@
 supervisor while any widget runs. Its menu shows the current track and what speech is
 saying; shows or hides each widget on its own; holds a submenu of settings for each
 (Spotify: text scaling, size, lyrics, always on top; Speech: pause, skip, clear, voice,
-volume, text scaling, size, always on top); turns start-at-login on or off; and quits
-every widget. What it reads and writes is in tray_model.py."""
+volume, text scaling, size, collapse when idle, always on top); turns start-at-login on or
+off; and quits every widget. What it reads and writes is in tray_model.py."""
 import ctypes, os, signal, subprocess, sys, threading
 
 import gi
@@ -122,7 +122,7 @@ def size_items(widget):
     scaling = Radio('Text scaling', [(scale, f'{scale:.0%}') for scale in SCALES],
                     lambda: widget_size.load(path)[2], pick_scale)
     reset = item('Reset widget size',
-                 lambda: widget_size.save(widget_size.DEFAULTS[:2] + widget_size.load(path)[2:], path))
+                 lambda: widget_size.save(widget_size.defaults_for(path)[:2] + widget_size.load(path)[2:], path))
     return scaling, reset
 
 
@@ -235,9 +235,11 @@ def main():
     controls = (pause, skip, clear, volume.item)   # the voices are greyed out by having none
     scaling, reset = size_items('speech')
     speech_on_top = on_top_check('speech')
-    for entry in (pause, skip, clear, voice.item, volume.item, scaling.item, reset, speech_on_top.item):
+    collapse = Check('Collapse when idle', tray_model.collapse_idle, tray_model.set_collapse_idle)
+    for entry in (pause, skip, clear, voice.item, volume.item, scaling.item, reset, collapse.item,
+                  speech_on_top.item):
         speech_menu.append(entry)
-    checks.append(speech_on_top)
+    checks += [collapse, speech_on_top]
     radios += [voice, volume, scaling]
     speech = Gtk.MenuItem(label='Speech')
     speech.set_submenu(speech_menu)

@@ -100,6 +100,25 @@ def set_on_top(widget, on):
         f.write('on\n' if on else 'off\n')
 
 
+def collapse_file():
+    return os.path.join(conf_dir('speech'), 'collapse-idle')   # 'on': one line while idle
+
+
+def collapse_idle():
+    try:
+        with open(collapse_file()) as f:
+            return f.read().strip() == 'on'
+    except OSError:
+        return False
+
+
+def set_collapse_idle(on):
+    path = collapse_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write('on\n' if on else 'off\n')
+
+
 def starts_at_login():
     return any(os.path.exists(autostart_file(w)) for w in WIDGETS)
 

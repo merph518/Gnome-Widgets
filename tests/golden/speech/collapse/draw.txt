@@ -1,0 +1,5 @@
+scale 1 1
+shadow 16
+window 649.0 671.0 27.0 10
+state idle
+header 26.0 27.0

@@ -14,6 +14,9 @@ import os
 
 PATH = os.path.expanduser('~/.config/conky-spotify-nowplaying/size')
 DEFAULTS = (505, 63, 1.0)                  # 63: three lines of lyrics at text scale 1
+# The speech widget's: its second number is the height of its sessions list, not of lyrics.
+SPEECH_PATH = os.path.expanduser('~/.config/conky-widgets/speech/size')
+SPEECH_DEFAULTS = (660, 128, 1.0)          # 128: five sessions at text scale 1
 # The width and height go as far as the monitor allows, which conky-mouse.py works out
 # while dragging; their upper limits here only catch a hand-edited file.
 LIMITS = ((400, 9999), (16, 99999), (0.7, 2.0))
@@ -27,16 +30,23 @@ def clamp(v, low, high):
     return min(max(v, low), high)
 
 
-def load(path=None):
+def defaults_for(path):
+    """The defaults of the widget whose size file `path` is."""
+    return SPEECH_DEFAULTS if path and os.path.abspath(path) == SPEECH_PATH else DEFAULTS
+
+
+def load(path=None, defaults=None):
     """(width, lyrics height, text scale), each within its limits; a missing or bad value
-    is its default. `path` is the widget's size file, the Spotify widget's by default."""
+    is its default. `path` is the widget's size file, the Spotify widget's by default, and
+    `defaults` its defaults, defaults_for(path) when not given."""
+    defaults = defaults or defaults_for(path)
     try:
         with open(path or PATH) as f:
             fields = f.read().split()
     except OSError:
         fields = []
     settings = []
-    for i, (default, limits) in enumerate(zip(DEFAULTS, LIMITS)):
+    for i, (default, limits) in enumerate(zip(defaults, LIMITS)):
         try:
             v = float(fields[i])
         except (IndexError, ValueError):

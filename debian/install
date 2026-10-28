@@ -12,6 +12,11 @@ src/spotify/spotify_local.py usr/share/conky-widgets/spotify
 src/spotify/lyrics_settings.py usr/share/conky-widgets/spotify
 src/spotify/art_colours.py usr/share/conky-widgets/spotify
 src/spotify/no-art.png usr/share/conky-widgets/spotify
+src/speech/conky.conf usr/share/conky-widgets/speech
+src/speech/draw.lua usr/share/conky-widgets/speech
+src/speech/speechqueue.py usr/share/conky-widgets/speech
+src/speech/sessions.py usr/share/conky-widgets/speech
+src/speech/mouse.py usr/share/conky-widgets/speech
 src/tray.py usr/share/conky-widgets
 src/tray_model.py usr/share/conky-widgets
 packaging/conky-spotify-nowplaying.desktop usr/share/applications

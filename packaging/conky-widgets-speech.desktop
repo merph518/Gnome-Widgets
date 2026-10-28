@@ -2,9 +2,9 @@
 Type=Application
 Name=Speech
 GenericName=Speech Widget
-Comment=Desktop widget for speech
+Comment=What Claude sessions are reading aloud, and what is queued
 Exec=conky-widgets speech
-Icon=audio-input-microphone
+Icon=audio-volume-high
 Terminal=false
 StartupNotify=false
 Categories=AudioVideo;Audio;

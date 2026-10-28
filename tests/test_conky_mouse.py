@@ -251,7 +251,8 @@ class CardPlacementTest(unittest.TestCase):
                                          clamp=conky_mouse.widget_size.clamp, LIMITS=conky_mouse.widget_size.LIMITS))
         placed = conky_mouse.resize(None, 0, 1, 'l', 2, {'lyrics': [0, 0, 1, 1]},
                                     conky_mouse.follow_pointer(None, 0))
-        conky_mouse.widget_size.save.assert_called_once_with(new)
+        conky_mouse.widget_size.load.assert_called_once_with(conky_mouse.SIZE)    # this widget's file
+        conky_mouse.widget_size.save.assert_called_once_with(new, conky_mouse.SIZE)
         conky_mouse.place_outline.assert_called_with(None, [], 932, 132, 1340, 666, 4)   # the card
         self.assertEqual(moves, [(900, 100)])                                           # the window
         conky_mouse.set_input_shape.assert_called_once_with(None, 1, 1404, 730, 2)
@@ -562,6 +563,8 @@ class ConfigureTest(unittest.TestCase):
         self.assertTrue(conky_mouse.POSITION.endswith('/.config/conky-spotify-nowplaying/position'))
         self.assertTrue(conky_mouse.REGIONS.endswith('/.cache/conky-spotify-nowplaying/regions.json'))
         self.assertEqual(conky_mouse.WM_CLASS, 'ConkySpotifyNowPlaying')
+        self.assertEqual(conky_mouse.SIZE, os.path.join(conky_mouse.CONF, 'size'))
+        self.assertEqual(conky_mouse.HEIGHT_REGION, 'lyrics')     # resizing from the top or bottom
 
     def test_its_buttons_come_with_minimize_and_close(self):
         self.assertEqual(set(conky_mouse.BUTTONS), {'heart', 'play', 'prev', 'next', 'minimize', 'close'})
