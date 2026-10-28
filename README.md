@@ -76,7 +76,7 @@ itself.
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
-- A footer with pause / resume, the volume and the voice
+- A footer with pause / resume, the volume and a drop down for the voice
 
 Each session in the speech widget's list starts with a four-letter label for its repository,
 named after its GitHub origin remote (or its folder, without one). The labels are read from
@@ -102,14 +102,24 @@ fade of the same length each time its colour changes.
 ### Controls
 
 The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
-skips it and the rest of that session's queue, the round button pauses or resumes, ◀ ▶ step
-through the voices, and a session's **On**, **Alerts** and **Off** set how it is read. The
+skips it and the rest of that session's queue, the round button pauses or resumes, the
+**Voice:** drop down picks the voice, and a session's **On**, **Alerts** and **Off** set how it
+is read. The
 volume slider, drawn like the Spotify widget's, sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
 from the tray or the keyboard. The mouse wheel turns the volume a tenth a notch over the
-slider or its speaker, steps through the voices over the voice, moves a session's setting a segment along over its segments, and
-scrolls the list anywhere else on it; a finger swiped up or down on the list scrolls it too.
+slider or its speaker, steps through the voices over the closed drop down, moves a session's
+setting a segment along over its segments, and scrolls the list anywhere else on it; a finger
+swiped up or down on the list scrolls it too.
+
+A click or tap on the **Voice:** drop down opens a list of the installed voices above it, over
+the session list, with the current one marked; picking one sets it. While the list is open it
+holds the pointer and the keyboard like a menu does, so a click anywhere else or Escape closes
+it, and it closes by itself after 20 seconds. A
+list longer than the card has room for scrolls with the wheel or a swipe. A touch outside the
+widget is not seen, so it closes on the timeout instead. The list follows voices installed
+meanwhile within ten seconds.
 Taps, dragging, resizing, − and × work as they do on the Spotify widget.
 
 ### Speech setting
@@ -141,7 +151,7 @@ press is logged in `~/.cache/conky-widgets/speech/mouse.log`).
 
 ### Voices and pace
 
-The Speech submenu's **Voice** and the widget's ◀ ▶ list the Piper voices in
+The Speech submenu's **Voice** and the widget's **Voice:** drop down list the Piper voices in
 `~/.local/share/piper/` (or `SPEAK_PIPER_DIR`), a voice being its `.onnx` model and its
 `.onnx.json` file. `conky-widgets-voices` lists the voices Piper publishes and fetches the ones
 you pick from its [voice repository](https://huggingface.co/rhasspy/piper-voices); it downloads
@@ -155,7 +165,7 @@ conky-widgets-voices add en_GB-alan-medium en_US-ryan-medium
 
 A medium voice is about 63 MB and a high one 110 to 135 MB; each download is checked against
 the sizes and checksums of Piper's catalog and kept only when they match.
-◀ ▶ step through a new voice at once, and the tray's Voice menu shows it within half a minute.
+The widget's drop down lists a new voice within ten seconds, and the tray's Voice menu shows it within half a minute.
 A model with several speakers (`arctic`, `libritts`, `vctk`) speaks as its first one for now.
 
 **Pace** in the same submenu is how fast a voice speaks, from 0.6 (fastest) to 1.4 (slowest),

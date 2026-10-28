@@ -5,6 +5,8 @@
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
+--   voice-menu    present while conky-mouse.py has the voice list open: the first voice shown and the
+--                 one under the pointer (-1 for none), as "<scroll> <hover>"
 -- and, read only, the Spotify widget's bg.txt (or the file ~/.config/conky-widgets/speech/
 -- background names), whose colour the card fades to with it. Everything drawn is the
 -- foreground or a share of it, as the Spotify widget's controls are, so the widget follows
@@ -42,11 +44,14 @@ end
 
 local function load_draw()
     -- {key = {numbers...}}, and each line's own text in d.text[key] for the ones that end in a
-    -- label ("Voice amy")
-    local d = {text = {}}
+    -- label ("Voice: amy"); d.items is the voice list's lines, each {current, label}
+    local d = {text = {}, items = {}}
     for line in (read('draw.txt') or ''):gmatch('[^\n]+') do
         local key, rest = line:match('^(%S+)%s+(.*)$')
-        if key then
+        if key == 'item' then
+            local current, label = rest:match('^(%d)%s+(.*)$')
+            d.items[#d.items + 1] = {current = current == '1', label = label or ''}
+        elseif key then
             local t = {}
             for v in rest:gmatch('%S+') do t[#t + 1] = tonumber(v) or v end
             d[key], d.text[key] = t, rest
@@ -459,16 +464,83 @@ local function draw_volume(cr, v, s)
                       active or hovered(ix - 4 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s))
 end
 
-local function draw_voice(cr, v, label, s, text)
-    -- "Voice amy" ending at its right edge, then ◀ and ▶
-    local right, prev_cx, next_cx, cy, pitch = v[1] * s, v[2] * s, v[3] * s, v[4] * s, v[5] * s
+local function chevron(cr, cx, cy, h, s, up)
+    -- a V (an upside-down one when `up`), the drop down's arrow
+    local dy = up and -1 or 1
+    cairo_move_to(cr, cx - h, cy - dy * h / 2)
+    cairo_line_to(cr, cx, cy + dy * h / 2)
+    cairo_line_to(cr, cx + h, cy - dy * h / 2)
+    cairo_set_line_width(cr, 1.8 * s)
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND)
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
+    cairo_stroke(cr)
+end
+
+local function menu_state()
+    -- {scroll, hover} while the voice list is open, else nil
+    local text = read('voice-menu')
+    if not text then return nil end
+    local scroll, hover = text:match('^%s*(-?%d+)%s+(-?%d+)')
+    return {scroll = tonumber(scroll) or 0, hover = tonumber(hover) or -1}
+end
+
+local function draw_voice(cr, v, label, s, text, open)
+    -- the drop down: "Voice: amy" and an arrow in a pill of the foreground's tint, which
+    -- the pointer or the open list darkens
+    local x0, x1, cy, h, pad, arrow = v[1] * s, v[2] * s, v[3] * s, v[4] * s, v[5] * s, v[6] * s
+    set(cr, fg, (open or hovered(v[1], v[3] - v[4] / 2, v[2], v[3] + v[4] / 2)) and 0.22 or 0.12)
+    rounded_rect(cr, x0, cy - h / 2, x1 - x0, h, h / 2)
+    cairo_fill(cr)
     font(cr, 11, text, s)
     set(cr, fg)
-    show(cr, label, right, cy, 'right')
-    shade(cr, prev_cx, cy, pitch / 2)
-    triangle(cr, prev_cx, cy, 4.5 * s, -1)
-    shade(cr, next_cx, cy, pitch / 2)
-    triangle(cr, next_cx, cy, 4.5 * s, 1)
+    show(cr, label, x0 + pad, cy, 'left')
+    set(cr, fg)
+    chevron(cr, x1 - pad - arrow / 2, cy, arrow / 3, s, open)
+end
+
+local function draw_menu(cr, m, items, s, text, state)
+    -- the open voice list: a panel over the card, `rows` of the voices from state.scroll, the
+    -- current one a pill of the foreground (as a selected segment is), the one under the pointer
+    -- tinted, and a slim bar at the right when there are more voices than rows
+    local x0, x1, top, bottom, item_h, rows, pad, count = m[1] * s, m[2] * s, m[3] * s, m[4] * s,
+        m[5] * s, m[6], m[7] * s, m[8]
+    rounded_rect(cr, x0, top, x1 - x0, bottom - top, 8 * s)
+    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
+    cairo_fill_preserve(cr)
+    set(cr, fg, 0.14)
+    cairo_fill_preserve(cr)
+    set(cr, fg, 0.35)
+    cairo_set_line_width(cr, 1 * s)
+    cairo_stroke(cr)
+    font(cr, 11, text, s)
+    for i = 0, rows - 1 do
+        local item = items[state.scroll + i + 1]
+        if not item then break end
+        local y = top + pad + i * item_h
+        if item.current then
+            set(cr, fg)
+            rounded_rect(cr, x0 + pad, y, x1 - x0 - 2 * pad, item_h, 5 * s)
+            cairo_fill(cr)
+            set(cr, fg_back)
+        else
+            if state.scroll + i == state.hover then
+                set(cr, fg, 0.2)
+                rounded_rect(cr, x0 + pad, y, x1 - x0 - 2 * pad, item_h, 5 * s)
+                cairo_fill(cr)
+            end
+            set(cr, fg)
+        end
+        show(cr, item.label, x0 + pad + 6 * s, y + item_h / 2, 'left')
+    end
+    if count > rows then
+        local ty0, ty1 = top + pad + 2 * s, bottom - pad - 2 * s
+        local len = (ty1 - ty0) * rows / count
+        local ty = ty0 + (ty1 - ty0 - len) * state.scroll / (count - rows)
+        set(cr, fg, 0.3)
+        rounded_line(cr, x1 - 4 * s, ty0, x1 - 4 * s, ty1, 3 * s)
+        set(cr, fg)
+        rounded_line(cr, x1 - 4 * s, ty, x1 - 4 * s, ty + len, 3 * s)
+    end
 end
 
 function conky_draw_widget()
@@ -495,6 +567,8 @@ function conky_draw_widget()
         if d.list and d.control then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end
         if d.volume then draw_volume(cr, d.volume, s) end
-        if d.voice then draw_voice(cr, d.voice, label_after(d.text.voice, 5), s, text) end
+        local menu = d.menu and #d.items > 0 and menu_state()
+        if d.voice then draw_voice(cr, d.voice, label_after(d.text.voice, 6), s, text, menu and true or false) end
+        if menu then draw_menu(cr, d.menu, d.items, s, text, menu) end
     end)
 end

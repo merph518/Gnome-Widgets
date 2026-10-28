@@ -24,7 +24,7 @@ Each session has a speech setting, read from its files the way speechctl reads i
 plays), Alerts only with neither (only its announcements play). Sessions with speech on sort
 first, then by process id, so the ones being read aloud are at the top.
 """
-import fcntl, glob, hashlib, json, os, re, subprocess, sys, tempfile, time, unicodedata, wave
+import fcntl, glob, hashlib, json, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
 import gi
 gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
@@ -34,6 +34,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'common'))
 import sessions as sessions_mod  # noqa: E402
 import widget_size as size_file  # noqa: E402
+sys.path.insert(0, os.path.join(HERE, '..'))
+import tray_model  # noqa: E402
 
 NAME = 'conky-widgets/speech'
 CONF = os.path.expanduser(f'~/.config/{NAME}')
@@ -77,7 +79,14 @@ BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle
-SMALL_PITCH = 22                              # ◀ ▶, centre to centre, and their hit width
+DROPDOWN_H = 24                               # the voice drop down's height, at least
+DROPDOWN_PAD = 10                             # either side of its label
+DROPDOWN_ARROW = 10                           # the arrow's width, after the label
+DROPDOWN_GAP = 6                              # label to arrow
+MENU_PAD = 4                                  # round the open list's items
+MENU_GAP = 4                                  # the open list to the footer
+MENU_MIN_ROWS = 3                             # rows the open list shows however short the card is
+VOICES_EVERY = 10.0                           # s between asking speechctl for the voices
 VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
 VOLUME_ICON = 16                              # the speaker and its waves, left of the track
 VOLUME_GAP = 8                                # speaker to track
@@ -102,7 +111,7 @@ LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, as draw.lua draws it
-FOOTER_FONT = 'Ubuntu Sans 11'                # Voice amy, as draw.lua draws it
+FOOTER_FONT = 'Ubuntu Sans 11'                # Voice: amy, and the open list, as draw.lua draws them
 TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
@@ -444,6 +453,29 @@ def voice_label(voice):
     return m.group(1) if m else voice
 
 
+_voices = {'names': [], 'asked': None, 'busy': False}
+
+
+def installed_voices(now=None):
+    """The voices `speechctl voices` lists, asked for in a thread of its own at most every
+    VOICES_EVERY seconds, since speechctl can be slow; what the last answer was until the next
+    one lands. A failed ask leaves the list as it was."""
+    now = time.monotonic() if now is None else now
+    asked = _voices['asked']
+    if not _voices['busy'] and (asked is None or now - asked >= VOICES_EVERY):
+        _voices['busy'], _voices['asked'] = True, now
+
+        def ask():
+            try:
+                names = tray_model.voices()
+                if names:
+                    _voices['names'] = names
+            finally:
+                _voices['busy'] = False
+        threading.Thread(target=ask, daemon=True).start()
+    return _voices['names']
+
+
 _last = None
 
 
@@ -659,6 +691,7 @@ def render(state, now=None):
     # The progress bar, always there: the current line's while its length is known (0:00 while
     # Piper still renders it), else the last line's, left full where it finished.
     out.gap(HEADER_GAP)
+    progress_top = out.y
     duration, running = state['duration'] or 0, False
     if n:
         elapsed = clock.elapsed(n, paused, now)
@@ -707,36 +740,64 @@ def render(state, now=None):
     regions['list_scroll'] = [last, round(row, 2)]
     out.gap(list_height)
 
-    # The footer: pause or resume, the volume slider, the voice with ◀ and ▶
+    # The footer: pause or resume, the volume slider, the voice drop down. The open list is
+    # drawn above the footer, over the progress bar and the sessions, when conky-mouse.py has it open.
+    footer_top = out.y
     out.gap(FOOTER_GAP)
-    fy = out.y + FOOTER_H / 2
+    drop_h = max(DROPDOWN_H, line_height(FOOTER_FONT) + 6)   # taller with the text scale
+    footer_h = max(FOOTER_H, drop_h + 6)
+    fy = out.y + footer_h / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2
     vol_icon = pause_cx + PAUSE_SIZE / 2 + 16
     vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
     vol_x1 = vol_x0 + VOLUME_WIDTH
     level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
-    voice_next_cx = right - SMALL_PITCH / 2
-    voice_prev_cx = voice_next_cx - SMALL_PITCH
-    voice_right = voice_prev_cx - SMALL_PITCH / 2 - 4
-    voice = fit(f"Voice {voice_label(state['voice'])}", FOOTER_FONT,
-                voice_right - (vol_x1 + 6 + 16))
+    chrome = 2 * DROPDOWN_PAD + DROPDOWN_GAP + DROPDOWN_ARROW
+    voice = fit(f"Voice: {voice_label(state['voice'])}", FOOTER_FONT,
+                right - (vol_x1 + 6 + 16) - chrome)
+    drop_x0 = right - (text_width(voice, FOOTER_FONT) + chrome)
+    drop = [drop_x0, fy - drop_h / 2, right, fy + drop_h / 2]
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
     draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
-    draw.append(f'voice {voice_right} {voice_prev_cx} {voice_next_cx} {fy} {SMALL_PITCH} {voice}')
-    small = SMALL_PITCH / 2
+    draw.append(f'voice {drop_x0} {right} {fy} {drop_h:g} {DROPDOWN_PAD} {DROPDOWN_ARROW} {voice}')
+    half = PAUSE_SIZE / 2 + 4
     regions.update({
-        'pause': box(pause_cx, fy, PAUSE_SIZE / 2 + 4, PAUSE_SIZE / 2 + 4),
-        'voice_prev': box(voice_prev_cx, fy, small, small),
-        'voice_next': box(voice_next_cx, fy, small, small),
+        'pause': box(pause_cx, fy, half, half),
         'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
         'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
         'volume_bar': [vol_x0, vol_x1],
-        'voice': [voice_right - text_width(voice, FOOTER_FONT), fy - small, voice_next_cx + small, fy + small],
+        'voice': drop,
     })
-    out.gap(FOOTER_H)
+    names = state.get('voices') or []
+    if names:
+        menu_lines, menu = voice_menu(names, state['voice'], right, footer_top - MENU_GAP + FOOTER_GAP,
+                                      progress_top)
+        draw.extend(menu_lines)
+        regions['menu'] = menu
+    out.gap(footer_h)
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
     return out.end(out.y + MARGIN - 4)
+
+
+def voice_menu(names, current, right, bottom, top_limit):
+    """(draw.txt's lines, regions.json's entry) for the open voice list: one row a voice, its
+    right edge on the drop down's, its bottom at `bottom` and as many rows as fit between there
+    and `top_limit` (at least MENU_MIN_ROWS), the rest scrolled. draw.lua draws it only while
+    conky-mouse.py has it open; the entry carries the names conky-mouse.py sets one from."""
+    item_h = line_height(FOOTER_FONT) + 8 * text_scale
+    rows = max(MENU_MIN_ROWS, int((bottom - top_limit - 2 * MENU_PAD) // item_h))
+    rows = min(rows, len(names))
+    labels = [voice_label(n) for n in names]
+    scrolls = len(names) > rows
+    width = max(text_width(label, FOOTER_FONT) for label in labels) + 2 * DROPDOWN_PAD + (8 if scrolls else 0)
+    x0, top = right - width, bottom - rows * item_h - 2 * MENU_PAD
+    lines = [f'menu {x0:.2f} {right} {top:.2f} {bottom} {item_h:.2f} {rows} {MENU_PAD} {len(names)}']
+    lines += [f'item {int(n == current)} {label}' for n, label in zip(names, labels)]
+    entry = {'box': [round(x0, 2), round(top, 2), right, bottom], 'item_h': round(item_h, 2),
+             'rows': rows, 'pad': MENU_PAD, 'names': names,
+             'current': names.index(current) if current in names else -1}
+    return lines, entry
 
 
 def message(text):
@@ -770,7 +831,9 @@ def main():
     last_error = None
     while True:
         try:
-            text = render(read_state())
+            state = read_state()
+            state['voices'] = installed_voices()
+            text = render(state)
             last_error = None
         except Exception as e:
             if str(e) != last_error:

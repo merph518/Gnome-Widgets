@@ -21,10 +21,14 @@ REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0,
                      'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]},
                     {'id': 'bbbb', 'speech': 'alerts', 'top': 48.0, 'bottom': 72.0,
                      'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]}],
-           'pause': [12.0, 339.0, 48.0, 375.0], 'voice_prev': [478.0, 346.0, 500.0, 368.0],
-           'voice_next': [500.0, 346.0, 522.0, 368.0], 'volume': [78.0, 347.0, 170.0, 367.0],
+           'pause': [12.0, 339.0, 48.0, 375.0], 'volume': [78.0, 347.0, 170.0, 367.0],
            'volume_wheel': [56.0, 347.0, 170.0, 367.0], 'volume_bar': [84.0, 164.0],
-           'voice': [406.0, 346.0, 522.0, 368.0]}
+           'voice': [440.0, 345.0, 522.0, 369.0],
+           # the open list: four rows of 26 px of the six voices, the third (amy) current
+           'menu': {'box': [450.0, 223.0, 522, 335], 'item_h': 26.0, 'rows': 4, 'pad': 4,
+                    'names': ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
+                              'en_US-joe-medium', 'en_US-lessac-medium', 'en_US-ryan-high'],
+                    'current': 2}}
 
 
 def centre(r):
@@ -40,7 +44,7 @@ class StubSpeechctl(support.TempDirTest):
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')
-        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='')
+        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', VOICE_MENU='voice-menu')
         self.redirect(conky_mouse, LOG='mouse.log')
         popen = subprocess.Popen
 
@@ -64,8 +68,7 @@ class StubSpeechctl(support.TempDirTest):
 
 class ButtonsTest(StubSpeechctl):
     def test_each_button_runs_its_command(self):
-        want = {'skip': 'skip', 'next': 'next', 'pause': 'toggle',
-                'voice_prev': 'voice prev', 'voice_next': 'voice next'}
+        want = {'skip': 'skip', 'next': 'next', 'pause': 'toggle'}
         for name, args in want.items():
             with self.subTest(name=name):
                 x, y = centre(REGIONS[name])
@@ -133,6 +136,164 @@ class VolumeSliderTest(StubSpeechctl):
         set_volume.assert_called_once()
 
 
+class VoiceMenuTest(StubSpeechctl):
+    NAMES = REGIONS['menu']['names']
+
+    def menu_at(self, y, scroll=0, x=480):
+        return speech_mouse.menu_at(REGIONS['menu'], x, y, scroll)
+
+    def show(self, *batches, now=None, menu=None):
+        """run_menu over the batches of events one call each gives (then none), returning the
+        pick and the VOICE_MENU contents it showed after each batch but the last."""
+        batches, shown, calls = list(batches), [], []
+
+        def events():
+            calls.append(1)
+            if len(calls) > 1:
+                shown.append(support.read(speech_mouse.VOICE_MENU)
+                             if os.path.exists(speech_mouse.VOICE_MENU) else None)
+            return batches.pop(0) if batches else []
+        clock = mock.Mock(side_effect=now) if now else mock.Mock(return_value=0.0)
+        picked = speech_mouse.run_menu(menu or REGIONS['menu'], events, now=clock, sleep=lambda _: None)
+        return picked, shown
+
+    def test_the_voice_drop_down_is_a_control_and_not_a_button(self):
+        x, y = centre(REGIONS['voice'])
+        self.assertEqual(speech_mouse_region(x, y), 'voice')
+        self.assertNotIn('voice', speech_mouse.BUTTONS)
+
+    def test_a_row_is_found_by_where_it_is_and_the_scroll(self):
+        # rows from y 227 (the box's top and its padding), 26 px each
+        self.assertEqual([self.menu_at(228), self.menu_at(252), self.menu_at(253), self.menu_at(330)],
+                         [0, 0, 1, 3])
+        self.assertEqual(self.menu_at(228, scroll=2), 2)
+        self.assertEqual(self.menu_at(330, scroll=2), 5)
+
+    def test_off_the_rows_is_no_voice(self):
+        self.assertIsNone(self.menu_at(225))                 # the padding above the first row
+        self.assertIsNone(self.menu_at(332))                 # and below the fourth
+        self.assertIsNone(self.menu_at(228, x=449))          # left of the list
+        self.assertIsNone(self.menu_at(228, x=523))
+
+    def test_with_fewer_voices_than_rows_only_the_voices_are_rows(self):
+        menu = dict(REGIONS['menu'], names=self.NAMES[:2])
+        self.assertEqual(speech_mouse.menu_at(menu, 480, 228, 0), 0)
+        self.assertIsNone(speech_mouse.menu_at(menu, 480, 228 + 2 * 26, 0))
+
+    def test_scrolling_stays_within_the_voices(self):
+        menu = REGIONS['menu']
+        self.assertEqual([speech_mouse.menu_scroll(menu, 0, -1), speech_mouse.menu_scroll(menu, 0, 1),
+                          speech_mouse.menu_scroll(menu, 2, 1), speech_mouse.menu_scroll(menu, 2, 5)],
+                         [0, 1, 2, 2])
+
+    def test_a_press_on_a_voice_picks_it(self):
+        picked, _ = self.show([('press', 480, 253)])
+        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')
+
+    def test_a_press_anywhere_else_closes_it_without_a_pick(self):
+        self.assertIsNone(self.show([('press', 300, 100)])[0])
+        self.assertIsNone(self.show([('press', 480, 356)])[0])     # on the drop down itself
+
+    def test_escape_closes_it(self):
+        self.assertIsNone(self.show([('escape',), ('press', 480, 253)])[0])
+
+    def test_it_shows_the_scroll_and_the_voice_under_the_pointer_until_it_closes(self):
+        picked, shown = self.show([('move', 480, 253)], [('wheel', True)], [('move', 480, 280)],
+                                 [('press', 480, 228)])
+        # amy, the current voice, is in view without scrolling; the wheel then scrolls a voice
+        self.assertEqual(shown, ['0 1', '1 2', '1 3'])
+        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # the second voice, once scrolled
+        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+
+    def test_it_opens_with_a_current_voice_below_the_rows_in_view(self):
+        _, shown = self.show([], [('escape',)], menu=dict(REGIONS['menu'], current=5))
+        self.assertEqual(shown, ['2 -1'])                   # scrolled as far as it goes
+
+    def test_a_swipe_scrolls_by_the_rows_it_gives(self):
+        _, shown = self.show([('scroll', 1)], [('scroll', 5)], [('scroll', -1)], [('escape',)])
+        self.assertEqual(shown, ['1 -1', '2 -1', '1 -1'])
+
+    def test_a_wheel_step_moves_the_highlight_to_the_voice_now_under_the_pointer(self):
+        _, shown = self.show([('move', 480, 253)], [('wheel', True)], [('wheel', True)], [('escape',)])
+        self.assertEqual(shown, ['0 1', '1 2', '2 3'])
+
+    def test_each_event_starts_the_timeout_again(self):
+        # 20 s from the last event, not from opening: a wheel step at 15 s keeps it open at 30 s
+        t, calls = [0.0], []
+
+        def events():
+            calls.append(t[0])
+            t[0] = (15.0, 30.0, 34.0)[len(calls) - 1]
+            return [[('wheel', True)], [], [('press', 480, 228)]][len(calls) - 1]
+        picked = speech_mouse.run_menu(REGIONS['menu'], events, now=lambda: t[0], sleep=lambda _: None)
+        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # one voice scrolled, so the second
+
+    def test_it_closes_itself_when_nothing_is_done(self):
+        picked, _ = self.show(now=[0.0, 5.0, 10.0, 20.5])
+        self.assertIsNone(picked)
+        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+
+    def test_the_file_goes_however_it_ends(self):
+        calls = []
+
+        def events():
+            calls.append(os.path.exists(speech_mouse.VOICE_MENU))
+            if len(calls) > 1:
+                raise RuntimeError('x')
+            return [('move', 480, 228)]
+        with self.assertRaises(RuntimeError):
+            speech_mouse.run_menu(REGIONS['menu'], events, now=lambda: 0.0, sleep=lambda _: None)
+        self.assertEqual(calls, [False, True])
+        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+
+    def test_a_click_opens_the_list_and_a_drag_moves_the_widget(self):
+        x, y = centre(REGIONS['voice'])
+        for moved, opens in ((False, True), (True, False)):
+            with self.subTest(moved=moved):
+                steps = [(x + (40 if moved else 0), y, True), (x, y, False)]
+                track = mock.Mock(side_effect=steps + [steps[-1]] * 50)
+                with mock.patch.object(conky_mouse.time, 'sleep'), \
+                        mock.patch.object(conky_mouse, 'drag', return_value=(0, 0, 1, 1)) as drag, \
+                        mock.patch.object(conky_mouse, 'remember'), \
+                        mock.patch.object(speech_mouse, 'open_menu') as open_menu:
+                    self.assertTrue(speech_mouse.pull_control('d', 'root', 'win', 1, REGIONS, 'voice',
+                                                              track, (x, y, (x, y)), False))
+                self.assertEqual((open_menu.called, drag.called), (opens, not opens))
+
+    def open(self, picked, regions=REGIONS):
+        with mock.patch.object(speech_mouse, 'declare'), \
+                mock.patch.object(speech_mouse, 'grab', return_value=(True, False)) as grab, \
+                mock.patch.object(speech_mouse, 'ungrab') as ungrab, \
+                mock.patch.object(speech_mouse, 'x_events'), \
+                mock.patch.object(speech_mouse, 'run_menu', return_value=picked), \
+                mock.patch.object(conky_mouse, 'touch_opcode', return_value=None):
+            speech_mouse.open_menu('d', 'win', 1, regions)
+        return grab, ungrab
+
+    def test_a_voice_picked_is_set_through_speechctl_and_logged(self):
+        grab, ungrab = self.open('en_US-joe-medium')
+        self.assertEqual(self.ran(), ['voice en_US-joe-medium'])
+        self.assertIn('speechctl voice en_US-joe-medium', support.read(conky_mouse.LOG))
+        self.assertTrue(grab.called and ungrab.called)
+
+    def test_picking_the_current_voice_or_nothing_sets_nothing(self):
+        self.open('en_US-amy-medium')
+        self.open(None)
+        self.assertEqual(self.ran(), [])
+        self.assertIn('keyboard not held', support.read(conky_mouse.LOG))
+
+    def test_without_voices_there_is_no_list_to_open(self):
+        grab, _ = self.open('en_US-joe-medium', regions={k: v for k, v in REGIONS.items() if k != 'menu'})
+        self.assertFalse(grab.called)
+        self.assertEqual(self.ran(), [])
+
+    def test_a_list_a_killed_run_left_is_cleared_at_start(self):
+        with open(speech_mouse.VOICE_MENU, 'w') as f:
+            f.write('0 -1')
+        speech_mouse.start()
+        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+
+
 def speech_mouse_region(x, y, s=1):
     """The button region_at would find, looking through the speech widget's regions."""
     for name in speech_mouse.REGIONS_ORDER:
@@ -186,7 +347,7 @@ class WheelTest(StubSpeechctl):
 
     def test_over_the_volume_and_the_voice(self):
         self.assertEqual([self.wheel('volume', True), self.wheel((64, 357), False),
-                          self.wheel('voice', True), self.wheel((420, 357), False)],
+                          self.wheel('voice', True), self.wheel((450, 357), False)],
                          ['volume', 'volume', 'voice', 'voice'])
         self.assertEqual(self.ran(), ['volume down', 'volume up', 'voice next', 'voice prev'])
 
