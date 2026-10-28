@@ -337,7 +337,7 @@ local function draw_label(cr, label, x, cy, w, h, s, text, speaking)
     show(cr, label, x + w / 2, cy, 'centre')
 end
 
-local function draw_row(cr, r, x0, x1, y, row, c, s, text)
+local function draw_row(cr, r, x0, y, row, c, s, text)
     -- a session's row: its repository's label (filled while it is speaking), its name,
     -- busy / bg / question, how many lines it has queued and its setting; with speech on, a
     -- second row of its last line read aloud. Returns how many rows it took.
@@ -364,7 +364,7 @@ local function draw_row(cr, r, x0, x1, y, row, c, s, text)
     if r.speech ~= 'on' then return 1 end
     font(cr, 11, text, s)
     set(cr, secondary())
-    show(cr, fit(cr, r.last, x1 - name_x), name_x, cy + row, 'left')
+    show(cr, fit(cr, r.last, c[1] * s - 10 * s - name_x), name_x, cy + row, 'left')   -- clear of the setting
     return 2
 end
 
@@ -395,7 +395,7 @@ local function draw_list(cr, l, version, c, s, text)
     for _, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
-        at = at + draw_row(cr, r, x0, x1, y, row, c, s, text)
+        at = at + draw_row(cr, r, x0, y, row, c, s, text)
     end
     cairo_restore(cr)
 end
