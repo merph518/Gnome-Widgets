@@ -1,7 +1,10 @@
 #!/bin/sh
 # After an upgrade, starts again the widgets that are running, so they pick up the new files
-# instead of respawning from paths this version no longer ships. The restart runs as the
-# widget's user, in that user's session: the supervisor's own environment says which.
+# instead of respawning from paths this version no longer ships. That includes the first
+# install of conky-widgets, which takes over from conky-spotify-nowplaying while its widget
+# runs from /usr/share/conky-spotify-nowplaying; on a machine where no widget runs, there is
+# nothing to restart. The restart runs as the widget's user, in that user's session: the
+# supervisor's own environment says which.
 set -e
 
 restart_running_widgets() {
@@ -21,7 +24,7 @@ restart_running_widgets() {
     done
 }
 
-if [ "$1" = configure ] && [ -n "$2" ]; then
+if [ "$1" = configure ]; then
     restart_running_widgets || true
 fi
 

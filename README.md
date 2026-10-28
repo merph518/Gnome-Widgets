@@ -3,8 +3,8 @@
 A bundle of desktop widgets for Linux (GNOME on Wayland), built on Conky. Each widget is a
 card of its own that you can drag, resize and minimize, on any monitor.
 
-The first, and so far the only one, is a Spotify "now playing" widget, packaged as
-`conky-spotify-nowplaying`. The rest of this page is about it.
+The first, and so far the only one, is a Spotify "now playing" widget. The package that ships
+it, and every widget to come, is `conky-widgets`. The rest of this page is about it.
 
 ## Spotify now playing
 
@@ -57,16 +57,23 @@ bindings, fonts) and brings new versions with your other updates:
 
 ```sh
 sudo add-apt-repository ppa:mfagerstrom/conky-spotify-nowplaying
-sudo apt install conky-spotify-nowplaying
+sudo apt install conky-widgets
 ```
+
+The package used to be called `conky-spotify-nowplaying`. If you installed it under that name
+from the PPA, `sudo apt upgrade` moves you over: `conky-spotify-nowplaying` becomes an empty
+transitional package that pulls in `conky-widgets`, and you can `sudo apt remove
+conky-spotify-nowplaying` afterwards. Your settings and autostart entry carry over, and a
+running widget restarts from the new files.
 
 The PPA builds for Ubuntu 26.04 (`resolute`) only, and that is the only release the widget is
 tested on. On another release you can try the latest `.deb` from the
 [Releases page](https://github.com/merph518/conky-widgets/releases) instead; apt
-reports any dependency that release lacks, and a `.deb` installed this way does not update itself:
+reports any dependency that release lacks, and a `.deb` installed this way does not update itself.
+It replaces a `conky-spotify-nowplaying` installed the same way:
 
 ```sh
-sudo apt install ./conky-spotify-nowplaying_1.8.0_all.deb
+sudo apt install ./conky-widgets_2.0.0_all.deb
 ```
 
 Then open **Spotify Now Playing** from the app grid. Opening it again hides the widget, or
@@ -120,7 +127,8 @@ autostart toggle of its own. One supervisor runs every widget that is started, a
 in `~/.cache/conky-widgets/`. `conky-spotify-nowplaying <command>` still works: it is
 `conky-widgets spotify <command>`.
 
-To uninstall: `sudo apt remove conky-spotify-nowplaying`. Your settings stay in
+To uninstall: `sudo apt remove conky-widgets` (and `conky-spotify-nowplaying`, if the
+transitional package is still there). Your settings stay in
 `~/.config/conky-spotify-nowplaying` (delete that folder too for a clean slate), and the
 autostart entry, if you turned it on, is `~/.config/autostart/conky-spotify-nowplaying.desktop`.
 

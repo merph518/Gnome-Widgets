@@ -9,17 +9,27 @@ Vcs-Browser: https://github.com/merph518/conky-widgets
 Vcs-Git: https://github.com/merph518/conky-widgets.git
 Rules-Requires-Root: no
 
-Package: conky-spotify-nowplaying
+Package: conky-widgets
 Architecture: all
 Depends: ${misc:Depends}, conky-all, playerctl, python3, python3-gi, gir1.2-pango-1.0,
  gir1.2-gdkpixbuf-2.0, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, libx11-6, libxext6, libxi6,
  x11-utils, x11-xserver-utils, xdg-utils, libnotify-bin, libsnappy1v5, fonts-ubuntu,
  fonts-dejavu-core, fonts-noto-core
 Recommends: fonts-noto-cjk
-Description: Spotify now-playing desktop widget (Conky)
+Replaces: conky-spotify-nowplaying (<< 2.0.0~)
+Breaks: conky-spotify-nowplaying (<< 2.0.0~)
+Description: Conky desktop widgets, with a Spotify now-playing widget
  Shows the current Spotify track with album art, previous/play-pause/next
  controls, a draggable seek bar, a like button and smoothly scrolling synced
  lyrics from LRCLIB. The background takes its colour from the album art, and a
  top-bar icon offers start-at-login and Quit.
  .
  Built for GNOME on Wayland (runs through XWayland).
+
+Package: conky-spotify-nowplaying
+Section: oldlibs
+Architecture: all
+Depends: ${misc:Depends}, conky-widgets (= ${binary:Version})
+Description: transitional package for conky-widgets
+ The Spotify now-playing widget now ships in conky-widgets, with every widget
+ of the bundle. This package pulls it in on upgrade and can be removed.

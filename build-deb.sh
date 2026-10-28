@@ -10,8 +10,9 @@ if [ -z "$BUILD_DEB_LOCKED" ]; then
 fi
 dpkg-buildpackage -b -us -uc --no-sign
 mkdir -p dist
-# dpkg-buildpackage writes its results next to the source tree
-for f in ../conky-spotify-nowplaying_*_all.deb ../conky-spotify-nowplaying_*.buildinfo ../conky-spotify-nowplaying_*.changes; do
+# dpkg-buildpackage writes its results next to the source tree: conky-widgets, the
+# transitional conky-spotify-nowplaying, and the source package's .buildinfo and .changes
+for f in ../conky-widgets_*_all.deb ../conky-spotify-nowplaying_*_all.deb ../conky-spotify-nowplaying_*.buildinfo ../conky-spotify-nowplaying_*.changes; do
     [ -e "$f" ] && mv "$f" dist/
 done
 dh_clean

@@ -9,6 +9,7 @@ dist/
 # debhelper build leftovers
 debian/.debhelper/
 debian/conky-spotify-nowplaying/
+debian/conky-widgets/
 debian/debhelper-build-stamp
 debian/files
 debian/*.substvars

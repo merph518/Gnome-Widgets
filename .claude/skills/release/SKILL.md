@@ -1,7 +1,7 @@
 ---
 name: release
 description: >-
-  Cut a release of conky-spotify-nowplaying end to end: add the debian/changelog
+  Cut a release of conky-widgets end to end: add the debian/changelog
   entry, run the static checks, build the .deb and smoke-test it installed, commit
   and tag, publish the GitHub release with the .deb attached, upload the signed
   source package to the Launchpad PPA, and confirm Launchpad builds and publishes
@@ -16,6 +16,11 @@ the git tag, the GitHub release `.deb`, and the Launchpad PPA
 (`ppa:mfagerstrom/conky-spotify-nowplaying`, series `resolute`). The version
 lives only in `debian/changelog`; `build-deb.sh` and `release-ppa.sh` read it
 from there.
+
+The source package is still `conky-spotify-nowplaying`, so the PPA keeps one
+source and its history. It builds two binary packages: `conky-widgets`, which
+holds everything, and `conky-spotify-nowplaying`, an empty transitional package
+that moves PPA users over on upgrade.
 
 Steps 5-7 publish to places other people see. Confirm the version and the
 changelog text with the user before step 5, and don't continue past a failed
@@ -47,7 +52,12 @@ reused - a broken release is fixed with the next number.
 
 ## 2. Changelog and README
 
-Write the entry non-interactively (`dch` would otherwise open an editor):
+Write the entry non-interactively (`dch` would otherwise open an editor). When
+the top entry is already `UNRELEASED`, a change that had to fix its version
+ahead of the release wrote it (the package rename set 2.0.0, which its
+`Breaks` and `Replaces` name): keep that version, add to the entry with
+`dch -a`, and finish it with `dch -r -D resolute --force-distribution ""`
+instead of starting a new one with `-v`. Otherwise:
 
 ```bash
 DEBFULLNAME=mfagerstrom DEBEMAIL=48690419+mfagerstrom@users.noreply.github.com \
@@ -75,13 +85,15 @@ Step 4 below is the build and the run that file asks for.
 
 ```bash
 ./build-deb.sh
+dpkg-deb --contents dist/conky-widgets_X.Y.Z_all.deb
+dpkg-deb -f dist/conky-widgets_X.Y.Z_all.deb Depends
 dpkg-deb --contents dist/conky-spotify-nowplaying_X.Y.Z_all.deb
-dpkg-deb -f dist/conky-spotify-nowplaying_X.Y.Z_all.deb Depends
 ```
 
 Check the listing: every directory `drwxr-xr-x`, the scripts under
-`/usr/share/conky-spotify-nowplaying/` present, and any new file that the code
-needs actually listed in `debian/install`.
+`/usr/share/conky-widgets/` present, and any new file that the code
+needs actually listed in `debian/install`. The transitional package holds
+nothing but its `/usr/share/doc` files.
 
 Then install it for real - running from the checkout does not catch path bugs
 that only exist under `/usr` (a checkout-detection bug once made the installed
@@ -89,7 +101,7 @@ launcher look in `/usr/src`). Install in the user's terminal, because it needs
 sudo:
 
 ```bash
-sudo apt install ./dist/conky-spotify-nowplaying_X.Y.Z_all.deb
+sudo apt install ./dist/conky-widgets_X.Y.Z_all.deb ./dist/conky-spotify-nowplaying_X.Y.Z_all.deb
 ```
 
 Then restart and verify:
@@ -97,7 +109,7 @@ Then restart and verify:
 ```bash
 : > ~/.cache/conky-widgets/run.log
 conky-widgets restart
-pgrep -af 'conky-spotify-nowplaying|share/conky-spotify|^conky '
+pgrep -af 'conky-widgets|conky-spotify-nowplaying|^conky '
 xwininfo -root -tree | grep ConkySpotifyNowPlaying
 grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 gdbus call --session --dest org.kde.StatusNotifierWatcher \
@@ -107,7 +119,7 @@ gdbus call --session --dest org.kde.StatusNotifierWatcher \
 ```
 
 Expect the supervisor plus `nowplaying.py`, `conky` and `conky-mouse.py`
-running from `/usr/share`, plus `tray.py`. Also expect the window present, no
+running from `/usr/share/conky-widgets`, plus `tray.py`. Also expect the window present, no
 errors in the log, and `conky_spotify_nowplaying` in the tray list. The log's
 `libayatana-appindicator is deprecated` warning is harmless. If Spotify is
 playing, capture the window and look at it before going on.
@@ -124,7 +136,7 @@ git push origin main vX.Y.Z
 ## 6. GitHub release
 
 ```bash
-gh release create vX.Y.Z dist/conky-spotify-nowplaying_X.Y.Z_all.deb \
+gh release create vX.Y.Z dist/conky-widgets_X.Y.Z_all.deb \
   --title "vX.Y.Z" --notes "<changelog bullets, then the apt install line>"
 gh release view vX.Y.Z --json assets --jq '.assets[].name'
 ```
