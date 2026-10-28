@@ -116,6 +116,12 @@ class VolumeSliderTest(StubSpeechctl):
         self.drag(1000 + 104 * 2, s=2)                    # a quarter along at scale 2
         self.assertEqual(self.ran(), ['volume 0.5'])
 
+    def test_a_preview_a_killed_run_left_is_cleared_at_start(self):
+        with open(speech_mouse.VOLUME_PREVIEW, 'w') as f:
+            f.write('0.5000')
+        speech_mouse.start()
+        self.assertFalse(os.path.exists(speech_mouse.VOLUME_PREVIEW))
+
     def test_a_press_on_the_slider_sets_the_volume_and_the_speaker_does_not(self):
         x, y = centre(REGIONS['volume'])
         self.assertEqual(speech_mouse_region(x, y), 'volume')

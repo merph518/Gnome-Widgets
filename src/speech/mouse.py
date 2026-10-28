@@ -38,7 +38,11 @@ core = None                                    # conky-mouse.py's module, set wh
 
 
 def start():
-    pass
+    """Clears the preview a previous run left behind if it was killed mid-drag."""
+    try:
+        os.remove(VOLUME_PREVIEW)
+    except OSError:
+        pass
 
 
 def speechctl(*args):
