@@ -1,0 +1,5 @@
+{
+  "name": "voice",
+  "description": "The voice bridge session hooks and the skill that answers a relayed voice request",
+  "version": "0.1.0"
+}
