@@ -1,6 +1,12 @@
-# conky-spotify-nowplaying
+# conky-widgets
 
-A Spotify "now playing" desktop widget for Linux (GNOME on Wayland), built on Conky.
+A bundle of desktop widgets for Linux (GNOME on Wayland), built on Conky. Each widget is a
+card of its own that you can drag, resize and minimize, on any monitor.
+
+The first, and so far the only one, is a Spotify "now playing" widget, packaged as
+`conky-spotify-nowplaying`. The rest of this page is about it.
+
+## Spotify now playing
 
 - Album art, title and artist, with long titles wrapped to the widget's width
 - Titles, artists and lyrics in other scripts, Cyrillic, Japanese, Chinese and Korean among
@@ -55,7 +61,7 @@ sudo apt install conky-spotify-nowplaying
 
 The PPA builds for Ubuntu 26.04 (`resolute`) only, and that is the only release the widget is
 tested on. On another release you can try the latest `.deb` from the
-[Releases page](https://github.com/mfagerstrom/conky-spotify-nowplaying/releases) instead; apt
+[Releases page](https://github.com/merph518/conky-widgets/releases) instead; apt
 reports any dependency that release lacks, and a `.deb` installed this way does not update itself:
 
 ```sh
