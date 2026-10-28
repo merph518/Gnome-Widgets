@@ -28,12 +28,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 AUTOSTART = os.path.expanduser(f'~/.config/autostart/{NAME}.desktop')
 HIDDEN = os.path.expanduser(f'~/.cache/{NAME}/hidden')   # the widget's minimize button writes it
 ON_TOP = os.path.expanduser(f'~/.config/{NAME}/on-top')  # 'off': not always on top; conky-mouse.py applies it
-LAUNCHER = os.environ.get('CSN_LAUNCHER') or NAME
+LAUNCHER = os.environ.get('CSN_LAUNCHER') or 'conky-widgets'
 SCALES = (0.7, 0.85, 1.0, 1.25, 1.5, 1.75, 2.0)          # the Text scaling menu's presets
 
 
 def launcher(*args):
-    subprocess.Popen([LAUNCHER, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen([LAUNCHER, 'spotify', *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def on_top():

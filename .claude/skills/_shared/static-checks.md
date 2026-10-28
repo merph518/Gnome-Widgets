@@ -13,12 +13,12 @@ before `/release` builds.
 ## The list
 
 ```bash
-python3 -m py_compile src/*/*.py bin/conky-spotify-nowplaying scripts/*.py
+python3 -m py_compile src/*/*.py bin/conky-widgets scripts/*.py
 python3 scripts/catchup_test.py
 python3 -m unittest discover -s tests
 luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
-desktop-file-validate packaging/conky-spotify-nowplaying.desktop
+desktop-file-validate packaging/*.desktop
 ```
 
 Every command must exit 0 and print nothing, apart from the test summaries
@@ -64,7 +64,7 @@ the `run` skill, or built and installed, as in `/release` step 4. Either way
 the widget's log is read afterwards:
 
 ```bash
-grep -iE 'error|critical|traceback|lua' ~/.cache/conky-spotify-nowplaying/run.log
+grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 ```
 
 `critical` is there for GLib's `Gtk-CRITICAL` lines, which name no error.

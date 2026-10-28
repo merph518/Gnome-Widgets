@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Conky desktop widgets: one launcher, one supervisor, a widget per command.
+
+usage: conky-widgets <widget> [command]
+       conky-widgets show | hide | stop | restart | status    (every widget)
+
+  <widget>         spotify | speech
+  (no command)     start the widget, show it if it is minimized, or minimize it
+  start | stop | restart | status
+  show | hide      bring back a minimized widget, or minimize it
+  login            log in to Spotify for the like button (spotify)
+  autostart on     start the widget when you log in
+  autostart off    don't
+
+With no widget, show and hide act on every widget that is running, and stop, restart
+and status on every widget.
+"""
+import os, re, shutil, signal, subprocess, sys, time
+
+NAME = 'conky-widgets'
+HERE = os.path.dirname(os.path.realpath(__file__))
+# Installed: /usr/share/<package>. Running from a checkout: ../src next to this script.
+# (Check for our own file: installed in /usr/bin, ../src is /usr/src, which always exists.)
+CHECKOUT_SRC = os.path.join(HERE, '..', 'src')
+APP_DIR = os.environ.get('CSN_DIR') or (
+    CHECKOUT_SRC if os.path.isfile(os.path.join(CHECKOUT_SRC, 'common', 'conky-mouse.py'))
+    else '/usr/share/conky-spotify-nowplaying')
+APP_DIR = os.path.realpath(APP_DIR)
+SHARED_CACHE = os.path.expanduser(f'~/.cache/{NAME}')
+PIDFILE = os.path.join(SHARED_CACHE, 'run.pid')    # the one supervisor for every widget
+WANTED = os.path.join(SHARED_CACHE, 'wanted')      # a file per widget that should be running
+UP = os.path.join(SHARED_CACHE, 'up')              # a file per widget the supervisor has running
+AUTOSTART_DIR = os.path.expanduser('~/.config/autostart')
+OLD_CONF = os.path.expanduser('~/.config/conky')   # pre-package installs kept state here
+STATE_FILES = ('position', 'spotify-client-id', 'spotify-token.json')
+# conky-mouse.py exits with this when Xft.dpi changes (a monitor added or removed can
+# change XWayland's scale); these read it once at start, so they start again.
+RESCALED, SCALED = 75, ('nowplaying', 'conky')
+
+# The Spotify widget keeps the folders and the autostart entry it had before there was a
+# bundle, so a saved position, client id and token carry over an upgrade.
+WIDGETS = {
+    'spotify': dict(
+        title='Spotify Now Playing', comment='Spotify now-playing desktop widget',
+        conf='~/.config/conky-spotify-nowplaying', cache='~/.cache/conky-spotify-nowplaying',
+        autostart='conky-spotify-nowplaying.desktop', icon='conky-spotify-nowplaying',
+        contents='nowplaying.py', legacy_pidfile=True),
+    'speech': dict(
+        title='Speech', comment='Speech-to-text desktop widget',
+        conf='~/.config/conky-widgets/speech', cache='~/.cache/conky-widgets/speech',
+        autostart='conky-widgets-speech.desktop', icon='audio-input-microphone',
+        contents='speech.py', legacy_pidfile=False),
+}
+
+
+def conf_dir(widget):
+    return os.path.expanduser(WIDGETS[widget]['conf'])
+
+
+def cache_dir(widget):
+    return os.path.expanduser(WIDGETS[widget]['cache'])
+
+
+def hidden_file(widget):
+    return os.path.join(cache_dir(widget), 'hidden')   # minimized; conky-mouse.py unmaps the window
+
+
+def autostart_file(widget):
+    return os.path.join(AUTOSTART_DIR, WIDGETS[widget]['autostart'])
+
+
+def installed(widget):
+    return os.path.isfile(os.path.join(APP_DIR, widget, 'conky.conf'))
+
+
+def notify(widget, msg):
+    title = WIDGETS[widget]['title']
+    subprocess.run(['notify-send', '-a', title, title, msg],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def alive(pidfile, *needles):
+    """The pid in `pidfile` when it is still a `_run` supervisor whose command line holds
+    every needle, not a recycled pid."""
+    try:
+        pid = int(open(pidfile).read())
+        cmdline = open(f'/proc/{pid}/cmdline', 'rb').read().split(b'\0')
+        if b'_run' in cmdline and all(any(n.encode() in part for part in cmdline) for n in needles):
+            return pid
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def running_pid():
+    return alive(PIDFILE, NAME)
+
+
+def legacy_pid(widget):
+    """The supervisor a version from before the bundle left running for this widget, which
+    kept its pid in the widget's own folder."""
+    if WIDGETS[widget]['legacy_pidfile']:
+        return alive(os.path.join(cache_dir(widget), 'run.pid'), 'conky-spotify-nowplaying')
+    return None
+
+
+def wanted():
+    try:
+        return [w for w in WIDGETS if os.path.exists(os.path.join(WANTED, w))]
+    except OSError:
+        return []
+
+
+def is_running(widget):
+    return bool(legacy_pid(widget) or (running_pid() and widget in wanted()))
+
+
+def flag(path, on):
+    if on:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, 'w').close()
+    else:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def migrate(widget):
+    """Copy login/Client ID/position from the old ~/.config/conky layout, once."""
+    conf = conf_dir(widget)
+    os.makedirs(conf, exist_ok=True)
+    if widget != 'spotify':
+        return
+    for f in STATE_FILES:
+        old, new = os.path.join(OLD_CONF, f), os.path.join(conf, f)
+        if os.path.isfile(old) and not os.path.lexists(new):
+            shutil.copy2(old, new)
+
+
+def set_hidden(widget, hidden):
+    if hidden:
+        os.makedirs(cache_dir(widget), exist_ok=True)
+    flag(hidden_file(widget), hidden)
+
+
+def terminate(pid):
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+
+
+def start(widget):
+    set_hidden(widget, False)                   # a widget started or started again is visible
+    if not installed(widget):
+        print(f'{widget} is not installed')
+        return
+    if legacy_pid(widget):
+        terminate(legacy_pid(widget))           # its own supervisor, now the bundle's job
+    elif is_running(widget):
+        print('already running')
+        return
+    migrate(widget)
+    os.makedirs(cache_dir(widget), exist_ok=True)
+    flag(os.path.join(WANTED, widget), True)
+    if not running_pid():
+        os.makedirs(SHARED_CACHE, exist_ok=True)
+        me = os.path.realpath(__file__)
+        with open(os.path.join(SHARED_CACHE, 'run.log'), 'a') as log:
+            subprocess.Popen([sys.executable, me, '_run'],
+                             start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                             env=dict(os.environ, CSN_DIR=APP_DIR, CSN_LAUNCHER=me))
+    print('started')
+
+
+def stop(widget):
+    if not is_running(widget):
+        print('not running')
+        return False
+    if legacy_pid(widget):
+        terminate(legacy_pid(widget))
+    flag(os.path.join(WANTED, widget), False)
+    pid = running_pid()
+    if pid and not wanted():
+        terminate(pid)                          # the last widget: the supervisor goes with it
+    else:
+        for _ in range(50):                     # the supervisor ends the widget's processes
+            if not os.path.exists(os.path.join(UP, widget)):
+                break
+            time.sleep(0.1)
+    print('stopped')
+    return True
+
+
+def xft_dpi():
+    out = subprocess.run(['xrdb', '-query'], capture_output=True, text=True).stdout
+    m = re.search(r'Xft\.dpi:\s*(\d+)', out)
+    return m.group(1) if m else ''
+
+
+def end(proc):
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def processes(widget):
+    """The processes that make up `widget`: its contents generator, conky, the mouse helper
+    and the tray icon, those of them it ships."""
+    py, folder = sys.executable, os.path.join(APP_DIR, widget)
+    specs = [
+        ('nowplaying', [py, os.path.join(folder, WIDGETS[widget]['contents'])]),
+        ('conky', ['conky', '-c', os.path.join(folder, 'conky.conf')]),
+        ('mouse', [py, os.path.join(APP_DIR, 'common', 'conky-mouse.py'), widget]),
+        ('tray', [py, os.path.join(folder, 'tray.py')]),
+    ]
+    return [(name, cmd) for name, cmd in specs
+            if name == 'conky' or name == 'mouse' or os.path.isfile(cmd[1])]
+
+
+def supervise():
+    """Runs, for every widget that is wanted, its contents generator, conky and the mouse
+    helper; restarts any that exit, and the ones that read the display scale when it
+    changes."""
+    os.makedirs(SHARED_CACHE, exist_ok=True)
+    with open(PIDFILE, 'w') as f:
+        f.write(str(os.getpid()))
+    children = {}      # widget -> {process name -> Popen}
+    given_up = set()   # (widget, name) exited with 78: can't run here (e.g. tray library missing)
+    last_start = {}
+    started_dpi = {}   # Xft.dpi as the widget's generator started, which conky-mouse.py watches for a change
+    stopping = False
+
+    def shutdown(*_):
+        nonlocal stopping
+        stopping = True
+
+    def release(widget):
+        for proc in children.pop(widget, {}).values():
+            if proc and proc.poll() is None:
+                proc.terminate()
+        flag(os.path.join(UP, widget), False)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    while not stopping:
+        want = wanted()
+        for widget in list(children):
+            if widget not in want:
+                release(widget)
+        for widget in want:
+            if widget not in children:
+                children[widget] = {}
+                flag(os.path.join(UP, widget), True)
+            procs = children[widget]
+            for name, cmd in processes(widget):
+                proc = procs.get(name)
+                if (widget, name) in given_up or (proc and proc.poll() is None):
+                    continue
+                if proc and proc.returncode == 78:
+                    given_up.add((widget, name))
+                    continue
+                if proc and proc.returncode == RESCALED:
+                    procs[name] = None         # handled once
+                    for other in SCALED:
+                        end(procs.get(other))
+                    continue                   # all start on the next pass, the generator first,
+                                               # so this one gets the dpi it starts at
+                if time.monotonic() - last_start.get((widget, name), -10) < 2:   # don't spin if it keeps dying
+                    continue
+                if name == 'nowplaying':
+                    started_dpi[widget] = xft_dpi()
+                procs[name] = subprocess.Popen(
+                    cmd, cwd=APP_DIR, env=dict(os.environ, CSN_DPI=started_dpi.get(widget, '')))
+                last_start[(widget, name)] = time.monotonic()
+                if name == 'nowplaying':
+                    time.sleep(1)   # let it write the first widget.txt before conky reads it
+        time.sleep(0.5)
+    everything = [p for procs in children.values() for p in procs.values() if p]
+    for widget in list(children):
+        release(widget)
+    for proc in everything:
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    try:
+        os.remove(PIDFILE)
+    except OSError:
+        pass
+
+
+def autostart(widget, on):
+    path = autostart_file(widget)
+    if on:
+        exe = shutil.which(NAME) or os.path.realpath(__file__)
+        info = WIDGETS[widget]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write('[Desktop Entry]\n'
+                    'Type=Application\n'
+                    f"Name={info['title']}\n"
+                    f"Comment={info['comment']}\n"
+                    f'Exec={exe} {widget} start\n'
+                    f"Icon={info['icon']}\n"
+                    'X-GNOME-Autostart-Delay=5\n'
+                    'NoDisplay=true\n')
+        print('will start at login')
+    else:
+        if os.path.exists(path):
+            os.remove(path)
+        print('will not start at login')
+
+
+def toggle(widget):
+    """What the widget's app-grid entry does: shows it, starting it first if need be, or
+    minimizes it when it is already showing."""
+    if not is_running(widget):
+        start(widget)
+        if not installed(widget):
+            notify(widget, f'The {widget} widget is not installed.')
+    elif os.path.exists(hidden_file(widget)):
+        set_hidden(widget, False)
+    else:
+        set_hidden(widget, True)
+
+
+def status(widget):
+    print(f'{widget}: ' + (('running, minimized' if os.path.exists(hidden_file(widget)) else 'running')
+                           if is_running(widget) else 'not running'))
+    print('starts at login' if os.path.exists(autostart_file(widget)) else 'does not start at login')
+
+
+def restart_all():
+    """Starts the supervisor again with the widgets it runs, which is how an upgraded
+    package's files get picked up."""
+    running = [w for w in WIDGETS if is_running(w)]
+    for widget in running:
+        stop(widget)
+    for widget in running:
+        start(widget)
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == '_run':
+        return supervise()
+    if args and args[0] in ('show', 'hide', 'stop', 'restart', 'status') and len(args) == 1:
+        if args[0] == 'restart':
+            return restart_all()
+        for widget in WIDGETS:
+            if args[0] in ('show', 'hide'):
+                if is_running(widget):
+                    set_hidden(widget, args[0] == 'hide')
+            elif args[0] == 'stop':
+                if is_running(widget):
+                    stop(widget)
+            else:
+                status(widget)
+        return
+    if not args or args[0] not in WIDGETS:
+        sys.exit(__doc__)
+    widget, cmd = args[0], (args[1] if len(args) > 1 else 'toggle')
+    if cmd == 'toggle':
+        toggle(widget)
+    elif cmd == 'start':
+        start(widget)
+    elif cmd == 'stop':
+        stop(widget)
+    elif cmd == 'restart':
+        stop(widget)
+        start(widget)
+    elif cmd in ('show', 'hide'):
+        set_hidden(widget, cmd == 'hide')
+    elif cmd == 'status':
+        status(widget)
+    elif cmd == 'login' and widget == 'spotify':
+        os.execv(sys.executable, [sys.executable, os.path.join(APP_DIR, 'spotify', 'spotify_api.py'), 'login'])
+    elif cmd == 'autostart' and len(args) == 3 and args[2] in ('on', 'off'):
+        autostart(widget, args[2] == 'on')
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == '__main__':
+    main()

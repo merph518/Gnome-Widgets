@@ -1,5 +1,5 @@
 #!/bin/sh
-# After an upgrade, starts again any widget that is running, so it picks up the new files
+# After an upgrade, starts again the widgets that are running, so they pick up the new files
 # instead of respawning from paths this version no longer ships. The restart runs as the
 # widget's user, in that user's session: the supervisor's own environment says which.
 set -e
@@ -8,7 +8,8 @@ restart_running_widgets() {
     for dir in /proc/[0-9]*; do
         args=$(tr '\0' '\n' < "$dir/cmdline" 2>/dev/null) || continue
         printf '%s\n' "$args" | grep -qx '_run' || continue
-        printf '%s\n' "$args" | grep -qx '/usr/bin/conky-spotify-nowplaying' || continue   # not a checkout's copy
+        # not a checkout's copy; the first is the supervisor a version before the bundle left running
+        printf '%s\n' "$args" | grep -qxE '/usr/bin/conky-(spotify-nowplaying|widgets)' || continue
         user=$(stat -c %U "$dir") || continue
         set --
         for var in HOME PATH LANG DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE \
@@ -16,7 +17,7 @@ restart_running_widgets() {
             value=$(tr '\0' '\n' < "$dir/environ" | grep "^$var=" | head -n 1) || true
             [ -n "$value" ] && set -- "$@" "$value"
         done
-        runuser -u "$user" -- env "$@" /usr/bin/conky-spotify-nowplaying restart || true
+        runuser -u "$user" -- env "$@" /usr/bin/conky-widgets restart || true
     done
 }
 
