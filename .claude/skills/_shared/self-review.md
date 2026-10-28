@@ -121,7 +121,8 @@ pads the list the user has to read.
 The pull request body carries a `Self review` heading, updated after each
 pass. It says how many passes ran, and lists each finding by pass: what it
 was, and the commit that fixed it, or the reason it was a false positive. The
-last pass is listed as clean. A first pass that found nothing reads "one pass,
+last pass is listed as clean, or, when it was the third, as ending the loop
+with its fixes. A first pass that found nothing reads "one pass,
 no findings" rather than dropping the heading.
 
 Patch the body through the API from a scratchpad file, which sidesteps
@@ -146,7 +147,8 @@ on the branch head and the pull request still reading as mergeable, per
 [ready-signal.md](ready-signal.md#the-mergeability-check-comes-first). A
 sibling branch can merge while the review runs, so read it again rather than
 trusting the read from before. A conflict resolved at that point is a new
-commit, so it goes back through the loop. Then the session sends the ready
+commit that owes the static checks and a look at the merge result, not a
+further pass beyond the cap. Then the session sends the ready
 signal, per [ready-signal.md](ready-signal.md).
 
 The report above the signal says in a line or two how many passes ran and what

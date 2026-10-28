@@ -43,6 +43,7 @@ apply and what replaces them.
 | `<follow-up-note>` | [/create-issue](../create-issue/SKILL.md) |
 | `<branch-age-note>` | None. The mergeability check in `<mergeability-note>` stands in |
 | `<post-merge-checks>` | None |
+| `<sampling-note>` | None. There are no specs to sample |
 | `<writing-rules>` | Comments say how the code works now and why, never its history or which issue asked for it |
 | `<repo-constraints>` | Under Overrides, Section 4 |
 | `<static-checks>` | [static-checks.md](../_shared/static-checks.md) |

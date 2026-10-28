@@ -20,7 +20,8 @@ luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/*.desktop
 test "$(git write-tree --prefix=.claude/att-docs/)" = "$(sed -n 's/^tree=//p' .claude/att-docs.lock)" \
-  && test -z "$(git status --porcelain -- .claude/att-docs)"
+  && git diff --quiet -- .claude/att-docs \
+  && test -z "$(git ls-files --others --exclude-standard -- .claude/att-docs)"
 ```
 
 Every command must exit 0 and print nothing, apart from the test summaries
@@ -29,9 +30,10 @@ Every command must exit 0 and print nothing, apart from the test summaries
 - The last command fails when the vendored Overmind copy differs from the tree
   `.claude/att-docs.lock` pins, so a hand edit to it shows offline. Moving the
   pin is `scripts/overmind-sync.sh <tag>`, followed by
-  `claude plugin update voice@att-docs`. The tree is read from the index, so
-  `git add` the copy first. Run it from the repository root; the status read
-  is what catches a file added under the copy.
+  `claude plugin update voice@att-docs`. The tree is read from the index, which
+  `overmind-sync.sh` fills, so the check passes before the sync is committed;
+  an edit, a deletion or a file added under the copy fails it. Run it from the
+  repository root.
 - `desktop-file-validate` hints count as failures to fix. It once caught a
   duplicate main category that every other check passed.
 - `luac5.3 -p` only parses; it catches syntax errors, not a bad call or a
