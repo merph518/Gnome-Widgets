@@ -107,13 +107,13 @@ end
 local function secondary() return theme.secondary(fg, bg) end
 
 local function fade()
-    -- one step of the ~1 s fade towards bg.txt's colour, and the foreground for it
-    fg, fg_back = theme.fade(bg, cache .. 'bg.txt', dt())
+    -- where the ~1 s fade towards bg.txt's colour has got to, and the foreground for it
+    fg, fg_back = theme.fade(bg, cache .. 'bg.txt')
 end
 
 function conky_widget()
     -- conky.text: nowplaying.py's markup, read on every update. Conky reads its text before
-    -- the draw hooks run, so the fade steps here, and its ${lua_parse fg ...} colours and
+    -- the draw hooks run, so the fade is worked out here, and its ${lua_parse fg ...} colours and
     -- everything the hooks draw share one foreground in every frame.
     fade()
     return read('widget.txt') or ''

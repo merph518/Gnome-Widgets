@@ -6,7 +6,7 @@ works a colour out of the art itself, so a cover picked once keeps its colour on
 that shows it, a whole album for one. Spotify's art URLs name the image
 (i.scdn.co/image/<id>), so the URL is the artwork's key.
 """
-import json, os, threading
+import json, math, os, threading, time
 
 CONF = os.path.expanduser('~/.config/conky-spotify-nowplaying')
 COLOURS = os.path.join(CONF, 'art-colours.json')
@@ -16,6 +16,8 @@ COVER_URL = os.path.join(CACHE, 'cover.url')       # the URL cover.jpg came from
 BG = os.path.join(CACHE, 'bg.txt')                 # what draw.lua fades to
 # Shown for a track without art. Every such track shares it, so it never keeps a pick.
 NO_ART_URL = 'file://' + os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-art.png')
+BOOT_ID = '/proc/sys/kernel/random/boot_id'
+NO_BG = 0.094                                      # what theme.lua shows without a bg.txt: #181818
 SPOT = 0.02                                        # the square around a click, as a fraction of the cover
 
 
@@ -29,8 +31,46 @@ def _write(path, text):
     os.replace(tmp, path)
 
 
+def boot_id():
+    """This boot's id, which bg.txt carries beside its start time: CLOCK_BOOTTIME restarts at
+    each boot, so a start from another boot is long finished."""
+    try:
+        with open(BOOT_ID) as f:
+            return f.readline().strip()
+    except OSError:
+        return ''
+
+
+def _numbers(words, n):
+    try:
+        return [float(w) for w in words[:n]] if len(words) >= n else None
+    except ValueError:
+        return None
+
+
+def shown_bg(now):
+    """The colour the widgets show at now (CLOCK_BOOTTIME seconds): where bg.txt's fade has got
+    to, as theme.lua's fade works it out; Spotify's #181818 while there is no bg.txt."""
+    try:
+        with open(BG) as f:
+            words = f.readline().split()
+    except OSError:
+        words = []
+    v = _numbers(words, 7)
+    if v and len(words) >= 8:
+        if words[7] != boot_id():
+            return tuple(v[:3])
+        k = 1 - math.exp(-max(now - v[6], 0) * 3)
+        return tuple(v[3 + i] + (v[i] - v[3 + i]) * k for i in range(3))
+    return tuple(_numbers(words, 3) or (NO_BG,) * 3)
+
+
 def write_bg(rgb):
-    _write(BG, '{:.3f} {:.3f} {:.3f}\n'.format(*rgb))
+    # The target, the colour shown now, now and this boot: both widgets fade from the colour
+    # shown to the target over the same wall-clock second, counted from the time written here.
+    now = time.clock_gettime(time.CLOCK_BOOTTIME)
+    _write(BG, '{:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {}\n'.format(
+        *rgb, *shown_bg(now), now, boot_id()))
 
 
 def _shown_url():

@@ -91,10 +91,12 @@ The header and progress bar stay put between lines: once a line ends, the header
 "<name> says:" and the bar stays full at that line's length until the next one starts.
 
 The speech widget takes the Spotify widget's background: it reads that widget's
-`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, its text and controls turning
-dark on a light cover just as Spotify's do, and stays on #181818 with white text while there
-is none. To follow another colour file, put its path on the first line of
-`~/.config/conky-widgets/speech/background`.
+`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, in step: both cards show the
+same colour in every frame of the one-second fade, and their text and controls turn dark on a
+light cover at the same moment. It stays on #181818 with white text while there is no
+`bg.txt`. To follow another colour file, put its path on the first line of
+`~/.config/conky-widgets/speech/background`; a file holding just `r g b` (0 to 1) starts a
+fade of the same length each time its colour changes.
 
 ### Controls
 

@@ -330,14 +330,19 @@ local function load(path)
 end
 local spotify_widget, spotify_fg = load(SPOTIFY)
 local speech_widget, speech_fg = load(SPEECH)
+local theme, T = package.loaded.theme, 1000
+theme.now = function() return T end
+theme.BOOT = 'boot-1'
 local function put(path, text)
     if text then local f = assert(io.open(path, 'w')); f:write(text); f:close()
     else os.remove(path) end
 end
 for _, step in ipairs(STEPS) do
     put(step.path, step.text)
+    if step.late then speech_widget, speech_fg = load(SPEECH) end
     for _ = 1, step.frames do
         spotify_widget(); speech_widget()
+        T = T + 0.05
         print(table.concat({spotify_fg('title'), spotify_fg('text'),
                             speech_fg('title'), speech_fg('text')}, '\\t'))
     end
@@ -355,9 +360,10 @@ end
 
     def frames(self, steps):
         """Each frame's colours, as (Spotify's title, its text, speech's title, its text)."""
-        lua = ', '.join('{path = %s, text = %s, frames = %d}' % (
-            json.dumps(path), json.dumps(text) if text is not None else 'nil', n)
-            for path, text, n in steps)
+        lua = ', '.join('{path = %s, text = %s, frames = %d, late = %s}' % (
+            json.dumps(path), json.dumps(text) if text is not None else 'nil', n,
+            'true' if late else 'false')
+            for path, text, n, *late in steps)
         script = (self.HARNESS
                   .replace('SPOTIFY', json.dumps(os.path.join(support.SRC, 'spotify', 'draw.lua')))
                   .replace('SPEECH', json.dumps(os.path.join(support.SRC, 'speech', 'draw.lua')))
@@ -383,6 +389,40 @@ end
         self.frames([(self.bg, '0.188 0.424 0.463', 5)])
         with open(self.bg) as f:
             self.assertEqual(f.read(), '0.188 0.424 0.463')     # read, never written
+
+    def test_a_widget_started_part_way_shows_the_same_colour(self):
+        # bg.txt as art_colours.py writes it: black to white from 1000 s, the harness's first
+        # frame. The speech widget, loaded again half a second in with its own #181818, takes
+        # the near-black text the light grey there needs from its first frame, as the Spotify
+        # widget does, rather than fading from #181818 under white.
+        fade = '1.000 1.000 1.000 0.000 0.000 0.000 1000.000 boot-1'
+        frames = self.frames([(self.bg, fade, 10), (self.bg, fade, 30, True)])
+        for i, f in enumerate(frames):
+            self.assertEqual(f[:2], f[2:], f'frame {i}')
+        self.assertEqual(frames[0][0], '${color ffffff}')
+        self.assertEqual(frames[10][2], '${color 121212}')
+
+    def test_the_fade_takes_wall_clock_time(self):
+        # 20 frames of 0.05 s: one second in, the fade is 95% of the way, so near-black text
+        fade = '0.950 0.900 0.800 0.094 0.094 0.094 1000.000 boot-1'
+        frames = self.frames([(self.bg, fade, 21)])
+        self.assertEqual(frames[0][0], '${color ffffff}')
+        self.assertEqual(frames[20][0], '${color 121212}')
+
+    def test_a_fade_from_another_boot_is_finished(self):
+        # written before a reboot at 999.5 s: the new boot's clock reads 1000 s, half a second
+        # on, but the fade is long done, so the light colour's near-black text from the start
+        fade = '0.950 0.900 0.800 0.094 0.094 0.094 999.500 boot-0'
+        self.assertEqual(self.frames([(self.bg, fade, 1)])[0][0], '${color 121212}')
+
+    def test_falling_back_to_an_earlier_colour_fades_again(self):
+        # #181818 without bg.txt, a timed fade to a light colour, then bg.txt gone: back to
+        # #181818 over a second, not at once
+        fade = '0.950 0.900 0.800 0.094 0.094 0.094 1000.000 boot-1'
+        frames = self.frames([(self.bg, None, 2), (self.bg, fade, 40), (self.bg, None, 25)])
+        self.assertEqual(frames[41][0], '${color 121212}')
+        self.assertEqual(frames[43][0], '${color 121212}')     # still light just after
+        self.assertEqual(frames[-1][0], '${color ffffff}')
 
     def test_the_setting_names_another_file(self):
         other = os.path.join(self.home, 'other.txt')

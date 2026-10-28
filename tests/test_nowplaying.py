@@ -248,7 +248,7 @@ class ArtColourTest(support.TempDirTest):
         self.redirect(nowplaying, COVER='missing.jpg')
         self.redirect(nowplaying.art_colours, COLOURS='art-colours.json', BG='bg.txt')
         nowplaying.update_bg('')
-        self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.094 0.094 0.094')
+        self.assertEqual(nowplaying._read(nowplaying.art_colours.BG).split()[:3], '0.094 0.094 0.094'.split())
 
     def test_update_bg_takes_the_colour_picked_for_that_art_over_its_own(self):
         path = self.cover(lambda x, y: (40, 70, 140))
@@ -257,9 +257,9 @@ class ArtColourTest(support.TempDirTest):
             json.dump({'https://i.scdn.co/image/picked': [0.1, 0.2, 0.3]}, f)
         with mock.patch.object(nowplaying, 'COVER', path):
             nowplaying.update_bg('https://i.scdn.co/image/picked')
-            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.100 0.200 0.300')
+            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG).split()[:3], '0.100 0.200 0.300'.split())
             nowplaying.update_bg('https://i.scdn.co/image/other')
-            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG), '0.157 0.275 0.549')   # the cover's own
+            self.assertEqual(nowplaying._read(nowplaying.art_colours.BG).split()[:3], '0.157 0.275 0.549'.split())   # the cover's own
 
 
 @unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
