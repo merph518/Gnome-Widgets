@@ -505,11 +505,12 @@ def render(state, now=None):
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
     for s in listed:
-        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + row, 2)}
+        span = row * (2 if second and s['queued'] else 1)
+        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
         rows.append(entry)
-        top += row * (2 if second and s['queued'] else 1)
+        top += span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
     regions['rows'] = rows
     regions['list_scroll'] = [last, round(row, 2)]

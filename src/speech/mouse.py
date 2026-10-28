@@ -9,6 +9,7 @@ WM_CLASS = 'ConkySpeechQueue'                  # conky.conf's own_window_class
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 BUTTONS = ()                                   # the controls a click or tap presses
 REGIONS_ORDER = ('minimize', 'close')          # the regions a press looks through, in order
+HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 

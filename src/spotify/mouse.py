@@ -14,6 +14,7 @@ WM_CLASS = 'ConkySpotifyNowPlaying'            # conky.conf's own_window_class
 OUTLINE = 0x1db954                             # Spotify green: the outline a resize shows
 BUTTONS = ('heart', 'play', 'prev', 'next')    # the controls this widget's click or tap presses
 # The regions nowplaying.py writes, in the order a press looks through them.
+HEIGHT_REGION = 'lyrics'                       # the region the second size setting is the height of
 REGIONS_ORDER = ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'seek', 'art')
 CONF = os.path.expanduser(f'~/.config/{NAME}')
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')

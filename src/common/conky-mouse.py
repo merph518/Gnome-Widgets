@@ -74,7 +74,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # widget's own mouse.py.
 hooks = None
 CONF = POSITION = SIZE = CACHE = REGIONS = LOG = HIDDEN = ON_TOP = None
-WM_CLASS, OUTLINE, BUTTONS = None, None, ()
+WM_CLASS, OUTLINE, BUTTONS, HEIGHT_REGION = None, None, (), None
 BUTTON_PRESS, MOTION_NOTIFY, BUTTON1_MASK = 4, 6, 1 << 8
 WHEEL_UP, WHEEL_DOWN = 4, 5                       # X reports the wheel as button presses
 BUTTON_PRESS_MASK, BUTTON_RELEASE_MASK, POINTER_MOTION_MASK = 1 << 2, 1 << 3, 1 << 6
@@ -105,7 +105,7 @@ def configure(widget):
     (the config and cache folders, the launcher, the window class), its controls and what
     they do. Run before anything else here."""
     global hooks, CONF, POSITION, SIZE, CACHE, REGIONS, LOG, HIDDEN, ON_TOP
-    global WM_CLASS, OUTLINE, BUTTONS
+    global WM_CLASS, OUTLINE, BUTTONS, HEIGHT_REGION
     folder = os.path.join(HERE, '..', widget)
     sys.path.insert(0, folder)
     spec = importlib.util.spec_from_file_location(f'{widget}_mouse', os.path.join(folder, 'mouse.py'))
@@ -120,7 +120,7 @@ def configure(widget):
     LOG = os.path.join(CACHE, 'mouse.log')
     HIDDEN = os.path.join(CACHE, 'hidden')
     ON_TOP = os.path.join(CONF, 'on-top')         # 'off': not always on top
-    WM_CLASS, OUTLINE = hooks.WM_CLASS, hooks.OUTLINE
+    WM_CLASS, OUTLINE, HEIGHT_REGION = hooks.WM_CLASS, hooks.OUTLINE, hooks.HEIGHT_REGION
     BUTTONS = hooks.BUTTONS + HIDES               # the controls a click or tap presses
 
 
@@ -507,12 +507,13 @@ def place_outline(d, frame, x, y, w, h, t):
     x11.XFlush(d)
 
 
-def resized(start, edges, old, new, s, lyrics):
+def resized(start, edges, old, new, s, tall):
     """The window's geometry at size settings `new`, from `start` (x, y, w, h) at `old`:
-    the edges across from the dragged ones stay put. Without lyrics the height stays."""
+    the edges across from the dragged ones stay put. Without the region whose height the
+    second size setting is (HEIGHT_REGION) the height stays."""
     x, y, w, h = start
     nw = w + round((new[0] - old[0]) * s)
-    nh = h + (round((new[1] - old[1]) * s) if lyrics else 0)
+    nh = h + (round((new[1] - old[1]) * s) if tall else 0)
     return x + (w - nw if 'l' in edges else 0), y + (h - nh if 't' in edges else 0), nw, nh
 
 
@@ -551,7 +552,7 @@ def resize(d, root, win, edges, s, regions, track):
         while held:
             nx, ny, held = track()
             new = dragged(old, edges, nx - px, ny - py, room_x, room_y, s)
-            g = resized(start, edges, old, new, s, regions.get('lyrics'))
+            g = resized(start, edges, old, new, s, regions.get(HEIGHT_REGION))
             if (nx, ny) != (px, py):
                 place_outline(d, frame, *g, round(OUTLINE_WIDTH * s))
             time.sleep(0.01)

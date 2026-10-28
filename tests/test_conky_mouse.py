@@ -563,6 +563,8 @@ class ConfigureTest(unittest.TestCase):
         self.assertTrue(conky_mouse.POSITION.endswith('/.config/conky-spotify-nowplaying/position'))
         self.assertTrue(conky_mouse.REGIONS.endswith('/.cache/conky-spotify-nowplaying/regions.json'))
         self.assertEqual(conky_mouse.WM_CLASS, 'ConkySpotifyNowPlaying')
+        self.assertEqual(conky_mouse.SIZE, os.path.join(conky_mouse.CONF, 'size'))
+        self.assertEqual(conky_mouse.HEIGHT_REGION, 'lyrics')     # resizing from the top or bottom
 
     def test_its_buttons_come_with_minimize_and_close(self):
         self.assertEqual(set(conky_mouse.BUTTONS), {'heart', 'play', 'prev', 'next', 'minimize', 'close'})
