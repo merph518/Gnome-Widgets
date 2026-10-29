@@ -64,8 +64,8 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 (`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
 itself.
 
-- A header with who is speaking ("<name> says:"), ⏭ and ⏩, and a progress bar with the
-  line's elapsed time and length
+- A header with who is speaking ("<name> says:") and a progress bar with the line's elapsed
+  time and length
 - **Sessions**: every open Claude session, the ones with speech on first, each with its
   repository's label, its name, one tag, how many lines it has queued, and its speech setting.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
@@ -125,8 +125,10 @@ fade of the same length each time its colour changes.
 
 ### Controls
 
-The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
-skips it and the rest of that session's queue, the round button pauses or resumes, the
+The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
+left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
+playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
+nothing, while no line plays, and grow a little under the pointer, as the pause button does. The
 **Voice:** drop down picks the voice, a session's **On**, **Alerts** and **Off** set how it
 is read, a session's box opens its issue, its pill its ready pull requests, and its name
 asks to close it. The

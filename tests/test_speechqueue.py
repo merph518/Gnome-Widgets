@@ -700,6 +700,41 @@ class Golden(Fixture):
         self.f.wav(9001, 6.0)
         self.check('playing', self.state())
 
+    def footer(self):
+        """(draw.txt's lines by key, regions.json) as render() just wrote them."""
+        with open(speechqueue.DRAW) as f:
+            lines = {l.split()[0]: l.split()[1:] for l in f.read().splitlines()}
+        with open(speechqueue.REGIONS) as f:
+            return lines, json.load(f)
+
+    def test_skip_and_next_are_round_buttons_in_the_footer_after_pause(self):
+        self.three()
+        self.f.now(ME, 'Claude Voice Widget', 'The data layer is in.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        speechqueue.render(self.state(), now=1000.0)
+        lines, regions = self.footer()
+        pause_cx, footer_y, size = (float(v) for v in lines['footer'][:3])
+        skip_cx, next_cx, y, button, active = (float(v) for v in lines['buttons'])
+        gap = speechqueue.FOOTER_BUTTON_GAP
+        self.assertEqual((skip_cx, next_cx, y, button, active),
+                         (pause_cx + size + gap, pause_cx + 2 * (size + gap), footer_y, size, 1))
+        for key, cx in (('pause', pause_cx), ('skip', skip_cx), ('next', next_cx)):
+            self.assertEqual(((regions[key][0] + regions[key][2]) / 2, (regions[key][1] + regions[key][3]) / 2),
+                             (cx, footer_y), key)
+        self.assertLessEqual(regions['pause'][2], regions['skip'][0])        # side by side, not overlapping
+        self.assertLessEqual(regions['skip'][2], regions['next'][0])
+        self.assertLess(regions['next'][2], regions['volume'][0])            # clear of the volume slider
+        self.assertGreater(regions['skip'][1], regions['close'][3])          # and not in the header
+
+    def test_without_a_clip_the_buttons_are_drawn_dimmed_and_are_not_click_areas(self):
+        self.three()
+        speechqueue.render(self.state(), now=1000.0)
+        lines, regions = self.footer()
+        self.assertEqual(lines['buttons'][4], '0')
+        self.assertFalse({'skip', 'next'} & set(regions))
+        self.assertIn('pause', regions)
+
     def test_after_a_line_the_header_and_full_bar_stay(self):
         self.three()
         self.f.now(ME, 'Claude Voice Widget', 'Done.', hook_pid=9001)
