@@ -732,17 +732,34 @@ class TitleAndFooter(Fixture):
         self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
         self.assertLess(float(cy), regions['list'][1])                # above the column headers and the list
 
-    def test_the_avatar_and_bubble_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
+    def test_the_avatar_and_bubble_sit_between_the_list_and_the_controls(self):
         lines, regions, _ = self.draw(text=self.LONG)
         avatar_y = float(lines['avatar'].split()[1])
         x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
-        progress_y = float(lines['progress'].split()[2])
         controls_y = float(lines['footer'].split()[1])
         self.assertLess(regions['list'][3], y0)
         self.assertLess(y0, avatar_y)                                  # the avatar is level with the bubble's bottom
         self.assertLess(avatar_y, y1)
-        self.assertLess(y1, progress_y)
-        self.assertLess(progress_y, controls_y)
+        self.assertLess(y1, controls_y)
+
+    def test_the_progress_bar_is_right_of_the_buttons_on_their_row_as_the_spotify_seek_bar_is(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        x0, x1, y = (float(v) for v in lines['progress'].split()[:3])
+        self.assertEqual(y, float(lines['footer'].split()[1]))         # level with the controls
+        self.assertGreater(x0, regions['next'][2])                     # right of the last button
+        self.assertEqual(x1, regions['list'][2])                       # to the card's right edge
+
+    def test_the_volume_is_on_the_top_row_left_of_minimize_and_level_with_the_title(self):
+        lines, regions, _ = self.draw()
+        track0, track1, y, _, icon, size = (float(v) for v in lines['volume'].split())
+        self.assertEqual(y, float(lines['title'].split()[1]))
+        self.assertLess(icon + size, track0)                           # the speaker, then its track
+        self.assertLess(track1, regions['minimize'][0])
+        self.assertEqual(regions['volume_bar'], [track0, track1])
+        for key in ('volume', 'volume_icon', 'volume_wheel'):
+            self.assertLess(regions[key][1], y)
+            self.assertGreater(regions[key][3], y)
+            self.assertLess(regions[key][2], regions['minimize'][0])
 
     def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_the_whole_text(self):
         lines, _, _ = self.draw(text=self.LONG)
@@ -893,6 +910,15 @@ class SettingsPopup(Fixture):
         self.assertEqual(popup['done'][2], buttons[2][2])
         line = next(l for l in draw if l.startswith('settings '))
         self.assertEqual([float(v) for v in line.split()[1:5]], box)
+
+    def test_the_speech_buttons_sit_as_far_below_their_label_as_the_voice_rows_below_theirs(self):
+        draw, regions = self.render(VOICES)
+        popup = regions['settings']
+        line = draw[next(i for i, l in enumerate(draw) if l.startswith('settings '))].split()
+        speech_cy, voice_cy = float(line[6]), float(line[7])
+        label_h = speechqueue.line_height(speechqueue.TAG_FONT)
+        self.assertEqual(popup['speech']['on'][1] - (speech_cy + label_h / 2), speechqueue.SETTINGS_LABEL_GAP)
+        self.assertEqual(popup['list'][1] - (voice_cy + label_h / 2), 0)
 
     def test_a_long_list_shows_four_rows_and_a_short_one_only_its_voices(self):
         many = [f'en_US-voice{i:02d}-medium' for i in range(40)]

@@ -79,12 +79,11 @@ BUBBLE_NAME_GAP = 2                           # the speaker's name to the text u
 BUBBLE_LINES = 6                              # most lines of the text read aloud the bubble shows at once
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
-HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
+HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the controls' row
 LINE_GAP = 14                                 # the title's row to the column headers
-PROGRESS_H = 14                               # the progress bar's row
 LIST_GAP = 0                                  # the column headers to the list
-FOOTER_GAP = 8                                # list to the bubble, and the progress bar's row to the controls
-FOOTER_H = 30                                 # the footer row: pause, skip, next and volume
+FOOTER_GAP = 8                                # list to the bubble
+FOOTER_H = 30                                 # the footer row: pause, skip, next and the progress bar
 ROW_SPACING = 6                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
@@ -96,6 +95,7 @@ CONFIRM_PAD = 14                              # round its contents
 CONFIRM_GAP = 8                               # between its lines, and its two buttons
 CONFIRM_BUTTON_PAD = 14                       # either side of a button's label
 SETTINGS_W = 300                              # the settings popup's width, at most
+SETTINGS_LABEL_GAP = 6                        # under its Speech label, so the buttons sit as far from it as the first voice
 SETTINGS_ROWS = 4                             # voices it shows at once, the rest scrolled
 GEAR_SIZE = 14                                # a row's gear icon, right of the row
 GEAR_PAD = 8                                  # click room round the icon, and its gap to the row's text
@@ -105,6 +105,7 @@ VOLUME_WIDTH = 80                             # the volume slider's track, right
 VOLUME_ICON = 16                              # the speaker and its waves, left of the track
 VOLUME_GAP = 8                                # speaker to track
 VOLUME_MIN = 32                               # its shortest track, as the Spotify widget's
+TITLE_ROOM = 150                              # what the title keeps while the volume's track shortens
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
@@ -824,19 +825,30 @@ def render(state, now=None):
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
-    text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - 8
+    # The volume, as the Spotify widget has it: the speaker and its slider left of minimize. The
+    # track gives up room, down to VOLUME_MIN, so the title keeps TITLE_ROOM.
+    vol_x1 = min_cx - WINDOW_BUTTON_PITCH / 2 - VOLUME_GAP
+    vol_x0 = vol_x1 - min(VOLUME_WIDTH, max(VOLUME_MIN, vol_x1 - VOLUME_ICON - VOLUME_GAP - MARGIN - TITLE_ROOM))
+    vol_icon = vol_x0 - VOLUME_GAP - VOLUME_ICON
+    text_right = vol_icon - VOLUME_GAP
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
     heard = last_heard(n, state['name'], state['duration'])
     half = WINDOW_BUTTON_PITCH / 2
+    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     regions = {
         'minimize': box(min_cx, cy, half, half),
         'close': [close_cx - half, cy - half, close_cx + half + 12, cy + half],
+        'volume_icon': [vol_icon - 4, cy - 10, vol_x0 - 6, cy + 10],   # a click mutes; the wheel reaches it too
+        'volume': [vol_x0 - 6, cy - 10, vol_x1 + 6, cy + 10],
+        'volume_wheel': [vol_icon - 4, cy - 10, vol_x1 + 6, cy + 10],
+        'volume_bar': [vol_x0, vol_x1],
     }
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
-            f'title {MARGIN} {cy} {TITLE_TRACK} {title}']
+            f'title {MARGIN} {cy} {TITLE_TRACK} {title}',
+            f'volume {vol_x0} {vol_x1} {cy} {level:.4f} {vol_icon} {VOLUME_ICON}']
     out = Markup(MARGIN)
     out.gap(header_h)
 
@@ -960,8 +972,14 @@ def render(state, now=None):
         regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
     out.gap(max(full_h, AVATAR_D))
     out.gap(HEADER_GAP)
-    # The progress bar, always there: the current line's while its length is known (0:00 while
-    # Piper still renders it), else the last line's, left full where it finished.
+    footer_h = FOOTER_H
+    fy = out.y + footer_h / 2
+    pause_cx = MARGIN + PAUSE_SIZE / 2
+    skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
+    next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
+    # The progress bar, always there, right of the buttons as the Spotify widget's seek bar is:
+    # the current line's while its length is known (0:00 while Piper still renders it), else the
+    # last line's, left full where it finished.
     duration, running = state['duration'] or 0, False
     if n:
         elapsed = clock.elapsed(n, paused, now)
@@ -969,31 +987,13 @@ def render(state, now=None):
         elapsed = min(elapsed, duration)
     else:
         duration = elapsed = float(heard.get('duration') or 0)
-    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+    progress_x0 = next_cx + PAUSE_SIZE / 2 + 16
+    draw.append(f'progress {progress_x0} {right} {fy} {time.monotonic():.3f} '
                 f'{elapsed:.3f} {duration:.3f} {int(running)}')
-    out.gap(PROGRESS_H)
-    out.gap(FOOTER_GAP)
-    footer_h = FOOTER_H
-    fy = out.y + footer_h / 2
-    pause_cx = MARGIN + PAUSE_SIZE / 2
-    skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
-    next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
-    vol_icon = next_cx + PAUSE_SIZE / 2 + 16
-    vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
-    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
-    # The track gives up room, down to VOLUME_MIN, as the card narrows
-    vol_x1 = vol_x0 + min(VOLUME_WIDTH, max(VOLUME_MIN, right - 22 - vol_x0))
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
     draw.append(f'buttons {skip_cx} {next_cx} {fy} {PAUSE_SIZE} {int(bool(n))}')
-    draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
     half = PAUSE_SIZE / 2 + 4
-    regions.update({
-        'pause': box(pause_cx, fy, half, half),
-        'volume_icon': [vol_icon - 4, fy - 10, vol_x0 - 6, fy + 10],   # a click mutes; the wheel reaches it too
-        'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
-        'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
-        'volume_bar': [vol_x0, vol_x1],
-    })
+    regions['pause'] = box(pause_cx, fy, half, half)
     if n:
         regions['skip'] = box(skip_cx, fy, half, half)
         regions['next'] = box(next_cx, fy, half, half)
@@ -1043,7 +1043,8 @@ def settings_popup(names, current, right, list_top, list_height):
     button_h = title_h + 8 * text_scale
     rows = min(SETTINGS_ROWS, len(names))
     list_h = rows * item_h + 2 * MENU_PAD
-    height = 2 * CONFIRM_PAD + title_h + 3 * CONFIRM_GAP + 2 * label_h + 2 * button_h + list_h + CONFIRM_GAP
+    height = (2 * CONFIRM_PAD + title_h + 3 * CONFIRM_GAP + 2 * label_h + SETTINGS_LABEL_GAP + 2 * button_h
+              + list_h + CONFIRM_GAP)
     width = min(right - MARGIN, SETTINGS_W)
     x0 = (MARGIN + right - width) / 2
     x1 = x0 + width
@@ -1053,7 +1054,7 @@ def settings_popup(names, current, right, list_top, list_height):
     title_cy = y + title_h / 2
     y += title_h + CONFIRM_GAP
     speech_cy = y + label_h / 2
-    y += label_h
+    y += label_h + SETTINGS_LABEL_GAP
     buttons_cy = y + button_h / 2
     bw = (inner1 - inner0 - 2 * CONFIRM_GAP) / 3
     buttons = {key: [inner0 + i * (bw + CONFIRM_GAP), buttons_cy - button_h / 2,
@@ -1071,8 +1072,7 @@ def settings_popup(names, current, right, list_top, list_height):
     lines = [f'settings {x0:.2f} {top:.2f} {x1:.2f} {bottom:.2f} {title_cy:.2f} {speech_cy:.2f} {voice_cy:.2f} '
              f'{buttons_cy:.2f} {button_h:.2f} ' + ' '.join(f'{v:.2f}' for v in flat) +
              f' {list_box[0]:.2f} {list_box[1]:.2f} {list_box[2]:.2f} {list_box[3]:.2f} {item_h:.2f} {rows} '
-             f'{MENU_PAD} {len(names)} {done[0]:.2f} {done[1]:.2f} {done[2]:.2f} {done[3]:.2f} '
-             f'{MARGIN} {list_top} {right} {list_top + list_height}']
+             f'{MENU_PAD} {len(names)} {done[0]:.2f} {done[1]:.2f} {done[2]:.2f} {done[3]:.2f}']
     lines.append(f'item 0 {DEFAULT_VOICE_LABEL} ({voice_label(current)})')
     lines += [f'item 0 {voice_label(n)}' for n in names[1:]]
     r = lambda box: [round(v, 2) for v in box]

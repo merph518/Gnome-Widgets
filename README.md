@@ -91,8 +91,9 @@ itself.
   the mouse wheel moves it while the pointer is over the bubble (it follows the clip again
   after five seconds). The bubble opens when a clip starts and fades away two seconds after the
   speech ends (the row is as tall without it, so the card does not change size as lines play);
-  a progress bar with the line's elapsed time and length; then pause / resume,
-  skip and next, and the volume
+  then pause / resume, skip and next, with the progress bar (the line's elapsed time, the bar
+  and its length) to their right, as the Spotify widget's seek bar is; the volume is at the top
+  right, left of minimize
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
@@ -127,7 +128,7 @@ A session with speech on always has a second row under its name: the last line r
 for it, without the hook's opening "<name> session says:" and cut to one line, or *Nothing
 read aloud yet* before its first. A question waiting to
 be read shows as a **question** tag after the name instead of its text.
-The header and progress bar stay put between lines: once a line ends, the header keeps
+The bubble and progress bar stay put between lines: once a line ends, the header keeps
 "<name> says:" and the bar stays full at that line's length until the next one starts.
 
 The speech widget takes the Spotify widget's background: it reads that widget's
@@ -141,13 +142,13 @@ fade of the same length each time its colour changes.
 ### Controls
 
 The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
-left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
+left, three round buttons in a row, the progress bar to their right: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
 nothing, while no line plays, and grow a little under the pointer, as the pause button does. A
 session's gear opens its settings, an issue number under a session's repository opens that
 issue, its pill its ready pull requests, and its name asks to close it. The
-volume slider, drawn and sized like the Spotify widget's (it shortens, down to 32 px, as the card
-narrows), sets the speech volume where you click, tap
+volume slider, at the top right left of minimize as in the Spotify widget, drawn and sized like
+it (it shortens, down to 32 px, as the card narrows), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
 from the tray or the keyboard. A click or tap on the speaker mutes, and the next one brings back
@@ -156,10 +157,10 @@ while muted still restores it; 1.2 if none was kept). The mouse wheel turns the 
 slider or its speaker, and scrolls the list anywhere else on it; a finger swiped up or down on
 the list scrolls it too.
 
-A click or tap on a session's gear dims the list and opens that session's settings over it, in
+A click or tap on a session's gear dims the card under a black veil and opens that session's settings over it, in
 the same panel as the close prompt: its name, its speech setting as three buttons (**On**,
-**Alerts**, **Off**, the current one filled) and the voice it is read in, as a list of the
-installed voices with the session's own marked, **Default** first. A choice applies at once and
+**Alerts**, **Off**, the current one filled) and the voice it is read in, as a column of buttons, one for each
+installed voice with the session's own filled, **Default** first. A choice applies at once and
 the popup stays open, so a setting and a voice can be changed in one visit; **Done**, a click
 anywhere outside the panel and Escape close it, and it closes by itself after 20 seconds. While
 it is open the widget holds the pointer and the keyboard, as it does for the close prompt, and a

@@ -749,17 +749,20 @@ local function draw_confirm(cr, c, state, s, text)
 end
 
 local function draw_settings(cr, c, items, state, s, text)
-    -- a session's settings popup, over the dimmed list in the close prompt's panel: its name,
+    -- a session's settings popup, over the dimmed card, in the close prompt's panel with a shadow: its name,
     -- the speech buttons On, Alerts and Off (the current one a pill of the foreground, as a
-    -- selected segment was), the voices as rows from state.scroll (the session's own a pill, the
-    -- one under the pointer tinted, and a slim bar at the right when there are more than fit)
-    -- and Done at the lower right
+    -- selected segment was), the voices as buttons of the same kind from state.scroll (the
+    -- session's own filled, the one under the pointer tinted, and a slim bar at the right when
+    -- there are more than fit) and Done at the lower right
     local x0, top, x1, bottom = c[1] * s, c[2] * s, c[3] * s, c[4] * s
     local title_cy, speech_cy, voice_cy, buttons_cy, button_h = c[5] * s, c[6] * s, c[7] * s, c[8] * s, c[9] * s
     local pad = 14 * s
-    cairo_set_source_rgba(cr, bg[1], bg[2], bg[3], 0.7)
-    cairo_rectangle(cr, c[28] * s, c[29] * s, (c[30] - c[28]) * s, (c[31] - c[29]) * s)
+    -- the whole card dimmed by a black veil over it, and the panel lifted off it by a shadow
+    local card_w, card_h = conky_window.width - 2 * margin, conky_window.height - 2 * margin
+    rounded_rect(cr, 0, 0, card_w, card_h, math.min(24, card_h / 4))
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.5)
     cairo_fill(cr)
+    theme.draw_shadow(cr, x0, top, x1 - x0, bottom - top, 10 * s, s)
     rounded_rect(cr, x0, top, x1 - x0, bottom - top, 10 * s)
     cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
     cairo_fill_preserve(cr)
@@ -790,28 +793,15 @@ local function draw_settings(cr, c, items, state, s, text)
     end
     local lx0, ltop, lx1, lbottom, item_h, rows, ipad, count = c[16] * s, c[17] * s, c[18] * s, c[19] * s,
         c[20] * s, c[21], c[22] * s, c[23]
-    rounded_rect(cr, lx0, ltop, lx1 - lx0, lbottom - ltop, 8 * s)
-    set(cr, fg, 0.08)
-    cairo_fill(cr)
-    font(cr, 11, text, s)
+    font(cr, 11, text, s, true)
+    local bar = count > rows and 8 * s or 0       -- room for the scroll bar at the right
     for i = 0, rows - 1 do
         local item = items[state.scroll + i + 1]
         if not item then break end
         local y = ltop + ipad + i * item_h
-        if state.scroll + i == state.voice then
-            set(cr, fg)
-            rounded_rect(cr, lx0 + ipad, y, lx1 - lx0 - 2 * ipad, item_h, 5 * s)
-            cairo_fill(cr)
-            set(cr, fg_back)
-        else
-            if state.hover == 'item:' .. (state.scroll + i) then
-                set(cr, fg, 0.2)
-                rounded_rect(cr, lx0 + ipad, y, lx1 - lx0 - 2 * ipad, item_h, 5 * s)
-                cairo_fill(cr)
-            end
-            set(cr, fg)
-        end
-        show(cr, fit(cr, item.label, lx1 - lx0 - 2 * ipad - 12 * s - 8 * s), lx0 + ipad + 6 * s, y + item_h / 2, 'left')
+        local px0, px1 = lx0 + ipad, lx1 - ipad - bar
+        button(px0 / s, px1 / s, (y + 2 * s) / s, (y + item_h - 2 * s) / s, fit(cr, item.label, px1 - px0 - 16 * s),
+               state.scroll + i == state.voice, state.hover == 'item:' .. (state.scroll + i))
     end
     if count > rows then
         local ty0, ty1 = ltop + ipad + 2 * s, lbottom - ipad - 2 * s
