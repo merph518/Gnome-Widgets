@@ -313,6 +313,79 @@ class Labels(Fixture):
         self.assertEqual(speechqueue.session_line(s).split('\t')[6], s['label'])
 
 
+class Links(Labels):
+    """What a click on a session's name opens: its issue, from its branch, or its ready pull
+    requests, from its ledger."""
+
+    def worktree(self, head, url='git@github.com:someone/Gnome-Widgets.git'):
+        top = self.repo('Gnome-Widgets', url)
+        gitdir = os.path.join(top, '.git', 'worktrees', 'wt')
+        os.makedirs(gitdir)
+        for name, text in (('commondir', '../..\n'), ('HEAD', head + '\n')):
+            with open(os.path.join(gitdir, name), 'w') as f:
+                f.write(text)
+        wt = os.path.join(top, '.claude', 'worktrees', 'wt')
+        os.makedirs(wt)
+        with open(os.path.join(wt, '.git'), 'w') as f:
+            f.write(f'gitdir: {gitdir}\n')
+        return wt
+
+    def pr_ledger(self, sid, *rows):
+        folder = os.path.join(self.f.ledgers, '-home-user-project', sid, 'scratchpad')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, 'ledger'), 'w') as f:
+            f.writelines(f'pr {n}\tpr:{n}\thttps://github.com/someone/Gnome-Widgets/pull/{n}\t{state}\t\n'
+                         for n, state in rows)
+
+    def test_the_issue_is_the_branchs_issue_number_on_the_origin_repository(self):
+        wt = self.worktree('ref: refs/heads/feat/issue-123-session-row-links')
+        self.assertEqual(speechqueue.session_issue(wt),
+                         'https://github.com/someone/Gnome-Widgets/issues/123')
+        top =self.repo('plain', 'https://github.com/someone/Overmind.git')
+        with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
+            f.write('ref: refs/heads/fix/issue-7-x\n')
+        self.assertEqual(speechqueue.session_issue(top), 'https://github.com/someone/Overmind/issues/7')
+
+    def test_no_issue_without_one_in_the_branch_a_branch_or_github(self):
+        for head, url in (('ref: refs/heads/main', None), ('0123abcd' * 5, None),
+                          ('ref: refs/heads/feat/issue-5-x', 'https://gitlab.com/someone/x.git'),
+                          ('ref: refs/heads/feat/tissue-5', None)):
+            with self.subTest(head=head):
+                shutil.rmtree(os.path.join(self.root, 'code'), ignore_errors=True)
+                self.assertEqual(speechqueue.session_issue(self.worktree(head, url or
+                                 'git@github.com:someone/Gnome-Widgets.git')), '')
+        self.assertEqual(speechqueue.session_issue(os.path.join(self.root, 'nowhere')), '')
+
+    def test_the_pill_names_the_ready_pull_requests_else_the_issue(self):
+        issue = 'https://github.com/o/r/issues/123'
+        pr = 'https://github.com/o/r/pull/'
+        self.assertEqual(speechqueue.link_pill(issue, []), '#123')
+        self.assertEqual(speechqueue.link_pill(issue, [pr + '151']), 'PR #151')
+        self.assertEqual(speechqueue.link_pill('', [pr + '151', pr + '152']), '2 PRs')
+        self.assertEqual(speechqueue.link_pill('', []), '')
+
+    def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
+        self.f.session(100, ME, 'One')
+        self.pr_ledger(ME, (150, 'done'), (151, 'open'), (152, 'open'))
+        s = self.state()['sessions'][0]
+        self.assertEqual(s['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151',
+                                    'https://github.com/someone/Gnome-Widgets/pull/152'])
+        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '1'])
+
+    def test_each_row_has_its_name_and_pill_as_a_click_area_with_what_it_opens(self):
+        self.f.session(100, ME, 'One')
+        self.f.session(200, OTHER, 'Two')
+        self.pr_ledger(ME, (151, 'open'))
+        speechqueue.render(self.state())
+        with open(speechqueue.REGIONS) as f:
+            one, two = json.load(f)['rows']
+        self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
+        self.assertEqual((two['issue'], two['prs']), ('', []))
+        self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
+        self.assertGreater(one['link'][1], two['link'][1])         # the pill widens it
+        self.assertEqual(one['link'][0], two['link'][0])
+
+
 @unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
 class SharedColours(unittest.TestCase):
     """Both widgets' draw.lua, loaded side by side, with the Spotify widget's bg.txt driven

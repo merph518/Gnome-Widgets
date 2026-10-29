@@ -1,6 +1,7 @@
 """The speech widget's controls (src/speech/mouse.py): which speechctl command a click, tap or
 wheel step on each region runs, checked against a stub speechctl that records its arguments,
 and the wheel and swipes that scroll the session list."""
+import json
 import os
 import subprocess
 import unittest
@@ -338,6 +339,69 @@ class SegmentsTest(StubSpeechctl):
     def test_a_drag_from_a_segment_moves_the_widget_and_sets_nothing(self):
         self.assertEqual(self.press(425, 106, moved=True), (True, True))
         self.assertEqual(self.ran(), [])
+
+
+ISSUE = 'https://github.com/o/r/issues/123'
+PR = 'https://github.com/o/r/pull/'
+
+
+class LinksTest(StubSpeechctl):
+    """A click on a session's name or its pill opens its ready pull requests, else its issue."""
+
+    def setUp(self):
+        super().setUp()
+        rows = [dict(r) for r in REGIONS['rows']]
+        rows[0].update(link=[73.0, 260.0], issue=ISSUE, prs=[PR + '151', PR + '152'])
+        rows[1].update(link=[73.0, 150.0], issue='', prs=[])
+        self.regions = dict(REGIONS, rows=rows)
+        self.opened = []
+
+    def gh(self, states):
+        """A gh that answers `gh pr view <link>` with states[link]: (state, labels)."""
+        def run(args, **kwargs):
+            state, labels = states.get(args[3], ('MERGED', []))
+            out = json.dumps({'state': state, 'labels': [{'name': n} for n in labels]})
+            return subprocess.CompletedProcess(args, 0, out, '')
+        return run
+
+    def open(self, row, states):
+        speech_mouse.open_links(row, run=self.gh(states),
+                                popen=lambda args, **kw: self.opened.append(args[1:]))
+        return self.opened.pop() if self.opened else None
+
+    def test_ready_pull_requests_open_and_the_rest_do_not(self):
+        row = self.regions['rows'][0]
+        ready = ('OPEN', ['Manual Review Needed'])
+        self.assertEqual(self.open(row, {PR + '151': ready, PR + '152': ready}), [PR + '151', PR + '152'])
+        self.assertEqual(self.open(row, {PR + '151': ready, PR + '152': ('OPEN', [])}), [PR + '151'])
+
+    def test_with_none_ready_the_issue_opens(self):
+        self.assertEqual(self.open(self.regions['rows'][0], {}), [ISSUE])
+
+    def test_with_no_issue_nothing_opens_and_it_is_logged(self):
+        self.assertIsNone(self.open(self.regions['rows'][1], {}))
+        self.assertIn('bbbb: no issue or ready pull request to open', support.read(conky_mouse.LOG))
+
+    def test_the_name_and_pill_on_the_first_line_are_the_link(self):
+        at = lambda x, y: (speech_mouse.link_at(self.regions, 1, x, y) or {}).get('id')
+        self.assertEqual(at(200, 106), 'aaaa')
+        self.assertIsNone(at(270, 106))                         # past the pill
+        self.assertIsNone(at(200, 130))                         # its second line
+        self.assertEqual(at(100, 154 - 12), 'bbbb')
+        self.assertIsNone(at(425, 106))                         # the setting
+
+    def test_a_click_on_the_link_opens_it_and_the_setting_keeps_its_own(self):
+        opened = []
+        thread = lambda target, args, daemon: mock.Mock(start=lambda: target(*args))
+        with mock.patch.object(speech_mouse.threading, 'Thread', side_effect=thread), \
+                mock.patch.object(speech_mouse, 'open_links', side_effect=opened.append):
+            for x in (200, 425):
+                track = mock.Mock(return_value=(x, 106, False))
+                hit = speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
+                                                (x, 106, (x, 106)), False)
+                self.assertTrue(hit)
+        self.assertEqual([r['id'] for r in opened], ['aaaa'])
+        self.assertEqual(self.ran(), ['speech aaaa on'])
 
 
 class WheelTest(StubSpeechctl):

@@ -84,6 +84,15 @@ named after its GitHub origin remote (or its folder, without one). The labels ar
 set the first time the widget runs; a repository not in it gets the first letter of each word
 of its name, filled out from the last word (`LaundryBot` reads `LBOT`).
 
+A session working an issue, on a branch named `<type>/issue-<N>-...` as `/implement` names
+them, shows a pill after its name: **#N** for the issue, or, once it has pull requests waiting
+on the user (open rows in its `scripts/catchup.py` ledger, which `/implement` adds after the
+ready signal), a white **PR #M** or **2 PRs**. A click or tap on the name or the pill opens
+what the pill names in new Google Chrome tabs: each of those pull requests still open with the
+**Manual Review Needed** label, read from GitHub with `gh` at the click, else the issue. The
+name and pill are tinted, and the name underlined, under the pointer. A session with neither
+opens nothing, and the click is noted in `mouse.log`.
+
 A session with speech on always has a second row under its name: the last line read aloud
 for it, without the hook's opening "<name> session says:" and cut to one line, or *Nothing
 read aloud yet* before its first. A question waiting to
@@ -103,8 +112,8 @@ fade of the same length each time its colour changes.
 
 The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
 skips it and the rest of that session's queue, the round button pauses or resumes, the
-**Voice:** drop down picks the voice, and a session's **On**, **Alerts** and **Off** set how it
-is read. The
+**Voice:** drop down picks the voice, a session's **On**, **Alerts** and **Off** set how it
+is read, and a session's name opens its issue or ready pull requests. The
 volume slider, drawn like the Spotify widget's, sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
