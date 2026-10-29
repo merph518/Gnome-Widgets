@@ -83,9 +83,12 @@ itself.
 - A footer with, from the top: the speaker's avatar (the image
   `~/.config/conky-widgets/speech/avatar.png` when it is there, else the Claude icon the
   package ships, else a spark drawn on an orange circle) at the bottom left, and, while a clip plays,
-  a speech bubble pointing at it that holds the speaker's name and up to three lines of the
-  line being read aloud (the row is as tall without the bubble, so the card does not change size
-  as lines play); a progress bar with the line's elapsed time and length; then pause / resume,
+  a speech bubble pointing at it that holds the speaker's name and the whole line being read
+  aloud, three lines at a time: a longer one scrolls with the clip's elapsed time, fading at the
+  top and bottom, with no scroll bar, and the mouse wheel moves it while the pointer is over the
+  bubble (it follows the clip again after five seconds). The bubble opens when a clip starts and,
+  two seconds after the speech ends, fades away (the row is as tall without the bubble, so the
+  card does not change size as lines play); a progress bar with the line's elapsed time and length; then pause / resume,
   skip and next, the volume and a drop down for the voice
 
 Each session in the speech widget's list starts with its repository's whole name, named after

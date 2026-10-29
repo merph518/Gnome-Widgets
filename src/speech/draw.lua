@@ -42,6 +42,7 @@ local bubble = {snap = nil, open = 0, idle = 0}   -- the bubble last sent, kept 
 local BUBBLE_OPEN = 0.15                  -- seconds the bubble takes to open when speech starts
 local BUBBLE_LINGER = 2                   -- seconds it stays after the speech ends
 local BUBBLE_FADE = 0.6                   -- seconds it then takes to fade away
+local BUBBLE_FADE_LINES = 0.7             -- lines the bubble's text takes to fade in from its top and bottom edge
 local BUBBLE_HOLD = 5                     -- seconds the wheel's place in the bubble stays before it follows the clip again
 
 local function read(name)
@@ -404,12 +405,30 @@ local function draw_bubble(cr, b, name, lines, s, text, scrolled, open, alpha)
     show(cr, name, x0 + pad, b[6] * s, 'left')
     font(cr, 11, text, s)
     local step = b[8] * s
+    local top, shown = (b[7] - b[8] / 2) * s, b[10]
+    local last = math.max(#lines - shown, 0)
     cairo_save(cr)
-    cairo_rectangle(cr, x0 + pad, (b[7] - b[8] / 2) * s, x1 - x0 - 2 * pad, b[10] * step)
+    cairo_rectangle(cr, x0 + pad, top, x1 - x0 - 2 * pad, shown * step)
     cairo_clip(cr)
+    local faded = last > 0                             -- a line that fits has nothing to fade
+    if faded then cairo_push_group(cr) end
     for i, line in ipairs(lines) do
         local y = b[7] * s + (i - 1 - scrolled) * step
-        if y > (b[7] - b[8]) * s and y < (b[7] + b[10] * b[8]) * s then show(cr, line, x0 + pad, y, 'left') end
+        if y > (b[7] - b[8]) * s and y < (b[7] + shown * b[8]) * s then show(cr, line, x0 + pad, y, 'left') end
+    end
+    -- As the Spotify widget fades its lyrics: the lines go through a mask that clears the text
+    -- at the top and the bottom, fading in over FADE_LINES lines, so none is cut off half way. An
+    -- end with no more text past it (the first lines, the last) stays whole.
+    if faded then
+        cairo_pop_group_to_source(cr)
+        local mask = cairo_pattern_create_linear(0, top, 0, top + shown * step)
+        local edge = BUBBLE_FADE_LINES / shown
+        cairo_pattern_add_color_stop_rgba(mask, 0, 0, 0, 0, 1 - math.min(scrolled, 1))
+        cairo_pattern_add_color_stop_rgba(mask, edge, 0, 0, 0, 1)
+        cairo_pattern_add_color_stop_rgba(mask, 1 - edge, 0, 0, 0, 1)
+        cairo_pattern_add_color_stop_rgba(mask, 1, 0, 0, 0, 1 - math.min(last - scrolled, 1))
+        cairo_mask(cr, mask)
+        cairo_pattern_destroy(mask)
     end
     cairo_restore(cr)
     cairo_restore(cr)
