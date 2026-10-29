@@ -79,7 +79,7 @@ left and right (the sessions column's share of the width is kept in
 
 - **Sessions**: the left column, in one column and in the terminal's look, as the CLI sets its
   session list in monospace: sections as the CLI names a session's state, in bold (**Needs
-  input** while a question waits to be read, **Working** for busy sessions and ones waiting,
+  input** while a question waits to be read or the CLI is waiting on input (its file says `status: waiting`), **Working** for busy sessions and ones waiting,
   **Completed** for idle ones), and under each its sessions behind a green dot, or a
   turning spinner and a bold name while busy, a finished one's name dim. A session is one line: its name, its repository dimmer, and the lines it has
   queued; the section says its state, so there is no tag. A section after the first has a blank

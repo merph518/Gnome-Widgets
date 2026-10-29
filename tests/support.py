@@ -76,11 +76,13 @@ class SpeechFixture:
         with open(os.path.join(self.proc, str(pid), 'cmdline'), 'wb') as f:
             f.write(b''.join(a.encode() + b'\0' for a in argv))
 
-    def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True, spare=False):
+    def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True, spare=False, waiting_for=None):
         entry = {'pid': pid, 'sessionId': sid, 'name': name, 'cwd': f'/home/user/{name}',
                  'kind': kind, 'status': status}
         if spare:
             entry['spare'] = True
+        if waiting_for:
+            entry['waitingFor'] = waiting_for
         if socket:
             entry['messagingSocketPath'] = f'/tmp/{sid}.sock'
         with open(os.path.join(self.sessions, f'{pid}.json'), 'w') as f:

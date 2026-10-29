@@ -608,8 +608,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
         if s['spare']:
             continue                                            # a background job kept ready, with no work yet, is not listed
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
-        # A question waiting to be read out shows as a "question" tag on the row
-        question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
+        # A session blocked on input in the CLI, or with a question waiting to be read out, is under Needs input
+        question = s['needs_input'] or (bool(lines) and display_text(lines[0]).lower().startswith('question:'))
         ledger = ledger_rows(s['id'], ledgers)
         git = session_branch(s['cwd'])
         listed.append(dict(s, speech=speech_setting(speak, s['id']), own_voice=session_voice(speak, s['id']),

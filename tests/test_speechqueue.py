@@ -91,6 +91,14 @@ class ReadState(Fixture):
         state = self.state()
         self.assertEqual((state['sessions'], state['name']), ([], 'A job'))
 
+    def test_a_session_waiting_for_input_in_the_cli_is_under_needs_input(self):
+        self.three()
+        self.f.session(400, '99999999-jobs', 'Relay Authority', kind='bg', status='waiting', waiting_for='input needed')
+        by_id = {x['id']: x for x in self.state()['sessions']}
+        self.assertTrue(by_id['99999999-jobs']['question'])
+        self.assertEqual(speechqueue.status_group(by_id['99999999-jobs']), 'Needs input')
+        self.assertFalse(by_id[ME]['question'])
+
     def test_a_queued_question_is_a_tag_not_a_line(self):
         self.f.session(100, ME, 'One')
         self.f.queue(ME, 'Question: Open the pull request? Options: yes or no.')
