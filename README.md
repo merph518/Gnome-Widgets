@@ -79,7 +79,8 @@ itself.
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
-- A footer with pause / resume, the volume and a drop down for the voice
+- A gear at the right of each session, which opens that session's settings
+- A footer with pause / resume, skip, next and the volume
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
@@ -106,7 +107,7 @@ closing it stops the turn it is in. Only a click or tap on **OK** closes the ses
 a click anywhere else and Escape close the prompt and leave the session running, as does
 leaving it for twenty seconds. A press in the half second after the prompt opens is ignored,
 so the second click of a double click cannot answer it. While the prompt is open the widget
-holds the pointer and the keyboard, as it does for the voice list. Closing sends the session's
+holds the pointer and the keyboard, as it does for a session's settings. Closing sends the session's
 process SIGTERM, after checking that its file in `~/.claude/sessions` still names that
 session, so it also ends a session the Claude app does not show. It is written to `mouse.log`.
 
@@ -130,33 +131,35 @@ fade of the same length each time its colour changes.
 The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
 left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
-nothing, while no line plays, and grow a little under the pointer, as the pause button does. The
-**Voice:** drop down picks the voice, a session's **On**, **Alerts** and **Off** set how it
-is read, an issue number under a session's repository opens that issue, its pill its ready pull
-requests, and its name asks to close it. The
-volume slider, drawn and sized like the Spotify widget's (it shortens, down to 32 px, before the
-voice drop down's label is cut), sets the speech volume where you click, tap
+nothing, while no line plays, and grow a little under the pointer, as the pause button does. A
+session's gear opens its settings, an issue number under a session's repository opens that
+issue, its pill its ready pull requests, and its name asks to close it. The
+volume slider, drawn and sized like the Spotify widget's (it shortens, down to 32 px, as the card
+narrows), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
 from the tray or the keyboard. A click or tap on the speaker mutes, and the next one brings back
 the volume from before (kept in `~/.cache/conky-widgets/speech/volume-before-mute`, so a restart
 while muted still restores it; 1.2 if none was kept). The mouse wheel turns the volume a tenth a notch over the
-slider or its speaker, steps through the voices over the closed drop down, moves a session's
-setting a segment along over its segments, and scrolls the list anywhere else on it; a finger
-swiped up or down on the list scrolls it too.
+slider or its speaker, and scrolls the list anywhere else on it; a finger swiped up or down on
+the list scrolls it too.
 
-A click or tap on the **Voice:** drop down opens a list of the installed voices above it, over
-the session list, with the current one marked; picking one sets it. While the list is open it
-holds the pointer and the keyboard like a menu does, so a click anywhere else or Escape closes
-it, and it closes by itself after 20 seconds. A
-list longer than the card has room for scrolls with the wheel or a swipe. A touch outside the
-widget is not seen, so it closes on the timeout instead. The list follows voices installed
-meanwhile within ten seconds.
+A click or tap on a session's gear dims the list and opens that session's settings over it, in
+the same panel as the close prompt: its name, its speech setting as three buttons (**On**,
+**Alerts**, **Off**, the current one filled) and the voice it is read in, as a list of the
+installed voices with the session's own marked, **Default** first. A choice applies at once and
+the popup stays open, so a setting and a voice can be changed in one visit; **Done**, a click
+anywhere outside the panel and Escape close it, and it closes by itself after 20 seconds. While
+it is open the widget holds the pointer and the keyboard, as it does for the close prompt, and a
+press in the half second after it opens is ignored. A voice list longer than the four rows shown
+scrolls with the wheel or a swipe. A touch outside the widget is not seen, so it closes on the
+timeout instead. The list follows voices installed meanwhile within ten seconds. The gear is
+drawn at full strength while the session is On, dimmer on Alerts and dimmest when Off.
 Taps, dragging, resizing, − and × work as they do on the Spotify widget.
 
 ### Speech setting
 
-Each session's **On**, **Alerts** and **Off** say what is read from it:
+Each session's **On**, **Alerts** and **Off**, set in its gear's popup, say what is read from it:
 
 - **On**: its replies are read aloud from then on, and it gets a second row with its last line
 - **Alerts** (a new session's default): only its announcements
@@ -164,6 +167,17 @@ Each session's **On**, **Alerts** and **Off** say what is read from it:
 
 The voice plugin's phone feed carries on whatever the setting, and `/implement-with-speech`
 and `/implement` change it too.
+
+### Voice per session (experiment)
+
+A session can be read in a voice of its own, to tell sessions apart by ear. **Default** is the
+global voice from the tray's **Voice** menu, or `speechctl voice`; picking another voice in a
+session's popup writes its name to `<session id>.voice` in the speaking hook's folder
+(`$XDG_RUNTIME_DIR/speak-attention/`), beside the session's `.replies` and `.muted` files, and
+picking **Default** removes that file. The widget only keeps the choice and shows it: playing a
+session's lines in its own voice is up to the speaking hook, which has to read that file (the
+Overmind `voice` plugin's hook reads the one global voice only so far), so until it does every
+session is still read in the global voice.
 
 ### speechctl
 
@@ -183,7 +197,7 @@ press is logged in `~/.cache/conky-widgets/speech/mouse.log`).
 
 ### Voices and pace
 
-The Speech submenu's **Voice** and the widget's **Voice:** drop down list the Piper voices in
+The Speech submenu's **Voice** and each session's voice list in its settings list the Piper voices in
 `~/.local/share/piper/` (or `SPEAK_PIPER_DIR`), a voice being its `.onnx` model and its
 `.onnx.json` file. `conky-widgets-voices` lists the voices Piper publishes and fetches the ones
 you pick from its [voice repository](https://huggingface.co/rhasspy/piper-voices); it downloads
@@ -197,7 +211,7 @@ conky-widgets-voices add en_GB-alan-medium en_US-ryan-medium
 
 A medium voice is about 63 MB and a high one 110 to 135 MB; each download is checked against
 the sizes and checksums of Piper's catalog and kept only when they match.
-The widget's drop down lists a new voice within ten seconds, and the tray's Voice menu shows it within half a minute.
+The widget's voice list shows a new voice within ten seconds, and the tray's Voice menu within half a minute.
 A model with several speakers (`arctic`, `libritts`, `vctk`) speaks as its first one for now.
 
 **Pace** in the same submenu is how fast a voice speaks, from 0.6 (fastest) to 1.4 (slowest),

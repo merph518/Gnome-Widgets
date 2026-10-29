@@ -1,6 +1,6 @@
 """The speech widget's controls (src/speech/mouse.py): which speechctl command a click, tap or
 wheel step on each region runs, checked against a stub speechctl that records its arguments,
-and the wheel and swipes that scroll the session list."""
+the gear that opens a session's settings, and the wheel and swipes that scroll the session list."""
 import json
 import os
 import shutil
@@ -16,22 +16,25 @@ tray_model = speech_mouse.tray_model
 
 # As speechqueue.py writes them: two sessions, the first On (two rows of 24 px), the second
 # Alerts (one row), the list from y 94 to 142 with one row scrolled out of view at most.
+VOICES = ['', 'en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium', 'en_US-joe-medium',
+          'en_US-ryan-high']
 REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0, 38.0],
            'skip': [429.0, 14.0, 455.0, 40.0], 'next': [455.0, 14.0, 481.0, 40.0],
            'list': [16, 94.0, 522, 142.0], 'list_scroll': [1, 24.0],
-           'rows': [{'id': 'aaaa', 'speech': 'on', 'top': 0.0, 'bottom': 48.0,
-                     'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]},
-                    {'id': 'bbbb', 'speech': 'alerts', 'top': 48.0, 'bottom': 72.0,
-                     'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]}],
+           'rows': [{'id': 'aaaa', 'speech': 'on', 'voice': '', 'top': 0.0, 'bottom': 48.0,
+                     'gear': [488.0, 522.0]},
+                    {'id': 'bbbb', 'speech': 'alerts', 'voice': 'en_US-amy-medium', 'top': 48.0, 'bottom': 72.0,
+                     'gear': [488.0, 522.0]}],
            'pause': [12.0, 339.0, 48.0, 375.0], 'volume': [78.0, 347.0, 170.0, 367.0],
            'volume_icon': [56.0, 347.0, 78.0, 367.0], 'volume_wheel': [56.0, 347.0, 170.0, 367.0],
            'volume_bar': [84.0, 164.0],
-           'voice': [440.0, 345.0, 522.0, 369.0],
-           # the open list: four rows of 26 px of the six voices, the third (amy) current
-           'menu': {'box': [450.0, 223.0, 522, 335], 'item_h': 26.0, 'rows': 4, 'pad': 4,
-                    'names': ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
-                              'en_US-joe-medium', 'en_US-lessac-medium', 'en_US-ryan-high'],
-                    'current': 2}}
+           # the settings popup: its three speech buttons, four rows of 26 px of the six voices (the
+           # first the global one) from y 164, and Done
+           'settings': {'box': [112.0, 60.0, 412.0, 304.0],
+                        'speech': {'on': [126.0, 100.0, 198.0, 128.0], 'alerts': [206.0, 100.0, 278.0, 128.0],
+                                   'off': [286.0, 100.0, 358.0, 128.0]},
+                        'list': [126.0, 160.0, 398.0, 272.0], 'item_h': 26.0, 'rows': 4, 'pad': 4,
+                        'names': VOICES, 'done': [330.0, 276.0, 398.0, 296.0]}}
 
 
 def centre(r):
@@ -47,8 +50,8 @@ class StubSpeechctl(support.TempDirTest):
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')
-        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', VOICE_MENU='voice-menu',
-                      CLOSE_CONFIRM='close-confirm')
+        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', SESSION_MENU='session-menu',
+                      CLOSE_CONFIRM='close-confirm', SPEAK='speak')
         self.redirect(conky_mouse, LOG='mouse.log')
         popen = subprocess.Popen
 
@@ -201,162 +204,168 @@ class VolumeSliderTest(StubSpeechctl):
         set_volume.assert_called_once()
 
 
-class VoiceMenuTest(StubSpeechctl):
-    NAMES = REGIONS['menu']['names']
+class SettingsPopupTest(StubSpeechctl):
+    NAMES = REGIONS['settings']['names']
+    ROW = dict(REGIONS['rows'][0], title='Widget Settings Session')
 
-    def menu_at(self, y, scroll=0, x=480):
-        return speech_mouse.menu_at(REGIONS['menu'], x, y, scroll)
+    def at(self, x, y, scroll=0):
+        return speech_mouse.settings_at(REGIONS['settings'], x, y, scroll)
 
-    def show(self, *batches, now=None, menu=None):
-        """run_menu over the batches of events one call each gives (then none), returning the
-        pick and the VOICE_MENU contents it showed after each batch but the last."""
-        batches, shown, calls = list(batches), [], []
+    def show(self, *steps, row=None, popup=None, timeout=False):
+        """run_settings over the (seconds passed, events) of each call to events() (then none),
+        returning what it applied and the SESSION_MENU contents it showed at each call."""
+        steps, shown, applied, clock = list(steps), [], [], {'t': 0.0}
 
         def events():
-            calls.append(1)
-            if len(calls) > 1:
-                shown.append(support.read(speech_mouse.VOICE_MENU)
-                             if os.path.exists(speech_mouse.VOICE_MENU) else None)
-            return batches.pop(0) if batches else []
-        clock = mock.Mock(side_effect=now) if now else mock.Mock(return_value=0.0)
-        picked = speech_mouse.run_menu(menu or REGIONS['menu'], events, now=clock, sleep=lambda _: None)
-        return picked, shown
+            if os.path.exists(speech_mouse.SESSION_MENU):
+                shown.append(support.read(speech_mouse.SESSION_MENU))
+            dt, batch = steps.pop(0) if steps else (speech_mouse.MENU_TIMEOUT + 1 if timeout else 0.0, [])
+            clock['t'] += dt
+            return batch
+        speech_mouse.run_settings(popup or REGIONS['settings'], row or self.ROW, events,
+                                  lambda kind, value: applied.append((kind, value)),
+                                  now=lambda: clock['t'], sleep=lambda _: None)
+        return applied, shown
 
-    def test_the_voice_drop_down_is_a_control_and_not_a_button(self):
-        x, y = centre(REGIONS['voice'])
-        self.assertEqual(speech_mouse_region(x, y), 'voice')
-        self.assertNotIn('voice', speech_mouse.BUTTONS)
+    def test_what_is_under_the_pointer_is_found_by_where_it_is(self):
+        self.assertEqual([self.at(160, 110), self.at(240, 110), self.at(320, 110), self.at(360, 290)],
+                         [('speech', 'on'), ('speech', 'alerts'), ('speech', 'off'), ('done',)])
+        self.assertEqual([self.at(200, 165), self.at(200, 190), self.at(200, 267)],
+                         [('voice', 0), ('voice', 1), ('voice', 3)])
+        self.assertEqual(self.at(200, 267, scroll=2), ('voice', 5))
 
-    def test_a_row_is_found_by_where_it_is_and_the_scroll(self):
-        # rows from y 227 (the box's top and its padding), 26 px each
-        self.assertEqual([self.menu_at(228), self.menu_at(252), self.menu_at(253), self.menu_at(330)],
-                         [0, 0, 1, 3])
-        self.assertEqual(self.menu_at(228, scroll=2), 2)
-        self.assertEqual(self.menu_at(330, scroll=2), 5)
-
-    def test_off_the_rows_is_no_voice(self):
-        self.assertIsNone(self.menu_at(225))                 # the padding above the first row
-        self.assertIsNone(self.menu_at(332))                 # and below the fourth
-        self.assertIsNone(self.menu_at(228, x=449))          # left of the list
-        self.assertIsNone(self.menu_at(228, x=523))
+    def test_the_rest_of_the_panel_is_the_panel_and_outside_it_is_nothing(self):
+        self.assertEqual(self.at(150, 75), ('panel',))               # the title
+        self.assertEqual(self.at(200, 162), ('panel',))              # above the first voice's padding
+        self.assertIsNone(self.at(111, 110))
+        self.assertIsNone(self.at(300, 305))
 
     def test_with_fewer_voices_than_rows_only_the_voices_are_rows(self):
-        menu = dict(REGIONS['menu'], names=self.NAMES[:2])
-        self.assertEqual(speech_mouse.menu_at(menu, 480, 228, 0), 0)
-        self.assertIsNone(speech_mouse.menu_at(menu, 480, 228 + 2 * 26, 0))
+        popup = dict(REGIONS['settings'], names=self.NAMES[:2])
+        self.assertEqual(speech_mouse.settings_at(popup, 200, 190, 0), ('voice', 1))
+        self.assertEqual(speech_mouse.settings_at(popup, 200, 216, 0), ('panel',))
 
     def test_scrolling_stays_within_the_voices(self):
-        menu = REGIONS['menu']
-        self.assertEqual([speech_mouse.menu_scroll(menu, 0, -1), speech_mouse.menu_scroll(menu, 0, 1),
-                          speech_mouse.menu_scroll(menu, 2, 1), speech_mouse.menu_scroll(menu, 2, 5)],
+        popup = REGIONS['settings']
+        self.assertEqual([speech_mouse.settings_scroll(popup, 0, -1), speech_mouse.settings_scroll(popup, 0, 1),
+                          speech_mouse.settings_scroll(popup, 2, 1), speech_mouse.settings_scroll(popup, 2, 5)],
                          [0, 1, 2, 2])
 
-    def test_a_press_on_a_voice_picks_it(self):
-        picked, _ = self.show([('press', 480, 253)])
-        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')
+    def test_a_press_on_a_speech_button_or_a_voice_applies_it_and_the_popup_stays_open(self):
+        applied, shown = self.show((1.0, [('press', 240, 110)]), (0.1, [('press', 200, 190)]),
+                                   (0.1, [('press', 160, 110)]), (0.1, [('escape',)]))
+        self.assertEqual(applied, [('speech', 'alerts'), ('voice', 'en_GB-alan-medium'), ('speech', 'on')])
+        # what each choice leaves shown: speech, then the voice, as indexes into the list
+        self.assertEqual([s.split('\n')[0] for s in shown],
+                         ['none 0 alerts 0', 'none 0 alerts 1', 'none 0 on 1'])
 
-    def test_a_press_anywhere_else_closes_it_without_a_pick(self):
-        self.assertIsNone(self.show([('press', 300, 100)])[0])
-        self.assertIsNone(self.show([('press', 480, 356)])[0])     # on the drop down itself
+    def test_done_a_press_outside_escape_and_the_timeout_close_it_applying_nothing(self):
+        for steps in (((1.0, [('press', 360, 290)]),), ((1.0, [('press', 300, 20)]),),
+                      ((1.0, [('escape',), ('press', 240, 110)]),)):
+            with self.subTest(steps=steps):
+                self.assertEqual(self.show(*steps)[0], [])
+        self.assertEqual(self.show(timeout=True)[0], [])
 
-    def test_escape_closes_it(self):
-        self.assertIsNone(self.show([('escape',), ('press', 480, 253)])[0])
+    def test_a_press_on_the_rest_of_the_panel_does_nothing(self):
+        applied, _ = self.show((1.0, [('press', 150, 75)]), (0.1, [('escape',)]))
+        self.assertEqual(applied, [])
 
-    def test_it_shows_the_scroll_and_the_voice_under_the_pointer_until_it_closes(self):
-        picked, shown = self.show([('move', 480, 253)], [('wheel', True)], [('move', 480, 280)],
-                                 [('press', 480, 228)])
-        # amy, the current voice, is in view without scrolling; the wheel then scrolls a voice
-        self.assertEqual(shown, ['0 1', '1 2', '1 3'])
-        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # the second voice, once scrolled
-        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+    def test_a_press_just_after_it_opens_answers_nothing(self):
+        # the second click of a double click on the gear
+        applied, _ = self.show((0.1, [('press', 240, 110)]), (0.1, [('press', 360, 290)]),
+                               (speech_mouse.CONFIRM_ARMED, [('press', 240, 110)]), (0.1, [('escape',)]))
+        self.assertEqual(applied, [('speech', 'alerts')])
 
-    def test_it_opens_with_a_current_voice_below_the_rows_in_view(self):
-        _, shown = self.show([], [('escape',)], menu=dict(REGIONS['menu'], current=5))
-        self.assertEqual(shown, ['2 -1'])                   # scrolled as far as it goes
+    def test_it_shows_the_pointer_the_scroll_and_the_name_until_it_closes(self):
+        _, shown = self.show((1.0, [('move', 240, 110)]), (0.1, [('move', 200, 190)]),
+                             (0.1, [('wheel', True)]), (0.1, [('move', 360, 290)]), (0.1, [('escape',)]))
+        self.assertEqual([s.split('\n')[0] for s in shown],
+                         ['speech:alerts 0 on 0', 'item:1 0 on 0', 'item:2 1 on 0', 'done 1 on 0'])
+        self.assertEqual(shown[0].split('\n')[1], 'Widget Settings Session')
+        self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
+
+    def test_it_opens_on_the_sessions_own_voice_scrolled_into_view(self):
+        _, shown = self.show((1.0, []), (0.1, [('escape',)]),
+                             row=dict(self.ROW, speech='off', voice='en_US-ryan-high'))
+        self.assertEqual(shown[0].split('\n')[0], 'none 2 off 5')    # scrolled as far as it goes
+        _, shown = self.show((1.0, []), (0.1, [('escape',)]), row=dict(self.ROW, voice='gone'))
+        self.assertEqual(shown[0].split('\n')[0], 'none 0 on -1')     # a voice no longer installed marks none
 
     def test_a_swipe_scrolls_by_the_rows_it_gives(self):
-        _, shown = self.show([('scroll', 1)], [('scroll', 5)], [('scroll', -1)], [('escape',)])
-        self.assertEqual(shown, ['1 -1', '2 -1', '1 -1'])
-
-    def test_a_wheel_step_moves_the_highlight_to_the_voice_now_under_the_pointer(self):
-        _, shown = self.show([('move', 480, 253)], [('wheel', True)], [('wheel', True)], [('escape',)])
-        self.assertEqual(shown, ['0 1', '1 2', '2 3'])
+        _, shown = self.show((1.0, [('scroll', 1)]), (0.1, [('scroll', 5)]), (0.1, [('scroll', -1)]),
+                             (0.1, [('escape',)]))
+        self.assertEqual([s.split()[1] for s in shown], ['1', '2', '1'])
 
     def test_each_event_starts_the_timeout_again(self):
         # 20 s from the last event, not from opening: a wheel step at 15 s keeps it open at 30 s
-        t, calls = [0.0], []
-
-        def events():
-            calls.append(t[0])
-            t[0] = (15.0, 30.0, 34.0)[len(calls) - 1]
-            return [[('wheel', True)], [], [('press', 480, 228)]][len(calls) - 1]
-        picked = speech_mouse.run_menu(REGIONS['menu'], events, now=lambda: t[0], sleep=lambda _: None)
-        self.assertEqual(picked, 'en_GB-jenny_dioco-medium')       # one voice scrolled, so the second
-
-    def test_it_closes_itself_when_nothing_is_done(self):
-        picked, _ = self.show(now=[0.0, 5.0, 10.0, 20.5])
-        self.assertIsNone(picked)
-        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+        applied, _ = self.show((15.0, [('wheel', True)]), (15.0, []), (4.0, [('press', 240, 110)]),
+                               (0.1, [('escape',)]))
+        self.assertEqual(applied, [('speech', 'alerts')])
 
     def test_the_file_goes_however_it_ends(self):
-        calls = []
-
         def events():
-            calls.append(os.path.exists(speech_mouse.VOICE_MENU))
-            if len(calls) > 1:
-                raise RuntimeError('x')
-            return [('move', 480, 228)]
+            raise RuntimeError('x')
         with self.assertRaises(RuntimeError):
-            speech_mouse.run_menu(REGIONS['menu'], events, now=lambda: 0.0, sleep=lambda _: None)
-        self.assertEqual(calls, [False, True])
-        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+            speech_mouse.run_settings(REGIONS['settings'], self.ROW, events, None, now=lambda: 0.0,
+                                      sleep=lambda _: None)
+        self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
 
-    def test_a_click_opens_the_list_and_a_drag_moves_the_widget(self):
-        x, y = centre(REGIONS['voice'])
-        for moved, opens in ((False, True), (True, False)):
-            with self.subTest(moved=moved):
-                steps = [(x + (40 if moved else 0), y, True), (x, y, False)]
-                track = mock.Mock(side_effect=steps + [steps[-1]] * 50)
-                with mock.patch.object(conky_mouse.time, 'sleep'), \
-                        mock.patch.object(conky_mouse, 'drag', return_value=(0, 0, 1, 1)) as drag, \
-                        mock.patch.object(conky_mouse, 'remember'), \
-                        mock.patch.object(speech_mouse, 'open_menu') as open_menu:
-                    self.assertTrue(speech_mouse.pull_control('d', 'root', 'win', 1, REGIONS, 'voice',
-                                                              track, (x, y, (x, y)), False))
-                self.assertEqual((open_menu.called, drag.called), (opens, not opens))
+    def test_a_popup_a_killed_run_left_is_cleared_at_start(self):
+        speech_mouse.write_settings(self.ROW, 'none', 0, 'on', 0)
+        speech_mouse.start()
+        self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
 
-    def open(self, picked, regions=REGIONS):
+
+class SessionVoiceTest(StubSpeechctl):
+    def path(self, sid='aaaa'):
+        return os.path.join(speech_mouse.SPEAK, sid + '.voice')
+
+    def test_a_voice_is_kept_in_the_sessions_file_and_the_global_one_removes_it(self):
+        speech_mouse.set_session_voice('aaaa', 'en_US-joe-medium')
+        self.assertEqual(support.read(self.path()), 'en_US-joe-medium')
+        speech_mouse.set_session_voice('aaaa', 'en_US-amy-medium')
+        self.assertEqual(support.read(self.path()), 'en_US-amy-medium')
+        speech_mouse.set_session_voice('aaaa', '')
+        self.assertFalse(os.path.exists(self.path()))
+        speech_mouse.set_session_voice('aaaa', '')                  # already the global one: nothing to say
+        self.assertNotIn('voice for aaaa', support.read(conky_mouse.LOG) if os.path.exists(conky_mouse.LOG) else '')
+
+    def test_another_sessions_file_is_left_alone(self):
+        speech_mouse.set_session_voice('aaaa', 'en_US-joe-medium')
+        speech_mouse.set_session_voice('bbbb', '')
+        self.assertTrue(os.path.exists(self.path()))
+
+    def test_an_id_that_is_a_path_writes_nothing(self):
+        for sid in ('', '../x', 'a/b'):
+            speech_mouse.set_session_voice(sid, 'en_US-joe-medium')
+        self.assertFalse(os.path.exists(speech_mouse.SPEAK))
+
+    def test_a_speech_choice_runs_speechctl_and_a_voice_choice_writes_the_file(self):
+        row = REGIONS['rows'][0]
+        speech_mouse.apply_setting(row, 'speech', 'off')
+        speech_mouse.apply_setting(row, 'voice', 'en_US-joe-medium')
+        self.assertEqual(self.ran(), ['speech aaaa off'])
+        self.assertEqual(support.read(self.path()), 'en_US-joe-medium')
+        self.assertIn('voice for aaaa: en_US-joe-medium', support.read(conky_mouse.LOG))
+
+    def open(self, regions=REGIONS):
         with mock.patch.object(speech_mouse, 'declare'), \
                 mock.patch.object(speech_mouse, 'grab', return_value=(True, False)) as grab, \
                 mock.patch.object(speech_mouse, 'ungrab') as ungrab, \
                 mock.patch.object(speech_mouse, 'x_events'), \
-                mock.patch.object(speech_mouse, 'run_menu', return_value=picked), \
+                mock.patch.object(speech_mouse, 'run_settings') as run, \
                 mock.patch.object(conky_mouse, 'touch_opcode', return_value=None):
-            speech_mouse.open_menu('d', 'win', 1, regions)
-        return grab, ungrab
+            speech_mouse.open_settings('d', 'win', 1, regions, regions['rows'][0])
+        return grab, ungrab, run
 
-    def test_a_voice_picked_is_set_through_speechctl_and_logged(self):
-        grab, ungrab = self.open('en_US-joe-medium')
-        self.assertEqual(self.ran(), ['voice en_US-joe-medium'])
-        self.assertIn('speechctl voice en_US-joe-medium', support.read(conky_mouse.LOG))
-        self.assertTrue(grab.called and ungrab.called)
-
-    def test_picking_the_current_voice_or_nothing_sets_nothing(self):
-        self.open('en_US-amy-medium')
-        self.open(None)
-        self.assertEqual(self.ran(), [])
+    def test_opening_holds_the_pointer_and_always_lets_it_go(self):
+        grab, ungrab, run = self.open()
+        self.assertTrue(grab.called and ungrab.called and run.called)
         self.assertIn('keyboard not held', support.read(conky_mouse.LOG))
 
-    def test_without_voices_there_is_no_list_to_open(self):
-        grab, _ = self.open('en_US-joe-medium', regions={k: v for k, v in REGIONS.items() if k != 'menu'})
-        self.assertFalse(grab.called)
-        self.assertEqual(self.ran(), [])
-
-    def test_a_list_a_killed_run_left_is_cleared_at_start(self):
-        with open(speech_mouse.VOICE_MENU, 'w') as f:
-            f.write('0 -1')
-        speech_mouse.start()
-        self.assertFalse(os.path.exists(speech_mouse.VOICE_MENU))
+    def test_without_a_popup_in_the_regions_nothing_opens(self):
+        grab, ungrab, run = self.open({k: v for k, v in REGIONS.items() if k != 'settings'})
+        self.assertFalse(grab.called or run.called)
 
 
 def speech_mouse_region(x, y, s=1):
@@ -368,41 +377,37 @@ def speech_mouse_region(x, y, s=1):
     return None
 
 
-class SegmentsTest(StubSpeechctl):
+class GearTest(StubSpeechctl):
     def press(self, x, y, s=1, touch=False, moved=False):
         """A press at card (x, y) logical px that lifts where it went down, or after a drag."""
         steps = [(x * s + (40 if moved else 0), y * s, True), (x * s, y * s, False)]
         track = mock.Mock(side_effect=steps + [steps[-1]] * 50)
         with mock.patch.object(conky_mouse.time, 'sleep'), \
                 mock.patch.object(conky_mouse, 'drag', return_value=(0, 0, 1, 1)) as drag, \
-                mock.patch.object(conky_mouse, 'remember'):
+                mock.patch.object(conky_mouse, 'remember'), \
+                mock.patch.object(speech_mouse, 'open_settings') as opened:
             hit = speech_mouse.pull_control(None, None, None, s, REGIONS, None, track,
                                             (x * s, y * s, (x * s, y * s)), touch)
-        return hit, drag.called
+        return hit, drag.called, [call.args[4]['id'] for call in opened.call_args_list]
 
-    def test_a_click_on_each_segment_sets_the_session(self):
-        self.assertEqual(self.press(425, 106), (True, False))       # the first row's On
-        self.assertEqual(self.press(460, 106), (True, False))       # its Alerts
-        self.assertEqual(self.press(500, 154 - 12), (True, False))  # the second row's Off
-        self.assertEqual(self.ran(), ['speech aaaa on', 'speech aaaa alerts', 'speech bbbb off'])
+    def test_a_click_on_each_rows_gear_opens_that_sessions_settings(self):
+        self.assertEqual(self.press(500, 106), (True, False, ['aaaa']))
+        self.assertEqual(self.press(500, 154 - 12), (True, False, ['bbbb']))
 
     def test_a_tap_does_the_same_at_scale_2(self):
-        self.assertEqual(self.press(460, 106, s=2, touch=True), (True, False))
-        self.assertEqual(self.ran(), ['speech aaaa alerts'])
+        self.assertEqual(self.press(500, 106, s=2, touch=True), (True, False, ['aaaa']))
 
-    def test_the_second_row_and_the_name_are_not_the_control(self):
-        self.assertEqual(self.press(460, 130), (False, False))      # under the first row's segments
-        self.assertEqual(self.press(200, 106), (False, False))      # on its name
-        self.assertEqual(self.press(460, 300), (False, False))      # off the list
+    def test_the_rest_of_the_row_is_not_the_gear(self):
+        self.assertEqual(self.press(460, 106), (False, False, []))      # where the segments were
+        self.assertEqual(self.press(500, 130), (False, False, []))      # under the first row's gear
+        self.assertEqual(self.press(500, 300), (False, False, []))      # off the list
 
     def test_the_list_scrolled_a_row_moves_the_rows_up(self):
         self.scroll_to(1)
-        self.press(500, 94 + 48 - 24 + 6)                           # the second row, now 24 px up
-        self.assertEqual(self.ran(), ['speech bbbb off'])
+        self.assertEqual(self.press(500, 94 + 48 - 24 + 6), (True, False, ['bbbb']))   # the second row, now 24 px up
 
-    def test_a_drag_from_a_segment_moves_the_widget_and_sets_nothing(self):
-        self.assertEqual(self.press(425, 106, moved=True), (True, True))
-        self.assertEqual(self.ran(), [])
+    def test_a_drag_from_a_gear_moves_the_widget_and_opens_nothing(self):
+        self.assertEqual(self.press(500, 106, moved=True), (True, True, []))
 
 
 ISSUE = 'https://github.com/o/r/issues/123'
@@ -478,12 +483,14 @@ class LinksTest(StubSpeechctl):
         self.assertIsNone(at(200, 154 - 12))                    # and no pill after it
         self.assertIsNone(at(425, 106))                         # the setting
 
-    def test_a_click_on_a_link_opens_it_and_the_setting_keeps_its_own(self):
+    def test_a_click_on_a_link_opens_it_and_the_gear_keeps_its_own(self):
         opened = []
         thread = lambda target, args, daemon: mock.Mock(start=lambda: target(*args))
         with mock.patch.object(speech_mouse.threading, 'Thread', side_effect=thread), \
-                mock.patch.object(speech_mouse, 'open_links', side_effect=lambda r, k: opened.append((r['id'], k))):
-            for x in (50, 200, 425):
+                mock.patch.object(speech_mouse, 'open_links', side_effect=lambda r, k: opened.append((r['id'], k))), \
+                mock.patch.object(speech_mouse, 'open_settings',
+                                  side_effect=lambda d, w, s, regions, row: opened.append((row['id'], 'settings'))):
+            for x in (50, 200, 500):
                 track = mock.Mock(return_value=(x, 106, False))
                 hit = speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
                                                 (x, 106, (x, 106)), False)
@@ -491,8 +498,8 @@ class LinksTest(StubSpeechctl):
             track = mock.Mock(return_value=(50, 142, False))
             self.assertFalse(speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
                                                        (50, 142, (50, 142)), False))    # a box without an issue
-        self.assertEqual(opened, [('aaaa', 'issue'), ('aaaa', 'prs')])
-        self.assertEqual(self.ran(), ['speech aaaa on'])
+        self.assertEqual(opened, [('aaaa', 'issue'), ('aaaa', 'prs'), ('aaaa', 'settings')])
+        self.assertEqual(self.ran(), [])
 
     def test_a_click_on_the_name_asks_to_close_it_and_opens_nothing(self):
         closed = []
@@ -708,17 +715,13 @@ class WheelTest(StubSpeechctl):
         x, y = centre(REGIONS[name_or_xy]) if isinstance(name_or_xy, str) else name_or_xy
         return speech_mouse.wheel(REGIONS, s, x * s, y * s, down)
 
-    def test_over_the_volume_and_the_voice(self):
-        self.assertEqual([self.wheel('volume', True), self.wheel((64, 357), False),
-                          self.wheel('voice', True), self.wheel((450, 357), False)],
-                         ['volume', 'volume', 'voice', 'voice'])
-        self.assertEqual(self.ran(), ['volume down', 'volume up', 'voice next', 'voice prev'])
+    def test_over_the_volume(self):
+        self.assertEqual([self.wheel('volume', True), self.wheel((64, 357), False)], ['volume', 'volume'])
+        self.assertEqual(self.ran(), ['volume down', 'volume up'])
 
-    def test_over_a_setting_it_moves_a_segment_and_stops_at_the_ends(self):
-        self.assertEqual(self.wheel((460, 106), True), 'setting')    # On -> Alerts
-        self.assertEqual(self.wheel((460, 106), False), 'setting')   # On is the first: nothing
-        self.wheel((460, 154 - 12), False)                           # Alerts -> On
-        self.assertEqual(self.ran(), ['speech aaaa alerts', 'speech bbbb on'])
+    def test_over_a_gear_it_scrolls_the_list_and_sets_nothing(self):
+        self.assertEqual(self.wheel((500, 106), True), 'list')
+        self.assertEqual(self.ran(), [])
 
     def test_over_the_rest_of_the_list_it_scrolls_a_row_within_its_range(self):
         self.assertEqual(self.wheel((200, 106), True), 'list')
@@ -749,12 +752,14 @@ class SwipeTest(StubSpeechctl):
         self.assertEqual(support.read(speech_mouse.LIST_SCROLL), '1')   # 60 px up, one row to scroll
         self.assertIn('swipe: 1 rows', support.read(conky_mouse.LOG))
 
-    def test_a_swipe_from_a_segment_scrolls_and_sets_nothing(self):
+    def test_a_swipe_from_a_gear_scrolls_and_opens_nothing(self):
         steps = [(300, 500, True), (300, 460, True), (300, 460, False)]
         track = mock.Mock(side_effect=steps)
-        with mock.patch.object(conky_mouse.time, 'sleep'), mock.patch.object(speech_mouse.time, 'sleep'):
+        with mock.patch.object(conky_mouse.time, 'sleep'), mock.patch.object(speech_mouse.time, 'sleep'), \
+                mock.patch.object(speech_mouse, 'open_settings') as opened:
             self.assertTrue(speech_mouse.pull_control(None, None, None, 1, REGIONS, None, track,
-                                                      (460, 106, (300, 500)), True))
+                                                      (500, 106, (300, 500)), True))
+        self.assertFalse(opened.called)
         self.assertEqual(support.read(speech_mouse.LIST_SCROLL), '1')
         self.assertEqual(self.ran(), [])
 
