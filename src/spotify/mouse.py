@@ -11,7 +11,9 @@ import os, subprocess, sys, time
 import art_colours
 
 NAME = 'conky-spotify-nowplaying'              # the config and cache folders, the launcher
-WM_CLASS = 'ConkySpotifyNowPlaying'            # conky.conf's own_window_class
+# conky.conf's own_window_class; a copy beside the user's (scripts/isolated-widgets.py) adds its
+# own suffix, so each conky-mouse.py finds only its copy's window
+WM_CLASS = 'ConkySpotifyNowPlaying' + os.environ.get('CSN_CLASS_SUFFIX', '')
 OUTLINE = 0x1db954                             # Spotify green: the outline a resize shows
 BUTTONS = ('heart', 'play', 'prev', 'next', 'volume_icon')   # the controls this widget's click or tap presses
 # The regions nowplaying.py writes, in the order a press looks through them.
