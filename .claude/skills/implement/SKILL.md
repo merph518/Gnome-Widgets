@@ -146,6 +146,8 @@ scope check-in). Void its paragraphs on test data discovery, tests that can
 never run, and observed-value constraints. The repository's own constraints:
 
 - Match the code around the change: its comment density, naming and idiom.
+- A layout, control or look the issue leaves open is put to the user per
+  [ui-options.md](../_shared/ui-options.md) before any drawing code.
 - A new file the installed program reads at runtime is listed in
   `debian/install`, and a new runtime dependency is in `debian/control`
   (installed with apt, as every dependency is on this machine).
@@ -271,7 +273,8 @@ None beyond `<static-checks>` before every push.
 ## Repository notes
 
 - [static-checks.md](../_shared/static-checks.md), [self-review.md](../_shared/self-review.md),
-  [ready-signal.md](../_shared/ready-signal.md) and [run-watch.md](../_shared/run-watch.md).
+  [ready-signal.md](../_shared/ready-signal.md), [run-watch.md](../_shared/run-watch.md) and
+  [ui-options.md](../_shared/ui-options.md).
 - [/create-issue](../create-issue/SKILL.md), [/new-branch](../new-branch/SKILL.md) and
   [/release](../release/SKILL.md).
 - [implement-with-speech](../implement-with-speech/SKILL.md), which runs this skill with
