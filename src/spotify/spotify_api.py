@@ -127,7 +127,7 @@ def _store(tok, old_refresh=None):
     return tok
 
 
-SETUP_URL = 'https://github.com/merph518/conky-widgets#like-button-optional'
+SETUP_URL = 'https://github.com/merph518/Gnome-Widgets#like-button-optional'
 
 
 def login():
