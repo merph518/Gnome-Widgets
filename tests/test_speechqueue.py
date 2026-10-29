@@ -799,6 +799,9 @@ class Golden(Fixture):
             widths[size] = x1 - x0
             self.assertEqual(' '.join(lines['voice'][6:]), 'Voice: amy')              # never "Voice:..."
             self.assertEqual(regions['volume_bar'], [x0, x1])
+            icon = float(lines['volume'][4])
+            self.assertEqual(regions['volume_icon'][0], icon - 4)       # the speaker takes a click too
+            self.assertEqual(regions['volume_icon'][2], regions['volume'][0])
         self.assertEqual(widths[(660, 128, 1.0)], speechqueue.VOLUME_WIDTH)
         self.assertLess(widths[(400, 128, 2.0)], speechqueue.VOLUME_WIDTH)
         self.assertGreaterEqual(widths[(400, 128, 2.0)], speechqueue.VOLUME_MIN)

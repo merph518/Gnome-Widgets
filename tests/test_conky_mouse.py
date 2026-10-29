@@ -416,12 +416,14 @@ class SwipeTest(support.TempDirTest):
 
 class VolumeTest(support.TempDirTest):
     # The track at x 280..344 on the top row's centre line y 29.5, the speaker from x 256.
-    REGIONS = {'volume': [274, 19.5, 350, 39.5], 'volume_wheel': [252, 19.5, 350, 39.5],
+    REGIONS = {'volume_icon': [252, 19.5, 274, 39.5], 'volume': [274, 19.5, 350, 39.5],
+               'volume_wheel': [252, 19.5, 350, 39.5],
                'volume_bar': [280, 344], 'lyrics': [22, 160, 545, 223], 'lyrics_scroll': ['1234', 5]}
 
     def setUp(self):
         super().setUp()
-        self.redirect(spotify_mouse, LYRICS_SCROLL='lyrics-scroll', VOLUME_PREVIEW='volume-preview')
+        self.redirect(spotify_mouse, LYRICS_SCROLL='lyrics-scroll', VOLUME_PREVIEW='volume-preview',
+                      VOLUME_BEFORE_MUTE='before-mute', CACHE='')
         self.redirect(conky_mouse, LOG='mouse.log')
         patcher = mock.patch.object(spotify_mouse.subprocess, 'run')
         self.run_ = patcher.start()
@@ -467,7 +469,65 @@ class VolumeTest(support.TempDirTest):
                                                        'track', (300, 30, (1300, 530)), False))
         set_volume.assert_called_once()
         self.assertEqual(conky_mouse.region_at(self.REGIONS, 1, 300, 30), 'volume')
-        self.assertIsNone(conky_mouse.region_at(self.REGIONS, 1, 260, 30))     # the speaker
+        self.assertEqual(conky_mouse.region_at(self.REGIONS, 1, 260, 30), 'volume_icon')   # the speaker
+        self.assertIn('volume_icon', spotify_mouse.BUTTONS)                    # pressed, not dragged
+
+    def playing_at(self, level):
+        """Has playerctl report `level` as Spotify's volume."""
+        self.run_.return_value = mock.Mock(stdout=f'{level}\n')
+
+    def sent(self):
+        """The levels set so far (the read is not one)."""
+        return [c.args[0][4] for c in self.run_.call_args_list if len(c.args[0]) > 4]
+
+    def click(self):
+        spotify_mouse.press('d', 'win', 'volume_icon')
+
+    def test_a_click_on_the_speaker_mutes_and_the_next_restores_the_volume(self):
+        self.playing_at(0.72)
+        self.click()
+        self.assertEqual(self.sent(), ['0'])
+        self.assertEqual(support.read(spotify_mouse.VOLUME_BEFORE_MUTE), '0.7200')
+        self.assertIn('volume: mute (was 0.72)', support.read(conky_mouse.LOG))
+        self.playing_at(0.0)
+        self.click()
+        self.assertEqual(self.sent(), ['0', '0.72'])
+        self.assertFalse(os.path.exists(spotify_mouse.VOLUME_BEFORE_MUTE))
+        self.assertIn('volume: unmute (0.72)', support.read(conky_mouse.LOG))
+
+    def test_the_level_is_kept_across_a_restart_while_muted(self):
+        with open(spotify_mouse.VOLUME_BEFORE_MUTE, 'w') as f:
+            f.write('0.3000')
+        self.playing_at(0.0)
+        self.click()                                    # a fresh process: only the file remembers
+        self.assertEqual(self.sent(), ['0.30'])
+
+    def test_a_click_at_zero_with_nothing_kept_restores_half(self):
+        self.playing_at(0.0)                            # the slider dragged to its left end
+        self.click()
+        self.assertEqual(self.sent(), ['0.50'])
+
+    def test_muting_at_zero_does_not_overwrite_the_kept_level(self):
+        with open(spotify_mouse.VOLUME_BEFORE_MUTE, 'w') as f:
+            f.write('0.9000')
+        self.playing_at(0.0)
+        self.click()
+        self.assertEqual(self.sent(), ['0.90'])
+
+    def test_the_slider_after_a_mute_follows_the_new_level_and_the_next_click_mutes_it(self):
+        self.playing_at(0.8)
+        self.click()
+        self.playing_at(0.25)                           # dragged or wheeled up from the mute
+        self.click()
+        self.assertEqual(self.sent(), ['0', '0'])
+        self.assertEqual(support.read(spotify_mouse.VOLUME_BEFORE_MUTE), '0.2500')
+
+    def test_a_click_with_spotify_unreadable_does_nothing(self):
+        self.run_.return_value = mock.Mock(stdout='')
+        self.click()
+        self.assertEqual(self.sent(), [])
+        self.assertFalse(os.path.exists(spotify_mouse.VOLUME_BEFORE_MUTE))
+        self.assertIn('unreadable', support.read(conky_mouse.LOG))
 
 
 class TapTest(unittest.TestCase):
@@ -623,7 +683,7 @@ class ConfigureTest(unittest.TestCase):
         self.assertEqual(conky_mouse.HEIGHT_REGION, 'lyrics')     # resizing from the top or bottom
 
     def test_its_buttons_come_with_minimize_and_close(self):
-        self.assertEqual(set(conky_mouse.BUTTONS), {'heart', 'play', 'prev', 'next', 'minimize', 'close'})
+        self.assertEqual(set(conky_mouse.BUTTONS), {'heart', 'play', 'prev', 'next', 'volume_icon', 'minimize', 'close'})
 
     def test_the_widget_gets_the_helper_to_share_its_window_handling(self):
         self.assertIs(spotify_mouse.core, conky_mouse)
