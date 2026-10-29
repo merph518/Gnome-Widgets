@@ -228,7 +228,7 @@ above. The title is `<summary> (#<N>)`, with no type prefix. The body carries
 run and what was not, `Judgment calls` (each decision the issue left open, what
 was chosen, what it beat and what decided it; none reads "none"), `UI choices`
 when a look was put to the user per [ui-options.md](../_shared/ui-options.md)
-(the page and the option picked), `Pre-existing failures fixed` (each, or
+(the screenshots and the option picked), `Pre-existing failures fixed` (each, or
 "none"), any open pull request touching the same files, by number, and the
 `Self review` and `Settled decisions` sections the review fills in. Push with
 `git push -u origin HEAD` and open it non-draft with the body passed as a file.

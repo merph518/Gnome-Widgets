@@ -2,84 +2,79 @@
 
 Shared by any session that has a layout, a control or a look to decide, inside
 `/implement` or outside it. The user picks how a widget looks; a session never
-settles a layout alone as a judgment call. The options are shown as a page the
-user can look at, from the desk or the phone, and the choice is asked once the
-page is up. This is done before any drawing or layout code is written.
+settles a layout alone as a judgment call. The options are shown as screenshots
+of the widget drawing them, which the user can look at from the desk or the
+phone, and the choice is asked once the screenshots are sent. This is done
+before the change itself is written.
 
-## First, look at what is there
+## Render the options in the app
 
-The widget as it is today comes from an isolated copy of `origin/main`, never from
-the copy on the desk: that copy may be the user's, or another session's unmerged
-branch, and a session does not capture either. Start one from a checkout of
-`origin/main` (a worktree or a temporary `git worktree add --detach` of it, removed
-afterwards) under a name of its own, capture it, and stop it:
+`scripts/render-option.py` draws an option with the real widget code, so the
+user compares what the widget would put on screen, never a redraw of it. It
+makes a temporary worktree of `origin/main`, applies the option's patch, runs an
+isolated copy from it with fixture content, captures that copy's window and
+removes both. Nothing of the user's own copy or another session's is read,
+stopped or captured.
 
 ```bash
-MAIN="main-$(basename "$PWD")"     # a name of this session's own
-git fetch origin main
-git worktree add --detach <scratchpad>/main-checkout origin/main
-<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" start <widget>
-<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" \
-  capture <scratchpad>/mockup-source.png <widget>   # speech or spotify
-<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" stop
-git worktree remove --force <scratchpad>/main-checkout
+scripts/render-option.py <scratchpad>/today.png speech            # the look as it is today
+scripts/render-option.py <scratchpad>/option-A.png speech --patch <scratchpad>/option-A.diff
 ```
 
-and read it with the `Read` tool, so the mockups start from the widget as it is
-drawn today: its colours, its fonts, its spacing and the rows around the part
-that changes. The speech copy shows fixture sessions, so a mockup of it starts from
-those rows. This capture is only for the mockups; Section 6 still takes its
-own after capture at the run. Read the drawing code for that part,
-`src/<widget>/draw.lua`, and the colours and fonts in `src/common/theme.lua`, so
-a mockup shows what the code can draw. Capturing only reads the copy's own window;
-it never touches the user's copy or another session's.
+The first call is the widget as drawn today, with its colours, fonts, spacing
+and the rows around the part that changes; read it with the `Read` tool before
+the options are drawn. The speech copy shows fixture sessions, so a rendering of
+it starts from those rows. The Spotify copy shows a card only while something is
+playing.
 
-When the isolated copy cannot be started or the capture fails (nothing is
-playing, so the Spotify widget shows no card), draw the mockups from the code
-and the theme alone, and say on the page that no capture was used.
+Each option is a `git diff` against `origin/main` of the smallest change to
+`src/` that draws it, written in a scratch worktree and never committed: read
+`src/<widget>/draw.lua` and the colours and fonts in `src/common/theme.lua`, so
+an option shows what the code can draw. The patch is throwaway; the real change
+is written after the user answers, and may differ from it.
 
-## The page
+When the copy cannot be started or the capture fails (nothing is playing, so the
+Spotify widget shows no card), say so and show the option as a few lines of text
+sketch in the question instead; no hand-written page stands in for a rendering.
 
-One Artifact, a plain HTML page published with the `Artifact` tool, titled for
-what is being decided, such as "Clickable Session Rows". It is a page of
-mockups to compare, not a design canvas, so the quickstart is called with
-intent `other` and the page is written by hand. It holds:
+## The screenshots
 
-- A short opening: the issue number, what is being decided, and what stays as it
-  is whatever the choice (a control keeping its clicks, say).
-- One section per option, two to four of them, each a letter and a short name
-  ("Option A, Issue number after the title"). Each draws a slice of the real
-  widget in its own colours and fonts, with real content from the capture (the
-  user's own session titles and labels, or the track and artist playing), never
-  placeholders. Several rows or frames, showing every state the change has, and
-  the pointer state drawn where hovering matters. For #123 the states were a
-  session with no issue, one with an issue, one with a pull request ready and
-  one with several; for a Spotify change they might be playing, paused, idle
-  and no cover art.
-- Under each option, a plain note of what it costs or gives up: room lost, a
-  meaning it clashes with, data it needs that the widget does not have.
-- A closing line with the recommendation and why, and where any data comes from
-  when that is part of the choice.
+Two to four options, each a letter and a short name ("Option A, Issue number
+after the title"), each rendered once per state the change has, with real
+content from the fixture or the capture (the session titles and labels, or the
+track and artist playing), never placeholders. For #123 the states were a
+session with no issue, one with an issue, one with a pull request ready and one
+with several; for a Spotify change they might be playing, paused, idle and no
+cover art. Where hovering matters, the pointer state is rendered too. Name each
+file for its option and state (`2A-issue.png`), so the order the user sees them
+in is the order they compare them.
+
+Send every screenshot to the user with `SendUserFile` before the question, so
+they land on the phone beside the conversation, with a line each that says which
+option and state it is. Beside them, in the message, say:
+
+- the issue number, what is being decided, and what stays as it is whatever the
+  choice (a control keeping its clicks, say);
+- under each option, what it costs or gives up: room lost, a meaning it clashes
+  with, data it needs that the widget does not have;
+- the recommendation and why, and where any data comes from when that is part of
+  the choice.
 
 When the issue leaves more than one look open (where a badge goes, and its
-colour), each is a numbered decision on the page with its own options, named
-by number and letter (1A, 1B, 2A). At most four decisions go to the user at
-once, as `AskUserQuestion` takes four questions; more than that is split into
-pages asked one after another.
-
-The page is a mockup, not the widget: HTML and CSS that look like it are enough,
-and it is never wired to anything on the machine.
+colour), each is a numbered decision with its own options, named by number and
+letter (1A, 1B, 2A). At most four decisions go to the user at once, as
+`AskUserQuestion` takes four questions; more than that is split into rounds
+asked one after another.
 
 ## The question
 
-Right after publishing, ask with `AskUserQuestion`, in the same turn, one
-question a decision on the page (the tool takes up to four):
+Right after the screenshots are sent, ask with `AskUserQuestion`, in the same
+turn, one question a decision (the tool takes up to four):
 
-- The question names the issue, the decision and the page, with its link, so
-  it stands on its own on the phone: in some modes the voice bridge passes on
-  the question alone. The speech hooks read a bare link as "the following
-  link", so it costs a few words aloud.
-- One option per option on the page, with the same names, the recommended one
+- The question names the issue and the decision, and says that the screenshots
+  were sent just before, with the file names, so it stands on its own on the
+  phone: in some modes the voice bridge passes on the question alone.
+- One option per option rendered, with the same names, the recommended one
   first and marked `(Recommended)`. Read aloud, a question carries at most its
   option labels, so each label carries the gist on its own ("A: number pill
   after the title", not "A").
@@ -87,10 +82,11 @@ question a decision on the page (the tool takes up to four):
   sentences, and its `preview` is a few lines of text sketch of the row, for
   whoever answers on a screen.
 - Decisions that are not about looks (where data comes from, say) are not put as
-  separate questions when the page already says what the session will do; they
-  go under `Judgment calls` as usual.
+  separate questions when the message already says what the session will do;
+  they go under `Judgment calls` as usual.
 
-The answer is the layout. The pull request body names the page and the
+The answer is the layout. The pull request body names the screenshots and the
 options picked (1A, 2B) under its own `UI choices` heading, apart from
-`Judgment calls`, since the user made them. Section 6's after capture, from the session's own isolated copy, is read
-next to the mockups of those options as well as its own before capture.
+`Judgment calls`, since the user made them. Section 6's after capture, from the
+session's own isolated copy, is read next to the screenshots of those options as
+well as its own before capture.
