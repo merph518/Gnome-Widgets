@@ -48,6 +48,7 @@ BROWSER = 'google-chrome'                      # what a session's box and name o
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
+BUBBLE_SCROLL = os.path.join(CACHE, 'bubble-scroll')   # wheel steps over the speech bubble, in all, for draw.lua
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
 SESSION_MENU = os.path.join(CACHE, 'session-menu')   # "<under the pointer> <scroll> <speech> <voice>" and the session's name, while its settings are open
@@ -629,13 +630,30 @@ def scroll_list(regions, down):
     return at
 
 
+def scroll_bubble(down):
+    """Counts a wheel step over the speech bubble, down or up, for draw.lua to turn into lines."""
+    try:
+        with open(BUBBLE_SCROLL) as f:
+            steps = int(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        steps = 0
+    os.makedirs(CACHE, exist_ok=True)
+    with open(BUBBLE_SCROLL + '.tmp', 'w') as f:
+        f.write(f'{steps + (1 if down else -1)}')
+    os.replace(BUBBLE_SCROLL + '.tmp', BUBBLE_SCROLL)
+
+
 def wheel(regions, s, x, y, down):
     """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down
-    over the slider or its speaker, or scrolls the list a row down. Returns what it did, or
-    None where the wheel does nothing."""
+    over the slider or its speaker, the speech bubble's text a line down while the pointer is
+    over it, or the list a row down. Returns what it did, or None where the wheel does nothing."""
     if inside(regions.get('volume_wheel'), s, x, y):
         speechctl('volume', 'down' if down else 'up')
         return 'volume'
+    if inside(regions.get('bubble'), s, x, y):
+        if regions.get('bubble_scroll'):
+            scroll_bubble(down)
+        return 'bubble'
     if inside(regions.get('list'), s, x, y) and regions.get('list_scroll'):
         scroll_list(regions, down)
         return 'list'

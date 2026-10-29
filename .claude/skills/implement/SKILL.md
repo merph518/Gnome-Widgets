@@ -167,7 +167,8 @@ the widgets that belongs to this session, started from the checkout. The copy ha
 own home, so its cache, config, pid file and window position are its own; its speech
 widget reads fixture Claude sessions and plays no sound; it has no tray icon, no
 Spotify login and so sends no Web API request; and its windows have a class and a
-position of their own. Any number of them run beside the user's copy and each
+position of their own, on the built-in display, so a copy never covers the monitor
+the user works on. Any number of them run beside the user's copy and each
 other, so a session never waits for another session's widget, and never stops,
 replaces, restarts or captures one: the user's copy (installed, or from another
 worktree) and every other session's copy are not this session's to touch, and

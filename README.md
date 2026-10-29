@@ -67,10 +67,11 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 (`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
 itself.
 
-- A header with who is speaking ("<name> says:") and a progress bar with the line's elapsed
-  time and length
-- **Sessions**: every open Claude session, the ones with speech on first, each with its
-  repository's label, its name, one tag, how many lines it has queued, and its speech setting.
+- A title along the top, **CLAUDE CODE SESSION MANAGEMENT**, with minimize and close at its right
+- **Sessions**: every open Claude session, the ones with speech on first, under two
+  column headers: **Identifiers** (the repository's label and its issue numbers) and
+  **Session Information** (the name, one tag, how many lines it has queued and the last
+  line read); a gear at each row's right, with no header, opens the session's settings.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
@@ -80,7 +81,18 @@ itself.
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
 - A gear at the right of each session, which opens that session's settings
-- A footer with pause / resume, skip, next and the volume
+- A footer with, from the top: the speaker's avatar (the image
+  `~/.config/conky-widgets/speech/avatar.png` when it is there, else the Claude icon the
+  package ships, else a spark drawn on an orange circle) at the bottom left, and, while a clip
+  plays, a speech bubble pointing at it that holds the speaker's name and the whole line being
+  read aloud, as wide as its text needs (up to the card's width) with the same padding on every
+  side: one line high for a short one, growing upward to six lines. A longer one
+  scrolls with the clip's elapsed time, fading at the top and bottom, with no scroll bar, and
+  the mouse wheel moves it while the pointer is over the bubble (it follows the clip again
+  after five seconds). The bubble opens when a clip starts and fades away two seconds after the
+  speech ends (the row is as tall without it, so the card does not change size as lines play);
+  a progress bar with the line's elapsed time and length; then pause / resume,
+  skip and next, and the volume
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
@@ -274,8 +286,8 @@ the icon stays while both are hidden.
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
 scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
 **Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
-size, **Collapse when idle** (off by default: on, the widget shrinks to its top line while
-nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
+size, **Collapse when idle** (off by default: on, the widget shrinks to its title and the avatar
+while nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
 [Speech widget](#speech-widget)); without one they're greyed out.
 
 Two of the Spotify settings are about lyrics, and both are remembered:
@@ -381,7 +393,8 @@ bin/conky-widgets spotify start
 To run a change beside the copy on your desktop without touching it, start an isolated copy.
 It has a home, cache and config of its own, three fixture Claude sessions for the speech widget
 and no sound, no tray icon, no Spotify login (so it sends no Web API request), and its windows
-have a class and a position of their own, so any number run at once, one per checkout:
+have a class and a position of their own on your laptop's built-in display (the primary monitor
+when there is none; `--at X,Y` places it elsewhere), so any number run at once, one per checkout:
 
 ```sh
 scripts/isolated-widgets.py start              # both widgets; or: start speech

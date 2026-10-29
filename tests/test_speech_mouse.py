@@ -21,6 +21,7 @@ VOICES = ['', 'en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium
 REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0, 38.0],
            'skip': [429.0, 14.0, 455.0, 40.0], 'next': [455.0, 14.0, 481.0, 40.0],
            'list': [16, 94.0, 522, 142.0], 'list_scroll': [1, 24.0],
+           'bubble': [64.0, 250.0, 522, 338.0], 'bubble_scroll': 4,
            'rows': [{'id': 'aaaa', 'speech': 'on', 'voice': '', 'top': 0.0, 'bottom': 48.0,
                      'gear': [488.0, 522.0]},
                     {'id': 'bbbb', 'speech': 'alerts', 'voice': 'en_US-amy-medium', 'top': 48.0, 'bottom': 72.0,
@@ -50,8 +51,8 @@ class StubSpeechctl(support.TempDirTest):
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')
-        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', SESSION_MENU='session-menu',
-                      CLOSE_CONFIRM='close-confirm', SPEAK='speak')
+        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', BUBBLE_SCROLL='bubble-scroll', CACHE='',
+                      SESSION_MENU='session-menu', CLOSE_CONFIRM='close-confirm', SPEAK='speak')
         self.redirect(conky_mouse, LOG='mouse.log')
         popen = subprocess.Popen
 
@@ -732,6 +733,21 @@ class WheelTest(StubSpeechctl):
         self.wheel((200, 106), False)
         self.assertEqual(support.read(speech_mouse.LIST_SCROLL), '0')
         self.assertEqual(self.ran(), [])
+
+    def test_over_the_bubble_it_counts_steps_for_draw_lua_and_nowhere_else(self):
+        self.assertEqual(self.wheel('bubble', True), 'bubble')
+        self.wheel('bubble', True)
+        self.wheel('bubble', False)
+        self.assertEqual(support.read(speech_mouse.BUBBLE_SCROLL), '1')
+        self.assertIsNone(self.wheel((300, 245), True))              # just above it: not the bubble
+        self.assertEqual(support.read(speech_mouse.BUBBLE_SCROLL), '1')
+        self.assertEqual(self.ran(), [])
+
+    def test_a_bubble_with_nothing_to_scroll_takes_the_wheel_and_writes_nothing(self):
+        regions = dict(REGIONS, bubble_scroll=0)
+        x, y = centre(REGIONS['bubble'])
+        self.assertEqual(speech_mouse.wheel(regions, 1, x, y, True), 'bubble')
+        self.assertFalse(os.path.exists(speech_mouse.BUBBLE_SCROLL))
 
     def test_anywhere_else_it_does_nothing(self):
         self.assertIsNone(self.wheel((300, 60), True))

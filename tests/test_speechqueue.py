@@ -8,6 +8,7 @@ and read the diff before committing it.
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,7 +41,7 @@ class Fixture(unittest.TestCase):
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
                             ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
                             ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
-                            ('LEDGERS', self.f.ledgers),
+                            ('LEDGERS', self.f.ledgers), ('AVATAR_IMAGES', ()),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -434,6 +435,49 @@ class Links(Repos):
         self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
         self.assertLess(two['name'][1], two['gear'][0])
 
+    def headers(self, state):
+        """[(x, label)] of the column headers widget.txt draws over the list, x from the card's left."""
+        text = speechqueue.render(state)
+        line = next(l for l in text.splitlines() if speechqueue.conky_font(speechqueue.HEADING_FONT) in l)
+        return text, [(int(x) - speechqueue.SHADOW, label)
+                      for x, label in re.findall(r'\$\{goto (\d+)\}([^$]+)', line)]
+
+    def test_two_column_headers_replace_the_sessions_heading_each_over_its_column(self):
+        self.f.session(100, ME, 'One')
+        state = self.state()
+        state['sessions'][0].update(repo='Gnome-Widgets', issues=[('#127', 'https://example.test/127')])
+        text, heads = self.headers(state)
+        with open(speechqueue.REGIONS) as f:
+            row = json.load(f)['rows'][0]
+        self.assertNotIn('Sessions', text)
+        self.assertEqual([label for _, label in heads], ['Identifiers', 'Session Information'])
+        self.assertEqual([x for x, _ in heads],
+                         [row['issues'][0][0], speechqueue.name_left(speechqueue.block_width(state['sessions']))])   # the left edge of each column; the gear has none
+
+    def test_the_headers_stay_whole_numbers_and_clear_of_each_other_at_any_size(self):
+        self.f.session(100, ME, 'One')
+        for size in ((660, 128, 1.1), (400, 128, 2.0), (9999, 128, 0.7)):
+            with self.subTest(size=size), mock.patch.object(speechqueue.size_file, 'load', return_value=size):
+                state = self.state()
+                state['sessions'][0]['repo'] = 'Gnome-Widgets'
+                text, heads = self.headers(state)
+                self.assertNotRegex(text, r'\$\{goto \d+\.')
+                self.assertIn('Identifiers', [label for _, label in heads])
+                font = speechqueue.HEADING_FONT
+                for (x, label), (nxt, _) in zip(heads, heads[1:]):
+                    self.assertLessEqual(x + speechqueue.text_width(label, font), nxt)   # none runs into the next
+
+    def test_the_headers_leave_the_lists_top_where_it_was_and_are_left_out_without_sessions(self):
+        self.f.session(100, ME, 'One')
+        speechqueue.render(self.state())
+        with open(speechqueue.REGIONS) as f:
+            with_sessions = json.load(f)['list']
+        os.remove(os.path.join(self.f.sessions, '100.json'))
+        text, heads = self.headers(self.state())
+        self.assertEqual((heads, 'Sessions' in text), ([], False))
+        with open(speechqueue.REGIONS) as f:
+            self.assertEqual(json.load(f)['list'], with_sessions)   # the same room, so the card does not jump
+
 
     def test_a_session_without_issues_has_no_chips_and_one_row(self):
         self.f.session(100, ME, 'One')
@@ -656,6 +700,162 @@ VOICES = ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
           'en_US-libritts-high', 'en_US-ryan-high']
 
 
+class TitleAndFooter(Fixture):
+    """The widget's title along the top, and the speaker's avatar, the bubble and the progress bar
+    above the controls."""
+    LONG = ('Pull request 148 now has the new title and footer layout, and the bubble is nudged 3 px toward '
+            'the text. The widget at the top of the card is titled in capitals with letter spacing, with '
+            'minimize and close at the right. The says line and the progress bar now sit above the controls.')
+
+    def draw(self, size=None, text=None, quiet=False):
+        self.three()
+        if quiet:
+            self.f.file(OTHER + '.queue', '')                       # nothing queued: idle
+        if text:
+            self.f.now(ME, 'Claude Voice Widget', 'Claude Voice Widget session says: ' + text, hook_pid=9001)
+            os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+            self.f.wav(9001, 6.0)
+        with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
+            widget = speechqueue.render(self.state(), now=1000.0)
+        with open(speechqueue.DRAW) as f:
+            raw = f.read().splitlines()
+        lines = {l.split()[0]: l.split(None, 1)[1] for l in raw if ' ' in l}
+        lines['line'] = [l.split(None, 1)[1] for l in raw if l.startswith('line ')]
+        with open(speechqueue.REGIONS) as f:
+            return lines, json.load(f), widget
+
+    def test_the_title_is_along_the_top_level_with_minimize_and_close(self):
+        lines, regions, _ = self.draw()
+        x, cy, track, text = lines['title'].split(None, 3)
+        self.assertEqual(text, 'CLAUDE CODE SESSION MANAGEMENT')
+        self.assertEqual((float(x), float(track)), (speechqueue.MARGIN, speechqueue.TITLE_TRACK))
+        self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
+        self.assertLess(float(cy), regions['list'][1])                # above the column headers and the list
+
+    def test_the_avatar_and_bubble_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        avatar_y = float(lines['avatar'].split()[1])
+        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
+        progress_y = float(lines['progress'].split()[2])
+        controls_y = float(lines['footer'].split()[1])
+        self.assertLess(regions['list'][3], y0)
+        self.assertLess(y0, avatar_y)                                  # the avatar is level with the bubble's bottom
+        self.assertLess(avatar_y, y1)
+        self.assertLess(y1, progress_y)
+        self.assertLess(progress_y, controls_y)
+
+    def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_the_whole_text(self):
+        lines, _, _ = self.draw(text=self.LONG)
+        ax, ay, d = (float(v) for v in lines['avatar'].split())
+        x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
+        self.assertEqual(x0 - (ax + d / 2), speechqueue.AVATAR_GAP)
+        self.assertEqual(ay + d / 2, y1)                                # level with the bubble's bottom
+        self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
+        self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
+        self.assertEqual(lines['speaker'], 'Claude Voice Widget Session:')
+        self.assertEqual(int(lines['bubble'].split()[9]), len(lines['line']))           # lines shown at once
+        self.assertEqual(' '.join(lines['line']), self.LONG)            # every word, none cut
+        self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
+        for line in lines['line']:
+            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+
+    def test_a_word_wider_than_the_bubble_is_broken_across_lines_and_none_is_lost(self):
+        word = 'x' * 300
+        lines, _, _ = self.draw(text=f'See {word} now')
+        x0, _, x1, _, pad = (float(v) for v in lines['bubble'].split()[:5])
+        self.assertEqual(''.join(lines['line']).replace(' ', ''), 'See' + word + 'now')
+        for line in lines['line']:
+            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+
+    def test_the_bubble_is_a_wheel_area_and_counts_the_lines_past_what_it_shows(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
+        self.assertEqual(regions['bubble'], [x0, y0, x1, y1])
+        self.assertEqual(regions['bubble_scroll'], len(lines['line']) - int(lines['bubble'].split()[9]))
+        lines, regions, _ = self.draw(text='Done.')
+        self.assertEqual(regions['bubble_scroll'], 0)                   # nothing to scroll
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        lines, regions, _ = self.draw(quiet=True)
+        self.assertNotIn('bubble', regions)                             # no bubble while nothing plays
+
+    def test_the_avatar_is_the_first_image_there_is_and_without_one_the_line_names_none(self):
+        mine = os.path.join(self.root, 'avatar.png')
+        icon = os.path.join(self.root, 'icon.png')
+        for path in (mine, icon):
+            with open(path, 'wb') as f:
+                f.write(b'\x89PNG')
+        for images, want in (((mine, icon), mine), ((os.path.join(self.root, 'none.png'), icon), icon), ((), None)):
+            with mock.patch.object(speechqueue, 'AVATAR_IMAGES', images):
+                lines, _, _ = self.draw()
+            fields = lines['avatar'].split(None, 3)
+            self.assertEqual(fields[3] if len(fields) > 3 else None, want)
+
+    def test_the_speaker_is_the_name_without_the_hooks_suffix_then_session_and_a_colon(self):
+        self.three()
+        self.f.now(ME, 'Table Headers session', 'Checks pass.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        speechqueue.render(self.state(), now=1000.0)
+        with open(speechqueue.DRAW) as f:
+            self.assertIn('speaker Table Headers Session:', f.read().splitlines())
+
+    def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_six(self):
+        def box(text):
+            lines, regions, widget = self.draw(text=text)
+            _, y0, _, y1 = (float(v) for v in lines['bubble'].split()[:4])
+            return y0, y1, int(lines['bubble'].split()[9]), widget, regions['bubble_scroll']
+        line_h = speechqueue.line_height(speechqueue.ROW_FONT)
+        one, some, most = box('Done.'), box(self.LONG), box(self.LONG * 3)
+        self.assertEqual((one[2], some[2], most[2]), (1, 4, speechqueue.BUBBLE_LINES))
+        self.assertEqual(speechqueue.BUBBLE_LINES, 6)
+        self.assertEqual(one[1], most[1])                               # the bottom stays level with the avatar
+        self.assertAlmostEqual(some[1] - some[0] - (one[1] - one[0]), 3 * line_h)
+        self.assertAlmostEqual(most[1] - most[0] - (one[1] - one[0]), 5 * line_h)
+        self.assertEqual((one[4], some[4]), (0, 0))
+        self.assertGreater(most[4], 0)                                  # more than six lines scroll
+        self.assertEqual(one[3], most[3])                               # conky's window does not resize
+
+    def test_the_bubble_is_as_wide_as_its_text_needs_up_to_the_card_with_one_padding_all_round(self):
+        def box(text):
+            lines, _, _ = self.draw(text=text)
+            x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
+            return x0, y0, x1, y1, pad, lines
+        short, long = box('Done.'), box(self.LONG)
+        widest = max([speechqueue.text_width(short[5]['speaker'], speechqueue.SEGMENT_FONT)] +
+                     [speechqueue.text_width(l, speechqueue.ROW_FONT) for l in short[5]['line']])
+        self.assertEqual(short[4], speechqueue.BUBBLE_PAD)
+        self.assertAlmostEqual(short[2] - short[0], 2 * short[4] + widest * speechqueue.BLOCK_SLACK, delta=1)
+        self.assertLess(short[2], long[2])
+        _, regions, _ = self.draw(text=self.LONG)
+        self.assertLessEqual(long[2], regions['list'][2])                 # never past the card's contents
+        self.assertGreater(long[2] - long[0], 0.9 * (regions['list'][2] - long[0]))   # a long line nearly fills it
+        name_h, line_h = (speechqueue.line_height(f) for f in (speechqueue.SEGMENT_FONT, speechqueue.ROW_FONT))
+        self.assertAlmostEqual(short[3] - short[1], 2 * short[4] + name_h + speechqueue.BUBBLE_NAME_GAP + line_h)
+
+    def test_while_nothing_plays_there_is_the_avatar_and_no_bubble_and_the_card_keeps_its_size(self):
+        playing_lines, _, playing = self.draw(text=self.LONG)
+        os.remove(os.path.join(self.f.speak, 'now.json'))             # the clip ends
+        lines, _, idle = self.draw()
+        self.assertIn('avatar', lines)
+        self.assertEqual([k for k in ('bubble', 'speaker') if k in lines] + lines['line'], [])
+        self.assertEqual(lines['avatar'], playing_lines['avatar'])      # in the same place
+        self.assertEqual(idle, playing)                                 # conky's window does not resize
+
+    def test_a_collapsed_card_is_the_title_and_the_avatar(self):
+        with open(speechqueue.COLLAPSE, 'w') as f:
+            f.write('on')
+        lines, _, _ = self.draw(quiet=True)
+        self.assertEqual(sorted(k for k in lines if k in ('title', 'avatar', 'bubble', 'speaker', 'progress', 'list')),
+                         ['avatar', 'title'])
+
+    def test_a_narrow_card_at_a_large_scale_cuts_the_title_to_what_clears_minimize(self):
+        lines, regions, _ = self.draw((400, 128, 2.0))
+        text = lines['title'].split(None, 3)[3]
+        self.assertTrue(text.endswith('\u2026') and len(text) < len('CLAUDE CODE SESSION MANAGEMENT'))
+        spaced = speechqueue.text_width(text, speechqueue.LABEL_FONT) + len(text) * speechqueue.TITLE_TRACK * 2.0 * 11 * 96 / 72
+        self.assertLess(speechqueue.MARGIN + spaced, regions['minimize'][0])
+
+
 class SettingsPopup(Fixture):
     def render(self, voices, voice='en_GB-jenny_dioco-medium'):
         self.three()
@@ -845,11 +1045,11 @@ class Golden(Fixture):
         speechqueue.render(self.state(), now=1000.0)
         os.remove(os.path.join(self.f.speak, 'now.json'))
         self.f.file(OTHER + '.queue', '')
-        text = speechqueue.render(self.state(), now=1010.0)
-        self.assertIn('Claude Voice Widget says:', text)
-        self.assertNotIn('Speech idle', text)
+        speechqueue.render(self.state(), now=1010.0)
         with open(speechqueue.DRAW) as f:
-            progress = next(l for l in f if l.startswith('progress ')).split()
+            lines = f.read().splitlines()
+        self.assertFalse([l for l in lines if l.startswith(('bubble ', 'speaker ', 'line '))])   # the avatar alone
+        progress = next(l for l in lines if l.startswith('progress ')).split()
         self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 
     def test_paused(self):

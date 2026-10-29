@@ -29,8 +29,9 @@ The copy is isolated by where it lives, so the launcher and the widgets run unch
   - there is no tray icon (CSN_NO_TRAY)
   - the windows have a class of their own (CSN_CLASS_SUFFIX), since each widget's mouse helper
     finds its window by class and two copies with one class would move each other's windows
-  - the windows start at a position of their own on the primary monitor, a slot to the left
-    of the last copy's, so they cover neither the user's widgets nor each other
+  - the windows start at a position of their own on the built-in display (the primary monitor
+    where there is none), a slot to the left of the last copy's, so they cover neither the
+    user's widgets nor each other, and never the monitor the user works on
 The user's copy and other sessions' copies are never read, stopped or captured: every path the
 copy uses is under its folder, and the stop only signals processes that folder's launcher
 started or fixture processes named for the copy.
@@ -128,12 +129,18 @@ def link_runtime(copy, real):
                 pass
 
 
+BUILT_IN = re.compile(r'(eDP|LVDS|DSI)', re.I)    # the names xrandr gives a laptop's own panel
+
+
 def monitor_of(listing):
-    """(x, y, width, height) of the primary monitor in `xrandr --listmonitors` output, the
-    first one when none is starred; a 1920x1080 screen at the origin when it lists none."""
-    found = re.findall(r'^\s*\d+: \+?(\*?)\S+ (\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)', listing, re.M)
+    """(x, y, width, height) of the monitor a copy goes on, in `xrandr --listmonitors` output:
+    the built-in display, else the primary (starred) monitor, else the first one; a 1920x1080
+    screen at the origin when it lists none. A copy goes on the built-in display so it never
+    covers the monitor the user works on."""
+    found = re.findall(r'^\s*\d+: \+?(\*?)(\S+) (\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)', listing, re.M)
+    built_in = [m for m in found if BUILT_IN.match(m[1])]
     starred = [m for m in found if m[0]]
-    w, h, x, y = map(int, (starred or found or [('', '1920', '1080', '0', '0')])[0][1:])
+    w, h, x, y = map(int, (built_in or starred or found or [('', '', '1920', '1080', '0', '0')])[0][2:])
     return x, y, w, h
 
 
