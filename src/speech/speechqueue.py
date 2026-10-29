@@ -84,6 +84,10 @@ DROPDOWN_PAD = 10                             # either side of its label
 DROPDOWN_ARROW = 10                           # the arrow's width, after the label
 DROPDOWN_GAP = 6                              # label to arrow
 MENU_PAD = 4                                  # round the open list's items
+CONFIRM_W = 320                               # the close prompt's width, at most
+CONFIRM_PAD = 14                              # round its contents
+CONFIRM_GAP = 8                               # between its lines, and its two buttons
+CONFIRM_BUTTON_PAD = 14                       # either side of a button's label
 MENU_GAP = 4                                  # the open list to the footer
 MENU_MIN_ROWS = 3                             # rows the open list shows however short the card is
 VOICES_EVERY = 10.0                           # s between asking speechctl for the voices
@@ -194,8 +198,8 @@ def ledger_prs(rows):
 
 
 def link_pill(prs):
-    """The pill after a session's name, naming the ready pull requests a click on the name
-    opens; '' without any, when the name opens nothing."""
+    """The pill after a session's name, naming the ready pull requests a click on it opens; ''
+    without any, when there is no pill."""
     if not prs:
         return ''
     return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
@@ -704,9 +708,11 @@ def box_width(listed):
     return text_width('W' * LABEL_LEN, SEGMENT_FONT) + 10 + (max(numbers) + NUMBER_PAD if numbers else 0)
 
 
-def link_span(s, right, box_w):
-    """Where a session's name and pill sit along its row, as draw.lua lays them out between its
-    box, `box_w` wide, and `right` (the queued count's right edge): [left, right]."""
+def name_spans(s, right, box_w):
+    """Where a session's name and its pill sit along its row, as draw.lua lays them out between
+    its box, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
+    [left, right] of the pill, or None without one). The name's span ends where the pill's
+    begins."""
     pill = link_pill(s.get('prs'))
     if s['queued'] > 0:
         right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
@@ -714,7 +720,11 @@ def link_span(s, right, box_w):
     pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
     flags_w = text_width(row_flags(s), TAG_FONT) + 8
     name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
-    return [round(name_x - 4, 2), round(name_x + text_width(name, ROW_FONT) + pill_w + 4, 2)]
+    after = name_x + text_width(name, ROW_FONT)
+    if not pill:
+        return [round(name_x - 4, 2), round(after + 4, 2)], None
+    return ([round(name_x - 4, 2), round(after + PILL_GAP / 2, 2)],
+            [round(after + PILL_GAP / 2, 2), round(after + pill_w + 4, 2)])
 
 
 def write_sessions(listed):
@@ -826,18 +836,21 @@ def render(state, now=None):
                  'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
-        # The box opens the session's issue and the name its ready pull requests, each only
-        # with one to open
+        # The box opens the session's issue and the pill its ready pull requests, each only
+        # with one to open; the name closes the session, once confirmed
+        name_span, pill_span = name_spans(s, queued_right, box_w)
+        entry.update(name=name_span, title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
         if s.get('label') and s.get('issue'):
             entry.update(box=[MARGIN, round(MARGIN + box_w, 2)], issue=s['issue'])
         if s.get('prs'):
-            entry.update(link=link_span(s, queued_right, box_w), branch=s.get('branch') or '',
-                         prs=s['prs'])
+            entry.update(link=pill_span, branch=s.get('branch') or '', prs=s['prs'])
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
     regions['rows'] = rows
     regions['list_scroll'] = [last, round(row, 2)]
+    prompt_line, regions['confirm'] = close_prompt(right, list_top, list_height)
+    draw.append(prompt_line)
     out.gap(list_height)
 
     # The footer: pause or resume, the volume slider, the voice drop down. The open list is
@@ -878,6 +891,36 @@ def render(state, now=None):
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
     return out.end(out.y + MARGIN - 4)
+
+
+def close_prompt(right, list_top, list_height):
+    """(draw.txt's line, regions.json's entry) for the "Are you sure?" prompt a click on a
+    session's name opens: a panel centred over the list, `right` being the list's right edge,
+    with its title and one line of explanation above Cancel and OK at its right. The names in
+    it come from conky-mouse.py's close-confirm file; draw.lua draws it only while that exists."""
+    title_h, msg_h = line_height(LABEL_FONT), line_height(TAG_FONT)
+    button_h = title_h + 8 * text_scale
+    height = 2 * CONFIRM_PAD + title_h + msg_h + CONFIRM_GAP + button_h + CONFIRM_GAP
+    width = min(right - MARGIN, CONFIRM_W)
+    x0 = (MARGIN + right - width) / 2
+    x1 = x0 + width
+    top = max(MARGIN, list_top + list_height / 2 - height / 2)
+    title_cy = top + CONFIRM_PAD + title_h / 2
+    msg_cy = top + CONFIRM_PAD + title_h + msg_h / 2
+    button_cy = top + height - CONFIRM_PAD - button_h / 2
+    ok_x0 = x1 - CONFIRM_PAD - text_width('OK', LABEL_FONT) - 2 * CONFIRM_BUTTON_PAD
+    cancel_x1 = ok_x0 - CONFIRM_GAP
+    cancel_x0 = cancel_x1 - text_width('Cancel', LABEL_FONT) - 2 * CONFIRM_BUTTON_PAD
+    ok, cancel = [ok_x0, x1 - CONFIRM_PAD], [cancel_x0, cancel_x1]
+    line = (f'confirm {x0:.2f} {top:.2f} {x1:.2f} {top + height:.2f} {title_cy:.2f} {msg_cy:.2f} '
+            f'{button_cy:.2f} {button_h:.2f} {cancel_x0:.2f} {cancel_x1:.2f} {ok[0]:.2f} {ok[1]:.2f} '
+            f'{MARGIN} {list_top} {right} {list_top + list_height}')
+    half = button_h / 2
+    entry = {'box': [round(x0, 2), round(top, 2), round(x1, 2), round(top + height, 2)],
+             'ok': [round(ok[0], 2), round(button_cy - half, 2), round(ok[1], 2), round(button_cy + half, 2)],
+             'cancel': [round(cancel[0], 2), round(button_cy - half, 2), round(cancel[1], 2),
+                        round(button_cy + half, 2)]}
+    return line, entry
 
 
 def voice_menu(names, current, right, bottom, top_limit):

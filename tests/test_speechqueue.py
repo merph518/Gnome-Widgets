@@ -392,7 +392,7 @@ class Links(Labels):
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
         self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', 'n/a'])
 
-    def test_the_box_opens_the_issue_and_the_name_the_pull_requests_each_only_with_one(self):
+    def test_the_box_opens_the_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
         self.pr_ledger(ME, (151, 'open'))
@@ -411,9 +411,30 @@ class Links(Labels):
         self.assertEqual(one['issue'], 'https://github.com/someone/Gnome-Widgets/issues/127')
         self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
         self.assertEqual(one['box'][0], speechqueue.MARGIN)
-        self.assertLess(one['box'][1], one['link'][0])             # the box, then the name
+        self.assertLess(one['box'][1], one['name'][0])             # the box, then the name
+        self.assertEqual(one['name'][1], one['link'][0])           # then the pill
         self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
         self.assertFalse({'box', 'issue', 'link', 'prs'} & set(two))
+        self.assertEqual([(r['pid'], r['title'], r['busy']) for r in (one, two)],
+                         [(100, 'One', False), (200, 'Two', False)])
+        self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
+        self.assertLess(two['name'][1], two['on'][0])
+
+    def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
+        self.f.session(100, ME, 'One')
+        speechqueue.render(self.state())
+        with open(speechqueue.REGIONS) as f:
+            regions = json.load(f)
+        prompt, (x0, top, x1, bottom) = regions['confirm'], regions['list']
+        box = prompt['box']
+        self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
+        for key in ('cancel', 'ok'):
+            self.assertTrue(box[0] <= prompt[key][0] < prompt[key][2] <= box[2], key)
+            self.assertTrue(box[1] <= prompt[key][1] < prompt[key][3] <= box[3], key)
+        self.assertLess(prompt['cancel'][2], prompt['ok'][0])
+        with open(speechqueue.DRAW) as f:
+            line = next(l for l in f.read().splitlines() if l.startswith('confirm '))
+        self.assertEqual([float(v) for v in line.split()[1:5]], box)
 
 
 
