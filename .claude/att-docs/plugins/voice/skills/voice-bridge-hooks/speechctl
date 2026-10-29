@@ -131,7 +131,8 @@ def is_paused():
 def queue_lines(queue):
     try:
         with open(queue, encoding="utf-8") as f:
-            return [l.rstrip("\n") for l in f if l.strip()]
+            # a line is the spoken text, then a tab and its Markdown source for now.json
+            return [l.rstrip("\n").split("\t", 1)[0] for l in f if l.strip()]
     except OSError:
         return []
 

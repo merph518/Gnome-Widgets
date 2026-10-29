@@ -115,7 +115,9 @@ The `voice` plugin registers the voice bridge hooks. Installed at user scope
 repository the reply relay, spoken replies and attention announcements, with no hook
 entries in the repository. A repository adds its own values with an extension file at
 `.claude/skills/voice-bridge-hooks/extension.json`. See the `voice-bridge-hooks`
-skill's Wiring section.
+skill's Wiring section. A session can also be read in a voice of its own: the speech widget
+saves the choice as `<session id>.voice` in the hook's state folder, and the hook speaks that
+session's lines in it, falling back to the global voice when the name is not installed.
 
 The `general` plugin also registers four repo hooks: a gate that refuses a pull request
 body whose Testing section a repository's checker cannot parse, a reminder to record a

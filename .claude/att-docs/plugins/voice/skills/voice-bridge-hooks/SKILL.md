@@ -60,11 +60,24 @@ through `speechctl`.
 | `<session>.replies` | Speech **On**: the session's replies are read aloud as they land |
 | `<session>.muted` | Speech **Off**: the session says nothing, announcements included. Its voice-bridge feed is unaffected |
 | neither | **Alerts only** (the default): just the short announcements |
-| `<session>.queue`, `.cursor`, `.name` | The lines waiting to be read, how far the turn was read, the name the voice gives the session. Edits to the first two take `<session>.cursor.lock` |
-| `now.json` | The clip playing: `session` and `name` of the session whose line it is (not always the hook's own, since a hook reads other sessions' queues after its own), `text`, `started`, `clip`, `hook_pid`, `player_pid` (null while Piper renders), `engine` (`piper` or `spd-say`). Written atomically, removed when the clip ends or its hook is killed |
+| `<session>.queue`, `.cursor`, `.name` | The lines waiting to be read, how far the turn was read, the name the voice gives the session. Edits to the first two take `<session>.cursor.lock`. A queue line is the spoken text, then a tab and the block as the assistant wrote it, as a JSON string; a line with no tab (queued before `markdown` existed) has no source |
+| `now.json` | The clip playing: `session` and `name` of the session whose line it is (not always the hook's own, since a hook reads other sessions' queues after its own), `text`, `markdown`, `started`, `clip`, `hook_pid`, `player_pid` (null while Piper renders), `engine` (`piper` or `spd-say`). Written atomically, removed when the clip ends or its hook is killed |
 | `paused` | Present while speech is held. A Piper clip is paused by stopping its player; a Speech Dispatcher clip is cancelled and its line put back at the head of the queue (`requeue` names the clip). A held line stays queued, and a hook gives up the hold after about 1100 s |
 | `skip` | Left by `speechctl skip` while Piper is still rendering; the hook drops the clip when the render ends |
 | `settings.json` | `voice` (a model in `~/.local/share/piper/`), `volume` (0.0 to 2.0, the `pw-play` level; default 1.2), `pace` (Piper length scale). Read before each clip, so a change applies from the next one, and overrides `SPEAK_PIPER_MODEL` and `SPEAK_PIPER_LENGTH`. `SPEAK_VOICE` still picks the Speech Dispatcher fallback voice |
+| `<session>.voice` | The session's own voice (an experiment): the whole file is a voice name as `settings.json`'s `voice` holds it, such as `en_US-amy-medium`. It wins over `voice` for that session's lines only, whichever hook reads them; volume, pace, the Piper `speaker`, `noise`, `noise_w` and `silence` settings, and the speech mode stay global (a `speaker` number must suit the session's voice too). It applies to Piper only; Speech Dispatcher still uses `SPEAK_VOICE`, and `speechctl status` still shows the global voice. A missing, empty or unreadable file, or a name with no model in `~/.local/share/piper/` (or containing `/`, in either file), uses the global voice, or `SPEAK_PIPER_MODEL` when that is unusable too. The speech widget writes and removes it; nothing here does. To drop the experiment, remove the `.voice` read from the voice loop in `say()` |
+
+`text` is the spoken form: the session's name ahead of the first block of a stretch ("demo
+session says: "), with code, links, symbols and spacing rewritten for the voice.
+`markdown` is the same line as the assistant wrote it, for a widget that draws it
+formatted: newlines and syntax intact, no name prefix, leading blank lines and trailing
+space trimmed. It is kept on the queue line beside the spoken text, so a line put back
+after a skip or pause, or read by another session's hook, publishes the source it was made
+from. A source over 2000 characters is cut after the last complete line within them (mid-line
+when they hold no newline) and ends with `…` (`MARKDOWN_CAP` in `speak-attention.sh`). A line with no source, such as an
+announcement the hook composes or a queue line that predates the field, publishes `""`, and
+a reader falls back to `text`. The voice bridge's feed already carries each block as
+written, so it has no such field.
 
 The hook that holds the voice reads its own session's queue first, then every other
 session's with lines left, oldest first. `speechctl next` drops what is queued for the

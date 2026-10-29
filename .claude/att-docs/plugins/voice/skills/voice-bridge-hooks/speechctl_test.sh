@@ -111,6 +111,12 @@ until_ 5 playing; "$CTL" toggle; check "$([[ -e $D/paused ]] && echo yes)" yes "
 "$CTL" toggle; check "$([[ -e $D/paused ]] && echo yes || echo no)" no "toggle resumes"
 until_ 10 gone $HOOK
 
+# --- a queue line carries its Markdown source after a tab
+fresh; touch "$D/paused"; queue "$(printf 'one\t"**one**"')" "two"
+check "$("$CTL" status --json | jq -c '.queues[0] | [.lines, .next]')" '[2,"one"]' \
+  "status shows a queued line's spoken text without its source"
+rm -f "$D/paused"; : > "$D/s1.queue"
+
 # --- a killed hook leaves no player and no now.json
 fresh; queue "one"; hook
 until_ 5 playing; PID=$(jq -r .player_pid "$D/now.json"); kill -TERM $HOOK
