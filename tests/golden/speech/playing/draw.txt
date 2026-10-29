@@ -15,6 +15,6 @@ bubble 64 282.0 643 356.0 10 300.00 319.00 18.00 338.00 2
 speaker Claude Voice Widget Session:
 line The data layer is in: speechqueue.py writes the widget, draw and regions files four
 line times a second.
-progress 132.0 676 377.0 1000.000 2.000 6.000 1
-footer 30.0 377.0 28 0
-buttons 66.0 102.0 377.0 28 1
+progress 132.0 676 383.0 1000.000 2.000 6.000 1
+footer 30.0 383.0 28 0
+buttons 66.0 102.0 383.0 28 1

@@ -79,7 +79,8 @@ BUBBLE_NAME_GAP = 2                           # the speaker's name to the text u
 BUBBLE_LINES = 6                              # most lines of the text read aloud the bubble shows at once
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
-HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the controls' row
+HEADER_GAP = 6                                # the title to the avatar when collapsed
+CONTROLS_GAP = 12                             # the bubble and avatar to the controls' row
 LINE_GAP = 14                                 # the title's row to the column headers
 LIST_GAP = 0                                  # the column headers to the list
 FOOTER_GAP = 8                                # list to the bubble
@@ -975,7 +976,7 @@ def render(state, now=None):
         regions['bubble'] = [bubble_x0, top, bubble_right, bottom]
         regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
     out.gap(max(full_h, AVATAR_D))
-    out.gap(HEADER_GAP)
+    out.gap(CONTROLS_GAP)
     footer_h = FOOTER_H
     fy = out.y + footer_h / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2

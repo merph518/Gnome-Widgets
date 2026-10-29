@@ -6,6 +6,6 @@ ${font Ubuntu Sans:size=1} ${voffset -22}
 ${font Ubuntu Sans:size=1} ${voffset 126}
 ${font Ubuntu Sans:size=1} ${voffset 6}
 ${font Ubuntu Sans:size=1} ${voffset 144}
-${font Ubuntu Sans:size=1} ${voffset 4}
+${font Ubuntu Sans:size=1} ${voffset 10}
 ${font Ubuntu Sans:size=1} ${voffset 28}
 ${font Ubuntu Sans:size=1} ${voffset 26}
