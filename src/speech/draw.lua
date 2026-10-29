@@ -6,10 +6,6 @@
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
 --   terminal-scroll how many lines conky-mouse.py has turned the wheel over the terminal pane, in
 --                 all (down counts up); the pane follows the newest line again once scrolled back to the end
---   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
---   settings-menu present while conky-mouse.py has the settings menu open: the selected row and
---                 how many rows it is scrolled, as "<selected> <scrolled>", the page's title, then
---                 a row a line, "<label>\t<value>\t<flag>"
 --   close-confirm present while conky-mouse.py has the close prompt open: the button under the
 --                 pointer (0 none, 1 OK, 2 Cancel) and whether the session is busy, then its name
 -- The colours are Claude's CLI's own and fixed: white text and its shares on a near-black
@@ -30,8 +26,7 @@ local hover_x, hover_y = -1, -1           -- window px
 local margin = 0                          -- the shadow margin around the card, in window px
 local frame = nil                         -- draw.txt as the background hook read it this frame
 local bg = {0.094, 0.094, 0.094}          -- the card's colour, #181818
-local fg, fg_back = theme.LIGHT, theme.DARK   -- fg_back: drawn on fg, like the pause icon
-local clock = {stamp = nil, pos = 0, duration = 0, running = false}
+local fg = theme.LIGHT
 local sessions = {version = nil, rows = {}}
 local scroll = nil                        -- eased list scroll position, in rows
 local said = {shown = nil, target = 0, follow = true, steps = nil}   -- the terminal's text: its eased offset in lines, where the wheel left it, whether it follows the newest line
@@ -68,17 +63,18 @@ local function label_after(rest, n)
 end
 
 local function load_sessions(version)
-    -- sessions.txt's lines (speechqueue.py's session_line) as {id, speech, speaking, queued,
-    -- flags, name, repo, span, header}
+    -- sessions.txt's lines (speechqueue.py's session_line) as {id, age, flags, name, repo, span,
+    -- header, review, last}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
         local f = {}
         for v in (line .. '\t'):gmatch('([^\t]*)\t') do f[#f + 1] = v end
-        rows[#rows + 1] = {id = f[1] or '', speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
-                           flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
-                           name = f[6] or '', repo = f[7] or '',
-                           span = tonumber(f[8]) or 1, header = f[9] or '', review = f[10] or ''}
+        rows[#rows + 1] = {id = f[1] or '', age = f[2] or '',
+                           flags = (f[3] or '-') ~= '-' and f[3]:gsub(',', ' ') or '',
+                           name = f[4] or '', repo = f[5] or '',
+                           span = tonumber(f[6]) or 1, header = f[7] or '', review = f[8] or '',
+                           last = f[9] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -132,12 +128,16 @@ function conky_draw_background()
         rounded_rect(cr, margin, margin, w, h, rad)
         cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
         cairo_fill(cr)
-        if d.divider then                          -- the terminal's column, between the header and footer, a shade darker than the sessions'
+        if d.divider then                          -- the terminal's column, under the header, a shade darker than the sessions'
             local x = margin + d.divider[1] * s
             local y0, y1 = margin + d.divider[2] * s, margin + d.divider[3] * s
+            cairo_save(cr)
+            rounded_rect(cr, margin, margin, w, h, rad)   -- kept inside the card's rounded corner
+            cairo_clip(cr)
             cairo_set_source_rgba(cr, 0, 0, 0, 0.22)
             cairo_rectangle(cr, x, y0, margin + w - x, y1 - y0)
             cairo_fill(cr)
+            cairo_restore(cr)
         end
     end)
 end
@@ -149,18 +149,6 @@ local function rounded_line(cr, x0, y0, x1, y1, width)
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
     cairo_move_to(cr, x0, y0)
     cairo_line_to(cr, x1, y1)
-    cairo_stroke(cr)
-end
-
-local function triangle(cr, cx, cy, h, dir)
-    -- right-pointing (dir = 1) or left-pointing (dir = -1) triangle with softened corners
-    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND)
-    cairo_set_line_width(cr, h * 0.25)
-    cairo_move_to(cr, cx - dir * h * 0.75, cy - h)
-    cairo_line_to(cr, cx + dir * h * 0.85, cy)
-    cairo_line_to(cr, cx - dir * h * 0.75, cy + h)
-    cairo_close_path(cr)
-    cairo_fill_preserve(cr)
     cairo_stroke(cr)
 end
 
@@ -320,11 +308,6 @@ local function show_line(cr, line, x, cy, s, text, alpha)
     return x
 end
 
-local function fmt_time(sec)
-    sec = math.floor(math.max(sec, 0))
-    return string.format('%d:%02d', sec // 60, sec % 60)
-end
-
 local MASCOT = {' \u{2590}\u{259b}\u{2588}\u{2588}\u{2588}\u{259c}\u{258c}',
                 '\u{259d}\u{259c}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259b}\u{2598}',
                 '  \u{2598}\u{2598} \u{259d}\u{259d}'}   -- Claude Code's creature, as its banner sets it in block characters
@@ -410,38 +393,16 @@ local function draw_meta(cr, meta, right, y, line, step, s, text, links)
     end
 end
 
-local function draw_working(cr, left, cw, y, s, pos, duration, paused, queued, playing)
-    -- the CLI's working line: the orange spinner turning and "Reading aloud…" with the clip's
-    -- time, or "Paused" (still, dimmer), or "Waiting" while lines queue and none plays
-    if playing == nil then playing = true end
-    local working = playing and not paused
-    draw_spark(cr, left + 0.55 * cw, y, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6)
-    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or 'Waiting'
-    set(cr, ORANGE, working and 1 or 0.6)
-    local lw = show(cr, label, left + 2 * cw, y, 'left')
-    local detail = {}
-    if playing then detail[#detail + 1] = fmt_time(math.min(pos, duration > 0 and duration or pos)) .. ' / ' .. fmt_time(duration) end
-    if queued > 0 then detail[#detail + 1] = queued .. ' queued' end
-    if #detail > 0 then
-        set(cr, fg, 0.5)
-        show(cr, '(' .. table.concat(detail, ' \u{b7} ') .. ')', left + 2 * cw + lw + cw, y, 'left')
-    end
-end
-
-local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, duration)
+local function draw_terminal(cr, t, title, lines, s, text, scrolled)
     -- the pane as Claude's CLI prints a session, with no frame of its own: its welcome banner
-    -- (the creature, then the pane's title and what the widget is holding), then each message
-    -- spoken so far, printed when it began to be read, scrolling like a terminal's. A message is
-    -- the CLI's own three parts: the speaker's name on a grey band behind a "❯" as the prompt,
-    -- the text behind a white bullet, and a dim "✻ Read aloud for 7s · done Thursday 9:47 AM" line.
-    -- t[9] lines show at once, the rest above them scrolled by `scrolled` lines and clipped to
-    -- where they show. While a clip plays, the closing line of the message being read is the
-    -- CLI's working line (the spinner turning and "Reading aloud…" with the clip's time, or
-    -- "Paused"), and turns into its gray line with the time once it is done.
+    -- (the creature, then the pane's title and how many sessions the widget lists), then each
+    -- reply the sessions have made, scrolling like a terminal's. A message is the CLI's own
+    -- three parts: the speaker's name on a grey band behind a "❯" as the prompt, the text
+    -- behind a white bullet, and a dim "✻ Replied · Thursday 9:47 AM" line. t[9] lines show at
+    -- once, the rest above them scrolled by `scrolled` lines and clipped to where they show.
     local x0, x1, pad = t[1] * s, t[3] * s, t[5] * s
-    local head_cy, first_cy, step, shown, status_cy = t[6] * s, t[7] * s, t[8] * s, t[9], t[10] * s
-    local playing, paused, queued = t[11] == 1, t[12] == 1, t[13]
-    local sessions, speech_on = t[14] or 0, t[15] or 0
+    local head_cy, first_cy, step, shown = t[6] * s, t[7] * s, t[8] * s, t[9]
+    local sessions = t[10] or 0
     local left = x0 + pad
 
     mono(cr, text, s)
@@ -453,16 +414,7 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     show(cr, fit(cr, title, x1 - pad - tx), tx, head_cy, 'left')
     mono(cr, text, s)
     set(cr, fg, 0.5)
-    show(cr, sessions .. (sessions == 1 and ' session' or ' sessions') .. ' \u{b7} ' .. speech_on .. ' with speech on', tx, head_cy + step, 'left')
-    show(cr, queued > 0 and (queued .. (queued == 1 and ' line queued' or ' lines queued')) or 'Nothing queued', tx, head_cy + 2 * step, 'left')
-
-    local reading = nil                                    -- the closing line of the message being read, which turns into the working line
-    if playing then
-        for i, line in ipairs(lines) do
-            if line:byte(1) == DONE_MARK then reading = i end
-        end
-        if reading and reading ~= #lines then reading = nil end
-    end
+    show(cr, sessions .. (sessions == 1 and ' managed session' or ' managed sessions'), tx, head_cy + step, 'left')
 
     local ytop = first_cy - step / 2
     local links_now = {}                                   -- the numbers drawn this frame, for mouse.py to hit-test
@@ -482,8 +434,6 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
                 local name, meta = line:match('^([^\6]*)(.*)$')
                 show_line(cr, name, left + 2 * cw, y, s, text, 1)
                 draw_meta(cr, meta, x1 - pad, y, i - 1, step, s, text, links_now)
-            elseif kind == DONE_MARK and i == reading then
-                draw_working(cr, left, cw, y, s, pos, duration, paused, queued)
             elseif kind == DONE_MARK then
                 draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.55, fg)      -- gray, as the CLI's is once its turn is done
                 show_line(cr, line, left + 2 * cw, y, s, text, 0.5)
@@ -501,34 +451,6 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     cairo_restore(cr)
 
     write_links(links_now)
-    -- the working line has a row of its own only when no message is being read: lines waiting,
-    -- or a clip playing before its message is printed
-    if reading or not (playing or queued > 0) then return end
-    draw_working(cr, left, cw, status_cy, s, pos, duration, paused, queued, playing)
-end
-
-local function round_button(cr, cx, cy, size, active)
-    -- a footer button as the pause button is drawn: the foreground's circle, a little bigger
-    -- under the pointer; dimmed, with its icon in the foreground, while there is nothing to skip.
-    -- Leaves the icon's colour set.
-    local on = active and hovered(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
-    set(cr, fg, active and 1 or 0.28)
-    cairo_new_path(cr)
-    cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
-    cairo_fill(cr)
-    if active then cairo_set_source_rgb(cr, bg[1], bg[2], bg[3]) else set(cr, fg, 0.6) end
-end
-
-local function draw_skip_buttons(cr, b, s)
-    -- skip (this line: a triangle at a bar) and next (on to the next session: two triangles),
-    -- round buttons after the pause button
-    local skip_cx, next_cx, cy, size, active = b[1] * s, b[2] * s, b[3] * s, b[4] * s, b[5] == 1
-    round_button(cr, skip_cx, cy, size, active)
-    triangle(cr, skip_cx - size * 0.06, cy, size * 0.15, 1)
-    rounded_line(cr, skip_cx + size * 0.2, cy - size * 0.15, skip_cx + size * 0.2, cy + size * 0.15, size * 0.086)
-    round_button(cr, next_cx, cy, size, active)
-    triangle(cr, next_cx - size * 0.12, cy, size * 0.139, 1)
-    triangle(cr, next_cx + size * 0.13, cy, size * 0.139, 1)
 end
 
 local function list_offset(last)
@@ -538,20 +460,17 @@ end
 
 local function draw_divider(cr, v, rules, s, w)
     -- the lines of the application's frame, as Claude's app draws its own: one thin line a little
-    -- lighter than the card under the header across the card, another over the controls at the
-    -- foot of the sessions column, and the divider between the columns from the first to the
-    -- card's bottom, brighter while it is being dragged (mouse.py's divider-drag file)
+    -- lighter than the card under the header across the card, and the divider between the columns
+    -- from it to the card's bottom, brighter while it is being dragged (mouse.py's divider-drag file)
     local x, y0, y1 = v[1] * s, v[2] * s, v[3] * s
     local held = read('divider-drag') ~= nil
     cairo_set_line_width(cr, math.max(1, math.floor(s + 0.5)))
     set(cr, fg, 0.14)
-    for _, line in ipairs({{rules[1], w}, {rules[2], x}}) do
-        local y = math.floor(line[1] * s) + 0.5
-        cairo_new_path(cr)
-        cairo_move_to(cr, 0, y)
-        cairo_line_to(cr, line[2], y)
-        cairo_stroke(cr)
-    end
+    local y = math.floor(rules[1] * s) + 0.5
+    cairo_new_path(cr)
+    cairo_move_to(cr, 0, y)
+    cairo_line_to(cr, w, y)
+    cairo_stroke(cr)
     set(cr, fg, held and 0.4 or 0.14)
     cairo_new_path(cr)
     cairo_move_to(cr, math.floor(x) + 0.5, y0)
@@ -573,28 +492,6 @@ local function draw_scrollbar(cr, x, top, height, s, rows, count, at, last)
 end
 
 
-local SPEECH_SETTINGS = {{'on', 'On'}, {'alerts', 'Alerts'}, {'off', 'Off'}}
-local function draw_gear(cr, g, s, open)
-    -- the gear at the footer's right, opening the settings menu: a ring with eight teeth in the
-    -- foreground, brighter under the pointer
-    local cx, cy, size = g[1] * s, g[2] * s, g[3] * s
-    local on = hovered(cx - size, cy - size, cx + size, cy + size)
-    local r, teeth = size * 0.32, 8
-    set(cr, fg, (on or open) and 1 or 0.7)
-    cairo_set_line_width(cr, size * 0.17)
-    cairo_new_path(cr)
-    cairo_arc(cr, cx, cy, r, 0, 2 * math.pi)
-    cairo_stroke(cr)
-    cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT)
-    for i = 0, teeth - 1 do
-        local a = i * 2 * math.pi / teeth
-        cairo_set_line_width(cr, size * 0.2)
-        cairo_move_to(cr, cx + math.cos(a) * r, cy + math.sin(a) * r)
-        cairo_line_to(cr, cx + math.cos(a) * size * 0.5, cy + math.sin(a) * size * 0.5)
-        cairo_stroke(cr)
-    end
-end
-
 local GREEN = {0.33, 0.78, 0.40}          -- the CLI's dot before a finished item
 
 local function draw_group(cr, r, x0, y, row, c, b, s, text)
@@ -614,12 +511,13 @@ end
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     -- a session's line, set as the CLI sets its session list, in the terminal's font: behind a
     -- small green dot, or the turning spinner and a bold name while it is busy, its name dim
-    -- unless it is busy; then dim after it its repository, and at the right the lines it has queued (a click on
-    -- the name asks to close the session). A section's title above it
-    -- when it is the first listed under that, after a blank row unless it is the first section.
-    -- Its issue and pull request numbers are in its messages' headers in the terminal. The name
-    -- is underlined under the pointer. Returns how many rows it took.
-    local head_rows = r.header ~= '' and r.span - 1 or 0
+    -- unless it is busy; then dim after it its repository, and at the right the age of its last
+    -- reply (a click on the name asks to close the session). A section's title above it
+    -- when it is the first listed under that, after a blank row unless it is the first section,
+    -- and under it, dimmer, its last reply's line while that is recent. Its issue and pull request
+    -- numbers are in its messages' headers in the terminal. The name is underlined under the
+    -- pointer. Returns how many rows it took.
+    local head_rows = r.header ~= '' and r.span - 1 - (r.last ~= '' and 1 or 0) or 0
     if head_rows > 0 then
         draw_group(cr, r, x0, y + (head_rows - 1) * row, row, c, blk, s, text)
         y = y + head_rows * row
@@ -637,9 +535,8 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         cairo_fill(cr)
     end
     font(cr, 11, text, s, false, false, true)
-    local queued = r.queued > 0 and r.queued .. ' queued' or ''
-    local queued_w = queued ~= '' and width_of(cr, queued) + 8 * s or 0
-    local right = c[2] * s - queued_w
+    local age_w = r.age ~= '' and width_of(cr, r.age) + 8 * s or 0
+    local right = c[2] * s - age_w
     mono(cr, text, s, busy)
     local name = fit(cr, r.name, right - name_x)
     local after = name_x + width_of(cr, name)
@@ -658,7 +555,11 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local detail = r.review ~= '' and r.review or r.repo   -- the section says its state; a pull request open says so
     local dx = after + 12 * s
     if detail ~= '' and right - dx > 40 * s then show(cr, fit(cr, detail, right - dx), dx, cy, 'left') end
-    if queued ~= '' then show(cr, queued, c[2] * s, cy, 'right') end
+    if r.age ~= '' then show(cr, r.age, c[2] * s, cy, 'right') end
+    if r.last ~= '' then
+        set(cr, secondary(), 0.7)
+        show(cr, fit(cr, r.last, c[2] * s - name_x), name_x, cy + row, 'left')
+    end
     return r.span
 end
 
@@ -692,52 +593,6 @@ local function draw_list(cr, l, version, c, blk, s, text)
         at = at + draw_row(cr, r, x0, y, row, c, s, text, blk)
     end
     cairo_restore(cr)
-end
-
-local function draw_footer(cr, f, s)
-    -- pause (two bars) while speech plays, resume (a triangle) while it is paused: the
-    -- foreground's circle with the icon in the card's colour, a little bigger under the pointer
-    local cx, cy, size, paused = f[1] * s, f[2] * s, f[3] * s, f[4] == 1
-    local on = hovered(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
-    set(cr, fg)
-    cairo_new_path(cr)
-    cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
-    cairo_fill(cr)
-    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
-    if paused then
-        triangle(cr, cx + size * 0.03, cy, size * 0.17, 1)
-    else
-        local gap, h = size * 0.12, size * 0.15
-        rounded_line(cr, cx - gap, cy - h, cx - gap, cy + h, size * 0.1)
-        rounded_line(cr, cx + gap, cy - h, cx + gap, cy + h, size * 0.1)
-    end
-end
-
-local function draw_volume(cr, v, s)
-    -- the speech volume: theme.draw_volume's slider, as the Spotify widget draws its own, its
-    -- fraction the volume over speechctl's top of 2.0; while conky-mouse.py drags it, the
-    -- level under the pointer from volume-preview
-    local x0, x1, cy, fraction, ix, size = v[1] * s, v[2] * s, v[3] * s, v[4], v[5] * s, v[6] * s
-    local preview = tonumber(read('volume-preview') or '')
-    if preview then fraction = preview end
-    local active = preview ~= nil or hovered(x0 - 6 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s)
-    theme.draw_volume(cr, x0, x1, cy, fraction, ix, size, s, fg, active,
-                      active or hovered(ix - 4 * s, cy - 10 * s, x1 + 6 * s, cy + 10 * s))
-end
-
-local function menu_state()
-    -- {selected, top, title, rows = {{label, value, flag}}} while the settings menu is open, else nil
-    local text = read('settings-menu')
-    if not text then return nil end
-    local head, title, rest = text:match('^(%d+ %d+)\n([^\n]*)\n?(.*)$')
-    if not head then return nil end
-    local selected, top = head:match('^(%d+) (%d+)$')
-    local rows = {}
-    for line in rest:gmatch('[^\n]+') do
-        local label, value, flag = line:match('^([^\t]*)\t?([^\t]*)\t?([^\t]*)$')
-        rows[#rows + 1] = {label or '', value or '', flag or ''}
-    end
-    return {selected = tonumber(selected), top = tonumber(top), title = title, rows = rows}
 end
 
 local function confirm_state()
@@ -790,69 +645,6 @@ local function draw_confirm(cr, c, state, s, text)
     button(c[11], c[12], 'OK', state.hover == 1, true)
 end
 
-local MENU_SELECTED = {0.69, 0.73, 0.98}     -- the CLI's selection colour, its cursor and the row it is on
-
-local function draw_menu(cr, m, state, s, text)
-    -- the settings menu, laid out as the CLI's settings list over the card below its title: the
-    -- page's title on a first line (a click on it goes back), a row for each setting with its
-    -- value at the right and the selected one behind a cursor in the selection colour, and the
-    -- keys at the foot
-    local x0, top, x1, bottom = m[1] * s, m[2] * s, m[3] * s, m[4] * s
-    local title_cy, first, row, visible, hint_cy, value_x, pad = m[5] * s, m[6] * s, m[7] * s, m[8], m[9] * s, m[10] * s, m[11] * s
-    local card_w, card_h = conky_window.width - 2 * margin, conky_window.height - 2 * margin
-    cairo_save(cr)
-    rounded_rect(cr, 0, 0, card_w, card_h, math.min(24, card_h / 4))
-    cairo_clip(cr)
-    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
-    cairo_rectangle(cr, 0, top, card_w, card_h - top)
-    cairo_fill(cr)
-    cairo_restore(cr)
-    set(cr, fg, 0.12)
-    cairo_set_line_width(cr, 1 * s)
-    cairo_move_to(cr, 0, top)
-    cairo_line_to(cr, card_w, top)
-    cairo_stroke(cr)
-    local left = x0 + pad
-    mono(cr, text, s, true)
-    set(cr, fg, 0.9)
-    show(cr, fit(cr, state.title, x1 - left - pad), left, title_cy, 'left')
-    local total = #state.rows
-    for i = state.top + 1, math.min(state.top + visible, total) do
-        local r = state.rows[i]
-        local cy = first + (i - state.top - 1) * row + row / 2
-        local on = i == state.selected + 1
-        mono(cr, text, s)
-        if on then draw_chevron(cr, left + 0.2 * width_of(cr, ' '), cy, row * 0.5, 1, MENU_SELECTED) end
-        local function colour(dim)
-            if on then
-                cairo_set_source_rgb(cr, MENU_SELECTED[1], MENU_SELECTED[2], MENU_SELECTED[3])
-            else
-                set(cr, fg, dim and 0.55 or 1)
-            end
-        end
-        colour(false)
-        show(cr, fit(cr, r[1], value_x - left - 3 * pad), left + 2 * width_of(cr, ' '), cy, 'left')
-        if r[2] ~= '' then
-            if r[3] == 'current' and not on then set(cr, GREEN) else colour(r[2] == '\u{203a}') end
-            show(cr, fit(cr, r[2], x1 - value_x - pad), value_x, cy, 'left')
-        end
-    end
-    mono(cr, text, s)
-    set(cr, fg, 0.5)
-    local function arrow(cy, dir)                  -- a small triangle at the right edge: more rows above (-1) or below (1)
-        local ax, h = x1 - pad - 4 * s, 3 * s
-        cairo_new_path(cr)
-        cairo_move_to(cr, ax - h, cy + dir * h / 2)
-        cairo_line_to(cr, ax + h, cy + dir * h / 2)
-        cairo_line_to(cr, ax, cy - dir * h / 2)
-        cairo_close_path(cr)
-        cairo_fill(cr)
-    end
-    if state.top > 0 then arrow(first + row / 2, 1) end
-    if state.top + visible < total then arrow(first + (visible - 0.5) * row, -1) end
-    show(cr, fit(cr, 'Enter/Space to change \u{b7} Backspace to go back \u{b7} Esc to close', x1 - left - pad), left, hint_cy, 'left')
-end
-
 function conky_draw_widget()
     if conky_window == nil then return end
     local d = frame or load_draw()                 -- read once a frame, by the background hook
@@ -860,30 +652,16 @@ function conky_draw_widget()
     if not d.scale then return end
     local s, text = d.scale[1], d.scale[2] or 1
 
-    -- the clip's clock: resync on each draw.txt update, advance locally in between
-    local p = d.clock
-    if p and p[1] ~= clock.stamp then
-        clock = {stamp = p[1], pos = p[2], duration = p[3], running = p[4] == 1}
-    elseif p and clock.running then
-        clock.pos = clock.pos + dt()
-    end
-
     with_cairo(function(cr)
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.title then draw_title(cr, d.title, label_after(d.text.title, 3), s, text) end
         if d.terminal then
             draw_terminal(cr, d.terminal, d.text.speaker or '', d.lines, s, text,
-                          term_offset(#d.lines, d.terminal[9]), clock.pos, clock.duration)
+                          term_offset(#d.lines, d.terminal[9]))
         end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
         if d.divider then draw_divider(cr, d.divider, d.rules, s, conky_window.width - 2 * margin) end
-        if d.footer then draw_footer(cr, d.footer, s) end
-        if d.buttons then draw_skip_buttons(cr, d.buttons, s) end
-        if d.volume then draw_volume(cr, d.volume, s) end
-        local menu = d.menu and menu_state()
-        if d.gear then draw_gear(cr, d.gear, s, menu ~= nil) end
-        if menu then draw_menu(cr, d.menu, menu, s, text) end
         local confirm = d.confirm and confirm_state()
         if confirm then draw_confirm(cr, d.confirm, confirm, s, text) end
     end)

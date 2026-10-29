@@ -1,49 +1,27 @@
 """The speech widget's part of the mouse helper, loaded by conky-mouse.py when it is started
-as `conky-mouse.py speech`: its name, window class and controls, every one of which runs
-speechctl (tray_model.py's, from PATH or the path ~/.config/conky-widgets/speech/speechctl
-holds).
+as `conky-mouse.py speech`: its name, window class and what a click, tap, drag or wheel step
+does.
 
-  - skip, next, pause/resume: a click or tap runs `speechctl skip`, `next` and `toggle`
-  - the gear in the footer: a click or tap opens the settings menu over the card, laid out as the
-    CLI's settings list: the default voice, pace, text scaling, collapse when idle, always on top
-    and reset size, and a page of the sessions, each with its speech On, Alerts or Off
-    (`speechctl speech <id> on|alerts|off`) and the voice it is read in, which is kept in
-    <id>.voice beside the session's other speech files (a voice's name, absent for the global
-    one). Up and Down or the pointer select a row, Enter, Space or a click change it, Left,
-    Backspace or a click on the title go back a page, and Escape closes the menu, as does 20
-    seconds without an event. While it is open this helper holds the pointer and the keyboard and
-    takes the keyboard focus, which conky's window never accepts, giving it back on closing
-  - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
-    is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
-    0) and the next restores the level from before
   - an issue or pull request number in a message's header in the terminal: a click or tap
     opens it in a new Chrome tab
   - a session's name: a click or tap asks "Are you sure?" over the list, and OK ends the
     session (SIGTERM to its process). While the prompt is open this helper holds the pointer
     and the keyboard, so a click anywhere but on OK, Cancel and Escape close it without
     ending anything
-  - the wheel: over the volume slider or its speaker it turns it down or up, and over the
-    list it scrolls the list a row at a time; a finger swiped over the list scrolls it too
+  - the divider between the columns: a drag moves it
+  - the wheel: over the terminal pane it scrolls the pane, and over the list it scrolls the
+    list a row at a time; a finger swiped over the list scrolls it too
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares.
 """
-import ctypes, json, os, signal, subprocess, sys, threading, time
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, '..'))
-import menu  # noqa: E402
-import tray_model  # noqa: E402
+import ctypes, json, os, signal, subprocess, threading, time
 
 NAME = 'conky-widgets/speech'                  # the config and cache folders under ~/.config, ~/.cache
 # conky.conf's own_window_class, with the suffix a copy beside the user's adds
 WM_CLASS = 'ConkySpeechQueue' + os.environ.get('CSN_CLASS_SUFFIX', '')
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
-# The buttons speechqueue.py writes the regions of, and what each runs.
-COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',)}
-BUTTONS = tuple(COMMANDS) + ('volume_icon', 'gear')  # the controls a click or tap presses
-REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'divider')   # the regions a press looks through, in order
-VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
-VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
+BUTTONS = ()                                   # the controls a click or tap presses: this widget has none of its own
+REGIONS_ORDER = ('minimize', 'close', 'divider')   # the regions a press looks through, in order
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
 BROWSER = 'google-chrome'                      # what a session's box and name open their links in
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again
@@ -52,76 +30,23 @@ LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is s
 TERMINAL_SCROLL = os.path.join(CACHE, 'terminal-scroll')   # wheel steps over the terminal pane, in all, for draw.lua
 SPLIT = os.path.expanduser(f'~/.config/{NAME}/split')   # the sessions column's share of the width, which speechqueue.py lays the columns out by
 DIVIDER_DRAG = os.path.join(CACHE, 'divider-drag')   # exists while the divider is held, so draw.lua brightens it
-VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
-VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
-SETTINGS_MENU = os.path.join(CACHE, 'settings-menu')   # "<selected> <scrolled>", the page's title, then a row a line (label, value and flag, tab separated), while the settings menu is open
-SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')   # the speaking hook's state
 MENU_TIMEOUT = 20.0                            # s an open popup waits before it closes itself
 CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
 CONFIRM_ARMED = 0.5                            # s after the prompt opens before a press answers it, so the second click of a double click on a name cannot
 SESSIONS_DIR = os.path.expanduser('~/.claude/sessions')   # one <pid>.json a running Claude session
 KEY_PRESS, ESCAPE = 2, 0xff1b                  # X's key press event, and the Escape keysym
-KEYS = {0xff52: 'up', 0xff54: 'down', 0xff51: 'left', 0xff53: 'right', 0xff0d: 'enter', 0xff8d: 'enter',
-        0x20: 'space', 0xff08: 'backspace'}   # the keysyms the settings menu reads
 GRAB_SUCCESS, GRAB_ASYNC = 0, 1
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 
 def start():
-    """Clears the preview, the open settings and the open prompt a previous run left behind if
-    it was killed mid-drag or mid-popup."""
-    for path in (VOLUME_PREVIEW, SETTINGS_MENU, CLOSE_CONFIRM, DIVIDER_DRAG):
+    """Clears the open prompt and the held divider a previous run left behind if it was killed
+    mid-popup or mid-drag."""
+    for path in (CLOSE_CONFIRM, DIVIDER_DRAG):
         try:
             os.remove(path)
         except OSError:
             pass
-
-
-def speechctl(*args):
-    """Runs speechctl with `args`, and logs it."""
-    ran = tray_model.run_speechctl(*args)
-    core.log('speechctl ' + ' '.join(args) + ('' if ran else ': no speechctl'))
-
-
-def press(d, win, hit):
-    """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
-    if hit == 'volume_icon':
-        toggle_mute()
-    elif hit == 'gear':
-        open_menu(d, win, core.scale(), core.load_regions())
-    else:
-        speechctl(*COMMANDS[hit])
-
-
-def remembered_volume():
-    """The level before the last mute, or None when none was kept."""
-    try:
-        with open(VOLUME_BEFORE_MUTE) as f:
-            level = float(f.read())
-    except (OSError, ValueError):
-        return None
-    return level if level >= VOLUME_MUTED else None
-
-
-def toggle_mute():
-    """Mutes the speech, keeping its volume in VOLUME_BEFORE_MUTE so a restart while muted still
-    restores it, or restores that volume when it is already muted. The kept level stays when the
-    volume is already zero, and the default volume comes back where none was kept (a slider
-    dragged to its left end)."""
-    level = tray_model.speech_settings()[1]
-    if level >= VOLUME_MUTED:
-        os.makedirs(CACHE, exist_ok=True)
-        with open(VOLUME_BEFORE_MUTE + '.tmp', 'w') as f:
-            f.write(f'{level:.1f}')
-        os.replace(VOLUME_BEFORE_MUTE + '.tmp', VOLUME_BEFORE_MUTE)
-        speechctl('volume', '0')
-        return
-    back = remembered_volume() or tray_model.DEFAULT_VOLUME
-    speechctl('volume', f'{back:.1f}')
-    try:
-        os.remove(VOLUME_BEFORE_MUTE)
-    except OSError:
-        pass
 
 
 def inside(r, s, x, y):
@@ -229,34 +154,6 @@ def open_once(row, kind, now=time.monotonic):
     threading.Thread(target=open_links, args=(row, kind), daemon=True).start()
 
 
-def set_volume(d, win, regions, s, track):
-    """Follow `track` (follow_pointer() or a Touch) along the volume slider, showing the level
-    under it (draw.lua draws the preview until speechqueue.py reports the level), and set the
-    speech volume where it is let go. speechctl runs unwaited, so it runs once, at the end,
-    where runs along the way could land out of order."""
-    bx0, bx1 = regions['volume_bar']
-    wx, _, _, _ = core.card_of(core.geometry(d, win), s)
-    os.makedirs(CACHE, exist_ok=True)
-    level, held = 0.0, True
-    try:
-        while held:
-            px, _, held = track()
-            fraction = min(max((px - wx - bx0 * s) / ((bx1 - bx0) * s), 0.0), 1.0)
-            level = round(fraction * VOLUME_TOP, 1)
-            with open(VOLUME_PREVIEW + '.tmp', 'w') as f:
-                f.write(f'{level / VOLUME_TOP:.4f}')
-            os.replace(VOLUME_PREVIEW + '.tmp', VOLUME_PREVIEW)
-            time.sleep(0.02)
-        speechctl('volume', f'{level:.1f}')
-        time.sleep(0.6)  # keep the preview until speechqueue.py reports the new level
-    finally:
-        # a preview left behind would hold the slider at it, so it goes however the drag ends
-        try:
-            os.remove(VOLUME_PREVIEW)
-        except OSError:
-            pass
-
-
 def move_divider(d, win, regions, s, track):
     """Follow `track` (follow_pointer() or a Touch) while the divider is held, writing the
     share of the width the sessions column takes with the pointer at the middle of the gap,
@@ -285,95 +182,8 @@ def move_divider(d, win, regions, s, track):
             pass
 
 
-def menu_hit(region, scroll, count, x, y):
-    """What card-relative logical (x, y) is on in the settings menu `region` (regions.json's
-    `menu`), whose rows are scrolled `scroll` down and number `count`: ('row', index), ('title',)
-    for its first line, ('panel',) for the rest of it, or None outside."""
-    if not inside(region['box'], 1, x, y):
-        return None
-    if region['title'][0] <= y <= region['title'][1]:
-        return ('title',)
-    index = int((y - region['first']) // region['row']) if y >= region['first'] else -1
-    if 0 <= index < region['visible'] and scroll + index < count:
-        return 'row', scroll + index
-    return ('panel',)
-
-
-def write_menu(model, visible):
-    """What draw.lua draws the menu from: the cursor and how far it is scrolled, the page's
-    title, then a row a line, "<label>\t<value>\t<flag>"."""
-    os.makedirs(CACHE, exist_ok=True)
-    rows = ''.join('\t'.join(row) + '\n' for row in model.rows())
-    with open(SETTINGS_MENU + '.tmp', 'w') as f:
-        f.write(f'{model.selected} {model.top}\n{model.title()}\n{rows}')
-    os.replace(SETTINGS_MENU + '.tmp', SETTINGS_MENU)
-
-
-def run_menu(model, regions, events, now=time.monotonic, sleep=time.sleep):
-    """Shows the settings menu for `model` (menu.Menu) until it is closed. `regions()` gives
-    regions.json's current entries, since a text scaling or a size reset changes the card while
-    the menu is open. `events()` gives the card-relative logical-px events since it was last
-    called: ('move', x, y), ('press', x, y), ('wheel', ±1), ('key', name) for up, down, left,
-    right, enter, space and backspace, and ('escape',). Moving over a row selects it and a press
-    on it changes it; Left and Right turn a setting's value back and forward, Right opens a
-    page, Left and Backspace go back one; a press on the title closes the menu from the first
-    page and goes back from another; Escape and MENU_TIMEOUT without an event close it. Presses in the first CONFIRM_ARMED seconds are
-    ignored, so the second click of a double click on the gear is not an answer. draw.lua draws
-    it from SETTINGS_MENU for as long as this runs."""
-    opened = now()
-    deadline = opened + MENU_TIMEOUT
-    shown = None
-    try:
-        while now() < deadline:
-            region = regions().get('menu')
-            if not region:
-                return
-            visible = region['visible']
-            for kind, *args in events():
-                deadline = now() + MENU_TIMEOUT
-                count = len(model.rows())
-                if kind == 'move':
-                    hit = menu_hit(region, model.top, count, *args)
-                    if hit and hit[0] == 'row':
-                        model.select(hit[1])
-                elif kind == 'press' and now() - opened >= CONFIRM_ARMED:
-                    hit = menu_hit(region, model.top, count, *args)
-                    if hit and hit[0] == 'row':
-                        model.activate(hit[1])
-                    elif hit and hit[0] == 'title' and not model.back():
-                        return
-                elif kind == 'wheel':
-                    model.move(args[0], visible)
-                elif kind == 'key':
-                    name = args[0]
-                    if name == 'up':
-                        model.move(-1, visible)
-                    elif name == 'down':
-                        model.move(1, visible)
-                    elif name in ('enter', 'space'):
-                        model.activate()
-                    elif name in ('right', 'left'):
-                        model.nudge(1 if name == 'right' else -1)
-                    elif name == 'backspace':
-                        model.back()
-                elif kind == 'escape':
-                    return
-                model.follow(visible)
-            model.follow(visible)
-            state = (model.selected, model.top, tuple(model.rows()), model.title())
-            if state != shown:
-                shown = state
-                write_menu(model, visible)
-            sleep(0.02)
-    finally:
-        try:
-            os.remove(SETTINGS_MENU)
-        except OSError:
-            pass
-
-
 def declare(x11):
-    """The argument types of the X calls the open list makes, which conky-mouse.py has no use for."""
+    """The argument types of the X calls the open prompt makes, which conky-mouse.py has no use for."""
     x11.XGrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_uint,
                                  ctypes.c_int, ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
     x11.XGrabKeyboard.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
@@ -456,12 +266,11 @@ def ungrab(d):
 
 
 def x_events(d, win, s, opcode):
-    """run_menu's and run_confirm's events() reading X's queue. A finger that touches down
+    """run_confirm's events() reading X's queue. A finger that touches down
     is followed from one call to the next: where it lifts after a tap is a press, and a swipe
     is not one."""
     x11, ev = core.x11, core.XEvent()
     escape = x11.XKeysymToKeycode(d, ESCAPE)
-    keys = {x11.XKeysymToKeycode(d, sym): name for sym, name in KEYS.items()}
     touch = {}                                   # the finger being followed: it, where it began, where it tapped
 
     def card(x, y):
@@ -488,12 +297,8 @@ def x_events(d, win, s, opcode):
                 out.append(('move', *card(b.x, b.y)))
             elif ev.type == core.BUTTON_PRESS and b.button == 1:
                 out.append(('press', *card(b.x, b.y)))
-            elif ev.type == core.BUTTON_PRESS and b.button in (core.WHEEL_UP, core.WHEEL_DOWN):
-                out.append(('wheel', 1 if b.button == core.WHEEL_DOWN else -1))
             elif ev.type == KEY_PRESS and b.button == escape:   # an XKeyEvent's keycode sits where a button's does
                 out.append(('escape',))
-            elif ev.type == KEY_PRESS and b.button in keys:
-                out.append(('key', keys[b.button]))
             elif opcode and ev.type == core.GENERIC_EVENT and not touch:
                 t = core.touch_event(d, ev, opcode)
                 if t and t[0] == core.XI_TOUCH_BEGIN and t[2] == win:
@@ -502,49 +307,6 @@ def x_events(d, win, s, opcode):
                                  at=card(t[5], t[6]), swiped=False)
         return out
     return events
-
-
-def set_session_voice(sid, name, speak=None):
-    """Keeps `name` as the voice session `sid` is read in, in <sid>.voice beside its other speech
-    files; '' (the global voice) removes the file."""
-    if not sid or os.path.basename(sid) != sid:
-        return
-    path = os.path.join(speak or SPEAK, sid + '.voice')
-    try:
-        if name:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path + '.tmp', 'w') as f:
-                f.write(name)
-            os.replace(path + '.tmp', path)
-        else:
-            os.remove(path)
-    except OSError as e:
-        if not (isinstance(e, FileNotFoundError) and not name):
-            core.log(f'voice for {sid}: {e}')
-
-
-def set_session_speech(sid, value):
-    speechctl('speech', sid, value)
-
-
-def open_menu(d, win, s, regions):
-    """The gear was pressed: open the settings menu, and carry out what is chosen in it."""
-    region = regions.get('menu')
-    if not region:
-        return
-    declare(core.x11)
-    pointer, keyboard = grab(d, win)
-    focused, accepted = focus_window(d, win)
-    core.log(f'settings menu: pointer {"held" if pointer else "not held"}, '
-             f'keyboard {"held" if keyboard else "not held"}, focus {"taken" if focused else "not taken"}')
-    model = menu.Menu(regions.get('rows', ()), region['voices'],
-                      menu.Settings(set_session_voice=set_session_voice, set_session_speech=set_session_speech))
-    try:
-        run_menu(model, core.load_regions, x_events(d, win, s, core.touch_opcode(d)))
-    finally:
-        ungrab(d)
-        set_accepts_input(d, win, bool(accepted))
-    core.log('settings menu closed')
 
 
 def prompt_at(prompt, x, y):
@@ -564,7 +326,8 @@ def write_confirm(row, hover):
 
 def run_confirm(prompt, row, events, now=time.monotonic, sleep=time.sleep):
     """Shows the close prompt for session `row` until it is answered, and returns whether OK was
-    pressed. `events()` is run_menu's. A press on OK answers yes; one anywhere else, Escape and
+    pressed. `events()` gives the card-relative logical-px events since it was last called:
+    ('move', x, y), ('press', x, y) and ('escape',). A press on OK answers yes; one anywhere else, Escape and
     MENU_TIMEOUT without an event answer no. Presses in the first CONFIRM_ARMED seconds are
     ignored, so the second click of a double click on the name is not an answer. draw.lua draws
     the prompt from CLOSE_CONFIRM for as long as this runs."""
@@ -649,14 +412,11 @@ def close_session(d, win, s, regions, row):
 
 
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
-    """A press on the volume slider sets the volume along it. A press on a session's name or an
-    issue or pull request number in the terminal: a click or tap opens the prompt that closes the
-    session, or the issue or pull request; a drag moves the widget, or with a finger scrolls the
-    list when it can scroll. Returns whether the press was on any of them."""
+    """A press on the divider moves it. A press on a session's name or an issue or pull request
+    number in the terminal: a click or tap opens the prompt that closes the session, or the issue
+    or pull request; a drag moves the widget, or with a finger scrolls the list when it can
+    scroll. Returns whether the press was on any of them."""
     x, y, start = at
-    if hit == 'volume' and regions.get('volume_bar'):
-        set_volume(d, win, regions, s, track)
-        return True
     if hit == 'divider' and regions.get('divider_drag'):
         move_divider(d, win, regions, s, track)
         return True
@@ -704,12 +464,9 @@ def scroll_terminal(down):
 
 
 def wheel(regions, s, x, y, down):
-    """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down
-    over the slider or its speaker, the terminal pane's text a line down while the pointer is
-    over it, or the list a row down. Returns what it did, or None where the wheel does nothing."""
-    if inside(regions.get('volume_wheel'), s, x, y):
-        speechctl('volume', 'down' if down else 'up')
-        return 'volume'
+    """What a wheel step down (or up) over card-relative (x, y) does: scrolls the terminal pane's
+    text a line down while the pointer is over it, or the list a row down. Returns what it did,
+    or None where the wheel does nothing."""
     if inside(regions.get('terminal'), s, x, y):
         if regions.get('terminal_scroll'):
             scroll_terminal(down)

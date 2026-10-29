@@ -1,11 +1,9 @@
-"""Tests for scripts/isolated-widgets.py: that a copy's files, fixtures and stub speechctl stay
-inside its own folder and read as the speech widget reads the real ones, without a display."""
+"""Tests for scripts/isolated-widgets.py: that a copy's files and fixtures stay inside its own
+folder and read as the speech widget reads the real ones, without a display."""
 import importlib.machinery
 import importlib.util
-import json
 import os
-import subprocess
-import sys
+import time
 import unittest
 from unittest import mock
 
@@ -92,42 +90,31 @@ class IsolatedTest(support.TempDirTest):
         self.assertEqual(iso.taken_slots(base, 'a'), {2})
         self.assertEqual(iso.taken_slots(base, 'c'), {0, 2})
 
-    def test_the_fixture_sessions_read_as_on_alerts_and_off_to_the_speech_widget(self):
+    def test_the_fixture_feeds_show_a_recent_reply_an_older_one_and_none(self):
         speechqueue = support.load_speechqueue()
-        pids = [os.getpid(), os.getppid(), 1]
-        iso.write_fixtures(self.copy, pids)
-        state = speechqueue.read_state(self.copy.speak, self.copy.sessions)
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        state = speechqueue.read_state(self.copy.speak, self.copy.sessions, now=time.time())
         rows = {s['name']: s for s in state['sessions']}
-        self.assertEqual({n: r['speech'] for n, r in rows.items()},
-                         {'Reading aloud': 'on', 'Waiting on tests': 'alerts', 'Muted': 'off'})
-        self.assertEqual((state['now']['name'], state['sessions'][0]['speaking']), ('Reading aloud', True))
+        self.assertEqual(sorted(rows), ['Feed widget', 'Retry fix', 'Waiting on tests'])
+        self.assertEqual(rows['Feed widget']['age'], '1m')
+        self.assertTrue(rows['Feed widget']['last'].startswith('The feed lists replies'))      # under ten minutes: a line too
+        self.assertEqual((rows['Waiting on tests']['age'], rows['Waiting on tests']['last']), ('25m', ''))
+        self.assertEqual((rows['Retry fix']['age'], rows['Retry fix']['last']), ('', ''))
+        self.assertEqual([e['name'] for e in state['feed']], ['Feed widget', 'Waiting on tests', 'Feed widget'])
 
-    def test_the_stub_speechctl_edits_the_fixture_and_lists_voices(self):
-        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1])
-        sid = iso.fixture_sessions(self.copy, [1, 2, 3])[1][1]
-        iso.speechctl(self.copy, ['speech', sid, 'on'])
-        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sid + '.replies')))
-        iso.speechctl(self.copy, ['speech', sid, 'off'])
-        self.assertEqual(sorted(f for f in os.listdir(self.copy.speak) if f.startswith(sid) and f.endswith(('.replies', '.muted'))),
-                         [sid + '.muted'])
-        iso.speechctl(self.copy, ['voice', 'next'])
-        iso.speechctl(self.copy, ['volume', '9'])
-        with open(os.path.join(self.copy.speak, 'settings.json')) as f:
-            self.assertEqual(json.load(f), {'voice': iso.VOICES[1], 'volume': 2.0})
-        iso.speechctl(self.copy, ['toggle'])
-        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, 'paused')))
-        with mock.patch('builtins.print') as shown:
-            iso.speechctl(self.copy, ['voices'])
-        self.assertEqual(shown.call_args[0][0].splitlines()[1], '* ' + iso.VOICES[1])
+    def test_the_fixture_has_an_unmanaged_session_the_widget_does_not_list(self):
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        sessions = iso.fixture_sessions(self.copy, [1, 2, 3, 4])
+        self.assertEqual([x[-1] for x in sessions], [True, True, True, False])
+        state = support.load_speechqueue().read_state(self.copy.speak, self.copy.sessions)
+        self.assertNotIn('Not managed', [s['name'] for s in state['sessions']])
+        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sessions[0][1] + '.managed')))
+        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.managed')))
+        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.feed')))
 
-    def test_the_stub_is_found_through_the_copys_own_config_and_runs_from_a_shell(self):
-        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1])
-        iso.write_stub(self.copy)
-        with open(os.path.join(self.copy.config('speech'), 'speechctl')) as f:
-            self.assertEqual(f.read().strip(), self.copy.stub)
-        env = dict(os.environ, HOME=self.copy.home)
-        out = subprocess.run([self.copy.stub, 'voices'], env=env, capture_output=True, text=True)
-        self.assertIn(iso.VOICES[0], out.stdout)
+    def test_the_fixture_has_nothing_that_plays(self):
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        self.assertEqual(sorted(f for f in os.listdir(self.copy.speak) if not f.endswith(('.managed', '.feed'))), [])
 
     def test_only_a_process_named_for_the_copy_is_signalled_on_stop(self):
         iso.write(self.copy.pids, f'{os.getpid()}\n')           # this very process: not a fixture

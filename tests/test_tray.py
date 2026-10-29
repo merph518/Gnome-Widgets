@@ -1,10 +1,8 @@
 """Tests for the tray menu's model: each widget's Show tick follows its own hidden flag
 whichever way the flag changed (the menu, the widget's – and × buttons, the launcher), one
-widget's buttons leave the other alone, and the speech line, settings and speechctl."""
-import json
+widget's buttons leave the other alone."""
 import os
 import shutil
-import stat
 import sys
 from unittest import mock
 
@@ -94,104 +92,3 @@ class FlagsTest(support.TempDirTest):
         tray_model.set_on_top('speech', False)
         self.assertEqual((tray_model.on_top('spotify'), tray_model.on_top('speech')), (True, False))
         self.assertEqual(tray_model.on_top_file('spotify'), self.mouse.ON_TOP)
-
-
-class SpeechTest(support.TempDirTest):
-
-    def setUp(self):
-        super().setUp()
-        self.f = support.SpeechFixture(self.dir)
-        self.redirect(tray_model, SPEAK='speak-attention', SPEECHCTL='speechctl-path')
-
-    def write(self, name, content):
-        self.f.file(name, content if isinstance(content, str) else json.dumps(content))
-
-    def executable(self, name):
-        path = os.path.join(self.dir, name)
-        with open(path, 'w') as f:
-            f.write('#!/bin/sh\n')
-        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
-        return path
-
-    def test_idle_speaking_and_paused(self):
-        self.assertEqual(tray_model.speech_line(), 'Speech idle')
-        self.write('now.json', {'name': 'Overmind #19', 'text': 'Waiting on\nPR 12'})
-        self.assertEqual(tray_model.speech_line(), 'Overmind #19: “Waiting on PR 12”')
-        self.write('paused', '')
-        self.assertEqual(tray_model.speech_line(), 'Speech paused')
-
-    def test_a_long_line_is_cut_and_a_bad_file_is_idle(self):
-        self.write('now.json', {'text': 'word ' * 40})
-        line = tray_model.speech_line()
-        self.assertTrue(line.endswith('…”') and len(line) <= tray_model.SPEECH_LINE + 2)
-        self.write('now.json', '{not json')
-        self.assertEqual(tray_model.speech_line(), 'Speech idle')
-
-    def test_settings_and_their_defaults(self):
-        self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
-        self.write('settings.json', {'voice': 'en_US-ryan-high', 'volume': 0.5})
-        self.assertEqual(tray_model.speech_settings(), ('en_US-ryan-high', 0.5))
-        self.write('settings.json', {'volume': 'loud'})
-        self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
-
-    def test_pace_from_settings_then_the_environment_then_the_default(self):
-        with mock.patch.dict(os.environ, clear=False):
-            os.environ.pop('SPEAK_PIPER_LENGTH', None)
-            self.assertEqual(tray_model.speech_pace(), tray_model.DEFAULT_PACE)
-            os.environ['SPEAK_PIPER_LENGTH'] = '0.7'
-            self.assertEqual(tray_model.speech_pace(), 0.7)
-            self.write('settings.json', {'pace': 1.2})
-            self.assertEqual(tray_model.speech_pace(), 1.2)
-            self.write('settings.json', {'pace': 'slow'})
-            self.assertEqual(tray_model.speech_pace(), 0.7)
-
-    def test_setting_the_pace_keeps_the_other_settings(self):
-        self.write('settings.json', {'voice': 'en_US-ryan-high', 'volume': 0.5})
-        tray_model.set_speech_pace(1.0)
-        with open(os.path.join(tray_model.SPEAK, 'settings.json')) as f:
-            self.assertEqual(json.load(f), {'voice': 'en_US-ryan-high', 'volume': 0.5, 'pace': 1.0})
-        self.assertEqual(tray_model.speech_settings(), ('en_US-ryan-high', 0.5))
-        self.assertEqual(tray_model.speech_pace(), 1.0)
-
-    def test_setting_the_pace_starts_a_settings_file(self):
-        tray_model.set_speech_pace(0.6)
-        self.assertEqual(tray_model.speech_pace(), 0.6)
-        self.assertEqual(sorted(f for f in os.listdir(tray_model.SPEAK) if f.startswith('.tmp')), [])
-
-    def test_speechctl_from_the_configured_path_then_path(self):
-        with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'):
-            self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
-            configured = self.executable('my-speechctl')
-            with open(tray_model.SPEECHCTL, 'w') as f:
-                f.write(configured + '\n')
-            self.assertEqual(tray_model.speechctl(), configured)
-            os.remove(configured)                          # configured but gone: PATH's
-            self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
-            with open(tray_model.SPEECHCTL, 'w') as f:
-                f.write(self.dir + '\n')                   # a folder is not a speechctl
-            self.assertEqual(tray_model.speechctl(), '/usr/bin/speechctl')
-
-    def test_without_speechctl_nothing_runs(self):
-        with mock.patch.object(tray_model.shutil, 'which', return_value=None), \
-                mock.patch.object(tray_model.subprocess, 'Popen') as popen:
-            self.assertFalse(tray_model.run_speechctl('skip'))
-            self.assertEqual(tray_model.voices(), [])
-        popen.assert_not_called()
-
-    def test_the_menu_items_call_speechctl(self):
-        with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'), \
-                mock.patch.object(tray_model.subprocess, 'Popen') as popen:
-            self.assertTrue(tray_model.run_speechctl('volume', '1.5'))
-        self.assertEqual(popen.call_args[0][0], ['/usr/bin/speechctl', 'volume', '1.5'])
-
-    def test_voices_are_the_first_word_of_each_line(self):
-        out = 'en_US-amy-medium  (current)\n\nen_US-ryan-high\n'
-        with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'), \
-                mock.patch.object(tray_model.subprocess, 'run', return_value=mock.Mock(stdout=out)):
-            self.assertEqual(tray_model.voices(), ['en_US-amy-medium', 'en_US-ryan-high'])
-
-    def test_the_current_voice_is_named_not_its_marker(self):
-        out = '* en_US-amy-medium\n  en_US-lessac-medium\n  en_US-ryan-high\n'
-        with mock.patch.object(tray_model.shutil, 'which', return_value='/usr/bin/speechctl'), \
-                mock.patch.object(tray_model.subprocess, 'run', return_value=mock.Mock(stdout=out)):
-            self.assertEqual(tray_model.voices(), ['en_US-amy-medium', 'en_US-lessac-medium', 'en_US-ryan-high'])

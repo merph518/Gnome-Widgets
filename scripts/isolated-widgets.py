@@ -21,11 +21,10 @@ The copy is isolated by where it lives, so the launcher and the widgets run unch
   - HOME is a folder of its own, so the launcher's pid file and lock, each widget's cache and
     config, its instance lock, its saved position and its logs are the copy's, and no Spotify
     login or token is there: the Spotify widget sends no Web API request, and has no heart
-  - ~/.claude/sessions there holds fixture Claude sessions (a speech setting each, one
-    reading aloud), and $XDG_RUNTIME_DIR holds a speak-attention folder of fixture hook state
-    beside links to everything else the desktop keeps there, so the speech widget reads those
-    and never a real session's files; its speechctl is a stub that edits the fixture and
-    never plays a sound
+  - ~/.claude/sessions there holds fixture Claude sessions (three managed, with replies in
+    their feeds from a minute to 40 minutes old, and one not managed), and $XDG_RUNTIME_DIR holds a
+    speak-attention folder of fixture hook state beside links to everything else the desktop
+    keeps there, so the speech widget reads those and never a real session's files
   - there is no tray icon (CSN_NO_TRAY)
   - the windows have a class of their own (CSN_CLASS_SUFFIX), since each widget's mouse helper
     finds its window by class and two copies with one class would move each other's windows
@@ -61,8 +60,6 @@ CARD_W = 1500                  # px a card and its shadow can span at the larges
 SLOT = 48                      # px between one copy's windows and the next's
 SPEECH_BELOW = 300             # px the speech widget sits below the Spotify one, as the defaults do
 FIXTURE_TAG = 'csn-isolated-fixture'
-VOICES = ('en_US-amy-medium', 'en_US-ryan-high', 'en_GB-alan-medium')
-DEFAULT_VOICE, DEFAULT_VOLUME = VOICES[0], 1.2
 
 
 def default_name():
@@ -79,7 +76,6 @@ class Copy:
         self.runtime = os.path.join(self.root, 'run')
         self.speak = os.path.join(self.runtime, 'speak-attention')
         self.sessions = os.path.join(self.home, '.claude', 'sessions')
-        self.stub = os.path.join(self.root, 'speechctl')
         self.pids = os.path.join(self.root, 'fixture.pids')
         self.slot_file = os.path.join(self.root, 'slot')
         # added to each window's class: the user's copy and other copies keep the plain one
@@ -175,12 +171,14 @@ def position_for(slot, monitor, widget, at=None):
 
 
 def fixture_sessions(copy, pids):
-    """[(pid, id, name, busy, setting, cwd)] of the fixture Claude sessions, one per pid."""
-    spec = [('Reading aloud', True, 'on', CHECKOUT),
-            ('Waiting on tests', True, 'alerts', os.path.join(copy.home, 'project-a')),
-            ('Muted', False, 'off', os.path.join(copy.home, 'project-b'))]
-    return [(pid, f'00000000-0000-4000-8000-00000000000{i}', name, busy, setting, cwd)
-            for i, (pid, (name, busy, setting, cwd)) in enumerate(zip(pids, spec), 1)]
+    """[(pid, id, name, busy, cwd, managed)] of the fixture Claude sessions, one per pid. The
+    last one is not managed, so the widget does not list it."""
+    spec = [('Feed widget', True, CHECKOUT, True),
+            ('Waiting on tests', True, os.path.join(copy.home, 'project-a'), True),
+            ('Retry fix', False, os.path.join(copy.home, 'project-b'), True),
+            ('Not managed', False, os.path.join(copy.home, 'project-c'), False)]
+    return [(pid, f'00000000-0000-4000-8000-00000000000{i}', name, busy, cwd, managed)
+            for i, (pid, (name, busy, cwd, managed)) in enumerate(zip(pids, spec), 1)]
 
 
 def write(path, text=''):
@@ -189,116 +187,37 @@ def write(path, text=''):
         f.write(text)
 
 
-def write_wav_header(path, seconds, rate=8000):
-    """A WAV header for `seconds` of 16-bit mono, with no samples after it: speechqueue reads
-    only the length, to size the progress bar."""
-    data = rate * 2 * seconds
-    header = (b'RIFF' + (36 + data).to_bytes(4, 'little') + b'WAVEfmt ' + (16).to_bytes(4, 'little')
-              + (1).to_bytes(2, 'little') + (1).to_bytes(2, 'little') + rate.to_bytes(4, 'little')
-              + (rate * 2).to_bytes(4, 'little') + (2).to_bytes(2, 'little') + (16).to_bytes(2, 'little')
-              + b'data' + data.to_bytes(4, 'little'))
-    with open(path, 'wb') as f:
-        f.write(header)
+def fixture_feeds(sessions, now):
+    """{session id: [(epoch seconds, text, markdown)]} of the replies each fixture session's feed
+    holds: the first replied a minute ago (its row carries the line), the second 25 minutes
+    ago (its row shows only the age) and the third has not replied."""
+    return {sessions[0][1]: [(now - 2400, 'Opened the pull request for the feed. Tests pass locally.', ''),
+                             (now - 60, 'The feed lists replies from managed sessions only. Next I am removing the '
+                                  'playback controls.', 'The feed lists replies from **managed** sessions only.\n\n'
+                                  'Next I am removing the playback controls.')],
+            sessions[1][1]: [(now - 1500, 'Started the test run. Twelve of forty files are done, no failures so far.', '')]}
 
 
 def write_fixtures(copy, pids):
     """The fixture hook state and Claude sessions for `pids` alive processes: the first session
-    reads aloud (speech On, a clip playing, two lines queued), the second has Alerts, the third
-    is Off."""
+    replied a minute ago and 40 minutes before, the second 25 minutes ago and the third not at
+    all, as <id>.feed holds them, and the fourth is not a managed session. The first three carry
+    the .managed marker."""
     shutil.rmtree(copy.sessions, ignore_errors=True)
     shutil.rmtree(copy.speak, ignore_errors=True)
     os.makedirs(copy.sessions)
     os.makedirs(copy.speak)
     sessions = fixture_sessions(copy, pids)
-    for pid, sid, name, busy, setting, cwd in sessions:
+    feeds = fixture_feeds(sessions, time.time())
+    for pid, sid, name, busy, cwd, managed in sessions:
         write(os.path.join(copy.sessions, f'{pid}.json'), json.dumps({
             'pid': pid, 'sessionId': sid, 'name': name, 'cwd': cwd, 'kind': 'interactive',
             'status': 'busy' if busy else 'idle', 'messagingSocketPath': f'/nonexistent/{sid}.sock'}))
-        write(os.path.join(copy.speak, f'{sid}.name'), name + '\n')
-        if setting == 'on':
-            write(os.path.join(copy.speak, f'{sid}.replies'))
-        elif setting == 'off':
-            write(os.path.join(copy.speak, f'{sid}.muted'))
-    pid, (_, sid, name, *_) = pids[0], sessions[0]
-    write(os.path.join(copy.speak, f'{sid}.queue'),
-          'The next block of the reply waits behind this one.\nAnd a third block after it.\n')
-    write(os.path.join(copy.speak, 'now.json'), json.dumps({
-        'session': sid, 'name': name, 'text': f'{name} session says: This is a fixture clip; nothing plays.',
-        'started': time.time(), 'clip': '1', 'hook_pid': pid, 'player_pid': pid, 'engine': 'piper'}))
-    write_wav_header(os.path.join(copy.speak, f'{pid}.wav'), 3600)
-    write(os.path.join(copy.speak, 'settings.json'),
-          json.dumps({'voice': DEFAULT_VOICE, 'volume': DEFAULT_VOLUME}))
-
-
-def write_stub(copy):
-    """The copy's speechctl, which the speech widget finds through its config: it edits the
-    fixture folder in $XDG_RUNTIME_DIR and plays nothing."""
-    write(os.path.join(copy.config('speech'), 'speechctl'), copy.stub + '\n')
-    write(copy.stub, '#!/bin/sh\nexec %s %s --name %s _speechctl "$@"\n' % (
-        sys.executable, os.path.realpath(__file__), copy.name))
-    os.chmod(copy.stub, 0o755)
-
-
-def speechctl(copy, args):
-    """What the stub does for `speechctl <args>`: the markers and settings of the fixture
-    hook state, as the real one writes them; `voices` lists the fixture voices."""
-    speak = copy.speak
-    cmd, rest = (args[0], args[1:]) if args else ('', [])
-    settings_path = os.path.join(speak, 'settings.json')
-    try:
-        with open(settings_path) as f:
-            settings = json.load(f)
-    except (OSError, ValueError):
-        settings = {}
-
-    def save():
-        write(settings_path, json.dumps(settings))
-
-    def remove(name):
-        try:
-            os.remove(os.path.join(speak, name))
-        except FileNotFoundError:
-            pass
-
-    if cmd == 'voices':
-        current = settings.get('voice', DEFAULT_VOICE)
-        print('\n'.join(('* ' if v == current else '  ') + v for v in VOICES))
-    elif cmd == 'speech' and len(rest) == 2 and rest[1] in ('on', 'alerts', 'off'):
-        sid, setting = rest
-        remove(f'{sid}.replies')
-        remove(f'{sid}.muted')
-        if setting == 'on':
-            write(os.path.join(speak, f'{sid}.replies'))
-        elif setting == 'off':
-            write(os.path.join(speak, f'{sid}.muted'))
-    elif cmd == 'voice' and rest:
-        names = list(VOICES)
-        current = settings.get('voice', DEFAULT_VOICE)
-        if rest[0] in ('next', 'prev'):
-            step = 1 if rest[0] == 'next' else -1
-            at = names.index(current) if current in names else 0
-            settings['voice'] = names[(at + step) % len(names)]
-        else:
-            settings['voice'] = rest[0]
-        save()
-    elif cmd == 'volume' and rest:
-        level = settings.get('volume', DEFAULT_VOLUME)
-        if rest[0] in ('up', 'down'):
-            level += 0.1 if rest[0] == 'up' else -0.1
-        else:
-            try:
-                level = float(rest[0])
-            except ValueError:
-                return
-        settings['volume'] = round(min(max(level, 0.0), 2.0), 2)
-        save()
-    elif cmd == 'toggle':
-        paused = os.path.join(speak, 'paused')
-        remove('paused') if os.path.exists(paused) else write(paused)
-    elif cmd == 'clear':
-        for name in os.listdir(speak):
-            if name.endswith('.queue'):
-                write(os.path.join(speak, name))
+        if managed:
+            write(os.path.join(copy.speak, f'{sid}.managed'))
+            write(os.path.join(copy.speak, f'{sid}.feed'), ''.join(
+                json.dumps({'session': sid, 'name': name, 'text': text, 'markdown': markdown or text, 'at': int(at)})
+                + '\n' for at, text, markdown in feeds.get(sid, [])))
 
 
 def argv0(pid):
@@ -309,7 +228,7 @@ def argv0(pid):
         return None
 
 
-def start_fixture_processes(copy, count=3):
+def start_fixture_processes(copy, count=4):
     """`count` processes that do nothing, for the fixture sessions to be the pids of. Their
     argv[0] names the copy, which is how stop knows them again."""
     pids = []
@@ -400,7 +319,6 @@ def start(copy, widgets, at=None, installed=False):
     link_runtime(copy, real_runtime_dir())
     if 'speech' in widgets and not (running and fixture_alive(copy)):
         write_fixtures(copy, start_fixture_processes(copy))
-        write_stub(copy)
     mon = monitor()
     for widget in widgets:
         position = os.path.join(copy.config(widget), 'position')
@@ -481,8 +399,6 @@ def main(argv=None):
         print(copy.root)
     elif cmd == 'capture' and rest and rest[1:2] in ([], ['spotify'], ['speech']):
         sys.exit(capture(copy, rest[0], rest[1] if len(rest) > 1 else 'spotify'))
-    elif cmd == '_speechctl':
-        speechctl(copy, rest)
     else:
         sys.exit(__doc__)
 

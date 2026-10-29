@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """The one top-bar (AppIndicator) icon for every widget, started by the launcher's
-supervisor while any widget runs. Its menu shows the current track and what speech is
-saying; shows or hides each widget on its own; holds a submenu of settings for each
-(Spotify: text scaling, size, lyrics, always on top; Speech: pause, skip, clear, voice,
-volume, pace, text scaling, size, collapse when idle, always on top); turns start-at-login on or
-off; and quits every widget. What it reads and writes is in tray_model.py."""
-import ctypes, os, signal, subprocess, sys, threading
+supervisor while any widget runs. Its menu shows the current track; shows or hides each
+widget on its own; holds a submenu of settings for each (Spotify: text scaling, size, lyrics,
+always on top; Speech: text scaling, size, collapse when idle, always on top); turns
+start-at-login on or off; and quits every widget. What it reads and writes is in tray_model.py."""
+import ctypes, os, signal, subprocess, sys
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -31,7 +30,6 @@ import widget_size
 
 NAME = 'conky-spotify-nowplaying'                         # the icon, and the indicator's id
 SCALES = tray_model.SCALES                                # the Text scaling menu's presets
-VOICES_EVERY = 10                                         # refreshes between asking for the voices
 
 
 def installed(widget):
@@ -102,13 +100,6 @@ class Radio:
         for value, item in self.items.items():
             item.set_active(same(value, current))
         self.syncing = False
-
-
-def pace_label(pace):
-    """A pace preset's menu label: its length scale, and what the ends and the default are."""
-    note = {tray_model.PACES[0]: ' (fastest)', tray_model.PACES[-1]: ' (slowest)',
-            tray_model.DEFAULT_PACE: ' (default)'}.get(pace, '')
-    return f'{pace:g}{note}'
 
 
 def item(label, activate):
@@ -193,9 +184,6 @@ def main():
     track = Gtk.MenuItem(label=now_playing())
     track.set_sensitive(False)
     menu.append(track)
-    speaking = Gtk.MenuItem(label=tray_model.speech_line())
-    speaking.set_sensitive(False)
-    menu.append(speaking)
     menu.append(Gtk.SeparatorMenuItem())
 
     checks = []                                 # every Check, read again on each refresh
@@ -229,27 +217,15 @@ def main():
     spotify.set_submenu(spotify_menu)
     menu.append(spotify)
 
-    # Speech: what speechctl does, greyed out without one, then the widget's own settings.
+    # Speech: its size, collapsing when idle and always on top.
     speech_menu = Gtk.Menu()
-    pause = item('Pause', lambda: tray_model.run_speechctl('toggle'))
-    skip = item('Skip', lambda: tray_model.run_speechctl('skip'))
-    clear = item('Clear queue', lambda: tray_model.run_speechctl('clear'))
-    voice = Radio('Voice', [], lambda: tray_model.speech_settings()[0],
-                  lambda name: tray_model.run_speechctl('voice', name))
-    volume = Radio('Volume', [(v, f'{v:.0%}') for v in tray_model.VOLUMES],
-                   lambda: tray_model.speech_settings()[1],
-                   lambda v: tray_model.run_speechctl('volume', f'{v:g}'))
-    pace = Radio('Pace', [(v, pace_label(v)) for v in tray_model.PACES], tray_model.speech_pace,
-                 tray_model.set_speech_pace)
-    controls = (pause, skip, clear, volume.item, pace.item)   # the voices are greyed out by having none
     scaling, reset = size_items('speech')
     speech_on_top = on_top_check('speech')
     collapse = Check('Collapse when idle', tray_model.collapse_idle, tray_model.set_collapse_idle)
-    for entry in (pause, skip, clear, voice.item, volume.item, pace.item, scaling.item, reset, collapse.item,
-                  speech_on_top.item):
+    for entry in (scaling.item, reset, collapse.item, speech_on_top.item):
         speech_menu.append(entry)
     checks += [collapse, speech_on_top]
-    radios += [voice, volume, pace, scaling]
+    radios.append(scaling)
     speech = Gtk.MenuItem(label='Speech')
     speech.set_submenu(speech_menu)
     menu.append(speech)
@@ -262,27 +238,8 @@ def main():
     menu.show_all()
     indicator.set_menu(menu)
 
-    refreshes = 0
-
-    def show_voices(names):
-        if list(voice.items) != names:
-            voice.set_choices([(name, name) for name in names])
-
-    def ask_voices():                           # off the main loop: speechctl can be slow
-        names = tray_model.voices()
-        GLib.idle_add(show_voices, names)
-
     def refresh():
-        nonlocal refreshes
         track.set_label(now_playing())
-        speaking.set_label(tray_model.speech_line())
-        pause.set_label('Resume' if tray_model.paused() else 'Pause')
-        has_speechctl = bool(tray_model.speechctl())
-        for control in controls:
-            control.set_sensitive(has_speechctl)
-        if refreshes % VOICES_EVERY == 0:       # a voice installed meanwhile
-            threading.Thread(target=ask_voices, daemon=True).start()
-        refreshes += 1
         for check in checks:                    # changed outside the menu: a button, the launcher,
             check.sync()                        # a drag, the app menu or a terminal
         for radio in radios:

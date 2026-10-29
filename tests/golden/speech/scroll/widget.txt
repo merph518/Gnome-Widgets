@@ -2,6 +2,4 @@ ${font Ubuntu Sans:size=1} ${goto 724}${voffset 30}
 ${font Ubuntu Sans:size=1} ${voffset 20}
 ${font Ubuntu Sans:size=1} ${voffset 12}
 ${font Ubuntu Sans:size=1} ${voffset 126}
-${font Ubuntu Sans:size=1} ${voffset 10}
-${font Ubuntu Sans:size=1} ${voffset 28}
 ${font Ubuntu Sans:size=1} ${voffset 26}

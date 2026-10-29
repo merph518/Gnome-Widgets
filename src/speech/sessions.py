@@ -1,4 +1,4 @@
-"""The Claude sessions that are open, listed the way speechctl and the voice bridge list them.
+"""The managed Claude sessions that are open, listed the way speechctl and the voice bridge list them.
 
 Claude Code keeps one file per running session in ~/.claude/sessions, named for the process
 id. It carries the session id, the title shown in the app's sidebar, the working directory,
@@ -6,6 +6,12 @@ whether a turn is running and the kind. The .key files beside them hold secrets 
 opened. Interactive sessions are the ones the sidebar shows; background sessions, the kind
 start_session makes, are listed too and marked as such. Two sessions with one name are told
 apart by a number, in process id order.
+
+Only managed sessions are listed: the ones whose <id>.managed marker is in the speaking hook's
+folder, $XDG_RUNTIME_DIR/speak-attention/. Overmind's hooks write it for every session that runs
+the implement skill and the voice bridge for every session it starts, and `speechctl sessions
+--json` reports it as `managed`. A session with no marker is not managed, as one with no
+`managed` field is; this reads the marker itself, so the widget never runs speechctl for it.
 
 This follows Overmind's voice-bridge-hooks/sessions.py rule for which sessions it lists, so the
 widget finds the sessions `speechctl speech <id> ...` can, without importing from Overmind; the
@@ -18,6 +24,7 @@ import re
 
 SESSIONS_DIR = os.path.expanduser('~/.claude/sessions')
 PROC_DIR = '/proc'
+SPEAK_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 KINDS = ('interactive', 'bg')
 
 
@@ -29,10 +36,11 @@ def _read_json(path):
         return None
 
 
-def list_sessions(sessions_dir=None, proc_dir=None):
-    """[{id, name, busy, background, needs_input, spare, pid, cwd}] for every live session, in pid order."""
+def list_sessions(sessions_dir=None, proc_dir=None, speak_dir=None):
+    """[{id, name, busy, background, needs_input, spare, pid, cwd}] for every live managed session, in pid order."""
     sessions_dir = sessions_dir or SESSIONS_DIR
     proc_dir = proc_dir or PROC_DIR
+    speak_dir = speak_dir or SPEAK_DIR
     try:
         files = os.listdir(sessions_dir)
     except OSError:
@@ -54,9 +62,13 @@ def list_sessions(sessions_dir=None, proc_dir=None):
         # the file can outlive its process, so the process has to still be there
         if not os.path.exists(os.path.join(proc_dir, str(pid))):
             continue
+        sid = str(entry.get('sessionId') or '')
+        # a session id is a file name; one that is not cannot name a marker
+        if not re.fullmatch(r'[\w-]+', sid) or not os.path.exists(os.path.join(speak_dir, sid + '.managed')):
+            continue
         cwd = str(entry.get('cwd') or '')
         sessions.append({
-            'id': str(entry.get('sessionId') or ''),
+            'id': sid,
             'name': str(entry.get('name') or '').strip() or os.path.basename(cwd),
             'busy': entry.get('status') == 'busy',
             'background': entry.get('kind') == 'bg',
