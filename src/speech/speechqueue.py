@@ -46,7 +46,6 @@ OUT = os.path.join(CACHE, 'widget.txt')
 DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
-LAST = os.path.join(CACHE, 'last-lines.json')     # {session id: the last line read aloud for it}
 SCROLLBACK = os.path.join(CACHE, 'scrollback.json')   # [{key, name, markdown, text}]: what the terminal pane has printed, oldest first
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
@@ -90,7 +89,7 @@ TERM_MIN = 200                                # the terminal pane's least width
 LINE_GAP = 14                                 # the title's row to the list
 FOOTER_GAP = 12                               # the two columns to the controls' row
 FOOTER_H = 30                                 # the footer row: pause, skip and next
-ROW_SPACING = 6                               # extra space in a session's row
+ROW_SPACING = 2                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle, and skip and next after it
@@ -115,12 +114,11 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
-GROUP_PAD = 12                                # the list's edge to a repository's name
-SESSION_INDENT = 14                           # a repository's name to the sessions listed under it
+GROUP_PAD = 10                                # the list's edge to a repository's name
+SESSION_INDENT = 24                           # a repository's name to the sessions listed under it
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
 CHIP_GAP = 3                                  # between chips, and between their lines
-NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
 SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
@@ -128,6 +126,9 @@ PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain(
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # a repository's name, as draw.lua draws it
+LIST_FONT = 'Ubuntu Mono 12'                  # the sessions column's text, as the terminal's, as draw.lua draws it: a session's name
+LIST_TAG_FONT = 'Ubuntu Mono 11'              # its tag, pill, queued count and issue numbers
+LIST_HEAD_FONT = 'Ubuntu Mono Bold 12'        # a repository's name
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
 FOOTER_FONT = 'Ubuntu Sans 11'                # the settings popup's voice rows, as draw.lua draws them
 TERM_FONT = 'Ubuntu Mono 12'                  # the terminal pane's text, as draw.lua draws it
@@ -135,7 +136,7 @@ TERM_BOLD_FONT = 'Ubuntu Mono Bold 12'
 TERM_ITALIC_FONT = 'Ubuntu Mono Italic 12'
 TERM_BOLD_ITALIC_FONT = 'Ubuntu Mono Bold Italic 12'
 STYLE_FONTS = {'': TERM_FONT, 'b': TERM_BOLD_FONT, 'i': TERM_ITALIC_FONT, 'x': TERM_BOLD_ITALIC_FONT, 'c': TERM_FONT}
-TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT,
+TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT, LIST_FONT, LIST_TAG_FONT, LIST_HEAD_FONT,
               TERM_FONT, TERM_BOLD_FONT, TERM_ITALIC_FONT, TERM_BOLD_ITALIC_FONT}
 MARKDOWN_MAX = 6000                           # the most of a line's markdown the terminal pane reads
 STYLE_MARK = '\x1f'                           # in a draw.txt line, before each run: its style letter, then its text
@@ -560,32 +561,6 @@ def installed_voices(now=None):
     return _voices['names']
 
 
-_last = None
-
-
-def last_lines(n, live):
-    """{session id: the last line read aloud for it}, kept in LAST across restarts: the line
-    now.json plays is recorded once it starts, a question excepted (it shows as a tag while it
-    waits, and its text is not listed). Sessions no longer open are dropped, unless none is
-    listed at all, which is a sessions folder that could not be read as often as it is none."""
-    global _last
-    if _last is None:
-        saved = _json(LAST)
-        _last = {str(k): str(v) for k, v in saved.items()} if isinstance(saved, dict) else {}
-    last = {k: v for k, v in _last.items() if k in live} if live else dict(_last)
-    text = display_text((n or {}).get('text') or '')
-    sid = str((n or {}).get('session') or '')
-    if sid in live and text and not text.lower().startswith('question:'):
-        last[sid] = text
-    if last != _last:
-        _last = last
-        try:
-            write_atomic(LAST, json.dumps(last))
-        except OSError:
-            pass
-    return last
-
-
 _scrollback = None
 
 
@@ -648,7 +623,6 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     listed = []
     open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
-    said = last_lines(n, {s['id'] for s in open_sessions})
     for s in open_sessions:
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
         # A question waiting to be read out shows as a "question" tag on the row
@@ -661,7 +635,6 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
                            waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
                            issue=session_issue(*git), branch=git[0], prs=ledger_prs(ledger),
                            repo=session_repo(s['cwd']), github=git[1],
-                           last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
     repo_issues(listed)
@@ -727,13 +700,11 @@ def box(cx, cy, half_w, half_h):
 
 def session_line(s, chips=(), span=1, header=''):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
-    repository's name, for a session with speech on its last line read aloud (NOTHING_SAID
-    before one), the pill after its name, its issue chips as line:x:width:text (block_chips'),
-    how many rows it takes, and the repository's name when this session is the first listed
-    under it, which draw.lua prints on a row above it."""
+    repository's name, the pull requests' pill, its issue chips as line:x:width:text
+    (block_chips'), how many rows it takes, and the repository's name when this session is the
+    first listed under it, which draw.lua prints on a row above it."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('repo', ''),
-                      without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else '',
                       link_pill(s.get('prs')),
                       ' '.join(f'{line}:{x:g}:{w:g}:{text}' for line, x, w, text, _ in chips), str(span), header))
 
@@ -956,7 +927,7 @@ def block_chips(issues, width):
     the next line when it would pass `width`, and how many lines they take."""
     chips, x, line = [], 0, 0
     for text, link in issues:
-        w = text_width(text, TAG_FONT) + CHIP_PAD
+        w = text_width(text, LIST_TAG_FONT) + CHIP_PAD
         if x and x + w > width:
             line, x = line + 1, 0
         chips.append((line, x, w, text, link))
@@ -968,7 +939,7 @@ def block_rows(row):
     """(chips_top, pitch, chip_h) of a session's issue numbers: their first line's top below the
     session's name line and the line of its tag, pill and queued count, each `row` high, and
     each line's pitch and height."""
-    chip_h = line_height(TAG_FONT) + 2
+    chip_h = line_height(LIST_TAG_FONT) + 2
     return 2 * row, chip_h + CHIP_GAP, chip_h
 
 
@@ -982,13 +953,13 @@ def name_spans(s, right):
     name on the name line, which ends at `right`, the gear's left edge; [left, right] of the pill
     on the line under it, after the session's tag, or None without a pill)."""
     name_x = name_left()
-    name = fit(display_text(s['name']), ROW_FONT, right - name_x)
-    span = [round(name_x - 4, 2), round(name_x + text_width(name, ROW_FONT) + 4, 2)]
+    name = fit(display_text(s['name']), LIST_FONT, (right - name_x) / BLOCK_SLACK)
+    span = [round(name_x - 4, 2), round(name_x + text_width(name, LIST_FONT) * BLOCK_SLACK + 4, 2)]
     pill = link_pill(s.get('prs'))
     if not pill:
         return span, None
-    x0 = name_x + text_width(row_flags(s), TAG_FONT) + 8
-    return span, [round(x0, 2), round(x0 + text_width(pill, TAG_FONT) + 2 * PILL_PAD + 4, 2)]
+    x0 = name_x + text_width(row_flags(s), LIST_TAG_FONT) * BLOCK_SLACK + 8
+    return span, [round(x0 - 2, 2), round(x0 + text_width(pill, LIST_TAG_FONT) * BLOCK_SLACK + 4, 2)]
 
 
 def write_sessions(listed, layout):
@@ -1032,13 +1003,14 @@ def took(seconds):
     return f'{seconds // 60}m {seconds % 60}s' if seconds >= 60 else f'{seconds}s'
 
 
-def message_lines(entry, width):
+def message_lines(entry, width, newest=True):
     """draw.txt's lines for one printed message, wrapped to `width`, as the CLI prints a turn: the
     speaker's name as the prompt, a blank line, the text behind a bullet (its markdown formatted
     when the hook published it), a blank line, and a closing line with how long it was read and
-    when. Kept until the width, the text scale or the message changes, since a scrollback of
+    when; only the newest message keeps that closing line, which goes when the next message
+    comes. Kept until the width, the text scale or the message changes, since a scrollback of
     them is laid out four times a second."""
-    key = (entry['key'], width, text_scale, entry.get('duration'))
+    key = (entry['key'], width, text_scale, entry.get('duration'), newest)
     if key not in _message_lines:
         if len(_message_lines) > 4 * SCROLLBACK_KEEP:
             _message_lines.clear()
@@ -1053,7 +1025,8 @@ def message_lines(entry, width):
         if entry.get('at'):
             done += ' \u00b7 done ' + datetime.datetime.fromtimestamp(entry['at']).strftime('%A %-I:%M %p')
         _message_lines[key] = ([PROMPT_MARK + fit(entry['name'], TERM_FONT, width - 2 * text_width(' ', TERM_FONT)), '']
-                               + body + ['', DONE_MARK + fit(done, TERM_FONT, width - 2 * text_width(' ', TERM_FONT))])
+                               + body + (['', DONE_MARK + fit(done, TERM_FONT, width - 2 * text_width(' ', TERM_FONT))]
+                                         if newest else []))
     return _message_lines[key]
 
 
@@ -1107,9 +1080,8 @@ def render(state, now=None):
         write_sessions(listed, [((), 1)] * len(listed))
         return out.end(out.y + MARGIN - 4)
 
-    # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
-    # they run longer than the list's height. A session with speech on always takes two rows,
-    # the second its last line read aloud, so the list's layout doesn't change as lines play.
+    # Sessions: drawn by draw.lua from sessions.txt, scrolled by the wheel when they run longer
+    # than the list's height.
     # Two columns of the same height: the sessions at the left, the terminal pane at the right,
     # the divider between them in the gap, where the drag moves it.
     avail = right - MARGIN - COLUMN_GAP
@@ -1117,7 +1089,7 @@ def render(state, now=None):
     list_right = MARGIN + round(avail * min(max(load_split(), low), high))
     term_left = list_right + COLUMN_GAP
     # One column: each repository's name, then its sessions indented under it, a session's name
-    # line followed by its issue numbers and, with speech on, the last line read aloud.
+    # line followed by its tag line and its issue numbers.
     listed = grouped(listed)
     # The gear at the right of each row, which opens that session's settings: its icon, and
     # the click area round it that runs the row's name line
@@ -1127,7 +1099,7 @@ def render(state, now=None):
     text_w = max(queued_right - name_x, 40)                    # the issue numbers wrap inside it
     out.gap(LINE_GAP)
     list_top = out.y
-    row = line_height(ROW_FONT) + ROW_SPACING * text_scale
+    row = line_height(LIST_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
     chips_top, pitch, chip_h = block_rows(row)
@@ -1137,15 +1109,15 @@ def render(state, now=None):
         header = s.get('repo', '') if s.get('repo', '') != repo and s.get('repo') else ''
         repo = s.get('repo', '')
         head = row if header else 0
-        # the name line, its issue numbers and the last line read take as many rows as they need
-        height = head + chips_top + lines * pitch + (row if s['speech'] == 'on' else 0)
+        # the name line, its tag line and its issue numbers take as many rows as they need
+        height = head + chips_top + lines * pitch
         span = max(1, math.ceil(round(height / row, 6)))
         layout.append((chips, span, header))
         spans.append(span)
         heads.append(head)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed, layout)
-    seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
+    seg_h = line_height(LIST_HEAD_FONT) + 4 * text_scale
     draw.append(f'list {MARGIN} {list_right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
     draw.append(f'control {gear_x0:.2f} {list_right} {GEAR_SIZE * text_scale:.2f} {seg_h:.2f} {queued_right:.2f}')
@@ -1194,10 +1166,10 @@ def render(state, now=None):
     term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h - TERM_STATUS_GAP - line_h) // line_h), 1)
     inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
     said = []
-    for entry in spoken:
+    for i, entry in enumerate(spoken):
         if said:
             said.append('')                                    # a blank line between messages
-        said.extend(message_lines(entry, inner))
+        said.extend(message_lines(entry, inner, i == len(spoken) - 1))
     queued = sum(s['queued'] for s in listed)
     draw.append(f'terminal {term_left} {box_top:.2f} {right} {bottom:.2f} {TERM_PAD} '
                 f'{box_top + TERM_PAD + line_h / 2:.2f} {box_top + TERM_PAD + banner_h + line_h / 2:.2f} {line_h:.2f} '

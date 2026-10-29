@@ -76,10 +76,11 @@ draws its sidebar's; the pointer turns to the resize cursor over it, and draggin
 left and right (the sessions column's share of the width is kept in
 `~/.config/conky-widgets/speech/split`; each column keeps a least width).
 
-- **Sessions**: the left column, in one column: each repository's name, then its sessions
-  indented under it. A session takes a line for its name, with its gear at the right (the gear
-  opens the session's settings), a line for its tag, its pill and how many lines it has queued,
-  then its issue numbers, and with speech on the last line read aloud.
+- **Sessions**: the left column, in one column and in the terminal's look, as the CLI sets its
+  session list in monospace: each repository's name in bold, then its sessions indented under it
+  behind a green dot, or a turning spinner and a bold name while busy, a finished one's name dim. A session takes a line for its name, with its gear at the right (the gear
+  opens the session's settings), a line for its tag, its pull requests and how many lines it has queued,
+  then its issue numbers.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
@@ -94,7 +95,7 @@ left and right (the sessions column's share of the width is kept in
   chevron, the text behind a white bullet, in monospace, with its markdown formatted (headings,
   **bold**, *italic*, `code` in orange, lists, code blocks and links as their labels) when the
   Overmind hook publishes it in `now.json`'s `markdown` field, else as the plain line, and a dim
-  line, "Read aloud for 7s, done Thursday 9:47 AM". A message is printed when it starts to be
+  line, "Read aloud for 7s, done Thursday 9:47 AM", which only the newest message keeps (the next message's arrival removes it). A message is printed when it starts to be
   read aloud, not when it was received, once (the same words from one session within 30
   seconds, or one clip published again, are one message), and stays: the text scrolls like a
   terminal's, the newest at the bottom, 40 messages kept in
@@ -116,11 +117,11 @@ issue shows its name alone.
 
 Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
 ledger, which `/implement` adds after the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv`
-in its scratchpad, as this repository's and the sibling repositories' scripts keep it), a white pill after its tag, on the line under its name, reads
-**PR #M** or **2 PRs**. A click or tap on the pill opens, in new Chrome tabs, each of those
+in its scratchpad, as this repository's and the sibling repositories' scripts keep it), the line under its name
+shows, after its tag, **PR #M** or **2 PRs** in orange. A click or tap on it opens, in new Chrome tabs, each of those
 pull requests still open with the **Manual Review Needed** label and from the session's own
 branch, read from GitHub with `gh` at the click; when none is, it opens nothing and notes
-that in `mouse.log`. The pill grows a little under the pointer.
+that in `mouse.log`. It is underlined under the pointer.
 
 A click or tap on a session's name closes the session, but only after it asks. The name is
 underlined under the pointer, and a click dims the list and opens a prompt over it,
@@ -133,9 +134,7 @@ holds the pointer and the keyboard, as it does for a session's settings. Closing
 process SIGTERM, after checking that its file in `~/.claude/sessions` still names that
 session, so it also ends a session the Claude app does not show. It is written to `mouse.log`.
 
-A session with speech on always has a last row: the last line read aloud for it, without
-the hook's opening "<name> session says:" and cut to one line, or *Nothing read aloud yet*
-before its first. A question waiting to be read shows as a **question** tag instead of its text.
+A question waiting to be read shows as a **question** tag.
 
 The speech widget's colours are Claude's CLI's, and fixed: white text and its shares on a
 #181818 card, with the CLI's orange for its creature, its code and its spinner. It no longer

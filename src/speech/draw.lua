@@ -73,7 +73,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {id, speech, speaking, queued,
-    -- flags, name, repo, last, pill, chips, span}, each chip {line, x, width, text}
+    -- flags, name, repo, pill, chips, span, header}, each chip {line, x, width, text}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -82,9 +82,9 @@ local function load_sessions(version)
         rows[#rows + 1] = {id = f[1] or '', speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', repo = f[7] or '',
-                           last = f[8] or '', pill = f[9] or '', chips = {},
-                           span = tonumber(f[11]) or 1, header = f[12] or ''}
-        for tok in (f[10] or ''):gmatch('%S+') do
+                           pill = f[8] or '', chips = {},
+                           span = tonumber(f[10]) or 1, header = f[11] or ''}
+        for tok in (f[9] or ''):gmatch('%S+') do
             local line, x, w, str = tok:match('^(%d+):([%d.]+):([%d.]+):(.+)$')
             if line then
                 local chips = rows[#rows].chips
@@ -273,9 +273,9 @@ end
 local ORANGE = {0.843, 0.467, 0.341}      -- Claude's CLI's orange (215, 119, 87)
 local SPARK = {1, 0.74, 0.92, 0.78, 1, 0.74, 0.92, 0.78, 1, 0.74, 0.92, 0.78}   -- ray lengths, as shares of the longest
 
-local function draw_spark(cr, cx, cy, r, phase, alpha)
-    -- the CLI's spinner: twelve rays of uneven length in its orange, turned by `phase`
-    set(cr, ORANGE, alpha)
+local function draw_spark(cr, cx, cy, r, phase, alpha, color)
+    -- the CLI's spinner: twelve rays of uneven length, in its orange unless `color` says another, turned by `phase`
+    set(cr, color or ORANGE, alpha)
     for i, share in ipairs(SPARK) do
         local angle = (i - 1) * math.pi / 6 - math.pi / 2 + phase
         rounded_line(cr, cx + 0.15 * r * math.cos(angle), cy + 0.15 * r * math.sin(angle),
@@ -420,7 +420,7 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
                 draw_chevron(cr, left + 0.2 * cw, y, step * 0.5, 0.6)
                 show_line(cr, line, left + 2 * cw, y, s, text, 1)
             elseif kind == DONE_MARK then
-                draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.5)
+                draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.55, fg)      -- gray, as the CLI's is once its turn is done
                 show_line(cr, line, left + 2 * cw, y, s, text, 0.5)
             else
                 show_line(cr, line, left, y, s, text, 1)
@@ -540,9 +540,12 @@ local function draw_gear(cr, c, cy, row, s, speech)
     end
 end
 
+local GREEN = {0.33, 0.78, 0.40}          -- the CLI's dot before a finished item
+
 local function draw_group(cr, r, x0, y, row, c, b, s, text)
-    -- the repository's name on a row of its own above the first session listed under it
-    font(cr, 9, text, s, true)
+    -- the repository's name on a row of its own above the first session listed under it, bold
+    -- as the CLI's section titles are
+    mono(cr, text, s, true)
     set(cr, fg)
     local x = x0 + b[1] * s
     show(cr, fit(cr, r.header, c[1] * s - x - 4 * s), x, y + row / 2, 'left')
@@ -550,10 +553,9 @@ end
 
 local function draw_chips(cr, r, x, y, b, s, text)
     -- the session's issue numbers under its name, wrapped as speechqueue.py laid them; a click
-    -- on one opens that issue. A number is plain text on the card, with no border or background,
-    -- and underlined under the pointer
+    -- on one opens that issue. A number is plain dim text, underlined under the pointer
     local chips_top, pitch, chip_h = b[4] * s, b[5] * s, b[6] * s
-    font(cr, 9, text, s)
+    font(cr, 11, text, s, false, false, true)
     for _, c in ipairs(r.chips) do
         local cx, ccy = x + c.x * s, y + chips_top + c.line * pitch + pitch / 2
         local w = width_of(cr, c.text)
@@ -569,26 +571,15 @@ local function draw_chips(cr, r, x, y, b, s, text)
     end
 end
 
-local function draw_pill(cr, str, x, cy, w, h, s, text, on)
-    -- the pill after a session's name, naming the ready pull requests a click on it opens: the
-    -- foreground with its text in fg_back, a little bigger under the pointer
-    set(cr, fg)
-    local grow = on and 1.5 * s or 0
-    rounded_rect(cr, x - grow, cy - h / 2 - grow, w + 2 * grow, h + 2 * grow, h / 2 + grow)
-    cairo_fill(cr)
-    font(cr, 9, text, s)
-    set(cr, fg_back)
-    show(cr, str, x + w / 2, cy, 'centre')
-end
-
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
-    -- a session's rows: its repository's name above it when it is the first listed under that,
-    -- then its name line, indented, with its setting's gear at the right (a click on the name
-    -- asks to close the session); under it the line of its tag (busy / idle / waiting / bg /
-    -- question), the pill naming the pull requests a click on the pill opens, and how many lines
-    -- it has queued; then its issue numbers, and with speech on a row of its last line read
-    -- aloud. The name is underlined and the pill grows under the pointer. Returns how many rows
-    -- it took.
+    -- a session's rows, set as the CLI sets its session list, in the terminal's font: its
+    -- repository's name above it, in bold, when it is the first listed under that; then its name
+    -- line, indented behind a green dot, or the turning spinner and a bold name while it is busy
+    -- (a finished session's name is dim), with its setting's gear at the right (a click on the
+    -- name asks to close the session); under it the line of its tag (busy / idle / waiting /
+    -- bg / question), the pull requests a click on "PR #n" opens, in the CLI's orange, and how
+    -- many lines it has queued; then its issue numbers. The name is underlined and the pull requests brighten under the pointer.
+    -- Returns how many rows it took.
     if r.header ~= '' then
         draw_group(cr, r, x0, y, row, c, blk, s, text)
         y = y + row
@@ -596,41 +587,50 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local cy = y + row / 2
     draw_gear(cr, c, cy, row, s, r.speech)
     local name_x = x0 + (blk[1] + blk[2]) * s
-    font(cr, 11, text, s)
+    local busy = r.flags == 'busy'
+    local lit = busy or r.speaking or r.speech == 'on'      -- a session in play is bright, the rest dim
+    if busy then
+        draw_spark(cr, name_x - 12 * s, cy, 5 * s, os.clock() * 3, 1, fg)
+    else
+        set(cr, GREEN)
+        cairo_new_path(cr)
+        cairo_arc(cr, name_x - 12 * s, cy, 1.8 * s, 0, 2 * math.pi)
+        cairo_fill(cr)
+    end
+    mono(cr, text, s, busy)
     local name = fit(cr, r.name, c[5] * s - name_x)
     local after = name_x + width_of(cr, name)
     if hovered(name_x - 4 * s, cy - row / 2, after + 4 * s, cy + row / 2) then
         set(cr, fg, 0.6)
         cairo_set_line_width(cr, 1 * s)
-        cairo_move_to(cr, name_x, cy + row * 0.32)
-        cairo_line_to(cr, after, cy + row * 0.32)
+        cairo_move_to(cr, name_x, cy + row * 0.34)
+        cairo_line_to(cr, after, cy + row * 0.34)
         cairo_stroke(cr)
     end
-    set(cr, fg)
+    if lit then set(cr, fg) else set(cr, secondary()) end
     show(cr, name, name_x, cy, 'left')
 
     local my = cy + row                                  -- the tag line
-    font(cr, 9, text, s)
-    set(cr, secondary())
+    font(cr, 11, text, s, false, false, true)
+    set(cr, secondary(), 0.8)
     local x = name_x
     if r.flags ~= '' then x = x + show(cr, r.flags, x, my, 'left') + 8 * s end
     if r.pill ~= '' then
-        local pill_w = width_of(cr, r.pill) + 12 * s
-        local on = hovered(x - 2 * s, my - row / 2, x + pill_w + 4 * s, my + row / 2)
-        draw_pill(cr, r.pill, x, my, pill_w, c[4] * s * 0.85, s, text, on)
-        x = x + pill_w + 8 * s
-        font(cr, 9, text, s)
-        set(cr, secondary())
+        local on = hovered(x - 2 * s, my - row / 2, x + width_of(cr, r.pill) + 4 * s, my + row / 2)
+        set(cr, ORANGE, on and 1 or 0.85)
+        local w = show(cr, r.pill, x, my, 'left')
+        if on then
+            cairo_set_line_width(cr, 1 * s)
+            cairo_move_to(cr, x, my + row * 0.34)
+            cairo_line_to(cr, x + w, my + row * 0.34)
+            cairo_stroke(cr)
+        end
+        x = x + w + 8 * s
+        set(cr, secondary(), 0.8)
     end
     if r.queued > 0 then show(cr, r.queued .. ' queued', x, my, 'left') end
 
     draw_chips(cr, r, name_x, y, blk, s, text)
-    if r.speech ~= 'on' then return r.span end
-    local lines = 0
-    for _, ch in ipairs(r.chips) do lines = math.max(lines, ch.line + 1) end
-    font(cr, 11, text, s)
-    set(cr, secondary(), 0.65)                          -- a lighter grey than the name and tags
-    show(cr, fit(cr, r.last, c[1] * s - 10 * s - name_x), name_x, y + blk[4] * s + lines * blk[5] * s + row / 2, 'left')   -- clear of the gear
     return r.span
 end
 
