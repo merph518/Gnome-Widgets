@@ -794,7 +794,8 @@ class Terminal(Fixture):
         text, width = orchestrator.markdown_lines('a\n\n---\n\nb', 400)[2]
         self.assertRegex(text, '^' + orchestrator.STYLE_MARK + 'n  ' + orchestrator.STYLE_MARK + 'd\u2500+$')
         self.assertGreater(width, 300)
-        self.assertLessEqual(width, 400)
+        self.assertLessEqual(width, 400 * orchestrator.BLOCK_SLACK)    # as far as the text lines run
+        self.assertGreater(width, 400 - 2 * orchestrator.text_width(' ', orchestrator.TERM_FONT))
 
     def test_a_code_block_is_banded_with_its_language_tag_dim_above_and_long_lines_cut(self):
         band, mark = orchestrator.BAND_MARK, orchestrator.STYLE_MARK
@@ -802,10 +803,22 @@ class Terminal(Fixture):
         self.assertEqual(lines[0], f'{band}{mark}n    {mark}dpython')
         self.assertEqual(lines[1], f'{band}{mark}n    {mark}cx = 1')
         self.assertEqual(lines[2], band + '    ')                              # a blank code line keeps the band
-        self.assertTrue(lines[3].startswith(band) and lines[3].endswith('\u2026'))
+        self.assertGreater(len(lines), 5)                                            # a long line wraps and loses nothing
+        self.assertEqual(sum(l.count('y') for l in lines[3:]), 200)
         self.assertTrue(all(l.startswith(band) for l in lines))
+        self.assertTrue(all(mark + 'cy' in l for l in lines[3:]))
         untagged = [t for t, _ in orchestrator.markdown_lines('```\nx\n```', 300)]
         self.assertEqual(untagged, [f'{band}{mark}n    {mark}cx'])
+
+    def test_text_straight_after_a_table_comes_after_it(self):
+        blocks = orchestrator.markdown_blocks('| A |\n|---|\n| 1 |\nafter')
+        self.assertEqual([k for k, _, _ in blocks], ['tbl', 'p'])
+
+    def test_quote_lines_join_into_one_block_and_a_lone_marker_ends_it(self):
+        blocks = orchestrator.markdown_blocks('> one\n> two\n>\n> three\n\ntext')
+        self.assertEqual([(k, r) for k, _, r in blocks],
+                         [('q', [('one two', '')]), ('q', [('three', '')]), ('p', [('text', '')])])
+        self.assertEqual(len(orchestrator.markdown_lines('> one\n> two\n> three', 600)), 1)
 
     def test_a_code_block_that_opens_a_reply_has_the_bullet_and_the_band_both(self):
         self.three()

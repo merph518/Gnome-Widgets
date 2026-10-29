@@ -633,17 +633,20 @@ def markdown_blocks(markdown):
     a line of a block quote, 'tbl' a table (its runs the rows of cell texts, the separator row
     left out), 'hr' a horizontal rule, 'tag' a fence's language tag (one dim run) and 'code' a line
     of a fenced block (one run, kept as written). Consecutive lines of a paragraph join."""
-    blocks, para, fenced, table = [], [], False, []
+    blocks, para, fenced, table, quote = [], [], False, [], []
 
     def flush():
-        if para:
-            blocks.append(('p', '', inline_runs(' '.join(para))))
-            para.clear()
-        if table:
+        if table:                                     # a paragraph that is still open came after the table
             rows = [[c.strip() for c in r.strip().strip('|').split('|')] for r in table
                     if not re.fullmatch(r'\s*\|?[\s:|-]+\|[\s:|-]*', r)]
             blocks.append(('tbl', '', rows))
             table.clear()
+        if para:
+            blocks.append(('p', '', inline_runs(' '.join(para))))
+            para.clear()
+        if quote:
+            blocks.append(('q', '', inline_runs(' '.join(quote))))
+            quote.clear()
     for line in markdown.split('\n'):
         if line.strip().startswith('```'):
             flush()
@@ -653,7 +656,7 @@ def markdown_blocks(markdown):
         elif fenced:
             blocks.append(('code', '', [(line.rstrip(), 'c')]))
         elif line.strip().startswith('|') and line.count('|') >= 2:
-            if para:
+            if para or quote:
                 flush()
             table.append(line)
         elif not line.strip():
@@ -671,9 +674,16 @@ def markdown_blocks(markdown):
             bullet = ('\u2022' if level == 0 else '\u2219') if m.group(2) in '-*+' else m.group(2)
             blocks.append(('li', '  ' * level + bullet, inline_runs(m.group(3))))
         elif re.match(r'\s*>', line):
-            flush()
-            blocks.append(('q', '', inline_runs(re.sub(r'^\s*>\s?', '', line).strip())))
+            text = re.sub(r'^\s*>\s?', '', line).strip()
+            if text:
+                if para or table:
+                    flush()
+                quote.append(text)
+            else:
+                flush()                               # a lone ">" ends the quote's paragraph
         else:
+            if quote:
+                flush()
             para.append(line.strip())
     flush()
     return blocks
@@ -734,8 +744,8 @@ def markdown_lines(markdown, width, indent=TERM_INDENT):
     """[(draw.txt text, pixel width)] for the visual lines of `markdown` wrapped to `width`, each
     opening with `indent`: a list item's lines hang under its first word, a quote's lines follow
     a dim bar, a table is drawn in box characters with its widest columns cut with an ellipsis
-    when it is wider than the pane, a rule is a dim line across it, a code line is cut at the
-    pane's edge and opens with BAND_MARK, and a blank line sits between blocks. A line with only
+    when it is wider than the pane, a rule is a dim line across the pane, a code line wraps like text, each
+    of its lines opening with BAND_MARK, and a blank line sits between blocks. A line with only
     plain text is its text; one with styled runs has STYLE_MARK, a style letter and the text
     before each run."""
     out, prev = [], None
@@ -771,14 +781,18 @@ def markdown_lines(markdown, width, indent=TERM_INDENT):
             out += [row(r, '') for r in rows[1:]]
             out.append(rule('\u2514', '\u2534', '\u2518'))
         elif kind == 'hr':
-            out.append([(indent, ''), ('\u2500' * (chars - 2), 'd')])
+            out.append([(indent, ''), ('\u2500' * int((width * BLOCK_SLACK - text_width(indent, TERM_FONT)) / cw), 'd')])
         elif kind == 'tag':
             out.append([(BAND_MARK, ''), (indent + '  ', ''), runs[0]])
         elif kind == 'q':
             for line in wrap_runs(runs, width - text_width(indent + '\u2502 ', TERM_FONT)):
                 out.append([(indent, ''), ('\u2502 ', 'd')] + line)
         elif kind == 'code':
-            out.append([(BAND_MARK, ''), (indent + '  ', ''), (cut(runs[0][0], chars - 2), 'c')])
+            first = indent + '  '
+            if runs[0][0].strip():
+                out += [[(BAND_MARK, '')] + line for line in wrap_runs(runs, width, first, first)]
+            else:
+                out.append([(BAND_MARK, ''), (first, '')])
         else:
             first = indent + (marker + ' ' if kind == 'li' else '')
             rest = ' ' * max(round(text_width(first, TERM_FONT) / max(text_width(' ', TERM_FONT), 1)), 0)
