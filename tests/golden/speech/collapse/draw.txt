@@ -3,4 +3,4 @@ shadow 16
 window 649.0 671.0 27.0 10
 state idle
 title 16 27.0 0.09 CLAUDE CODE SESSION MANAGEMENT
-says 27.0 55.0 48 0 Speech idle
+says 30.0 55.0 48 0 Speech idle

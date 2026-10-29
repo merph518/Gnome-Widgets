@@ -733,7 +733,9 @@ class TitleAndFooter(Fixture):
     def test_the_bubble_leaves_a_gap_before_the_says_text(self):
         lines, _ = self.draw()
         bubble_x, _, text_x, strong, text = lines['says'].split(None, 4)
-        self.assertGreaterEqual(float(text_x) - (float(bubble_x) + speechqueue.BUBBLE_W / 2), 8)
+        gap = float(text_x) - (float(bubble_x) + speechqueue.BUBBLE_W / 2)
+        self.assertEqual(gap, speechqueue.ICON_W - speechqueue.BUBBLE_INSET - speechqueue.BUBBLE_W)
+        self.assertGreaterEqual(gap, 6)                          # clear of the text, but close to it
         self.assertEqual(text, 'Speech idle')
 
     def test_the_open_voice_list_stays_below_the_column_headers(self):

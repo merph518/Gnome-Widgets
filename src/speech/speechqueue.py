@@ -68,6 +68,7 @@ DEFAULT_VOLUME = 1.2
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 BUBBLE_W = 22                                 # the speech bubble left of the says line
+BUBBLE_INSET = 3                              # the bubble's gap from the card's margin, which leaves 7 px before the text
 ICON_W = BUBBLE_W + 10                        # the bubble and the gap after it, to the says line's text
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
@@ -806,7 +807,7 @@ def render(state, now=None):
         """The says line, "<name> says:" or the idle or paused line, with its speech bubble at its
         left. draw.lua draws both from the line's geometry, so they share one centre; the row
         is a gap here."""
-        draw.append(f'says {MARGIN + BUBBLE_W / 2} {out.y + header_h / 2} {MARGIN + ICON_W} {int(bool(n))} {said}')
+        draw.append(f'says {MARGIN + BUBBLE_INSET + BUBBLE_W / 2} {out.y + header_h / 2} {MARGIN + ICON_W} {int(bool(n))} {said}')
         out.gap(header_h)
 
     if idle and collapse_idle():
