@@ -12,15 +12,19 @@ holds).
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
   - a session's repository box: a click or tap opens the issue its branch names in a new
     Chrome tab
-  - a session's name or the pill after it: a click or tap opens, in new Chrome tabs, its
-    pull requests still open with the ready label
+  - the pill after a session's name: a click or tap opens, in new Chrome tabs, its pull
+    requests still open with the ready label
+  - a session's name: a click or tap asks "Are you sure?" over the list, and OK ends the
+    session (SIGTERM to its process). While the prompt is open this helper holds the pointer
+    and the keyboard, so a click anywhere but on OK, Cancel and Escape close it without
+    ending anything
   - the wheel: over the volume slider or its speaker it turns it down or up, over the closed
     drop down it steps through the voices, over a session's setting it moves it a segment along, and over the rest of the
     list it scrolls the list a row at a time; a finger swiped over the list scrolls it too
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares.
 """
-import ctypes, json, os, subprocess, sys, threading, time
+import ctypes, json, os, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
@@ -44,15 +48,18 @@ LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is s
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOICE_MENU = os.path.join(CACHE, 'voice-menu')   # "<first voice shown> <voice under the pointer>" while the list is open
 MENU_TIMEOUT = 20.0                            # s an open list waits before it closes itself
+CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
+CONFIRM_ARMED = 0.5                            # s after the prompt opens before a press answers it, so the second click of a double click on a name cannot
+SESSIONS_DIR = os.path.expanduser('~/.claude/sessions')   # one <pid>.json a running Claude session
 KEY_PRESS, ESCAPE = 2, 0xff1b                  # X's key press event, and the Escape keysym
 GRAB_SUCCESS, GRAB_ASYNC = 0, 1
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 
 def start():
-    """Clears the preview and the open list a previous run left behind if it was killed
-    mid-drag or mid-list."""
-    for path in (VOLUME_PREVIEW, VOICE_MENU):
+    """Clears the preview, the open list and the open prompt a previous run left behind if it
+    was killed mid-drag, mid-list or mid-prompt."""
+    for path in (VOLUME_PREVIEW, VOICE_MENU, CLOSE_CONFIRM):
         try:
             os.remove(path)
         except OSError:
@@ -102,14 +109,15 @@ def row_at(regions, s, x, y):
 
 def link_at(regions, s, x, y):
     """(session row, 'issue') when its repository box is under card-relative (x, y), (row,
-    'prs') when its name or pill is, else None. Each is there only with something to open."""
+    'prs') when its pill is, (row, 'close') when its name is, else None. The box and the pill
+    are there only with something to open."""
     row, _ = row_at(regions, s, x, y)
     if not row:
         return None
     at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
     if at >= row['top'] + regions['list_scroll'][1]:          # its second line
         return None
-    for key, kind in (('box', 'issue'), ('link', 'prs')):
+    for key, kind in (('box', 'issue'), ('link', 'prs'), ('name', 'close')):
         if row.get(key) and row[key][0] * s <= x <= row[key][1] * s:
             return row, kind
     return None
@@ -139,7 +147,7 @@ def ready_prs(links, branch, run=subprocess.run):
 
 def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
     """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on its box)
-    or its ready pull requests ('prs', a click on its name). Chrome takes them all at once;
+    or its ready pull requests ('prs', a click on its pill). Chrome takes them all at once;
     without it, xdg-open takes each."""
     try:
         if kind == 'issue':
@@ -312,13 +320,13 @@ def ungrab(d):
     core.x11.XFlush(d)
 
 
-def x_events(d, win, s, opcode, menu):
-    """run_menu's events() reading X's queue. A finger that touches down is followed from one
-    call to the next: where it lifts after a tap is a press, and a swipe scrolls the list a
-    voice for each voice's height it moves."""
+def x_events(d, win, s, opcode, item_h):
+    """run_menu's and run_confirm's events() reading X's queue. A finger that touches down is
+    followed from one call to the next: where it lifts after a tap is a press, and a swipe
+    scrolls the list a voice for each `item_h` (logical px) it moves."""
     x11, ev = core.x11, core.XEvent()
     escape = x11.XKeysymToKeycode(d, ESCAPE)
-    step = menu['item_h'] * s
+    step = item_h * s
     touch = {}                                   # the finger being followed: it, where it began, rows scrolled
 
     def card(x, y):
@@ -374,7 +382,7 @@ def open_menu(d, win, s, regions):
     core.log(f'voice list: {len(menu["names"])} voices, pointer {"held" if pointer else "not held"}, '
              f'keyboard {"held" if keyboard else "not held"}')
     try:
-        name = run_menu(menu, x_events(d, win, s, core.touch_opcode(d), menu))
+        name = run_menu(menu, x_events(d, win, s, core.touch_opcode(d), menu['item_h']))
     finally:
         ungrab(d)
     core.log('voice list closed' + (f': {name}' if name else ''))
@@ -382,13 +390,113 @@ def open_menu(d, win, s, regions):
         speechctl('voice', name)
 
 
+def prompt_at(prompt, x, y):
+    """'ok' or 'cancel' for the button of the close prompt `prompt` (regions.json's) under
+    card-relative logical (x, y), else None."""
+    return next((key for key in ('ok', 'cancel') if inside(prompt[key], 1, x, y)), None)
+
+
+def write_confirm(row, hover):
+    """What draw.lua draws the close prompt from: the button under the pointer (0 none, 1 OK,
+    2 Cancel), whether the session is busy, and its name."""
+    os.makedirs(CACHE, exist_ok=True)
+    with open(CLOSE_CONFIRM + '.tmp', 'w') as f:
+        f.write(f"{(None, 'ok', 'cancel').index(hover)} {int(bool(row.get('busy')))}\n{row.get('title', '')}")
+    os.replace(CLOSE_CONFIRM + '.tmp', CLOSE_CONFIRM)
+
+
+def run_confirm(prompt, row, events, now=time.monotonic, sleep=time.sleep):
+    """Shows the close prompt for session `row` until it is answered, and returns whether OK was
+    pressed. `events()` is run_menu's. A press on OK answers yes; one anywhere else, Escape and
+    MENU_TIMEOUT without an event answer no. Presses in the first CONFIRM_ARMED seconds are
+    ignored, so the second click of a double click on the name is not an answer. draw.lua draws
+    the prompt from CLOSE_CONFIRM for as long as this runs."""
+    opened = now()
+    deadline = opened + MENU_TIMEOUT
+    pointer, hover = None, None
+    try:
+        write_confirm(row, hover)
+        while now() < deadline:
+            for kind, *args in events():
+                deadline = now() + MENU_TIMEOUT
+                if kind == 'move':
+                    pointer = args
+                elif kind == 'press' and now() - opened >= CONFIRM_ARMED:
+                    return prompt_at(prompt, *args) == 'ok'
+                elif kind == 'escape':
+                    return False
+            under = prompt_at(prompt, *pointer) if pointer else None
+            if under != hover:
+                hover = under
+                write_confirm(row, hover)
+            sleep(0.02)
+        return False
+    finally:
+        try:
+            os.remove(CLOSE_CONFIRM)
+        except OSError:
+            pass
+
+
+def proc_start(pid, proc_dir='/proc'):
+    """The start time of process `pid` in clock ticks since boot, field 22 of its stat, which
+    Claude Code writes to a session's file as procStart."""
+    with open(os.path.join(proc_dir, str(int(pid)), 'stat'), encoding='utf-8') as f:
+        return f.read().rsplit(')', 1)[1].split()[19]      # after the name, which can hold spaces and ')'
+
+
+def end_session(row, sessions_dir=SESSIONS_DIR, proc_dir='/proc', kill=os.kill):
+    """Ends the Claude session `row` by sending its process SIGTERM, which is what closing it
+    from outside comes to. Claude Code's file for the pid is read first and has to still name
+    this session, and the process has to have started when the file says it did, so a file
+    that outlived its session while its pid went to another process signals nothing. Returns
+    whether the signal was sent."""
+    pid, sid = row.get('pid'), row.get('id')
+    try:
+        with open(os.path.join(sessions_dir, f'{int(pid)}.json'), encoding='utf-8') as f:
+            entry = json.load(f)
+        named = isinstance(entry, dict) and int(entry.get('pid')) == int(pid) and str(entry.get('sessionId')) == sid
+        same = named and str(entry.get('procStart')) == proc_start(pid, proc_dir)
+    except (OSError, ValueError, TypeError, IndexError):
+        same = False
+    if not (same and sid):
+        core.log(f'close: session {sid} is no longer running as pid {pid}')
+        return False
+    try:
+        kill(int(pid), signal.SIGTERM)
+    except OSError as e:
+        core.log(f'close: session {sid} pid {pid}: {e}')
+        return False
+    core.log(f'close: SIGTERM to session {sid} ({row.get("title", "")}) pid {pid}')
+    return True
+
+
+def close_session(d, win, s, regions, row):
+    """A session's name was pressed: show the prompt, and end the session when OK is pressed."""
+    prompt = regions.get('confirm')
+    if not prompt:
+        return
+    declare(core.x11)
+    pointer, keyboard = grab(d, win)
+    core.log(f'close prompt for {row["id"]}: pointer {"held" if pointer else "not held"}, '
+             f'keyboard {"held" if keyboard else "not held"}')
+    try:
+        ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d),
+                                               prompt['ok'][3] - prompt['ok'][1]))
+    finally:
+        ungrab(d)
+    core.log('close prompt: ' + ('OK' if ok else 'not confirmed'))
+    if ok:
+        end_session(row)
+
+
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
     """A press on the volume slider sets the volume along it. A press on the voice drop down:
     a click or tap opens the list of voices, a drag from it moves the widget. A press on a
     session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. A press on a session's box, or its name or pill: a click or
-    tap opens its issue, or its pull requests; a drag moves the widget, or with a finger
-    scrolls the list when it can scroll.
+    with a finger scrolls the list. A press on a session's box, pill or name: a click or tap
+    opens its issue, its pull requests, or the prompt that closes it; a drag moves the widget,
+    or with a finger scrolls the list when it can scroll.
     Returns whether the press was on any of them."""
     x, y, start = at
     if hit == 'volume' and regions.get('volume_bar'):
@@ -407,6 +515,8 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     if core.clicked(start, s, track, core.TAP_SLOP if touch else core.CLICK_SLOP):
         if segment:
             speechctl('speech', *segment)
+        elif link[1] == 'close':
+            close_session(d, win, s, regions, link[0])
         else:
             open_once(*link)
     elif touch and (segment or scrollable(regions, s, x, y)):
