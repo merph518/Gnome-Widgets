@@ -7,8 +7,10 @@ opened. Interactive sessions are the ones the sidebar shows; background sessions
 start_session makes, are listed too and marked as such. Two sessions with one name are told
 apart by a number, in process id order.
 
-This follows Overmind's voice-bridge-hooks/sessions.py rule for rule, so the widget lists
-exactly the sessions `speechctl speech <id> ...` can find, without importing from Overmind.
+This follows Overmind's voice-bridge-hooks/sessions.py rule for which sessions it lists, so the
+widget finds the sessions `speechctl speech <id> ...` can, without importing from Overmind; the
+widget decides itself which of them it shows (not the spares, `spare` in the file) and reads
+whether each waits on input (`status: waiting`).
 """
 import json
 import os

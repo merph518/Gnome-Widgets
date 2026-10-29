@@ -95,6 +95,7 @@ class Menu:
         self.selected = 0
         self.top = 0
         self.came_from = []
+        self._rows = None
 
     # What a page shows
     @property
@@ -115,6 +116,13 @@ class Menu:
         return ' › '.join(parts)
 
     def rows(self):
+        """The page's rows, built once and again after a change: mouse.py asks fifty times a second
+        and each build reads the settings' files."""
+        if self._rows is None:
+            self._rows = self._build()
+        return self._rows
+
+    def _build(self):
         """[(label, value, flag)] of the page: the flag is 'current' on the voice in use and ''
         otherwise, and a value ending in › opens a page."""
         kind, i = self.page
@@ -165,6 +173,7 @@ class Menu:
 
     def go(self, page, selected=0):
         """Opens `page` with row `selected` under the cursor, remembering where the cursor was."""
+        self._rows = None
         self.came_from.append(self.selected)
         self.path.append(page)
         self.selected, self.top = selected, 0
@@ -174,6 +183,7 @@ class Menu:
         which closing the menu answers."""
         if len(self.path) == 1:
             return False
+        self._rows = None
         self.path.pop()
         self.selected, self.top = self.came_from.pop(), 0
         return True
@@ -198,6 +208,7 @@ class Menu:
         backwards."""
         if index is not None:
             self.select(index)
+        self._rows = None                                         # what is chosen shows in the page's values
         kind, i = self.page
         s, row = self.settings, self.selected
         if kind == 'root':
