@@ -751,7 +751,7 @@ class TitleAndFooter(Fixture):
         x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
         self.assertEqual(x0 - (ax + d / 2), speechqueue.AVATAR_GAP)
         self.assertEqual(ay + d / 2, y1)                                # level with the bubble's bottom
-        self.assertEqual(float(lines['bubble'].split()[9]), ay)         # and the tail points at its middle
+        self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
         self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
         self.assertEqual(lines['speaker'], 'Claude Voice Widget')
         self.assertEqual(len(lines['line']), speechqueue.BUBBLE_LINES)
@@ -788,10 +788,14 @@ class TitleAndFooter(Fixture):
         self.assertEqual(short_lines['bubble'].split()[:4], long_lines['bubble'].split()[:4])
         self.assertEqual(short_widget, long_widget)                     # conky's window does not resize
 
-    def test_after_a_line_the_bubble_keeps_it_and_nothing_heard_says_speech_idle(self):
-        lines, _, _ = self.draw()
-        self.assertEqual((lines['speaker'], lines['line']), ('Speech idle', []))
-        self.assertEqual(lines['bubble'].split()[8], '0')               # not the text of a clip playing
+    def test_while_nothing_plays_there_is_the_avatar_and_no_bubble_and_the_card_keeps_its_size(self):
+        playing_lines, _, playing = self.draw(text=self.LONG)
+        os.remove(os.path.join(self.f.speak, 'now.json'))             # the clip ends
+        lines, _, idle = self.draw()
+        self.assertIn('avatar', lines)
+        self.assertEqual([k for k in ('bubble', 'speaker') if k in lines] + lines['line'], [])
+        self.assertEqual(lines['avatar'], playing_lines['avatar'])      # in the same place
+        self.assertEqual(idle, playing)                                 # conky's window does not resize
 
     def test_a_collapsed_card_is_the_title_and_the_avatar(self):
         with open(speechqueue.COLLAPSE, 'w') as f:
@@ -1006,8 +1010,7 @@ class Golden(Fixture):
         speechqueue.render(self.state(), now=1010.0)
         with open(speechqueue.DRAW) as f:
             lines = f.read().splitlines()
-        self.assertIn('speaker Claude Voice Widget', lines)
-        self.assertIn('line Done.', lines)                            # the last line read stays in the bubble
+        self.assertFalse([l for l in lines if l.startswith(('bubble ', 'speaker ', 'line '))])   # the avatar alone
         progress = next(l for l in lines if l.startswith('progress ')).split()
         self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 

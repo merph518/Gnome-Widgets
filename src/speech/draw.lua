@@ -321,24 +321,21 @@ end
 local function draw_bubble(cr, b, name, lines, s, text)
     -- the line being read aloud in a bubble whose tail points left at the avatar: the box
     -- x = b[1]..b[3], y = b[2]..b[4], the name centred on y = b[6] and the lines from b[7],
-    -- b[8] apart, all from x + b[5]; in the foreground while a clip is current (b[9] is 1),
-    -- else in the text's colour; the tail's tip is level with y = b[10]
+    -- b[8] apart, all from x + b[5]; the tail's tip is level with y = b[9]
     local x0, y0, x1, y1, pad = b[1] * s, b[2] * s, b[3] * s, b[4] * s, b[5] * s
     set(cr, fg, 0.14)
     -- one path for the body and its tail, which reaches into it, so no seam shows between them
     rounded_rect(cr, x0, y0, x1 - x0, y1 - y0, 12 * s)
-    local tip = b[10] * s
+    local tip = b[9] * s
     cairo_move_to(cr, x0 + 1 * s, tip + 8 * s)
     cairo_line_to(cr, x0 - 9 * s, tip)
     cairo_line_to(cr, x0 + 1 * s, tip - 8 * s)
     cairo_close_path(cr)
     cairo_fill(cr)
-    local strong = b[9] == 1
     font(cr, 9, text, s, true)
-    set(cr, strong and fg or secondary())
+    set(cr, fg)
     show(cr, name, x0 + pad, b[6] * s, 'left')
     font(cr, 11, text, s)
-    set(cr, strong and fg or secondary(), strong and 1 or 0.85)
     for i, line in ipairs(lines) do
         show(cr, line, x0 + pad, (b[7] + (i - 1) * b[8]) * s, 'left')
     end

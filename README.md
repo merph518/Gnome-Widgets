@@ -82,12 +82,11 @@ itself.
   runs in the background), else **idle**
 - A footer with, from the top: the speaker's avatar (the image
   `~/.config/conky-widgets/speech/avatar.png` when it is there, else the icon Claude Desktop
-  installs, else a spark drawn on an orange circle) at the bottom
-  left of a speech bubble that points at it. The bubble holds the speaker's name and up to
-  three lines of the line being read aloud, is three lines tall whatever the line holds, and
-  keeps the last line read while nothing plays. Under it: a progress bar with the line's
-  elapsed time and length; then pause / resume, skip and next, the volume and a drop down
-  for the voice
+  installs, else a spark drawn on an orange circle) at the bottom left, and, while a clip plays,
+  a speech bubble pointing at it that holds the speaker's name and up to three lines of the
+  line being read aloud (the row is as tall without the bubble, so the card does not change size
+  as lines play); a progress bar with the line's elapsed time and length; then pause / resume,
+  skip and next, the volume and a drop down for the voice
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,

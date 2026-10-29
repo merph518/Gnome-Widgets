@@ -8,7 +8,7 @@ control 564.00 594.00 643.00 676.00 20.00 554.00
 block 2 7 90 21.00 21.00 18.00
 confirm 186.00 86.00 506.00 190.00 109.00 126.00 163.00 26.00 361.00 434.00 442.00 492.00 16 74.0 676 202.0
 avatar 34.0 280.0 36
-bubble 64 210.0 676 298.0 12 226.00 245.00 18.00 1 280.00
+bubble 64 210.0 676 298.0 12 226.00 245.00 18.00 280.00
 speaker Claude Voice Widget
 line The data layer is in: speechqueue.py writes the widget, draw and regions files four
 line times a second.

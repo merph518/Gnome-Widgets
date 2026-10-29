@@ -574,15 +574,15 @@ def last_lines(n, live):
 _heard = None
 
 
-def last_heard(n, name, duration, text=''):
-    """{'name', 'duration', 'text'} of the last clip played, kept in HEARD across restarts, so
-    the bubble and the progress bar stay as the last line left them while nothing plays."""
+def last_heard(n, name, duration):
+    """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
+    progress bar stays as the last line left it while nothing plays."""
     global _heard
     if _heard is None:
         saved = _json(HEARD)
         _heard = saved if isinstance(saved, dict) else {}
     if n:
-        heard = {'name': name or 'A session', 'duration': duration or 0, 'text': text}
+        heard = {'name': name or 'A session', 'duration': duration or 0}
         if heard != _heard:
             _heard = heard
             try:
@@ -819,8 +819,7 @@ def render(state, now=None):
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
-    heard = last_heard(n, state['name'], state['duration'],
-                       without_speaker(state.get('text') or '')[:BUBBLE_TEXT_MAX])
+    heard = last_heard(n, state['name'], state['duration'])
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -924,28 +923,26 @@ def render(state, now=None):
     # click areas, while no clip plays. The open list is drawn above the controls, over the
     # progress bar and the sessions, when conky-mouse.py has it open.
     out.gap(FOOTER_GAP)
-    # The speaker's avatar, level with the bottom of a bubble whose tail points at it. The
-    # bubble holds the speaker's name, then up to BUBBLE_LINES lines of the line being read
-    # aloud, and is as tall whatever the line holds, so the card's size does not change as
-    # lines play. While nothing plays it keeps the last line read, dimmed. draw.lua draws it
+    # The speaker's avatar, level with the bottom of a bubble whose tail points at it. While a
+    # clip plays the bubble holds the speaker's name, then up to BUBBLE_LINES lines of the
+    # line being read aloud; while nothing plays there is the avatar alone. The row is as
+    # tall either way, so the card's size does not change as lines play. draw.lua draws it
     # from these lines.
     name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
     bubble_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
     bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
     inner = (right - bubble_x0 - 2 * BUBBLE_PAD_X) / BLOCK_SLACK    # draw.lua's text runs wider
     top = out.y
-    if paused and not n:
-        speaker, said = 'Speech paused', ''
-    else:
-        speaker = re.sub(r' session$', '', heard.get('name') or '', flags=re.I) or 'Speech idle'   # the hook's "<name> session"
-        said = heard.get('text') or ''
     avatar_at(top + bubble_h - AVATAR_D)                      # level with the bubble's bottom
-    draw.append(f'bubble {bubble_x0} {top} {right} {top + bubble_h} {BUBBLE_PAD_X} '
-                f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
-                f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} {int(bool(n))} '
-                f'{top + bubble_h - AVATAR_D / 2:.2f}')
-    draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
-    draw.extend(f'line {line}' for line in wrap_lines(said, ROW_FONT, inner, BUBBLE_LINES))
+    if n:
+        speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A session'   # the hook's "<name> session"
+        draw.append(f'bubble {bubble_x0} {top} {right} {top + bubble_h} {BUBBLE_PAD_X} '
+                    f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
+                    f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
+                    f'{top + bubble_h - AVATAR_D / 2:.2f}')
+        draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
+        said = without_speaker(state.get('text') or '')[:BUBBLE_TEXT_MAX]
+        draw.extend(f'line {line}' for line in wrap_lines(said, ROW_FONT, inner, BUBBLE_LINES))
     out.gap(max(bubble_h, AVATAR_D))
     out.gap(HEADER_GAP)
     # The progress bar, always there: the current line's while its length is known (0:00 while
