@@ -7,6 +7,8 @@
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 --   voice-menu    present while conky-mouse.py has the voice list open: the first voice shown and the
 --                 one under the pointer (-1 for none), as "<scroll> <hover>"
+--   close-confirm present while conky-mouse.py has the close prompt open: the button under the
+--                 pointer (0 none, 1 OK, 2 Cancel) and whether the session is busy, then its name
 -- and, read only, the Spotify widget's bg.txt (or the file ~/.config/conky-widgets/speech/
 -- background names), whose colour the card fades to with it. Everything drawn is the
 -- foreground or a share of it, as the Spotify widget's controls are, so the widget follows
@@ -358,11 +360,11 @@ end
 
 local function draw_block(cr, r, x0, y, row, b, s, text)
     -- the repository's name on the row's first line, cut to the block's width, and under it the
-    -- issue numbers, each a chip a click on opens that issue, wrapped as speechqueue.py laid
-    -- them (b is its block line). A chip has no border and no fill of its own: it is the card's
-    -- colour until its session is speaking or the pointer is over it, when it takes a tint. A
-    -- rule at the block's left runs the whole height: a thin dim one, or while its session is
-    -- speaking a thicker, lit one with the numbers lit as well
+    -- issue numbers, wrapped as speechqueue.py laid them (b is its block line); a click on one
+    -- opens that issue. A number is plain text on the card, with no border or background and
+    -- nothing right of it, lit while its session is speaking and underlined under the pointer.
+    -- A rule at the block's left runs the whole height: a thin dim one, or while its session is
+    -- speaking a thicker, lit one
     if r.repo == '' then return end
     local rule, pad, tw = b[1] * s, b[2] * s, b[3] * s
     local chips_top, pitch, chip_h = b[4] * s, b[5] * s, b[6] * s
@@ -381,22 +383,24 @@ local function draw_block(cr, r, x0, y, row, b, s, text)
     font(cr, 9, text, s)
     for _, c in ipairs(r.chips) do
         local cx, ccy, w = tx + c.x * s, y + chips_top + c.line * pitch + pitch / 2, c.w * s
-        local under = hovered(cx, ccy - chip_h / 2, cx + w, ccy + chip_h / 2)
-        if r.speaking or under then
-            set(cr, fg, (r.speaking and 0.25 or 0.12) + (under and 0.13 or 0))
-            rounded_rect(cr, cx, ccy - chip_h / 2, w, chip_h, chip_h / 2)
-            cairo_fill(cr)
+        if hovered(cx, ccy - chip_h / 2, cx + w, ccy + chip_h / 2) then
+            set(cr, fg, 0.6)
+            cairo_set_line_width(cr, 1 * s)
+            cairo_move_to(cr, cx + w - width_of(cr, c.text), ccy + chip_h * 0.38)
+            cairo_line_to(cr, cx + w, ccy + chip_h * 0.38)
+            cairo_stroke(cr)
         end
         if r.speaking then set(cr, fg) else set(cr, secondary()) end
-        show(cr, c.text, cx + w / 2, ccy, 'centre')
+        show(cr, c.text, cx + w, ccy, 'right')
     end
 end
 
-local function draw_pill(cr, str, x, cy, w, h, s, text)
-    -- the pill after a session's name, naming the ready pull requests a click on the name
-    -- opens: the foreground with its text in fg_back
+local function draw_pill(cr, str, x, cy, w, h, s, text, on)
+    -- the pill after a session's name, naming the ready pull requests a click on it opens: the
+    -- foreground with its text in fg_back, a little bigger under the pointer
     set(cr, fg)
-    rounded_rect(cr, x, cy - h / 2, w, h, h / 2)
+    local grow = on and 1.5 * s or 0
+    rounded_rect(cr, x - grow, cy - h / 2 - grow, w + 2 * grow, h + 2 * grow, h / 2 + grow)
     cairo_fill(cr)
     font(cr, 9, text, s)
     set(cr, fg_back)
@@ -404,11 +408,11 @@ local function draw_pill(cr, str, x, cy, w, h, s, text)
 end
 
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
-    -- a session's row: its repository's name and issue numbers, its name and the pill naming
-    -- the pull requests a click on the name opens,
+    -- a session's row: its repository's name and issue numbers, its name (a click on it asks to
+    -- close the session) and the pill naming the pull requests a click on the pill opens,
     -- busy / idle / waiting / bg / question, how many lines it has queued and its setting;
-    -- with speech on, a second row of its last line read aloud. The name and pill are tinted,
-    -- and the name underlined, under the pointer. Returns how many rows it took.
+    -- with speech on, a second row of its last line read aloud. The name is underlined and the
+    -- pill grows under the pointer. Returns how many rows it took.
     local cy = y + row / 2
     draw_control(cr, c, cy, c[5], s, text, r.speech)
     local right = c[6] * s
@@ -424,19 +428,17 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local name = fit(cr, r.name, right - name_x - flags_w - (pill_w > 0 and pill_w + 8 * s or 0))
     local nw = width_of(cr, name)
     local after = name_x + nw
+    if hovered(name_x - 4 * s, cy - row / 2, after + 4 * s, cy + row / 2) then
+        set(cr, fg, 0.6)
+        cairo_set_line_width(cr, 1 * s)
+        cairo_move_to(cr, name_x, cy + row * 0.32)
+        cairo_line_to(cr, after, cy + row * 0.32)
+        cairo_stroke(cr)
+    end
     if pill_w > 0 then
         local x1 = after + 8 * s + pill_w
-        if hovered(name_x - 4 * s, cy - row / 2, x1 + 4 * s, cy + row / 2) then
-            set(cr, fg, 0.1)
-            rounded_rect(cr, name_x - 4 * s, cy - row / 2 + 1 * s, x1 - name_x + 8 * s, row - 2 * s, 6 * s)
-            cairo_fill(cr)
-            set(cr, fg, 0.6)
-            cairo_set_line_width(cr, 1 * s)
-            cairo_move_to(cr, name_x, cy + row * 0.32)
-            cairo_line_to(cr, after, cy + row * 0.32)
-            cairo_stroke(cr)
-        end
-        draw_pill(cr, r.pill, after + 8 * s, cy, pill_w, c[5] * s * 0.85, s, text)
+        local on = hovered(after + 4 * s, cy - row / 2, x1 + 4 * s, cy + row / 2)
+        draw_pill(cr, r.pill, after + 8 * s, cy, pill_w, c[5] * s * 0.85, s, text, on)
         after = x1
         font(cr, 11, text, s)
     end
@@ -596,6 +598,56 @@ local function draw_menu(cr, m, items, s, text, state)
     end
 end
 
+local function confirm_state()
+    -- {hover, busy, name} while the close prompt is open, else nil
+    local text = read('close-confirm')
+    if not text then return nil end
+    local hover, busy, name = text:match('^%s*(%d)%s+(%d)\n?(.*)$')
+    return {hover = tonumber(hover) or 0, busy = busy == '1', name = name or ''}
+end
+
+local function draw_confirm(cr, c, state, s, text)
+    -- the close prompt: the list dimmed, and over it a panel (as the voice list's) with
+    -- "Close <name>?", a line saying what that does, and Cancel and OK, OK in red
+    local x0, top, x1, bottom = c[1] * s, c[2] * s, c[3] * s, c[4] * s
+    local title_cy, msg_cy, button_cy, button_h = c[5] * s, c[6] * s, c[7] * s, c[8] * s
+    local pad = 14 * s
+    cairo_set_source_rgba(cr, bg[1], bg[2], bg[3], 0.7)
+    cairo_rectangle(cr, c[13] * s, c[14] * s, (c[15] - c[13]) * s, (c[16] - c[14]) * s)
+    cairo_fill(cr)
+    rounded_rect(cr, x0, top, x1 - x0, bottom - top, 10 * s)
+    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
+    cairo_fill_preserve(cr)
+    set(cr, fg, 0.14)
+    cairo_fill_preserve(cr)
+    set(cr, fg, 0.35)
+    cairo_set_line_width(cr, 1 * s)
+    cairo_stroke(cr)
+    local inner = x1 - x0 - 2 * pad
+    font(cr, 11, text, s, true)
+    set(cr, fg)
+    local named = width_of(cr, 'Close ?')
+    show(cr, 'Close ' .. fit(cr, state.name, inner - named) .. '?', x0 + pad, title_cy, 'left')
+    font(cr, 9, text, s)
+    set(cr, secondary())
+    show(cr, fit(cr, state.busy and 'It is busy: closing it stops the turn it is in.' or 'This ends the session.',
+                 inner), x0 + pad, msg_cy, 'left')
+    font(cr, 11, text, s, true)
+    local function button(bx0, bx1, label, on, red)
+        rounded_rect(cr, bx0 * s, button_cy - button_h / 2, (bx1 - bx0) * s, button_h, button_h / 2)
+        if red then
+            cairo_set_source_rgba(cr, 0.78, 0.22, 0.18, on and 1 or 0.88)
+        else
+            set(cr, fg, on and 0.3 or 0.18)
+        end
+        cairo_fill(cr)
+        if red then cairo_set_source_rgb(cr, 1, 1, 1) else set(cr, fg) end
+        show(cr, label, (bx0 + bx1) / 2 * s, button_cy, 'centre')
+    end
+    button(c[9], c[10], 'Cancel', state.hover == 2, false)
+    button(c[11], c[12], 'OK', state.hover == 1, true)
+end
+
 function conky_draw_widget()
     if conky_window == nil then return end
     local d = frame or load_draw()                 -- read once a frame, by the background hook
@@ -623,5 +675,7 @@ function conky_draw_widget()
         local menu = d.menu and #d.items > 0 and menu_state()
         if d.voice then draw_voice(cr, d.voice, label_after(d.text.voice, 6), s, text, menu and true or false) end
         if menu then draw_menu(cr, d.menu, d.items, s, text, menu) end
+        local confirm = d.confirm and confirm_state()
+        if confirm then draw_confirm(cr, d.confirm, confirm, s, text) end
     end)
 end

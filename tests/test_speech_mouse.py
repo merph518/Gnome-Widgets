@@ -3,6 +3,7 @@ wheel step on each region runs, checked against a stub speechctl that records it
 and the wheel and swipes that scroll the session list."""
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from unittest import mock
@@ -45,7 +46,8 @@ class StubSpeechctl(support.TempDirTest):
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')
-        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', VOICE_MENU='voice-menu')
+        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', CACHE='', VOICE_MENU='voice-menu',
+                      CLOSE_CONFIRM='close-confirm')
         self.redirect(conky_mouse, LOG='mouse.log')
         popen = subprocess.Popen
 
@@ -347,16 +349,18 @@ PR = 'https://github.com/o/r/pull/'
 
 
 class LinksTest(StubSpeechctl):
-    """A click on an issue number under a session's repository name opens that issue, and one on
-    its name or pill its ready pull requests; with nothing to open, neither is a click area."""
+    """A click on an issue number under a session's repository name opens that issue, one on its
+    pill its ready pull requests, and one on its name asks to close it; with nothing to open,
+    the issue numbers and the pill are not click areas."""
 
     def setUp(self):
         super().setUp()
         rows = [dict(r) for r in REGIONS['rows']]
-        # two issue chips, the first on the block's first line and the second on its next
+        # two issue numbers, the first on the block's first line and the second on its next
         rows[0].update(issues=[[25.0, 5.0, 60.0, 19.0, ISSUE], [25.0, 29.0, 60.0, 43.0, ISSUE2]],
-                       link=[96.0, 260.0], branch='feat/issue-123-x',
+                       name=[96.0, 200.0], link=[200.0, 260.0], branch='feat/issue-123-x',
                        prs=[PR + '151', PR + '152'])
+        rows[1].update(name=[96.0, 180.0])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
         speech_mouse.opened.clear()
@@ -389,25 +393,27 @@ class LinksTest(StubSpeechctl):
                          [PR + '152'])
         self.assertIsNone(self.open(self.regions['rows'][0], {PR + '151': blocker}))
 
-    def test_with_none_ready_the_name_opens_nothing_and_not_the_issue(self):
+    def test_with_none_ready_the_pill_opens_nothing_and_not_the_issue(self):
         self.assertIsNone(self.open(self.regions['rows'][0], {}))
         self.assertIn('aaaa: no ready pull request to open', support.read(conky_mouse.LOG))
 
     def test_an_issue_number_opens_its_issue(self):
         self.assertEqual(self.open(dict(self.regions['rows'][0], issue=ISSUE2), {}, 'issue'), [ISSUE2])
 
-    def test_each_issue_number_is_a_link_on_any_line_and_the_name_only_on_the_first(self):
+    def test_each_issue_number_is_a_link_on_any_line_and_the_name_and_pill_only_on_the_first(self):
         at = lambda x, y: (lambda hit: hit and (hit[0]['id'], hit[0].get('issue'), hit[1]))(
             speech_mouse.link_at(self.regions, 1, x, y))
         self.assertEqual(at(50, 106), ('aaaa', ISSUE, 'issue'))
         self.assertEqual(at(50, 130), ('aaaa', ISSUE2, 'issue'))  # the next line of the block
-        self.assertEqual(at(200, 106), ('aaaa', None, 'prs'))
-        self.assertIsNone(at(50, 122))                          # between the two chips
-        self.assertIsNone(at(80, 106))                          # between the chip and the name
+        self.assertEqual(at(150, 106), ('aaaa', None, 'close'))   # the name
+        self.assertEqual(at(230, 106), ('aaaa', None, 'prs'))     # the pill, where the name's span ends
+        self.assertIsNone(at(50, 122))                          # between the two issue numbers
+        self.assertIsNone(at(80, 106))                          # between the issue numbers and the name
         self.assertIsNone(at(270, 106))                         # past the pill
-        self.assertIsNone(at(200, 130))                         # the name's second line
+        self.assertIsNone(at(150, 130))                         # the name's second line
         self.assertIsNone(at(50, 154 - 12))                     # a session without issues
-        self.assertIsNone(at(120, 154 - 12))                    # a name without pull requests
+        self.assertEqual(at(120, 154 - 12), ('bbbb', None, 'close'))   # a name without pull requests
+        self.assertIsNone(at(200, 154 - 12))                    # and no pill after it
         self.assertIsNone(at(425, 106))                         # the setting
 
     def test_a_click_on_a_link_opens_it_and_the_setting_keeps_its_own(self):
@@ -420,11 +426,20 @@ class LinksTest(StubSpeechctl):
                 hit = speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
                                                 (x, 106, (x, 106)), False)
                 self.assertTrue(hit)
-            track = mock.Mock(return_value=(120, 142, False))
+            track = mock.Mock(return_value=(50, 142, False))
             self.assertFalse(speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
-                                                       (120, 142, (120, 142)), False))
+                                                       (50, 142, (50, 142)), False))    # a box without an issue
         self.assertEqual(opened, [('aaaa', 'issue'), ('aaaa', 'prs')])
         self.assertEqual(self.ran(), ['speech aaaa on'])
+
+    def test_a_click_on_the_name_asks_to_close_it_and_opens_nothing(self):
+        closed = []
+        with mock.patch.object(speech_mouse, 'close_session', side_effect=lambda *a: closed.append(a[4]['id'])), \
+                mock.patch.object(speech_mouse, 'open_once') as open_once:
+            track = mock.Mock(return_value=(150, 106, False))
+            self.assertTrue(speech_mouse.pull_control('d', 'root', 'win', 1, self.regions, None, track,
+                                                      (150, 106, (150, 106)), False))
+        self.assertEqual((closed, open_once.called), (['aaaa'], False))
 
     def test_a_second_click_soon_after_or_while_it_opens_does_nothing(self):
         started, clock = [], mock.Mock()
@@ -474,6 +489,146 @@ class LinksTest(StubSpeechctl):
                 speech_mouse.pull_control(None, None, None, 1, regions, None, track,
                                           (200, 106, (200, 106)), True)
             self.assertEqual((swipe.called, drag.called), (swiped, not swiped))
+
+
+PROMPT = {'box': [109.0, 235.0, 429.0, 339.0], 'ok': [365.0, 299.0, 415.0, 325.0],
+          'cancel': [284.0, 299.0, 357.0, 325.0]}
+ROW = {'id': 'aaaa', 'pid': 4242, 'title': 'Widget Close Session', 'busy': True}
+
+
+class CloseTest(StubSpeechctl):
+    """The prompt a click on a session's name opens, and the end of the session OK confirms."""
+    OK, CANCEL, ELSEWHERE = (390, 312), (320, 312), (200, 400)
+
+    def show(self, *steps, timeout=False):
+        """run_confirm over the (seconds passed, events) of each call to events() (then none),
+        returning whether OK was pressed and the CLOSE_CONFIRM contents after each call."""
+        steps, shown, clock = list(steps), [], {'t': 0.0}
+
+        def events():
+            if os.path.exists(speech_mouse.CLOSE_CONFIRM):
+                shown.append(support.read(speech_mouse.CLOSE_CONFIRM))
+            dt, batch = steps.pop(0) if steps else (speech_mouse.MENU_TIMEOUT + 1 if timeout else 0.0, [])
+            clock['t'] += dt
+            return batch
+        return speech_mouse.run_confirm(PROMPT, ROW, events, now=lambda: clock['t'],
+                                        sleep=lambda _: None), shown
+
+    def test_the_buttons_are_found_by_where_they_are(self):
+        self.assertEqual([speech_mouse.prompt_at(PROMPT, *xy) for xy in (self.OK, self.CANCEL, self.ELSEWHERE)],
+                         ['ok', 'cancel', None])
+
+    def test_a_press_on_ok_answers_yes_and_anything_else_no(self):
+        for xy, answer in ((self.OK, True), (self.CANCEL, False), (self.ELSEWHERE, False), ((300, 250), False)):
+            with self.subTest(xy=xy):
+                self.assertEqual(self.show((1.0, [('press', *xy)]))[0], answer)
+
+    def test_escape_and_the_timeout_answer_no(self):
+        self.assertFalse(self.show((1.0, [('escape',), ('press', *self.OK)]))[0])
+        self.assertFalse(self.show(timeout=True)[0])
+
+    def test_a_press_just_after_it_opens_answers_nothing(self):
+        # the second click of a double click on the name
+        answer, _ = self.show((0.1, [('press', *self.OK)]), (0.1, [('press', *self.OK)]),
+                              (speech_mouse.CONFIRM_ARMED, [('press', *self.CANCEL)]))
+        self.assertFalse(answer)
+        answer, _ = self.show((0.1, [('press', *self.OK)]), (speech_mouse.CONFIRM_ARMED, [('press', *self.OK)]))
+        self.assertTrue(answer)
+
+    def test_it_shows_the_session_and_the_button_under_the_pointer_until_it_closes(self):
+        answer, shown = self.show((0.1, [('move', *self.CANCEL)]), (0.1, [('move', *self.OK)]),
+                                  (0.1, [('move', *self.ELSEWHERE)]), (1.0, [('press', *self.OK)]))
+        self.assertEqual(shown, ['0 1\nWidget Close Session', '2 1\nWidget Close Session',
+                                 '1 1\nWidget Close Session', '0 1\nWidget Close Session'])
+        self.assertTrue(answer)                                 # the press carries its own place
+        self.assertFalse(os.path.exists(speech_mouse.CLOSE_CONFIRM))
+
+    def test_the_file_goes_however_it_ends(self):
+        def events():
+            raise RuntimeError('x')
+        with self.assertRaises(RuntimeError):
+            speech_mouse.run_confirm(PROMPT, ROW, events, now=lambda: 0.0, sleep=lambda _: None)
+        self.assertFalse(os.path.exists(speech_mouse.CLOSE_CONFIRM))
+
+    def test_a_prompt_a_killed_run_left_is_cleared_at_start(self):
+        speech_mouse.write_confirm(ROW, None)
+        speech_mouse.start()
+        self.assertFalse(os.path.exists(speech_mouse.CLOSE_CONFIRM))
+
+    def sessions(self, sid='aaaa', pid=4242, running=True, started=8594608):
+        """A sessions folder with Claude Code's file for pid 4242, which says the process started
+        at tick 8594608, and a /proc whose pid 4242 started at tick `started`."""
+        shutil.rmtree(os.path.join(self.dir, 'proc'), ignore_errors=True)
+        os.makedirs(os.path.join(self.dir, 'sessions'), exist_ok=True)
+        os.makedirs(os.path.join(self.dir, 'proc', '4242' if running else '1'), exist_ok=True)
+        # as the kernel writes it: the name in brackets can hold spaces and brackets
+        stat = f'4242 (claude (x) y) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 1 0 0 20 0 9 0 {started} 1000 100 '
+        with open(os.path.join(self.dir, 'proc', '4242' if running else '1', 'stat'), 'w') as f:
+            f.write(stat)
+        with open(os.path.join(self.dir, 'sessions', '4242.json'), 'w') as f:
+            json.dump({'pid': pid, 'sessionId': sid, 'procStart': '8594608'}, f)
+        return dict(sessions_dir=os.path.join(self.dir, 'sessions'), proc_dir=os.path.join(self.dir, 'proc'))
+
+    def test_the_session_is_sent_sigterm(self):
+        kill = mock.Mock()
+        self.assertTrue(speech_mouse.end_session(ROW, kill=kill, **self.sessions()))
+        kill.assert_called_once_with(4242, speech_mouse.signal.SIGTERM)
+        self.assertIn('SIGTERM to session aaaa (Widget Close Session) pid 4242', support.read(conky_mouse.LOG))
+
+    def test_a_pid_that_is_no_longer_that_session_is_not_signalled(self):
+        for name, setup in (('another session', dict(sid='cccc')), ('not running', dict(running=False)),
+                            ('another pid', dict(pid=1)), ('a process that started later', dict(started=9000000))):
+            with self.subTest(name):
+                kill = mock.Mock()
+                self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **self.sessions(**setup)))
+                self.assertFalse(kill.called)
+        kill = mock.Mock()
+        self.assertFalse(speech_mouse.end_session(ROW, kill=kill, sessions_dir=os.path.join(self.dir, 'none'),
+                                                  proc_dir=os.path.join(self.dir, 'proc')))
+        self.assertFalse(speech_mouse.end_session(dict(ROW, id=''), kill=kill, **self.sessions()))
+        self.assertFalse(kill.called)
+        self.assertIn('close: session aaaa is no longer running as pid 4242', support.read(conky_mouse.LOG))
+
+    def test_the_start_time_is_read_past_a_name_with_spaces_and_brackets(self):
+        folders = self.sessions(started=777)
+        self.assertEqual(speech_mouse.proc_start(4242, folders['proc_dir']), '777')
+
+    def test_a_file_without_a_start_time_signals_nothing(self):
+        folders = self.sessions()
+        with open(os.path.join(folders['sessions_dir'], '4242.json'), 'w') as f:
+            json.dump({'pid': 4242, 'sessionId': 'aaaa'}, f)
+        kill = mock.Mock()
+        self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **folders))
+        self.assertFalse(kill.called)
+
+    def test_a_signal_that_fails_is_logged(self):
+        kill = mock.Mock(side_effect=PermissionError('denied'))
+        self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **self.sessions()))
+        self.assertIn('close: session aaaa pid 4242: denied', support.read(conky_mouse.LOG))
+
+    def close(self, answer, regions=None):
+        regions = dict(REGIONS, confirm=PROMPT) if regions is None else regions
+        with mock.patch.object(speech_mouse, 'declare'), \
+                mock.patch.object(speech_mouse, 'grab', return_value=(True, True)), \
+                mock.patch.object(speech_mouse, 'ungrab') as ungrab, \
+                mock.patch.object(speech_mouse, 'x_events'), \
+                mock.patch.object(speech_mouse, 'run_confirm', return_value=answer), \
+                mock.patch.object(speech_mouse, 'end_session') as end, \
+                mock.patch.object(conky_mouse, 'touch_opcode', return_value=None):
+            speech_mouse.close_session('d', 'win', 1, regions, ROW)
+        return end, ungrab
+
+    def test_only_a_confirmed_prompt_ends_the_session_and_the_grab_is_always_let_go(self):
+        for answer in (True, False):
+            with self.subTest(answer=answer):
+                end, ungrab = self.close(answer)
+                self.assertEqual((end.called, ungrab.called), (answer, True))
+        self.assertIn('close prompt: OK', support.read(conky_mouse.LOG))
+        self.assertIn('close prompt: not confirmed', support.read(conky_mouse.LOG))
+
+    def test_without_a_prompt_in_the_regions_nothing_opens(self):
+        end, ungrab = self.close(True, regions=dict(REGIONS))
+        self.assertEqual((end.called, ungrab.called), (False, False))
 
 
 class WheelTest(StubSpeechctl):

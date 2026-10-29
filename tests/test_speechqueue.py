@@ -377,7 +377,7 @@ class Links(Repos):
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
         self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '', '1'])
 
-    def test_each_issue_number_opens_its_issue_and_the_name_the_pull_requests_each_only_with_one(self):
+    def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
         self.pr_ledger(ME, (151, 'open'))
@@ -403,9 +403,15 @@ class Links(Repos):
         self.assertEqual([l[8] for l in lines], ['PR #151', ''])
         self.assertEqual([[t.split(':')[3] for t in l[9].split()] for l in lines], [['#127', '#131']] * 2)
         self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
-        self.assertLess(one['issues'][1][2], one['link'][0])        # the block, then the name
-        self.assertLess(one['link'][1], one['on'][0])               # clear of the setting
+        self.assertLess(one['issues'][1][2], one['name'][0])       # the block, then the name
+        self.assertEqual(one['name'][1], one['link'][0])           # then the pill
+        self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
         self.assertFalse({'link', 'prs'} & set(two))
+        self.assertEqual([(r['pid'], r['title'], r['busy']) for r in (one, two)],
+                         [(100, 'One', False), (200, 'Two', False)])
+        self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
+        self.assertLess(two['name'][1], two['on'][0])
+
 
     def test_a_session_without_issues_has_no_chips_and_one_row(self):
         self.f.session(100, ME, 'One')
@@ -438,12 +444,12 @@ class Links(Repos):
             self.assertEqual(width('a' * 100), chrome + speechqueue.BLOCK_MAX)
             self.assertEqual(width(), chrome + speechqueue.BLOCK_MIN)
 
-    def test_the_issue_chips_wrap_onto_the_next_line_when_they_pass_the_width(self):
+    def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):
         with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 10 * len(t)):
             issues = [(f'#{n}', f'link{n}') for n in (127, 131, 133, 5)]
             chips, lines = speechqueue.block_chips(issues, 110)
         pad, gap = speechqueue.CHIP_PAD, speechqueue.CHIP_GAP
-        w = 40 + 2 * pad
+        w = 40 + pad
         self.assertEqual([(c[0], c[1]) for c in chips],
                          [(0, 0), (1, 0), (2, 0), (2, w + gap)] if w * 2 + gap > 110 else
                          [(0, 0), (0, w + gap), (1, 0), (1, w + gap)])
@@ -474,6 +480,22 @@ class Links(Repos):
         last_line = max(int(t.split(':')[0]) for t in lines[0][9].split())
         self.assertGreaterEqual(last_line, 1)                       # it wrapped
         self.assertGreaterEqual(spans[0] * 24, rows[0]['issues'][-1][3])    # the last chip is inside the row
+
+    def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
+        self.f.session(100, ME, 'One')
+        speechqueue.render(self.state())
+        with open(speechqueue.REGIONS) as f:
+            regions = json.load(f)
+        prompt, (x0, top, x1, bottom) = regions['confirm'], regions['list']
+        box = prompt['box']
+        self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
+        for key in ('cancel', 'ok'):
+            self.assertTrue(box[0] <= prompt[key][0] < prompt[key][2] <= box[2], key)
+            self.assertTrue(box[1] <= prompt[key][1] < prompt[key][3] <= box[3], key)
+        self.assertLess(prompt['cancel'][2], prompt['ok'][0])
+        with open(speechqueue.DRAW) as f:
+            line = next(l for l in f.read().splitlines() if l.startswith('confirm '))
+        self.assertEqual([float(v) for v in line.split()[1:5]], box)
 
 
 
