@@ -106,6 +106,15 @@ class SpeechFixture:
         with open(os.path.join(folder, 'ledger'), 'w') as f:
             f.writelines(f'label\t{key}\thttps://example.test\t{state}\t\n' for key, state in rows)
 
+    def branch_ledger(self, sid, name, *rows, project='-home-user-project'):
+        """Session `sid`'s ledger as the other repositories' catchup.py writes it, scratchpad/`name`,
+        a (key, state) per row with a branch column after the label."""
+        folder = os.path.join(self.ledgers, project, sid, 'scratchpad')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, name), 'w') as f:
+            f.writelines(f'label\tfeat/branch\t{key}\thttps://github.com/o/r/pull/{key.split(":")[-1]}'
+                         f'\t{state}\tadded now\t\n' for key, state in rows)
+
     def sweep(self, sid, *states, project='-home-user-project'):
         """A skill's own ledger for session `sid`, scratchpad/sweep/ledger.tsv: a GitHub
         Actions run per state, in that format's columns."""

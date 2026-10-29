@@ -54,6 +54,7 @@ COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while no
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
 # <project>/<session id>/scratchpad/ledger: a row a line, label, key, link and state, tab apart
 LEDGERS = os.path.join(tempfile.gettempdir(), f'claude-{os.getuid()}')
+LEDGER_FILES = ('ledger', 'ledger.tsv', 'catchup.tsv')   # a session's ledger in its scratchpad
 WAITS = (('run:', 'tests'), ('lp:', 'ci'), ('pr:', 'merge'))   # an open row's key, and the wait
 # A shell polling a systemd user unit until it stops, and the tag of the units it shows
 UNIT_WAIT = re.compile(r'systemctl --user is-active (?:-q |--quiet )?([\w@.-]+)')
@@ -163,16 +164,26 @@ def without_speaker(text):
     return SPEAKER.sub('', text, count=1) or text
 
 
+def ledger_fields(f):
+    """A ledger line's fields as [label, key, link, state, tally, ...]. This repository's
+    catchup.py writes those columns; the one the other repositories keep has the branch after
+    the label (label, branch, key, link, state, tally, title), told apart by the link in the
+    fourth field."""
+    return [f[0]] + f[2:] if len(f) > 4 and f[3].startswith('http') else f
+
+
 def ledger_rows(sid, ledgers=None):
-    """The open rows of session `sid`'s catchup.py ledgers (scratchpad/ledger, and a skill's
-    own such as scratchpad/sweep/ledger.tsv), each a list of its fields."""
+    """The open rows of session `sid`'s catchup.py ledgers (scratchpad/ledger, ledger.tsv or
+    catchup.tsv as another repository names it, and a skill's own such as
+    scratchpad/sweep/ledger.tsv), each a list of its fields as ledger_fields has them."""
     folder = os.path.join(glob.escape(ledgers or LEDGERS), '*', glob.escape(sid), 'scratchpad')
-    paths = glob.glob(os.path.join(folder, 'ledger')) + glob.glob(os.path.join(folder, '*', 'ledger.tsv'))
+    paths = [p for name in LEDGER_FILES for p in glob.glob(os.path.join(folder, name))]
+    paths += glob.glob(os.path.join(folder, '*', 'ledger.tsv'))
     rows = []
     for path in paths:
         for line in (_read(path) or '').splitlines():
-            f = line.split('\t')
-            if len(f) >= 4 and 'done' not in f[3:5]:
+            f = ledger_fields(line.split('\t'))
+            if len(f) >= 4 and f[3] != 'done':
                 rows.append(f)
     return rows
 

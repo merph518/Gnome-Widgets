@@ -377,6 +377,27 @@ class Links(Repos):
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
         self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '', '1'])
 
+    def test_the_pill_shows_for_a_ledger_another_repository_keeps(self):
+        # ledger.tsv and catchup.tsv, with a branch column after the label
+        self.f.session(100, ME, 'One')
+        self.f.session(200, OTHER, 'Two')
+        self.f.branch_ledger(ME, 'ledger.tsv', ('pr:151', 'done'), ('pr:152', 'open'))
+        self.f.branch_ledger(OTHER, 'catchup.tsv', ('pr:7', 'open'), ('pr:8', 'open'))
+        one, two = self.state()['sessions']
+        self.assertEqual(one['prs'], ['https://github.com/o/r/pull/152'])
+        self.assertEqual(speechqueue.session_line(one).split('\t')[8], 'PR #152')
+        self.assertEqual(speechqueue.session_line(two).split('\t')[8], '2 PRs')
+        self.assertEqual(one['waiting'], 'merge')
+        self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'done'))
+        self.assertEqual(self.state()['sessions'][0]['prs'], [])
+
+    def test_the_pill_stays_while_a_ledger_of_either_layout_holds_the_row(self):
+        self.f.session(100, ME, 'One')
+        self.pr_ledger(ME, (151, 'open'))
+        self.f.branch_ledger(ME, 'ledger.tsv', ('run-ignored', 'done'))
+        self.assertEqual(self.state()['sessions'][0]['prs'],
+                         ['https://github.com/someone/Gnome-Widgets/pull/151'])
+
     def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
