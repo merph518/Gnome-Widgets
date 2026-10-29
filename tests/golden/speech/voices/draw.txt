@@ -1,7 +1,6 @@
 scale 1 1
 shadow 16
 window 649.0 671.0 27.0 10
-state idle
 title 16 27.0 0.09 CLAUDE CODE SESSION MANAGEMENT
 list 16 676 74.0 24.00 128 8c3ec128d6 3 0
 control 564.00 594.00 643.00 676.00 20.00 554.00

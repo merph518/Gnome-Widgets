@@ -827,7 +827,6 @@ def render(state, now=None):
     }
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
-            f"state {'paused' if paused else 'playing' if n else 'idle'}",
             f'title {MARGIN} {cy} {TITLE_TRACK} {title}']
     out = Markup(MARGIN)
     out.gap(header_h)
