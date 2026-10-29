@@ -614,8 +614,7 @@ end
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     -- a session's line, set as the CLI sets its session list, in the terminal's font: behind a
     -- small green dot, or the turning spinner and a bold name while it is busy, its name dim
-    -- unless it is busy or being read aloud; then dim after it its repository and, for a waiting,
-    -- background or question tag, the tag, and at the right the lines it has queued (a click on
+    -- unless it is busy or being read aloud; then dim after it its repository, and at the right the lines it has queued (a click on
     -- the name asks to close the session). A section's title above it
     -- when it is the first listed under that, after a blank row unless it is the first section.
     -- Its issue and pull request numbers are in its messages' headers in the terminal. The name
@@ -656,10 +655,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
 
     font(cr, 11, text, s, false, false, true)
     set(cr, secondary(), 0.7)
-    local detail = r.repo
-    if r.flags ~= '' and r.flags ~= 'idle' and r.flags ~= 'busy' then
-        detail = (detail ~= '' and detail .. ' \u{b7} ' or '') .. r.flags
-    end
+    local detail = r.repo                            -- the section it is under says its state
     local dx = after + 12 * s
     if detail ~= '' and right - dx > 40 * s then show(cr, fit(cr, detail, right - dx), dx, cy, 'left') end
     if queued ~= '' then show(cr, queued, c[2] * s, cy, 'right') end

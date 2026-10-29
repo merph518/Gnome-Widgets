@@ -79,20 +79,20 @@ left and right (the sessions column's share of the width is kept in
 
 - **Sessions**: the left column, in one column and in the terminal's look, as the CLI sets its
   session list in monospace: sections as the CLI names a session's state, in bold (**Needs
-  input** while a question waits to be read, **Working** for busy, waiting and background
-  sessions, **Completed** for idle ones), and under each its sessions behind a green dot, or a
+  input** while a question waits to be read, **Working** for busy sessions and ones waiting,
+  **Completed** for idle ones), and under each its sessions behind a green dot, or a
   turning spinner and a bold name while busy, a finished one's name dim, the one being read
-  aloud white. A session is one line: its name, then its repository and tag dimmer
-  (nothing for an idle one) and the lines it has queued. A section after the first has a blank line above its title. A click
-  or tap on the name asks to close the session. The tag is the first of these that holds: **question** (one waits to be read), **busy**,
-  **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
-  script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
-  run open), **waiting: local ai** (it polls `systemctl --user is-active build-pack-now`, the
-  local model pipeline; another unit it polls shows by name), **waiting: ci** or
-  **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
-  open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), else **idle**. Sessions that run in the background (jobs started with
-  `claude --bg`) are not listed, unless they are on remote control (their file names a
-  `bridgeSessionId`), which are listed like any other; a clip one of them speaks still prints in the terminal
+  aloud white. A session is one line: its name, its repository dimmer, and the lines it has
+  queued; the section says its state, so there is no tag. A section after the first has a blank
+  line above its title. A click or tap on the name asks to close the session. A session is
+  **waiting**, and so **Working**, when a test run (such as `unittest`, `pytest`, a `test_*.py`
+  or `*_test.sh` script, `npm test` or `playwright test`) runs under it or its ledger has a
+  GitHub Actions run open, when it polls `systemctl --user is-active build-pack-now` (the local
+  model pipeline) or another unit, or when its `scripts/catchup.py` ledger has a Launchpad build
+  or a pull request open (a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts
+  too). Sessions that run in the background (jobs started with `claude --bg`) are not listed,
+  unless they are on remote control (their file names a `bridgeSessionId`), which are listed like
+  any other; a clip one of them speaks still prints in the terminal
 - **Combined Session Output**: the right column, a terminal as Claude's CLI prints a session,
   in its look: its welcome banner (the creature, the title and what the widget holds), then each
   message as the CLI prints a turn: the speaker's name as the prompt on a grey band behind a
@@ -138,7 +138,7 @@ holds the pointer and the keyboard, as it does for the settings menu. Closing se
 process SIGTERM, after checking that its file in `~/.claude/sessions` still names that
 session, so it also ends a session the Claude app does not show. It is written to `mouse.log`.
 
-A question waiting to be read shows as a **question** tag.
+A question waiting to be read puts its session under **Needs input**.
 
 The speech widget's colours are Claude's CLI's, and fixed: white text and its shares on a
 #181818 card, with the CLI's orange for its creature, its code and its spinner. It no longer
