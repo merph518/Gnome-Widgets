@@ -414,6 +414,24 @@ local function draw_meta(cr, meta, right, y, line, step, s, text, links)
     end
 end
 
+local function draw_working(cr, left, cw, y, s, pos, duration, paused, queued, playing)
+    -- the CLI's working line: the orange spinner turning and "Reading aloud…" with the clip's
+    -- time, or "Paused" (still, dimmer), or "Waiting" while lines queue and none plays
+    if playing == nil then playing = true end
+    local working = playing and not paused
+    draw_spark(cr, left + 0.55 * cw, y, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6)
+    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or 'Waiting'
+    set(cr, ORANGE, working and 1 or 0.6)
+    local lw = show(cr, label, left + 2 * cw, y, 'left')
+    local detail = {}
+    if playing then detail[#detail + 1] = fmt_time(math.min(pos, duration > 0 and duration or pos)) .. ' / ' .. fmt_time(duration) end
+    if queued > 0 then detail[#detail + 1] = queued .. ' queued' end
+    if #detail > 0 then
+        set(cr, fg, 0.5)
+        show(cr, '(' .. table.concat(detail, ' \u{b7} ') .. ')', left + 2 * cw + lw + cw, y, 'left')
+    end
+end
+
 local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, duration)
     -- the pane as Claude's CLI prints a session, with no frame of its own: its welcome banner
     -- (the creature, then the pane's title and what the widget is holding), then each message
@@ -421,8 +439,9 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     -- the CLI's own three parts: the speaker's name on a grey band behind a "❯" as the prompt,
     -- the text behind a white bullet, and a dim "✻ Read aloud for 7s · done Thursday 9:47 AM" line.
     -- t[9] lines show at once, the rest above them scrolled by `scrolled` lines and clipped to
-    -- where they show. At the foot the CLI's working line: the spinner turning and "Reading
-    -- aloud…" with the clip's time while one plays, or "Paused", and nothing when idle.
+    -- where they show. While a clip plays, the closing line of the message being read is the
+    -- CLI's working line (the spinner turning and "Reading aloud…" with the clip's time, or
+    -- "Paused"), and turns into its gray line with the time once it is done.
     local x0, x1, pad = t[1] * s, t[3] * s, t[5] * s
     local head_cy, first_cy, step, shown, status_cy = t[6] * s, t[7] * s, t[8] * s, t[9], t[10] * s
     local playing, paused, queued = t[11] == 1, t[12] == 1, t[13]
@@ -440,6 +459,14 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     set(cr, fg, 0.5)
     show(cr, sessions .. (sessions == 1 and ' session' or ' sessions') .. ' \u{b7} ' .. speech_on .. ' with speech on', tx, head_cy + step, 'left')
     show(cr, queued > 0 and (queued .. (queued == 1 and ' line queued' or ' lines queued')) or 'Nothing queued', tx, head_cy + 2 * step, 'left')
+
+    local reading = nil                                    -- the closing line of the message being read, which turns into the working line
+    if playing then
+        for i, line in ipairs(lines) do
+            if line:byte(1) == DONE_MARK then reading = i end
+        end
+        if reading and reading ~= #lines then reading = nil end
+    end
 
     local ytop = first_cy - step / 2
     local links_now = {}                                   -- the numbers drawn this frame, for mouse.py to hit-test
@@ -459,6 +486,8 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
                 local name, meta = line:match('^([^\6]*)(.*)$')
                 show_line(cr, name, left + 2 * cw, y, s, text, 1)
                 draw_meta(cr, meta, x1 - pad, y, i - 1, step, s, text, links_now)
+            elseif kind == DONE_MARK and i == reading then
+                draw_working(cr, left, cw, y, s, pos, duration, paused, queued)
             elseif kind == DONE_MARK then
                 draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.55, fg)      -- gray, as the CLI's is once its turn is done
                 show_line(cr, line, left + 2 * cw, y, s, text, 0.5)
@@ -476,19 +505,10 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     cairo_restore(cr)
 
     write_links(links_now)
-    if not (playing or queued > 0) then return end            -- idle: the last message's gray spinner line is the rest
-    local working = playing and not paused
-    draw_spark(cr, left + 0.55 * cw, status_cy, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6)
-    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or 'Waiting'
-    set(cr, ORANGE, working and 1 or 0.6)
-    local lw = show(cr, label, left + 2 * cw, status_cy, 'left')
-    local detail = {}
-    if playing then detail[#detail + 1] = fmt_time(math.min(pos, duration > 0 and duration or pos)) .. ' / ' .. fmt_time(duration) end
-    if queued > 0 then detail[#detail + 1] = queued .. ' queued' end
-    if #detail > 0 then
-        set(cr, fg, 0.5)
-        show(cr, '(' .. table.concat(detail, ' \u{b7} ') .. ')', left + 2 * cw + lw + cw, status_cy, 'left')
-    end
+    -- the working line has a row of its own only when no message is being read: lines waiting,
+    -- or a clip playing before its message is printed
+    if reading or not (playing or queued > 0) then return end
+    draw_working(cr, left, cw, status_cy, s, pos, duration, paused, queued, playing)
 end
 
 local function round_button(cr, cx, cy, size, active)

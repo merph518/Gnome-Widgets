@@ -98,18 +98,18 @@ left and right (the sessions column's share of the width is kept in
   chevron, the text behind a white bullet, in monospace, with its markdown formatted (headings,
   **bold**, *italic*, `code` in orange, lists, code blocks and links as their labels) when the
   Overmind hook publishes it in `now.json`'s `markdown` field, else as the plain line, and a dim
-  line closing it, "Read aloud for 7s, done Thursday 9:47 AM", which every message keeps, its
-  spinner turning orange while the message is read and resting gray after. The speaker's line
+  line closing it, which every message keeps: while the message is read it is the CLI's working
+  line, an orange turning spinner and **Reading aloud…** with the clip's time and length and the
+  queued lines (or **Paused**), and when the speech ends it becomes the gray resting spinner
+  with "Read aloud for 7s, done Thursday 9:47 AM". The speaker's line
   carries the session's issue and pull request numbers at its right,
   `[ Issue #123, #125 | PR #124, #126 ]`, each number a bold link (below). A message is printed when it starts to be
   read aloud, not when it was received, once (the same words from one session within 30
   seconds, or one clip published again, are one message), and stays: the text scrolls like a
   terminal's, the newest at the bottom, 40 messages kept in
   `~/.cache/conky-widgets/speech/scrollback.json` across restarts. The wheel scrolls back over
-  the pane; at the end it follows the newest line again. At the foot the CLI's working line
-  turns its spinner and says **Reading aloud…** with the clip's time and length and the
-  queued lines, or **Paused**, and shows nothing while idle (the messages above keep their own
-  gray spinners). Its colours are Claude's CLI's, and
+  the pane; at the end it follows the newest line again. A row of its own at the foot shows only
+  while lines are queued and none plays (**Waiting**). Its colours are Claude's CLI's, and
   fixed
 
 The row of the session being read aloud is brighter, fading in and out over about a third of a
