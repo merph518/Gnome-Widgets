@@ -335,9 +335,9 @@ local function bubble_offset(lines, shown_lines, progress, clock_pos)
     if said.key ~= key then
         said = {key = key, shown = 0, manual = nil, hold = 0, steps = said.steps}   -- a new line starts at the top
     end
-    local steps = tonumber((read('bubble-scroll') or ''):match('^%s*(%S+)') or '')
-    if steps and said.steps == nil then said.steps = steps end
-    if steps and steps ~= said.steps then
+    local steps = tonumber((read('bubble-scroll') or ''):match('^%s*(%S+)') or '') or 0   -- no file: no steps yet
+    if said.steps == nil then said.steps = steps end
+    if steps ~= said.steps then
         local from = said.manual or said.shown
         said.manual = math.min(math.max(from + (steps - said.steps), 0), last)
         said.hold, said.steps = BUBBLE_HOLD, steps
@@ -359,6 +359,7 @@ local function bubble_state(d)
     -- ends the last one stays BUBBLE_LINGER seconds, then fades over BUBBLE_FADE. Returns the
     -- bubble, its speaker and lines, how far open (0..1) and how opaque (0..1).
     local step = dt()
+    if not d.list then bubble = {snap = nil, open = 0, idle = 0} end   -- a collapsed card has no room for it
     if d.bubble and #d.bubble < 10 then d.bubble = nil end   -- one an older speechqueue.py wrote, until it restarts
     if d.bubble then
         bubble.snap = {b = d.bubble, name = d.text.speaker or '', lines = d.lines}
