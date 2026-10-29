@@ -727,6 +727,21 @@ class Golden(Fixture):
         self.assertLess(regions['next'][2], regions['volume'][0])            # clear of the volume slider
         self.assertGreater(regions['skip'][1], regions['close'][3])          # and not in the header
 
+    def test_the_slider_shortens_before_the_voice_label_is_cut(self):
+        self.three()
+        widths = {}
+        for size in ((660, 128, 1.0), (400, 128, 2.0)):
+            with mock.patch.object(speechqueue.size_file, 'load', return_value=size):
+                speechqueue.render(self.state(), now=1000.0)
+            lines, regions = self.footer()
+            x0, x1 = (float(v) for v in lines['volume'][:2])
+            widths[size] = x1 - x0
+            self.assertEqual(' '.join(lines['voice'][6:]), 'Voice: amy')              # never "Voice:..."
+            self.assertEqual(regions['volume_bar'], [x0, x1])
+        self.assertEqual(widths[(660, 128, 1.0)], speechqueue.VOLUME_WIDTH)
+        self.assertLess(widths[(400, 128, 2.0)], speechqueue.VOLUME_WIDTH)
+        self.assertGreaterEqual(widths[(400, 128, 2.0)], speechqueue.VOLUME_MIN)
+
     def test_without_a_clip_the_buttons_are_drawn_dimmed_and_are_not_click_areas(self):
         self.three()
         speechqueue.render(self.state(), now=1000.0)

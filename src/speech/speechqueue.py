@@ -93,6 +93,7 @@ VOICES_EVERY = 10.0                           # s between asking speechctl for t
 VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
 VOLUME_ICON = 16                              # the speaker and its waves, left of the track
 VOLUME_GAP = 8                                # speaker to track
+VOLUME_MIN = 32                               # its shortest track, as the Spotify widget's: the voice drop down keeps its label first
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
@@ -859,11 +860,12 @@ def render(state, now=None):
     next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
     vol_icon = next_cx + PAUSE_SIZE / 2 + 16
     vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
-    vol_x1 = vol_x0 + VOLUME_WIDTH
     level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     chrome = 2 * DROPDOWN_PAD + DROPDOWN_GAP + DROPDOWN_ARROW
-    voice = fit(f"Voice: {voice_label(state['voice'])}", FOOTER_FONT,
-                right - (vol_x1 + 6 + 16) - chrome)
+    voice = f"Voice: {voice_label(state['voice'])}"
+    # The track gives up room, down to VOLUME_MIN, before the voice's label is cut
+    vol_x1 = vol_x0 + min(VOLUME_WIDTH, max(VOLUME_MIN, right - (text_width(voice, FOOTER_FONT) + chrome) - 22 - vol_x0))
+    voice = fit(voice, FOOTER_FONT, right - (vol_x1 + 6 + 16) - chrome)
     drop_x0 = right - (text_width(voice, FOOTER_FONT) + chrome)
     drop = [drop_x0, fy - drop_h / 2, right, fy + drop_h / 2]
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
