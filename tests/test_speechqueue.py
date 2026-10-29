@@ -801,12 +801,19 @@ class TitleAndFooter(Fixture):
         with open(speechqueue.DRAW) as f:
             self.assertIn('speaker Table Headers', f.read().splitlines())
 
-    def test_the_bubble_and_the_card_are_as_tall_whatever_the_line_holds(self):
-        long_lines, _, long_widget = self.draw(text=self.LONG)
-        short_lines, _, short_widget = self.draw(text='Done.')
-        self.assertEqual(short_lines['line'], ['Done.'])
-        self.assertEqual(short_lines['bubble'].split()[:4], long_lines['bubble'].split()[:4])
-        self.assertEqual(short_widget, long_widget)                     # conky's window does not resize
+    def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_three(self):
+        def box(text):
+            lines, _, widget = self.draw(text=text)
+            _, y0, _, y1 = (float(v) for v in lines['bubble'].split()[:4])
+            return y0, y1, int(lines['bubble'].split()[9]), widget
+        line_h = speechqueue.line_height(speechqueue.ROW_FONT)
+        one, two, three = box('Done.'), box(self.LONG[:150]), box(self.LONG)
+        self.assertEqual((one[2], three[2]), (1, speechqueue.BUBBLE_LINES))
+        self.assertEqual(one[1], three[1])                              # the bottom stays level with the avatar
+        self.assertAlmostEqual(three[1] - three[0] - (one[1] - one[0]), 2 * line_h)
+        self.assertLess(three[0], two[0])
+        self.assertLess(two[0], one[0])
+        self.assertEqual(one[3], three[3])                              # conky's window does not resize
 
     def test_while_nothing_plays_there_is_the_avatar_and_no_bubble_and_the_card_keeps_its_size(self):
         playing_lines, _, playing = self.draw(text=self.LONG)

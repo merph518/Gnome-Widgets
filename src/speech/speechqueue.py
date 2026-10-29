@@ -76,7 +76,7 @@ AVATAR_GAP = 12                               # the avatar to the bubble, which 
 BUBBLE_PAD_X = 12                             # the bubble's edge to its text
 BUBBLE_PAD_Y = 8
 BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
-BUBBLE_LINES = 3                              # lines of the text read aloud the bubble shows at once, always
+BUBBLE_LINES = 3                              # most lines of the text read aloud the bubble shows at once
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
 HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
@@ -927,28 +927,31 @@ def render(state, now=None):
     # progress bar and the sessions, when conky-mouse.py has it open.
     out.gap(FOOTER_GAP)
     # The speaker's avatar, level with the bottom of a bubble whose tail points at it. While a
-    # clip plays the bubble holds the speaker's name, then BUBBLE_LINES lines at a time of the
-    # whole line being read aloud, which draw.lua scrolls; while nothing plays there is the
-    # avatar alone. The row is as tall either way, so the card's size does not change as
-    # lines play. draw.lua draws it from these lines.
+    # clip plays the bubble holds the speaker's name, then the whole line being read aloud: one
+    # line high for a short one, growing upward with it to BUBBLE_LINES lines, after which
+    # draw.lua scrolls it; while nothing plays there is the avatar alone. The row is always as
+    # tall as the tallest bubble, so the card's size does not change as lines play. draw.lua
+    # draws it from these lines.
     name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
-    bubble_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
+    full_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
     bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
     inner = (right - bubble_x0 - 2 * BUBBLE_PAD_X) / BLOCK_SLACK    # draw.lua's text runs wider
-    top = out.y
-    avatar_at(top + bubble_h - AVATAR_D)                      # level with the bubble's bottom
+    bottom = out.y + full_h
+    avatar_at(bottom - AVATAR_D)                              # level with the bubble's bottom
     if n:
         speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A session'   # the hook's "<name> session"
-        draw.append(f'bubble {bubble_x0} {top} {right} {top + bubble_h} {BUBBLE_PAD_X} '
+        said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
+        shown = min(max(len(said), 1), BUBBLE_LINES)
+        top = bottom - (2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + shown * line_h)
+        draw.append(f'bubble {bubble_x0} {top} {right} {bottom} {BUBBLE_PAD_X} '
                     f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
                     f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
-                    f'{top + bubble_h - AVATAR_D / 2:.2f} {BUBBLE_LINES}')
+                    f'{bottom - AVATAR_D / 2:.2f} {shown}')
         draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
-        said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
         draw.extend(f'line {line}' for line in said)
-        regions['bubble'] = [bubble_x0, top, right, top + bubble_h]
-        regions['bubble_scroll'] = max(len(said) - BUBBLE_LINES, 0)     # lines past what it shows
-    out.gap(max(bubble_h, AVATAR_D))
+        regions['bubble'] = [bubble_x0, top, right, bottom]
+        regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
+    out.gap(max(full_h, AVATAR_D))
     out.gap(HEADER_GAP)
     # The progress bar, always there: the current line's while its length is known (0:00 while
     # Piper still renders it), else the last line's, left full where it finished.
