@@ -111,6 +111,10 @@ session whose speech mode is on.
   waits for.
 - Do not apologize for announcements or promise to stop making them. Just
   answer. An apology is more speech to sit through and fixes nothing.
+- Say a thing once. A turn that ends waiting on background work, such as a
+  test run or a review pass, ends on one line of a few words, such as "Waiting
+  on PR 214's checks." When a progress line already went out in that turn and
+  nothing has changed since, end with no closing text, or only what is new.
 - Avoid the verb for where something resides, spelled l-i-v-e-s. The voice
   gives it a long I, as in "alive." Say "is in", "sits in" or "is kept in"
   instead.

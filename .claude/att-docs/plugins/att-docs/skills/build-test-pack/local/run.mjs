@@ -12,6 +12,9 @@ import { ModelError, modelClient } from './model.mjs';
 import { jobLogs } from './status.mjs';
 import * as P from './phases.mjs';
 
+/** The objective config names for a set, else the usual name if the builder lists it, else none. */
+const setObjective = (named, builder, usual) => named ?? (builder.OBJECTIVES.includes(usual) ? usual : null);
+
 const DEFAULTS = {
   IMPACT_CLASSES: ['Direct Change', 'Indirect Impact', 'Regression', 'Not Impacted'],
   COVERAGE_STATUSES: ['Covered', 'Partially Covered', 'Weakly Covered', 'Missing', 'Not Applicable'],
@@ -42,7 +45,7 @@ export const PHASES = ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5
 
 // What a run builds for itself from the config; everything else on ctx is the job's state.
 const SETUP = new Set(['config', 'job', 'logs', 'builder', 'suiteMerge', 'model', 'ref', 'private',
-  'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets']);
+  'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets', 'fullCoverageObjective', 'breakItObjective', 'rulesFresh']);
 
 const checkpointPath = (outDir) => path.join(outDir, 'work', 'checkpoint.json');
 
@@ -82,6 +85,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
     pack: {},
     riskLevels: config.riskLevels ?? ['High', 'Medium', 'Low'],
     coreObjective: config.coreObjective ?? builder.OBJECTIVES[0],
+    fullCoverageObjective: setObjective(config.fullCoverageObjective, builder, 'Full Coverage Required Run'),
+    breakItObjective: setObjective(config.breakItObjective, builder, 'BREAK IT'),
     suiteSetOrder: suiteMerge?.SUITE_SET_ORDER ?? builder.OBJECTIVES.slice(1),
     suiteRunSets: config.suiteMerge?.runSets ?? ['Regression Testing', 'Full Coverage Required Run'],
     calls: 0, repairs: 0, droppedObjectives: 0, derived: 0, reviewIssues: 0, reuse: [],

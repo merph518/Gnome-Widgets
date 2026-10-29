@@ -109,6 +109,74 @@ def converted(path: pathlib.Path, source: str, day: str) -> None:
     )
 
 
+class Lookup(Configured):
+    def report(self, *rows: tuple[str, ...]) -> str:
+        lines = ["|".join(("LOOKUP", *row)) for row in rows]
+        return "\n".join(["DOCWATCH-BEGIN", *lines, "WALKED|1|1", "DOCWATCH-END"])
+
+    def test_a_same_day_edit_after_the_conversion_minute_is_stale(self) -> None:
+        converted(self.repo / "converted" / "ALPHA" / "1-Home.md", "1 - Home.doc",
+                  "2026-10-13 10:04Z")
+        text = self.report(("Process%20Description", "1%20-%20Home.doc",
+                            "2026-10-13T14%3A31%3A00Z", "100", "ALPHA"))
+        out = DOCWATCH.lookup(text, ["1 - Home.doc"])
+        self.assertEqual([c["replaces"] for c in out["changed"]], ["converted/ALPHA/1-Home.md"])
+
+    def test_an_edit_before_the_conversion_minute_is_current(self) -> None:
+        converted(self.repo / "converted" / "ALPHA" / "1-Home.md", "1 - Home.doc",
+                  "2026-10-13 10:04Z")
+        text = self.report(("Process%20Description", "1%20-%20Home.doc",
+                            "2026-10-13T10%3A03%3A00Z", "100", "ALPHA"))
+        out = DOCWATCH.lookup(text, ["1 - Home.doc"])
+        self.assertEqual((out["changed"], out["current"]), ([], ["1 - Home.doc"]))
+
+    def test_a_date_only_conversion_is_stale_on_the_day_it_was_edited(self) -> None:
+        converted(self.repo / "converted" / "ALPHA" / "1-Home.md", "1 - Home.doc", "2026-10-13")
+        text = self.report(("Process%20Description", "1%20-%20Home.doc",
+                            "2026-10-13T08%3A00%3A00Z", "100", "ALPHA"))
+        self.assertEqual(len(DOCWATCH.lookup(text, ["1 - Home.doc"])["changed"]), 1)
+
+    def test_a_document_with_no_converted_copy_is_new_and_a_missing_one_not_found(self) -> None:
+        text = self.report(("Process%20Description", "2%20-%20Other.doc",
+                            "2026-10-13T08%3A00%3A00Z", "100", "ALPHA"))
+        out = DOCWATCH.lookup(text, ["2 - Other.doc", "3 - Gone.doc"])
+        self.assertEqual([n["suite"] for n in out["new"]], ["ALPHA"])
+        self.assertEqual(out["not_found"], ["3 - Gone.doc"])
+
+    def test_a_walk_that_did_not_finish_is_not_read_as_not_found(self) -> None:
+        out = DOCWATCH.lookup("DOCWATCH-BEGIN\nSESSION|expired\nDOCWATCH-END", ["1 - Home.doc"])
+        self.assertEqual((out["readable"], out["not_found"], out["session"]),
+                         (False, [], "expired"))
+
+    def test_an_edit_in_the_conversion_minute_is_stale(self) -> None:
+        converted(self.repo / "converted" / "ALPHA" / "1-Home.md", "1 - Home.doc",
+                  "2026-10-13 10:04Z")
+        text = self.report(("Process%20Description", "1%20-%20Home.doc",
+                            "2026-10-13T10%3A04%3A40Z", "100", "ALPHA"))
+        self.assertEqual(len(DOCWATCH.lookup(text, ["1 - Home.doc"])["changed"]), 1)
+
+    def test_a_new_document_in_a_folder_with_no_suite_needs_one(self) -> None:
+        text = self.report(("Process%20Description", "2%20-%20Other.doc",
+                            "2026-10-13T08%3A00%3A00Z", "100", "track"))
+        out = DOCWATCH.lookup(text, ["2 - Other.doc"])
+        self.assertEqual((out["new"], len(out["no_suite"])), ([], 1))
+
+    def test_a_revision_copy_is_not_weighed_against_the_current_one(self) -> None:
+        converted(self.repo / "converted" / "ALPHA" / "1-Home.md", "1 - Home.doc",
+                  "2026-10-13 10:04Z")
+        text = self.report(
+            ("Process%20Description", "1%20-%20Home.doc", "2026-10-13T10%3A03%3A00Z", "100",
+             "ALPHA", ""),
+            ("Process%20Description/Revision%20History", "1%20-%20Home.doc",
+             "2026-10-01T09%3A00%3A00Z", "90", "ALPHA", "side"))
+        out = DOCWATCH.lookup(text, ["1 - Home.doc"])
+        self.assertEqual((out["held"], out["current"]), ([], ["1 - Home.doc"]))
+
+    def test_the_payload_asks_for_the_named_documents(self) -> None:
+        script = DOCWATCH.payload("lookup", False, ("2 - Other.doc",))
+        self.assertIn(DOCWATCH.fnv("2 - Other"), script)
+
+
 class FutureFolder(Configured):
     def test_future_copy_shadows_the_suite_copy(self) -> None:
         apps = self.repo / "converted"

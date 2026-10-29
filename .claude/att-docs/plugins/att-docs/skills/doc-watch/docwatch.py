@@ -90,6 +90,8 @@ RULES = ("track", "skip")
 # content reads "- Source: <origin>, by way of `<file>`", and the file is still the key.
 SOURCE_LINE = re.compile(r"^- Source: (?:.*by way of )?`([^`]+)`\s*$")
 CONVERTED_LINE = re.compile(r"^- Converted: (\d{4}-\d{2}-\d{2})")
+# The same line with the time convert-docs adds, in Zulu time; an older copy holds the date alone.
+CONVERTED_STAMP = re.compile(r"^- Converted: (\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2})?)")
 # How many lines from the top of a converted file the provenance block is read from.
 BLOCK_LINES = 41
 
@@ -162,6 +164,17 @@ def read_block(md: Path) -> tuple[list[str], str] | None:
     return None
 
 
+def converted_stamp(md: Path) -> str:
+    """The Converted value of a converted file: `YYYY-MM-DD HH:MM` (Zulu time), or the date alone."""
+    with md.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle):
+            if number >= BLOCK_LINES:
+                break
+            if match := CONVERTED_STAMP.match(line):
+                return match.group(1)
+    return ""
+
+
 def is_future(md: Path) -> bool:
     """Whether a converted file sits in its suite's Future folder."""
     parts = md.relative_to(APPS).parts
@@ -189,6 +202,7 @@ def build_index(follow: bool = True) -> dict[str, list[dict]]:
                 "path": md.relative_to(ROOT).as_posix(),
                 "suite": md.relative_to(APPS).parts[0],
                 "converted": converted,
+                "converted_at": converted_stamp(md),
                 "future": is_future(md),
             })
     for name, claims in index.items() if follow else ():
@@ -336,7 +350,7 @@ def packed_index() -> dict:
     return {"days": days, "entries": joined, "check": fnv(joined)}
 
 
-def payload(mode: str, cached: bool) -> str:
+def payload(mode: str, cached: bool, names: tuple[str, ...] = ()) -> str:
     """page.js with the folder table, the readable formats and the hashed index filled in.
 
     The page keeps the index in its own localStorage, so a cached payload leaves it out
@@ -362,6 +376,7 @@ def payload(mode: str, cached: bool) -> str:
         .replace("__FORMATS__", json.dumps(read_formats()))
         .replace("__DATE_SUFFIX__", json.dumps(DATE_SUFFIX))
         .replace("__SOURCES__", json.dumps(sorted(sources)))
+        .replace("__NAMES__", json.dumps(sorted({fnv(stem(name)) for name in names})))
         .replace("__INDEX__", "null" if cached else json.dumps(packed))
     )
 
@@ -458,6 +473,103 @@ def compare(text: str) -> dict:
     result["not_listed"] = sorted(
         name for h in missing if h in by_hash for name in grouped[by_hash[h]]["names"]
     )
+    return result
+
+
+def modified_minute(modified: str) -> str:
+    """A library Modified time (ISO, Zulu time) as `YYYY-MM-DD HH:MM`."""
+    return f"{modified[:10]} {modified[11:16]}"
+
+
+def is_stale(modified: str, converted_at: str) -> bool:
+    """Whether a library copy changed after its conversion, to the minute.
+
+    A conversion stamped with a time is compared to the minute, and an edit in the same minute
+    counts as stale, since the stamp cannot tell which came first. One stamped with the date
+    alone has no time to compare, so a copy modified on that day or later counts as stale.
+    """
+    if len(converted_at) > 10:
+        return modified_minute(modified) >= converted_at
+    return modified[:10] >= converted_at
+
+
+def lookup(text: str, names: list[str]) -> dict:
+    """Classify the named documents from a lookup report, to the minute.
+
+    `changed` lists a document whose converted copy is stale and `new` one with no converted
+    copy, both in the shape `place` reads. `current` and `not_found` name the rest, `held` a
+    name in two folders holding different files that sources.tsv does not settle, `no_suite`
+    a new document in a folder that follows documents without naming a suite, and `ignored`
+    a document the ignored table passes over. `readable` is false, with the reason in
+    `session`, `errors`, or `index`, when the walk did not finish, so an unreachable library
+    is never read as documents not found.
+    """
+    groups = parse_report(text)
+    session = (groups.get("SESSION") or [["ok"]])[0][0]
+    errors = groups.get("ERROR", [])
+    index_state = (groups.get("INDEX") or [[]])[0]
+    result: dict = {
+        "readable": bool(groups.get("WALKED")) and session == "ok" and not errors
+        and not index_state,
+        "session": session, "errors": errors, "index": index_state,
+        "changed": [], "new": [], "current": [], "not_found": [], "held": [],
+        "no_suite": [], "ignored": [],
+    }
+    if not result["readable"]:
+        return result
+    ignored = {(row[0], row[1] if len(row) > 1 else "*") for row in read_tsv(IGNORED)}
+    rows = groups.get("LOOKUP", [])
+    grouped = by_stem(build_index())
+    homes = read_sources(grouped)
+    for wanted in names:
+        key = stem(wanted).lower()
+        found = [r for r in rows if stem(r[1]).lower() == key]
+        # A revision copy stands in only when no current copy was found.
+        found = [r for r in found if len(r) < 6 or r[5] != "side"] or found
+        if not found:
+            result["not_found"].append(wanted)
+            continue
+        placed = homes.get(key, {})
+        group = grouped.get(key)
+        by_folder: dict[str, list[tuple[str, str]]] = {}
+        for folder, name, _modified, size, *_rest in found:
+            by_folder.setdefault(folder, []).append((name.lower(), size))
+        if len(by_folder) > 1 and not placed:
+            if len({tuple(sorted(files)) for files in by_folder.values()}) > 1:
+                result["held"].append({"name": wanted, "folders": sorted(by_folder)})
+                continue
+            found = found[:1]
+        if any((name, "*") in ignored or (name, modified) in ignored
+               for _f, name, modified, *_rest in found):
+            result["ignored"].append(wanted)
+            continue
+        if group is None:
+            folder, name, modified, size, rule, *_rest = found[0]
+            if rule not in SUITES.values():
+                result["no_suite"].append({"name": name, "folder": folder, "rule": rule})
+                continue
+            result["new"].append({
+                "suite": rule, "name": name, "folder": folder, "modified": modified,
+                "size": int(size or 0), "url": library_path(folder, name),
+                "replaces": None, "future": False,
+            })
+            continue
+        stale = []
+        for folder, name, modified, size, *_rest in found:
+            for claim in group["claims"].values():
+                if placed and not from_source(folder, placed[claim["path"]]):
+                    continue
+                if is_stale(modified, claim["converted_at"] or claim["converted"]):
+                    stale.append({
+                        "suite": claim["suite"], "name": name, "folder": folder,
+                        "modified": modified, "size": int(size or 0),
+                        "url": library_path(folder, name), "replaces": claim["path"],
+                        "converted": claim["converted"], "future": claim["future"],
+                    })
+        if stale:
+            result["changed"].extend(stale)
+        else:
+            result["current"].append(wanted)
     return result
 
 
@@ -802,8 +914,14 @@ def main() -> int:
     parser.add_argument("--config", help="the skill's extension.json")
     sub = parser.add_subparsers(dest="command", required=True)
     pay = sub.add_parser("payload")
-    pay.add_argument("--mode", choices=("scan", "survey", "links"), default="scan")
+    pay.add_argument("--mode", choices=("scan", "survey", "links", "lookup"), default="scan")
+    pay.add_argument("--name", action="append", default=[],
+                     help="a library file name to report, for --mode lookup; repeatable")
     pay.add_argument("--cached", action="store_true", help="leave the index out")
+    looker = sub.add_parser("lookup")
+    looker.add_argument("report", help="file holding the lookup page report")
+    looker.add_argument("--name", action="append", required=True,
+                        help="a library file name to classify; repeatable")
     comparer = sub.add_parser("compare")
     comparer.add_argument("report", help="file holding the page report")
     comparer.add_argument("--all", action="store_true",
@@ -834,7 +952,10 @@ def main() -> int:
         args.repo = str(ROOT)
 
     if args.command == "payload":
-        sys.stdout.write(payload(args.mode, args.cached))
+        sys.stdout.write(payload(args.mode, args.cached, tuple(args.name)))
+    elif args.command == "lookup":
+        text = Path(args.report).read_text(encoding="utf-8")
+        json.dump(lookup(text, args.name), sys.stdout, indent=1)
     elif args.command == "compare":
         text = Path(args.report).read_text(encoding="utf-8")
         json.dump(compare(every_document_changed(text) if args.all else text), sys.stdout,

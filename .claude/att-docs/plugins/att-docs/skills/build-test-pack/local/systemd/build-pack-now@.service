@@ -16,7 +16,8 @@
 # BUILD_PACK_CONFIG, and a full PATH and any token the rule export needs.
 #
 # If another queue run holds the queue, this unit exits at once and leaves the
-# job queued; the run that holds the queue takes it in its turn.
+# job queued. A nightly run takes it when it is due; a run that works only
+# start-now rows takes it only if it is marked now with `queue add --now`.
 
 [Unit]
 Description=Build the queued test pack %i now

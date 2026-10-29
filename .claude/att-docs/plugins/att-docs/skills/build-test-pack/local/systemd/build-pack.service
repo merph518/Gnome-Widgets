@@ -1,5 +1,8 @@
 # Runs the test pack queue on the local model, one job at a time, until the
-# queue is empty or the cutoff passes. The timer starts it each night. If a job
+# queue is empty or the cutoff passes. The timer starts it each night. Before it
+# takes its first job it reads the sources in the config's queue.sources and
+# queues the jobs they list. A job that fails is retried once: by the next nightly
+# run when it failed at night, by tonight's when it failed in the daytime. If a job
 # started by build-pack-now@.service still holds the queue at 22:00, this run
 # polls every 30 seconds until that job finishes, and works the queue then; it
 # gives up only when the cutoff passes.

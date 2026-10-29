@@ -610,8 +610,8 @@ def main() -> int:
         help="a source document this Markdown came from, repeatable",
     )
     parser.add_argument(
-        "--converted", default=dt.date.today().isoformat(),
-        help="the run date, which is the only value this script originates",
+        "--converted", default=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%MZ"),
+        help="the run date and time to the minute, in Zulu time (a trailing Z), the only value this script originates",
     )
     parser.add_argument("--title", help="override the title taken from the file name")
     parser.add_argument(

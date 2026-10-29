@@ -142,6 +142,29 @@ There, `source_page` is the heading the rule sits under and the description's
 anchor ends with that heading, and the import check holds no row of that
 document to a page.
 
+Struck-through text, `~~like this~~` in the converted file, is behavior the
+document removed. Each struck-through span that states behavior becomes a rule
+of its own, written as the behavior it described, with a `change_summary` that
+starts "Retired:" and says it was removed and where it sat. It takes the next
+number in document order, cites the page of the struck text, and is never
+merged into a rule the live text carries. Struck old text beside live text
+that changes or restates the same behavior is one rule, the live one, with no
+retired row. A
+span that only corrects wording, or that the live text repeats unchanged, is not a
+retired rule.
+
+The rule store sets a rule retired only when an approved row classifies as
+retired, and a first extraction stages only `new` rows. So a struck-through row
+staged here, which is classified `new`, still lands in the master as active until
+the store honors the "Retired:" marker. Until the store does, name every such row
+under `manual_review_items`. After approval, and before anyone uploads a workbook,
+the reviewer sets each one's `status` to `retired` with a direct update of
+`<master-table>`. `<review-commands>` has no action for it, and the update does
+not record the batch that changed the row. The reviewer then exports the document
+again with `<workbook-command>` and its `--doc` form, which `<update-skill>`
+describes, so the removed behavior is not uploaded as a live rule. The review
+states how many such rows the batch holds.
+
 The converted files carry no images, and whatever a screenshot said is not in
 the repository copy. A document with a screen print or image section gets that
 section named under `manual_review_items` and `screenshots_reviewed: false`, so
@@ -207,8 +230,9 @@ Column by column, per the procedure:
   restriction, batch, integration, timing, and legal rules; `Medium` for
   validation, conditional logic, reporting, and calculation; `Low` for display
   and informational rules.
-- `classification` is `new` on every row, `change_summary` is empty, and no
-  row carries a `business_rule_id`.
+- `classification` is `new` on every row, `change_summary` is empty except on a
+  retired rule, where it starts "Retired:", and no row carries a
+  `business_rule_id`.
 
 `qa` holds the Extraction QA counts: sections reviewed, rules extracted, the
 count by category, sections with no rule, duplicates merged, whether
@@ -299,7 +323,8 @@ with Path in full for a `<tool-docs>` document. `Business Rules` leaves out the
 rows a reviewer rejected with the row review command, so after a row review
 export the batch again and hand over the new file. `<update-export>` says what
 the export refuses and how it builds Path. For a `<tool-docs>` document, the
-user uploads the workbook to `<rule-tool>` by hand once the batch is approved.
+user uploads the workbook to `<rule-tool>` by hand once the batch is approved, the
+`--doc` workbook when the batch held struck-through rows.
 
 ## Review, approval, and what approval does
 

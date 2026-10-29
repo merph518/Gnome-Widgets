@@ -3,11 +3,15 @@
 //
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
-//   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] | --suite <code>) [--resume] [--now]
+//   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+//   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
+//   node build-pack.mjs queue remove --config <pipeline.json> --job <id>
+//   node build-pack.mjs queue fill --config <pipeline.json>
 //   node build-pack.mjs queue run --config <pipeline.json> [--cutoff HH:MM]
 //   node build-pack.mjs queue start --config <pipeline.json> --job <id> [--cutoff HH:MM]
 //   node build-pack.mjs queue status --config <pipeline.json> --job <id>
 //   node build-pack.mjs queue summary --config <pipeline.json>
+//   node build-pack.mjs report --config <pipeline.json> [--period day|week|auto] [--seed <n>]
 //
 // Console output is the content-free status lines only: phase names, pass or
 // fail, reason codes, counts and timings. What the model wrote stays in each
@@ -17,18 +21,26 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.mjs';
+import { fill, globFiles, loadConfig, MAX_TRIES } from './config.mjs';
 import { createPauser } from './pause.mjs';
+import { documentRules, USABLE_RULE_CODES } from './phases.mjs';
+import { seededRandom, writeReports } from './report.mjs';
 import { jobId, runJob } from './run.mjs';
-import { statusFields } from './status.mjs';
+import { lineArgs, sourceLines } from './sources.mjs';
+import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
-  build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... | --suite <code>) [--resume]
-  build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... | --suite <code>) [--resume] [--now]
+  build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
+  build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+  build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
+  build-pack.mjs queue remove --config <file> --job <id>
+  build-pack.mjs queue fill --config <file>
   build-pack.mjs queue run --config <file> [--cutoff HH:MM]
   build-pack.mjs queue start --config <file> --job <id> [--cutoff HH:MM]
   build-pack.mjs queue status --config <file> --job <id>
-  build-pack.mjs queue summary --config <file>`;
+  build-pack.mjs queue summary --config <file>
+  build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
+exit codes of check: 0 every input present, 1 an input missing, 3 documents not named, so their rules are unchecked`;
 
 export function parseArgs(argv) {
   const args = { docs: [] };
@@ -39,9 +51,9 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume and --now take no value.
-    if (flag === '--resume' || flag === '--now') {
-      args[flag.slice(2)] = true;
+    // --resume, --now and --allow-derived-rules take no value.
+    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules') {
+      args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
     }
     i += 1;
@@ -56,6 +68,7 @@ export function jobFrom(args) {
   if (args.suite && args.issue) throw new Error('a job names an issue or a suite, not both');
   if (args.suite) {
     if (!/^[A-Za-z0-9_-]+$/.test(args.suite)) throw new Error('--suite takes a suite code');
+    if (args.allowDerivedRules) throw new Error('--allow-derived-rules does not apply to a suite');
     return { suite: args.suite, ...(args.resume ? { resume: true } : {}) };
   }
   if (!/^\d+$/.test(args.issue ?? '')) throw new Error('--issue takes a number');
@@ -65,7 +78,49 @@ export function jobFrom(args) {
   return { issue: args.issue, ...(args.change ? { change: args.change } : {}),
     ...(args.docs.length ? { docs: args.docs } : {}),
     ...(args.descriptionFile ? { descriptionFile: args.descriptionFile } : {}),
+    ...(args.allowDerivedRules ? { allowDerivedRules: true } : {}),
     ...(args.resume ? { resume: true } : {}) };
+}
+
+/**
+ * The input gates for an issue job, with no model call: one line per input,
+ * `<input>  present|missing  <code>`, whether every required input is
+ * present, and whether the documents' rules went unchecked. Documents are named by number and nothing from a document or a
+ * rule reaches the lines; what was wrong with a rule export goes to the
+ * check's own detail.log. Without `--doc`, the model chooses the documents at
+ * intake, so their rules are not checked here.
+ */
+export function checkJob(config, job) {
+  const lines = [];
+  let unchecked = false;
+  const add = (input, present, code) => lines.push(
+    { input, present, text: `${input}  ${present ? 'present' : 'missing'}  ${code}` });
+  add('issue-number', /^\d+$/.test(job.issue ?? ''), 'issue');
+  const descriptionFiles = job.descriptionFile ? [config.at(job.descriptionFile)]
+    : config.inputs.description ? globFiles(config.root, fill(config.inputs.description, job)) : [];
+  const description = descriptionFiles.filter((f) => fs.existsSync(f))
+    .map((f) => fs.readFileSync(f, 'utf8')).join('').trim();
+  add('description', Boolean(description), description ? 'found' : 'no-description');
+  if (job.docs?.length) {
+    const logs = jobLogs(path.join(config.output, `${jobId(job)}.check`), { echo: false });
+    const ctx = { config, job, logs };
+    job.docs.forEach((doc, i) => {
+      const file = config.at(doc);
+      if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+        add(`document-${i + 1}`, false, 'document-file');
+        return;
+      }
+      const { code } = documentRules(ctx, file);
+      add(`document-${i + 1}`, USABLE_RULE_CODES.includes(code), code);
+    });
+  } else {
+    const candidates = config.inputs.documentIndex
+      ? globFiles(config.root, fill(config.inputs.documentIndex, job)) : [];
+    add('documents', candidates.length > 0, candidates.length ? `candidates=${candidates.length}` : 'no-candidates');
+    if (candidates.length) unchecked = true;
+  }
+  if (unchecked) lines.push({ input: 'rules', present: true, text: 'rules  unchecked  name-documents-with-doc' });
+  return { lines: lines.map((line) => line.text), ok: lines.every((line) => line.present), unchecked };
 }
 
 const queuePath = (config) => config.at(config.queue.file);
@@ -89,18 +144,82 @@ export function addJob(config, job, now = new Date()) {
   const id = jobId(job);
   const open = queue.jobs.find((row) => row.id === id && ['queued', 'running'].includes(row.status));
   if (open) {
-    // A request to start now marks a row that is waiting for tonight, and a
-    // resume asked for with it rides along.
-    if (job.now && open.status === 'queued' && !open.now) {
-      Object.assign(open, { now: true }, job.resume ? { resume: true } : {});
-      writeQueue(config, queue);
-      return { id, added: false, marked: true };
-    }
-    return { id, added: false, running: open.status === 'running' };
+    if (open.status === 'running') return { id, added: false, running: true };
+    // A request on a row that is waiting for tonight changes what it will run:
+    // start-now, resume, derived rules and the named documents ride along.
+    const merged = [];
+    if (job.now && !open.now) merged.push('now');
+    if (job.resume && !open.resume) merged.push('resume');
+    if (job.allowDerivedRules && !open.allowDerivedRules) merged.push('allowDerivedRules');
+    if (job.docs?.length && JSON.stringify(job.docs) !== JSON.stringify(open.docs)) merged.push('docs');
+    for (const field of merged) open[field] = job[field];
+    if (merged.length) writeQueue(config, queue);
+    if (!merged.length) return { id, added: false, running: false };
+    const rest = merged.filter((field) => field !== 'now');
+    return { id, added: false, ...(merged.includes('now') ? { marked: true } : {}),
+      ...(rest.length ? { merged: rest } : {}) };
   }
   queue.jobs.push({ id, ...job, status: 'queued', added: now.toISOString() });
   writeQueue(config, queue);
   return { id, added: true };
+}
+
+/**
+ * Takes a waiting job out of the queue. The row stays as `removed`, so a
+ * source that still lists the job does not queue it again.
+ */
+export function removeJob(config, id, now = new Date()) {
+  const queue = readQueue(config);
+  const row = queue.jobs.findLast((r) => r.id === id && ['queued', 'running'].includes(r.status));
+  if (!row) return { id, removed: false, running: false };
+  if (row.status === 'running') return { id, removed: false, running: true };
+  Object.assign(row, { status: 'removed', finished: now.toISOString() });
+  delete row.notBefore;
+  writeQueue(config, queue);
+  return { id, removed: true };
+}
+
+/** The job a source line names, or null for a blank or comment line. */
+export function jobFromLine(line) {
+  const text = line.trim();
+  if (!text || text.startsWith('#')) return null;
+  return jobFrom(parseArgs(lineArgs(text)));
+}
+
+/**
+ * Queues every job the configured sources list that the queue has not seen.
+ * A job already in the queue file in any state, queued, passed, failed or
+ * removed, is not queued again; `queue add` is how a finished or dropped job
+ * is run once more. A source that cannot be read, or a line that is not a
+ * job, is counted and skipped so the other sources still fill the queue.
+ */
+export function fillQueue(config, now = new Date()) {
+  const seen = new Set(readQueue(config).jobs.map((row) => row.id));
+  const result = { added: [], known: 0, invalid: 0, errors: [] };
+  for (const source of config.queue.sources) {
+    const { lines, error, invalid = 0 } = sourceLines(config, source);
+    result.invalid += invalid;
+    if (error) result.errors.push(`${source.type}:${error}`);
+    for (const line of lines) {
+      let job;
+      try {
+        job = jobFromLine(line);
+      } catch {
+        result.invalid += 1;
+        continue;
+      }
+      if (!job) continue;
+      const id = jobId(job);
+      if (seen.has(id)) {
+        result.known += 1;
+        continue;
+      }
+      seen.add(id);
+      addJob(config, job, now);
+      result.added.push(id);
+    }
+  }
+  return result;
 }
 
 /** The first moment at or after `from` whose clock reads HH:MM. */
@@ -220,12 +339,15 @@ function lockQueue(config) {
 /**
  * Works the queue one job at a time, oldest first, until it is empty or the
  * cutoff passes. A job already running when the cutoff passes finishes. A
- * failed job is marked failed with its phase, and the next one starts.
+ * failed job goes back to waiting, with its phase and reason kept, and the next
+ * one starts; a run does not take a job again that failed in it.
  *
  * With `start` set, the queue runs only in the window from start to cutoff: a
  * run that begins outside it, such as a timer catching up after the machine
  * slept through the night, takes no job. A job left running by a run that
- * died is marked failed as interrupted.
+ * died counts as a failed try, `interrupted`, and has no wait; a run that works
+ * every queued row takes it again at once, while one that works only `now`
+ * rows leaves it for the night, since the failed try cleared its mark.
  *
  * With `only` set to a job ID, the run takes that job's queued row first; with
  * no queued row of that ID it takes nothing. With `nowOnly` set, the jobs after
@@ -235,11 +357,18 @@ function lockQueue(config) {
  * holder that is finishing is not mistaken for a long one. Then, with `wait`
  * set, the run polls every `pollMs` until it gets the queue or the cutoff
  * passes, so a nightly run behind a daytime job still works the night's rows.
- * Without `wait`, `onBusy` is called and the row stays queued; a holder that
- * works every row, or every `now` row, takes it in its turn.
+ * Without `wait`, `onBusy` is called and the row stays queued. A holder that
+ * works every row takes it when it is due and has not failed in that run; a
+ * holder that works only `now` rows takes it only if it is marked `now`.
+ *
+ * A job that fails during the night is queued again for the next nightly run,
+ * and one that fails in the daytime for tonight's, resumed from the phase that
+ * stopped it either way; one that has failed MAX_TRIES times stays failed and
+ * is not taken again. With `refill` set, it is called once the queue is held and
+ * before the first job is taken, to add the jobs the configured sources list.
  */
 export async function drainQueue(config, { cutoff = config.queue.cutoff, start = null,
-  only = null, nowOnly = false, wait = false, onBusy = () => {}, run = runJob,
+  only = null, nowOnly = false, wait = false, onBusy = () => {}, run = runJob, refill = null,
   clock = () => new Date(), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   settleMs = 2000, pollMs = 30000, pause = (cfg) => createPauser(cfg) } = {}) {
   const stopAt = cutoffAfter(clock(), cutoff);
@@ -261,10 +390,10 @@ export async function drainQueue(config, { cutoff = config.queue.cutoff, start =
     const stale = readQueue(config);
     const interrupted = stale.jobs.filter((row) => row.status === 'running');
     for (const row of interrupted) {
-      Object.assign(row, { status: 'failed', finished: clock().toISOString(),
-        reason: 'interrupted' });
+      settleRow(row, { ok: false, phase: 'unknown', reason: 'interrupted', ms: 0 }, clock(), config);
     }
     if (interrupted.length) writeQueue(config, stale);
+    if (refill) refill(config);
     return await drainLocked(config, { stopAt, only, nowOnly, run, clock, pause });
   } finally {
     unlock();
@@ -282,14 +411,52 @@ async function drainLocked(config, { pause, ...rest }) {
   }
 }
 
+/** True when `at` falls in the nightly window, from the configured start to the cutoff. */
+function inNightWindow(config, at) {
+  return cutoffAfter(at, config.queue.start) > cutoffAfter(at, config.queue.cutoff);
+}
+
+// What a finished attempt does to its row. A first failure puts the job back in
+// the queue to resume. One that failed during the night waits until that
+// night's cutoff has passed, so only the next nightly run takes it; one that
+// failed in the daytime is taken by tonight's run. A row found running after
+// its run died has no wait; a run that works every queued row takes it at once,
+// and one that works only `now` rows leaves it for the night.
+function settleRow(row, result, at, config) {
+  const failures = [...(row.failures ?? [])];
+  if (!result.ok) {
+    failures.push({ at: at.toISOString(), phase: result.phase ?? 'unknown',
+      reason: result.reason ?? 'error', ms: result.ms ?? 0 });
+  }
+  for (const field of ['started', 'now', 'finished', 'ms', 'phase', 'reason', 'workbook', 'outDir',
+    'notBefore']) delete row[field];
+  if (!result.ok && failures.length < MAX_TRIES) {
+    const wait = result.reason !== 'interrupted' && inNightWindow(config, at);
+    Object.assign(row, { status: 'queued', resume: true, failures,
+      ...(wait ? { notBefore: cutoffAfter(at, config.queue.cutoff).toISOString() } : {}) });
+    return;
+  }
+  Object.assign(row, {
+    status: result.ok ? 'passed' : 'failed', finished: at.toISOString(),
+    ms: result.ms, phase: result.ok ? 'done' : result.phase, reason: result.reason ?? null,
+    workbook: result.workbook ?? null, outDir: result.outDir ?? null,
+    ...(failures.length ? { failures } : {}),
+  });
+}
+
 async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) {
   const done = [];
   let first = only;
   let paused = false;
+  // A job that failed in this run waits for a later one.
+  const tried = new Set();
   for (;;) {
     if (clock() >= stopAt) break;
     const queue = readQueue(config);
-    const next = queue.jobs.find((row) => row.status === 'queued'
+    // A request to start a job now, by its ID or with --now, ignores the wait for the next nightly run.
+    const next = queue.jobs.find((row) => row.status === 'queued' && !tried.has(row.id)
+      && (!row.notBefore || clock() >= new Date(row.notBefore)
+        || row.id === first || (nowOnly && row.now))
       && (first ? row.id === first : !nowOnly || row.now));
     if (!next) break;
     first = null;
@@ -297,10 +464,15 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
       paused = true;
       await pauser.pause();
     }
-    next.status = 'running';
-    next.started = clock().toISOString();
-    writeQueue(config, queue);
-    const { id, status, added, started, now: _now, ...job } = next;
+    // Stopping the units can take minutes, so the row is claimed in a fresh read of the
+    // queue file, which keeps a job added in the meantime.
+    const fresh = readQueue(config);
+    const claimed = fresh.jobs.find((row) => row.id === next.id && row.status === 'queued');
+    if (!claimed) continue;
+    claimed.status = 'running';
+    claimed.started = clock().toISOString();
+    writeQueue(config, fresh);
+    const { id, status, added, started, now: _now, failures, notBefore, ...job } = claimed;
     let result;
     try {
       result = await run(config, { ...job, id });
@@ -310,15 +482,12 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     const after = readQueue(config);
     let row = after.jobs.find((r) => r.id === id && r.status === 'running');
     if (!row) {
-      // The row was taken out of the queue file while the job ran.
-      row = { id, ...job, added, started };
+      // The queue file was replaced while the job ran and no longer holds its running row.
+      row = { id, ...job, added, started, ...(failures ? { failures } : {}) };
       after.jobs.push(row);
     }
-    Object.assign(row, {
-      status: result.ok ? 'passed' : 'failed', finished: clock().toISOString(),
-      ms: result.ms, phase: result.ok ? 'done' : result.phase, reason: result.reason ?? null,
-      workbook: result.workbook ?? null, outDir: result.outDir ?? null,
-    });
+    settleRow(row, result, clock(), config);
+    tried.add(id);
     writeQueue(config, after);
     done.push(row);
   }
@@ -327,10 +496,13 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
 
 /** The morning summary: one content-free line per job. */
 export function summaryLines(queue) {
-  return queue.jobs.map((row) => {
+  return queue.jobs.filter((row) => row.status !== 'removed').map((row) => {
     const minutes = row.ms ? `${Math.round(row.ms / 60000)} min` : '';
+    const last = row.failures?.at(-1);
     const where = row.status === 'failed' ? `stopped at ${row.phase} (${row.reason})`
-      : row.status === 'passed' ? row.workbook ?? '' : '';
+      + (row.failures?.length >= MAX_TRIES ? `, dropped after failing ${MAX_TRIES} times` : '')
+      : row.status === 'passed' ? row.workbook ?? ''
+        : row.status === 'queued' && last ? `retry after stopping at ${last.phase} (${last.reason})` : '';
     return [row.id, row.status, minutes, where].filter(Boolean).join('  ');
   });
 }
@@ -347,13 +519,7 @@ export function jobStatus(config, id) {
     // A line cut off mid-write does not parse and is skipped. A resumed job
     // appends to its earlier log, so only a line written since this row
     // started belongs to this attempt.
-    const entries = fs.readFileSync(log, 'utf8').trim().split('\n').flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
+    const entries = readStatusLog(log);
     const last = entries.at(-1);
     if (last && new Date(last.at) >= new Date(row.started)) {
       // statusFields refuses any value that is not a short code, so a line that
@@ -393,6 +559,29 @@ async function main(argv) {
   }
 }
 
+/** Runs `fn` while this process holds the queue; null when a live process holds it. */
+function withQueue(config, fn) {
+  const unlock = lockQueue(config);
+  if (!unlock) return null;
+  try {
+    return { value: fn() };
+  } finally {
+    unlock();
+  }
+}
+
+function busyQueue() {
+  console.error('the queue is running; try again when the run ends');
+  return 1;
+}
+
+/** The fill's outcome in content-free counts and codes. */
+function printFill({ added, known, invalid, errors }) {
+  for (const id of added) console.log(`queued ${id}`);
+  console.log(`filled ${added.length} job(s), ${known} already known, ${invalid} unreadable line(s)`
+    + (errors.length ? `, source problems: ${errors.join(' ')}` : ''));
+}
+
 async function dispatch(args, command, sub, config, track) {
   const pause = (cfg) => track(cfg);
   if (command === 'run') {
@@ -406,18 +595,45 @@ async function dispatch(args, command, sub, config, track) {
       await pauser.resume();
     }
   }
+  if (command === 'check') {
+    const job = jobFrom(args);
+    if (job.suite) throw new Error('check takes an issue job');
+    const { lines, ok, unchecked } = checkJob(config, job);
+    for (const line of lines) console.log(line);
+    return !ok ? 1 : unchecked ? 3 : 0;
+  }
   if (command === 'queue' && sub === 'add') {
-    const { id, added, marked, running } = addJob(config,
+    const { id, added, marked, merged, running } = addJob(config,
       { ...jobFrom(args), ...(args.now ? { now: true } : {}) });
     if (added) console.log(`queued ${id}`);
-    else if (marked) console.log(`${id} is marked to start now`);
-    else console.log(running ? `${id} is already running` : `${id} is already queued`);
+    else if (marked || merged?.length) {
+      if (marked) console.log(`${id} is marked to start now`);
+      if (merged?.length) console.log(`${id} is already queued; updated ${merged.join(', ')}`);
+    } else console.log(running ? `${id} is already running` : `${id} is already queued`);
+    return 0;
+  }
+  if (command === 'queue' && sub === 'remove') {
+    if (!args.job) throw new Error('--job takes a job ID');
+    const held = withQueue(config, () => removeJob(config, args.job));
+    if (!held) return busyQueue();
+    const { removed, running } = held.value;
+    console.log(removed ? `removed ${args.job}` : running ? `${args.job} is marked running; it cannot be removed`
+      : `${args.job} is not waiting in the queue`);
+    return removed ? 0 : 1;
+  }
+  if (command === 'queue' && sub === 'fill') {
+    const held = withQueue(config, () => fillQueue(config));
+    if (!held) return busyQueue();
+    printFill(held.value);
     return 0;
   }
   if (command === 'queue' && sub === 'run') {
+    const fillFirst = (cfg) => printFill(fillQueue(cfg));
     // A cutoff given on the command line is a deliberate run, outside the nightly window.
-    const done = await drainQueue(config, args.cutoff ? { cutoff: args.cutoff, wait: true, pause }
-      : { cutoff: config.queue.cutoff, start: config.queue.start, wait: true, pause });
+    const done = await drainQueue(config, args.cutoff
+      ? { cutoff: args.cutoff, wait: true, pause, refill: fillFirst }
+      : { cutoff: config.queue.cutoff, start: config.queue.start, wait: true, pause,
+        refill: fillFirst });
     console.log(`ran ${done.length} job(s)`);
     for (const line of summaryLines(readQueue(config))) console.log(line);
     return 0;
@@ -432,7 +648,8 @@ async function dispatch(args, command, sub, config, track) {
     if (busy) {
       const row = readQueue(config).jobs.findLast((r) => r.id === args.job);
       console.log(row?.status === 'running' ? `${args.job} is already running`
-        : `the queue is running; ${args.job} stays queued and starts in its turn`);
+        : `the queue is running; ${args.job} stays queued. A run that works every row takes it `
+          + 'when it is due; one that works only start-now rows takes it only if it is marked now');
     } else {
       console.log(`ran ${done.length} job(s)`);
     }
@@ -446,6 +663,17 @@ async function dispatch(args, command, sub, config, track) {
   }
   if (command === 'queue' && sub === 'summary') {
     for (const line of summaryLines(readQueue(config))) console.log(line);
+    return 0;
+  }
+  if (command === 'report') {
+    const seed = args.seed ?? config.report.seed;
+    const random = seed === undefined ? Math.random : seededRandom(seed);
+    for (const { period, file, counts, queue } of writeReports(config, readQueue(config),
+      { period: args.period, random })) {
+      console.log(`wrote ${period} report ${file}`);
+      console.log(`passed=${counts.pass} retrying=${counts.retry} dropped=${counts.dropped} `
+        + `queued=${queue.depth}`);
+    }
     return 0;
   }
   console.error(USAGE);

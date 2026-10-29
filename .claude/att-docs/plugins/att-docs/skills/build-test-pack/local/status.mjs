@@ -9,6 +9,23 @@ import path from 'node:path';
 /** Field values a status line may carry: numbers, booleans, and short codes. */
 const SAFE = /^[A-Za-z0-9 _.:/=+-]{0,80}$/;
 
+/** The parsed lines of a status.log; a line cut off mid-write is skipped, and a missing log is empty. */
+export function readStatusLog(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return [];
+  }
+  return text.trim().split('\n').flatMap((line) => {
+    try {
+      return [JSON.parse(line)];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /**
  * One status line's fields, checked. A string field has to be a code from the
  * pipeline itself (a phase name, a reason code, a job id), never text that

@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { estimateTokens, ModelError } from './model.mjs';
 import { fill, globFiles } from './config.mjs';
 import * as S from './schemas.mjs';
+import { revisedDate, rulesStale, shapeProblems } from './rules.mjs';
 
 export class GateError extends Error {
   constructor(phase, code, counts = {}) {
@@ -131,23 +132,64 @@ function runCommand(ctx, template, values, { failure } = {}) {
   return result.stdout;
 }
 
+/** The codes whose rules a job can use: exported, derived by choice, or exported but old. */
+export const USABLE_RULE_CODES = ['rules-ok', 'rules-derived', 'rules-stale'];
+/** The codes that stop intake: the export is missing or not an export. */
+const INTAKE_STOPS = ['rule-export-failed', 'rules-malformed'];
+/** The codes that stop Phase 2 for an Included document. */
+const PHASE2_STOPS = ['rule-export-failed', 'rules-malformed', 'rules-not-extracted'];
+
 /**
- * One document's rules from the rule export. A failure the config's `noRules`
- * pattern matches is the export saying the document has no rules yet, so they
- * are derived from its text; any other failure stops intake, since a pack built
- * from derived rules alone would hide the outage.
+ * One document's rules from the rule export, as { code, rules }. A failure the
+ * config's `noRules` pattern matches is the export saying the document has no
+ * rules yet: `rules-not-extracted`, or `rules-derived` when the job or config
+ * allows Phase 2 to derive them from the text. Any other failure is
+ * `rule-export-failed`, since a pack built from derived rules alone would hide
+ * the outage. An export that parses is checked for structure
+ * (`rules-malformed`); the values the master holds that the procedure would not
+ * write, and an export older than the document (`rules-stale`), are warnings:
+ * they go to detail.log, and the stale one also leaves a content-free status
+ * line naming the document `number`. Retired rules are kept.
  */
-function exportedRules(ctx, file, number) {
-  const { inputs } = ctx.config;
-  if (!inputs.ruleExport) return [];
+export function documentRules(ctx, file, number) {
+  const { inputs, ruleShape } = ctx.config;
+  if (!inputs.ruleExport) return { code: 'rules-ok', rules: [] };
+  const doc = relative(ctx, file);
   const failure = {};
-  const raw = runCommand(ctx, inputs.ruleExport, { doc: relative(ctx, file) }, { failure });
+  const raw = runCommand(ctx, inputs.ruleExport, { doc }, { failure });
   if (raw === null) {
-    if (inputs.noRules && new RegExp(inputs.noRules).test(failure.stderr)) return [];
-    throw new GateError('intake', 'rule-export-failed', { document: number });
+    if (!inputs.noRules || !new RegExp(inputs.noRules).test(failure.stderr)) {
+      return { code: 'rule-export-failed', rules: [] };
+    }
+    const allowed = ctx.job.allowDerivedRules ?? ctx.config.allowDerivedRules;
+    return { code: allowed ? 'rules-derived' : 'rules-not-extracted', rules: [] };
   }
-  return exportsOf(JSON.parse(raw)).flatMap((doc) => list(doc.rules))
-    .filter((rule) => rule.status === undefined || rule.status === 'active');
+  const text = fs.readFileSync(file, 'utf8');
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    ctx.logs.detail(`rule export of document ${doc}`, 'the export is not JSON');
+    return { code: 'rules-malformed', rules: [] };
+  }
+  const { errors, warnings } = shapeProblems(json, doc, text, ruleShape);
+  if (errors.length) {
+    ctx.logs.detail(`rule export of document ${doc} is malformed`, errors.join('\n'));
+    return { code: 'rules-malformed', rules: [] };
+  }
+  if (warnings.length) ctx.logs.detail(`rule export of document ${doc}: warnings`, warnings.join('\n'));
+  const rules = exportsOf(json).flatMap((entry) => list(entry.rules))
+    .filter((rule) => rule.status !== 'superseded');
+  if (rulesStale(text, exportsOf(json))) {
+    ctx.logs.detail(`rule export of document ${doc} is stale`,
+      `revised ${revisedDate(text)}; the rules were last confirmed earlier`);
+    if (number) {
+      ctx.logs.status({ job: ctx.job.id, phase: 'rules', event: 'warn', reason: 'rules-stale',
+        document: number });
+    }
+    return { code: 'rules-stale', rules };
+  }
+  return { code: 'rules-ok', rules };
 }
 
 const exportsOf = (json) => (Array.isArray(json?.exports) ? json.exports : json ? [json] : []);
@@ -245,14 +287,19 @@ export async function intake(ctx) {
 
   if (!job.suite) {
     ctx.documents = [];
+    ctx.rulesFresh = true;
     for (const file of ctx.documentPaths ?? []) {
       if (!fs.existsSync(file)) {
         codeMissing.push('document-file');
         continue;
       }
-      const rules = exportedRules(ctx, file, ctx.documents.length + 1);
+      const number = ctx.documents.length + 1;
+      const { code, rules } = documentRules(ctx, file, number);
+      if (INTAKE_STOPS.includes(code)) throw new GateError('intake', code, { document: number });
       ctx.documents.push({
         key: path.basename(file).replace(/\.[^.]+$/, ''),
+        file,
+        ruleCode: code,
         name: rules[0]?.source_document ?? path.basename(file).replace(/\.[^.]+$/, ''),
         text: fs.readFileSync(file, 'utf8'),
         rules,
@@ -330,10 +377,11 @@ async function digestDocument(ctx, doc) {
  */
 function phase1Rules(ctx, budget) {
   const rules = (line) => asLines(ctx.documents.flatMap((doc) => doc.rules).map(line));
-  const full = rules((rule) => `- ${rule.rule_id ?? rule.id}: ${rule.name ?? ''} | ${rule.rule_summary
+  const tag = (rule) => (rule.status === 'retired' ? '[retired] ' : '');
+  const full = rules((rule) => `- ${tag(rule)}${rule.rule_id ?? rule.id}: ${rule.name ?? ''} | ${rule.rule_summary
     ?? rule.summary ?? ''}`);
   if (estimateTokens(full) <= budget) return full;
-  const named = rules((rule) => `- ${rule.rule_id ?? rule.id}: ${rule.name ?? ''}`);
+  const named = rules((rule) => `- ${tag(rule)}${rule.rule_id ?? rule.id}: ${rule.name ?? ''}`);
   if (estimateTokens(named) <= budget) return named;
   return ctx.documents.map((doc) => `- ${doc.name}: ${doc.rules.length} rule(s)`).join('\n');
 }
@@ -354,7 +402,8 @@ export async function phase1(ctx) {
       + ' no other module shares, and list every conflict between included sources.'
       + ' A conflict is two authoritative sources that require different behavior for the'
       + ' same thing. A defect record saying the system behaves differently from a document'
-      + ' today is the defect under test, not a conflict.'
+      + ' today is the defect under test, not a conflict. A rule marked [retired] describes'
+      + ' behavior that was removed; it is not a conflict with the documents.'
       + ' Rate confidence honestly.',
     inputs: [['Change description', ctx.description],
       ['Business rules', ruleText],
@@ -415,17 +464,60 @@ const summaryText = (ctx) => Object.entries(ctx.summary ?? {})
 // ---------------------------------------------------------------------------
 // Phase 2, Business Rule / Requirement Intake
 
+/**
+ * Reads each Included document's rule export again, so a job resumed after the
+ * user extracted or fixed the rules sees them, and stops when one still has
+ * none usable. A run whose intake just exported a document with usable rules
+ * keeps those rules, and so does a checkpoint with no file path for the
+ * document. An export outage that follows a usable intake keeps the rules held
+ * and leaves a warning. Every failing document gets a status line and the stop
+ * names them all, under the most basic code among them. A context-only
+ * document is not read again.
+ */
+function refreshRules(ctx) {
+  const failing = [];
+  for (const doc of ctx.documents) {
+    if (doc.inclusion !== 'Included' || !doc.file) continue;
+    const held = USABLE_RULE_CODES.includes(doc.ruleCode);
+    if (held && ctx.rulesFresh) continue;
+    const { code, rules } = documentRules(ctx, doc.file);
+    if (code === 'rule-export-failed' && held) {
+      ctx.logs.status({ job: ctx.job.id, phase: 'phase2', event: 'warn', reason: code,
+        document: doc.number });
+      continue;
+    }
+    doc.ruleCode = code;
+    if (PHASE2_STOPS.includes(code)) failing.push({ number: doc.number, code });
+    else doc.rules = rules;
+  }
+  if (!failing.length) return;
+  for (const { number, code } of failing) {
+    ctx.logs.status({ job: ctx.job.id, phase: 'phase2', event: 'stop-doc', document: number,
+      reason: code });
+  }
+  const code = PHASE2_STOPS.find((c) => failing.some((row) => row.code === c));
+  throw new GateError('phase2', code,
+    { documents: failing.length, numbers: failing.map((row) => row.number).join(' ') });
+}
+
+const RETIRED_SUMMARY = 'Retired: this rule was removed from the master.';
+
 export async function phase2(ctx) {
   const { pack, ref } = ctx;
   const risks = ctx.riskLevels;
   const rules = [];
   let derived = 0;
+  if (!ctx.job.suite) refreshRules(ctx);
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included')) {
     if (doc.rules.length) {
       for (const rule of doc.rules) {
+        // A retired rule stays in the pack, marked in its summary as removed; Phase 3
+        // decides whether the change concerns that removal.
+        const retired = rule.status === 'retired';
         rules.push({
           id: rule.rule_id, name: stripId(rule), module: doc.module, sourceDocument: doc.name,
-          sourcePage: String(rule.source_page ?? '') || 'N/A', summary: rule.rule_summary,
+          sourcePage: String(rule.source_page ?? '') || 'N/A',
+          summary: retired ? `${RETIRED_SUMMARY} ${rule.rule_summary ?? ''}`.trim() : rule.rule_summary,
           risk: risks.includes(rule.risk_level) ? rule.risk_level : undefined,
         });
       }
@@ -490,7 +582,10 @@ export async function phase3(ctx) {
       phase: 'phase3', step: `scope-${i + 1}`, reasoning: true, refs,
       task: 'Classify each rule by the change description: Direct Change, Indirect Impact,'
         + ' Regression or Not Impacted, with a one-sentence rationale. A rule the change does'
-        + ' not touch is Not Impacted. Record each ambiguity as an assumption.',
+        + ' not touch is Not Impacted. A rule whose summary starts with "Retired:" was removed'
+        + ' from the master: it is a Direct Change only when the change description concerns'
+        + ' that removal, and Not Impacted otherwise; for a Direct Change, the rationale says its'
+        + ' removal is to be verified. Record each ambiguity as an assumption.',
       inputs: [['Change description', ctx.description], ['Project understanding', summaryText(ctx)],
         ['Rules', asLines(group.map(ruleLine))]],
       schema: S.scopeSchema(ids, ctx.builder.IMPACT_CLASSES),
@@ -600,27 +695,136 @@ function cardObjectives(ctx) {
   return ctx.pack.objectives.filter((row) => row.applicable).map((row) => row.objective);
 }
 
-async function designBatch(ctx, doc, group, objectives, index, extra = '') {
-  const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
-  const ids = group.map((rule) => rule.id);
-  const lines = asLines(group.map((rule) => `${ruleLine(rule)} | ${rule.impact} | risk ${rule.risk}`));
-  const budget = room(ctx, false, refs) - estimateTokens(lines + ctx.description) - 3000;
+const scenarioLine = (s) => `- ${s.id} | ${s.kind} | rules ${s.rules.join(', ')} | ${s.population} | ${s.action}`
+  + ` | ${s.outcome}`;
+const cardLine = (card) => `- ${card.title} | ${card.scenario} | rules ${card.rules.join(', ')}`;
+const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** What makes two scenarios, or two cards for them, the same test: kind, rules, who, and what is done. */
+export const scenarioKey = (s) => [s.kind, [...new Set(s.rules)].sort().join(','), norm(s.population),
+  norm(s.action)].join('|');
+
+/** The document text for a call: whole if it fits beside what the call already carries, else its digest. */
+async function documentText(ctx, doc, refs, carried) {
+  const budget = room(ctx, false, refs) - estimateTokens(carried + ctx.description) - 3000;
   // A document too long to send whole goes as its digest; the call's own size
   // check refuses anything that still does not fit.
-  const docText = estimateTokens(doc.text) <= budget ? doc.text : await digestDocument(ctx, doc);
+  return estimateTokens(doc.text) <= budget ? doc.text : digestDocument(ctx, doc);
+}
+
+/** True when the pack has a BREAK IT set that its cards can fill. */
+const breakItOn = (ctx) => !ctx.job.suite && ctx.breakItObjective != null
+  && cardObjectives(ctx).includes(ctx.breakItObjective);
+
+// Rules go to the inventory a quarter of the room at a time; a reply lists at most one scenario per 150 tokens.
+const INVENTORY_SHARE = 4;
+const SCENARIO_TOKENS = 150;
+
+/**
+ * The distinct scenarios a document's impacted rules call for. Rules that do
+ * not fit one call go in batches, each shown the scenarios listed so far. Code
+ * numbers the scenarios and drops any that repeats another's kind, rules,
+ * population and action. With `only`, just that kind is asked for, and
+ * `known` are the scenarios already listed.
+ */
+async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
+  const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
+  const required = only ? [] : [...S.REQUIRED_SCENARIO_KINDS, ...(breakItOn(ctx) ? ['break'] : [])];
+  const maxItems = Math.max(1, Math.floor(ctx.config.model.maxOutput / SCENARIO_TOKENS));
+  const line = (rule) => `${ruleLine(rule)} | ${rule.impact} | risk ${rule.risk}`;
+  const groups = batches(rules, line, Math.max(1000, Math.floor(room(ctx, false, refs) / INVENTORY_SHARE)));
+  const seen = new Set(known.map(scenarioKey));
+  const scenarios = [];
+  const notes = [];
+  const checks = new Map();
+  let dropped = 0;
+  let capped = false;
+  for (const [i, group] of groups.entries()) {
+    const lines = asLines(group.map(line));
+    const listed = asLines([...known, ...scenarios].map(scenarioLine));
+    const answer = await ask(ctx, {
+      phase: 'phase6', reasoning: false, refs,
+      step: only ? `scenarios-d${doc.number}-${only}` : groups.length > 1
+        ? `scenarios-d${doc.number}-${i + 1}` : `scenarios-d${doc.number}`,
+      task: (only ? `List only the ${only} scenarios these rules and the document call for.`
+        : 'List the distinct test scenarios these rules and the document call for.')
+        + ' A scenario is one population (which records or users), one action, and the expected'
+        + ' outcome, and it names the rules it checks. '
+        + (only ? 'A break scenario tries to break the change with bad input, a wrong order, a'
+          + ' boundary or a repeated action.'
+          : 'Cover each of these kinds wherever the document supports it, and mark every other'
+          + ' scenario a decision: control is a population the change must not affect, such as'
+          + ' the plain save; isolation is another record\'s state that must not leak into this'
+          + ' one; combined is conditions that overlap; persistence is closing and reopening the'
+          + ' record' + (required.includes('break') ? '; break tries to break the change with bad'
+          + ' input, a wrong order, a boundary or a repeated action' : '') + '. Under kindChecks,'
+          + ' say for each of those kinds what its scenario tests, or why the document supports'
+          + ' none.') + ' Never list a scenario already listed.',
+      inputs: [['Change description', ctx.description], ['Document', doc.name], ['Rules', lines],
+        ['Scenarios listed so far', listed],
+        ['Document text', await documentText(ctx, doc, refs, lines + listed)]],
+      schema: S.scenarioInventorySchema({ ids: group.map((rule) => rule.id), maxItems, required,
+        kinds: only ? [only] : S.SCENARIO_KINDS }),
+    });
+    if (answer.scenarios.length >= maxItems) capped = true;
+    for (const row of answer.scenarios) {
+      const key = scenarioKey(row);
+      if (seen.has(key)) {
+        dropped += 1;
+        continue;
+      }
+      seen.add(key);
+      scenarios.push({ ...row, id: `S${known.length + scenarios.length + 1}`,
+        rules: [...new Set(row.rules)] });
+    }
+    for (const check of answer.kindChecks ?? []) {
+      checks.set(check.kind, [...(checks.get(check.kind) ?? []), check.note]);
+    }
+  }
+  // A required kind with no scenario is said so, not left unmentioned.
+  for (const kind of required.filter((k) => !scenarios.some((s) => s.kind === k))) {
+    notes.push({ assumption: `${doc.name}: no ${kind} scenario was listed.`,
+      why: (checks.get(kind) ?? []).join(' '), impact: `No card tests a ${kind} scenario for this document.`,
+      clarification: 'Confirm the document supports none.' });
+  }
+  if (capped) {
+    notes.push({ assumption: `${doc.name}: the scenario list reached its limit of ${maxItems}.`,
+      why: 'One reply holds only so many scenarios.', impact: 'Some scenarios may be missing.',
+      clarification: 'Check the list against the document by hand.' });
+  }
+  return { scenarios, notes, dropped };
+}
+
+/**
+ * One card call. `focus` are the scenarios it is asked for; it may cover any
+ * scenario in `open` (those with no card, reuse or skip yet), and no other.
+ */
+async function designBatch(ctx, doc, { focus, open, written }, objectives, index, extra = '') {
+  const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
+  const byId = new Map(ctx.pack.rules.map((rule) => [rule.id, rule]));
+  const group = [...new Set(open.flatMap((s) => s.rules))].map((id) => byId.get(id));
+  const ids = group.map((rule) => rule.id);
+  const lines = asLines(group.map((rule) => `${ruleLine(rule)} | ${rule.impact} | risk ${rule.risk}`));
+  const scenarios = asLines(open.map(scenarioLine));
+  const cards = asLines(written.map(cardLine));
   const existing = ctx.existingTests ?? '';
+  const docText = await documentText(ctx, doc, refs, [lines, scenarios, cards, existing].join('\n'));
   return ask(ctx, {
     phase: 'phase6', step: `cards-d${doc.number}-${index}`, reasoning: false, refs,
-    task: 'Design reusable test cards for these rules: one card per business decision. Focus'
-      + ' items and steps are actions; expected results are observable business behavior.'
-      + ' Name on each card and each step only the rules it checks. Mark cards that come'
-      + ' from quality thinking rather than a stated rule as Quality. A rule no card can'
-      + ' cover goes in uncovered with its gap. A card an existing test already covers is'
-      + ` named in reuse instead of written again.${extra}`,
+    task: `Design reusable test cards for these scenarios: ${focus.map((s) => s.id).join(', ')}.`
+      + ' Write one card per scenario, only for scenarios no card written so far covers, and name'
+      + ' on each card the scenario it covers. Focus items and steps are actions; expected'
+      + ' results are observable business behavior. Name on each card and each step only the'
+      + ' rules it checks. Mark cards that come from quality thinking rather than a stated rule'
+      + ' as Quality. A scenario an existing test already covers, or that no card can cover, is'
+      + ' named in skipped with how (reused or gap) and the reason; reused names the test. A'
+      + ` rule no card can cover goes in uncovered with its gap.${extra}`,
     inputs: [['Change description', ctx.description], ['Document', doc.name],
-      ['Rules', lines], ['Document text', docText], ['Existing tests', existing]],
+      ['Scenarios', scenarios], ['Rules', lines], ['Cards written so far', cards],
+      ['Document text', docText], ['Existing tests', existing]],
     schema: S.cardsSchema({ ids, objectives, derivations: ctx.builder.DERIVATIONS,
-      uncoveredStatuses: ['Partially Covered', 'Missing', 'Not Applicable'] }),
+      uncoveredStatuses: ['Partially Covered', 'Missing', 'Not Applicable'],
+      scenarios: open.map((s) => s.id) }),
   });
 }
 
@@ -639,81 +843,193 @@ function tidyCard(card, allowed) {
   return { ...card, rules, steps };
 }
 
+/**
+ * The sets a card sits in: the objectives it names, Full Coverage when it
+ * comes from a requirement, and BREAK IT only when the card is a BREAK IT
+ * type (`breakIt`, set from its scenario's kind). With `exclusiveSets`, a
+ * BREAK IT card sits in no other set. A card left in no set takes the first
+ * ordinary objective, else Full Coverage; with neither, it has no set.
+ */
+export function setsOf(ctx, card) {
+  const { fullCoverageObjective: full, breakItObjective: brk } = ctx;
+  const applicable = cardObjectives(ctx);
+  const breakIt = brk != null && applicable.includes(brk) && card.breakIt === true;
+  if (breakIt && ctx.config.exclusiveSets) return [brk];
+  const sets = list(card.objectives).filter((o) => applicable.includes(o) && o !== full && o !== brk);
+  if (full != null && applicable.includes(full) && card.derivation !== 'Quality') sets.push(full);
+  if (breakIt) sets.push(brk);
+  if (!sets.length) {
+    const other = applicable.find((o) => o !== full && o !== brk)
+      ?? (full != null && applicable.includes(full) ? full : null);
+    return other == null ? [] : [other];
+  }
+  return [...new Set(sets)];
+}
+
+const DROPPED = 'No test card could be designed for it in this run.';
+const noStop = (text) => String(text).replace(/[.\s]+$/, '');
+
+const docRules = (ctx, doc) => ctx.pack.rules.filter((rule) => rule.sourceDocument === doc.name
+  && rule.module === doc.module && rule.impact !== 'Not Impacted');
+
+/**
+ * One document's scenarios, then its cards, one batch of scenarios at a time.
+ * Given its earlier `designed` and `only`, it adds scenarios of that kind.
+ * A scenario is settled by a card, by a skip saying an existing test covers it,
+ * or by a skip saying no card can; each records how in its `settled`.
+ */
+async function designDocument(ctx, doc, rules, objectives, { designed, only } = {}) {
+  const state = designed ?? { cards: [], uncovered: [], reuse: [], assumptions: [], scenarios: [] };
+  const count = { retried: 0, duplicates: 0, unsettled: 0 };
+  if (!rules.length) return { designed: state, ...count };
+  const inventory = await scenarioInventory(ctx, doc, rules, { only, known: state.scenarios });
+  const mine = inventory.scenarios;
+  state.scenarios.push(...mine);
+  state.assumptions.push(...inventory.notes);
+  count.duplicates += inventory.dropped;
+  const byScenario = new Map(mine.map((s) => [s.id, s]));
+  const seen = new Set(state.cards.map((card) => card.key));
+  const settled = (s) => Boolean(s.settled);
+  const take = async (focus, index, extra) => {
+    const open = mine.filter((s) => !settled(s));
+    const answer = await designBatch(ctx, doc, { focus, open, written: state.cards },
+      objectives, index, extra);
+    const openIds = new Set(open.map((s) => s.id));
+    for (const card of answer.cards) {
+      const scenario = byScenario.get(card.scenario);
+      if (!scenario || !openIds.has(scenario.id)) continue;
+      const tidy = tidyCard(card, new Set(scenario.rules));
+      if (!tidy.rules.length) continue;
+      const key = scenarioKey(scenario);
+      if (seen.has(key)) {
+        count.duplicates += 1;
+        continue;
+      }
+      seen.add(key);
+      state.cards.push({ ...tidy, key, breakIt: scenario.kind === 'break' });
+      scenario.settled ??= { how: 'card' };
+    }
+    for (const skip of answer.skipped ?? []) {
+      const scenario = byScenario.get(skip.scenario);
+      if (scenario && openIds.has(scenario.id)) {
+        scenario.settled ??= { how: skip.how, reason: skip.reason };
+      }
+    }
+    state.uncovered.push(...answer.uncovered);
+    state.reuse.push(...answer.reuse);
+    state.assumptions.push(...answer.assumptions);
+  };
+  const perCall = ctx.config.cardScenariosPerCall ?? 4;
+  for (const [i, group] of batches(mine, scenarioLine, 20000, perCall).entries()) {
+    const todo = group.filter((s) => !settled(s));
+    if (!todo.length) continue;
+    await take(todo, only ? `${only}-${i + 1}` : i + 1);
+    const left = todo.filter((s) => !settled(s));
+    if (!left.length) continue;
+    // One more try, told which scenarios it left with no card, reuse entry or skip.
+    count.retried += 1;
+    await take(left, only ? `${only}-${i + 1}b` : `${i + 1}b`,
+      ' Every scenario listed needs a card or a skipped entry.');
+  }
+  for (const s of mine.filter((x) => !settled(x))) {
+    count.unsettled += 1;
+    state.assumptions.push({
+      assumption: `No test card covers scenario ${s.id}: ${s.population}; ${s.action}.`,
+      why: 'The local design pass wrote no card and no skipped entry for it after a second try.',
+      impact: `Rules ${s.rules.join(', ')} are not tested for this scenario.`,
+      clarification: 'Design a card for this scenario by hand.' });
+  }
+  // Rule rows: none for a rule a card covers, one for any other. A rule only an
+  // existing test covers reads Missing and points at that test.
+  const covered = new Set(state.cards.flatMap((card) => card.rules));
+  const rows = new Map();
+  for (const row of state.uncovered) {
+    if (!covered.has(row.ruleId) && !rows.has(row.ruleId)) rows.set(row.ruleId, row);
+  }
+  for (const rule of rules.filter((r) => !covered.has(r.id) && !rows.has(r.id))) {
+    const named = state.scenarios.filter((s) => s.rules.includes(rule.id));
+    const reused = named.find((s) => s.settled?.how === 'reused');
+    const skipped = named.find((s) => s.settled?.how === 'gap');
+    rows.set(rule.id, reused ? { ruleId: rule.id, status: 'Missing',
+      gap: `Covered only by the existing test ${noStop(reused.settled.reason)}; confirm it and reuse it.`,
+      recommendation: 'Confirm the existing test covers this rule and reuse it, or design a card.' }
+      : { ruleId: rule.id, status: 'Missing',
+        gap: skipped ? `No card can cover this rule: ${noStop(skipped.settled.reason)}.`
+          : 'The local design pass wrote no card for this rule.',
+        recommendation: 'Design a card for this rule by hand.' });
+  }
+  state.uncovered = [...rows.values()];
+  return { designed: state, ...count };
+}
+
 export async function phase6(ctx) {
   const { pack, job } = ctx;
   const objectives = cardObjectives(ctx);
   if (!objectives.length) throw new GateError('phase6', 'no-applicable-objective');
-  const perCall = ctx.config.cardRulesPerCall ?? 4;
   ctx.designed = {};
-  let cards = 0;
-  let retried = 0;
+  const total = { retried: 0, duplicates: 0, unsettled: 0, scenarios: 0 };
+  const add = (done) => {
+    for (const key of ['retried', 'duplicates', 'unsettled']) total[key] += done[key];
+  };
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included')) {
-    const rules = pack.rules.filter((rule) => rule.sourceDocument === doc.name
-      && rule.module === doc.module && rule.impact !== 'Not Impacted');
-    const designed = { cards: [], uncovered: [], reuse: [], assumptions: [] };
-    for (const [i, group] of batches(rules, ruleLine, 20000, perCall).entries()) {
-      let answer = await designBatch(ctx, doc, group, objectives, i + 1);
-      const allowed = new Set(group.map((rule) => rule.id));
-      const reached = () => new Set([...answer.cards.flatMap((c) => c.rules),
-        ...answer.uncovered.map((row) => row.ruleId)]);
-      const left = group.filter((rule) => !reached().has(rule.id));
-      if (left.length) {
-        // One more try, told which rules it left with neither a card nor a gap.
-        retried += 1;
-        const again = await designBatch(ctx, doc, left, objectives, `${i + 1}b`,
-          ' Every rule listed needs a card or an uncovered entry.');
-        answer = { cards: [...answer.cards, ...again.cards],
-          uncovered: [...answer.uncovered, ...again.uncovered],
-          reuse: [...answer.reuse, ...again.reuse],
-          assumptions: [...answer.assumptions, ...again.assumptions] };
-      }
-      designed.cards.push(...answer.cards.map((card) => tidyCard(card, allowed))
-        .filter((card) => card.rules.length));
-      // A rule a card covers needs no uncovered row.
-      const covered = new Set(designed.cards.flatMap((card) => card.rules));
-      designed.uncovered.push(...answer.uncovered.filter((row) => !covered.has(row.ruleId)));
-      designed.reuse.push(...answer.reuse);
-      designed.assumptions.push(...answer.assumptions);
-    }
-    // Rules that ended with neither a card nor a gap get one saying so.
-    const reachedAll = new Set([...designed.cards.flatMap((c) => c.rules),
-      ...designed.uncovered.map((row) => row.ruleId)]);
-    for (const rule of rules.filter((r) => !reachedAll.has(r.id))) {
-      designed.uncovered.push({ ruleId: rule.id, status: 'Missing',
-        gap: 'The local design pass wrote no card for this rule.',
-        recommendation: 'Design a card for this rule by hand.' });
-    }
-    cards += designed.cards.length;
-    ctx.designed[doc.key] = designed;
+    const done = await designDocument(ctx, doc, docRules(ctx, doc), objectives);
+    ctx.designed[doc.key] = done.designed;
+    add(done);
   }
 
   if (!job.suite) {
-    // An applicable objective no card names gets one targeted pass.
-    for (const objective of objectives) {
-      const used = Object.values(ctx.designed).some((d) => d.cards
-        .some((card) => card.objectives.includes(objective)));
-      if (used) continue;
-      const doc = ctx.documents.find((d) => d.inclusion === 'Included'
-        && pack.rules.some((r) => r.sourceDocument === d.name && r.impact !== 'Not Impacted'));
-      if (!doc) break;
-      const group = pack.rules.filter((rule) => rule.sourceDocument === doc.name
-        && rule.impact !== 'Not Impacted').slice(0, perCall);
-      const answer = await designBatch(ctx, doc, group, [objective], `obj-${objectives.indexOf(objective) + 1}`,
-        ` Write at least one card that serves the objective ${objective}.`);
-      const allowed = new Set(group.map((rule) => rule.id));
-      const extra = answer.cards.map((card) => tidyCard(card, allowed)).filter((c) => c.rules.length);
-      ctx.designed[doc.key].cards.push(...extra);
-      cards += extra.length;
-      if (!extra.length) {
-        // No card could serve it, so the decision cannot stand as Applicable.
-        const row = pack.objectives.find((r) => r.objective === objective);
-        row.applicable = false;
-        row.reason = `${row.reason} No test card could be designed for it in this run.`;
-        ctx.droppedObjectives += 1;
+    const drop = (objective) => {
+      // No card could serve it, so the decision cannot stand as Applicable.
+      const row = pack.objectives.find((r) => r.objective === objective);
+      row.applicable = false;
+      row.reason = `${row.reason} ${DROPPED}`;
+      ctx.droppedObjectives += 1;
+    };
+    const allCards = () => Object.values(ctx.designed).flatMap((d) => d.cards);
+    // An applicable objective no card serves gets one targeted pass.
+    for (const [n, objective] of objectives.entries()) {
+      const served = () => allCards().some((card) => setsOf(ctx, card).includes(objective));
+      if (served()) continue;
+      if (objective === ctx.fullCoverageObjective) {
+        // It holds every requirement card, so none being there leaves it empty.
+        drop(objective);
+      } else if (objective === ctx.breakItObjective) {
+        // New break scenarios, each with one card, in the first document that has scenarios.
+        const doc = ctx.documents.find((d) => ctx.designed[d.key]?.scenarios.length);
+        if (doc) {
+          const done = await designDocument(ctx, doc, docRules(ctx, doc), objectives,
+            { designed: ctx.designed[doc.key], only: 'break' });
+          add(done);
+          if (served()) {
+            const gone = `${doc.name}: no break scenario was listed.`;
+            done.designed.assumptions = done.designed.assumptions
+              .filter((a) => a.assumption !== gone);
+          }
+        }
+        if (!served()) drop(objective);
+      } else {
+        // Ask which of the cards already written serve it; none new is written.
+        const refs = allCards().map((card, i) => ({ card, ref: `C${i + 1}` }));
+        const answer = refs.length ? await ask(ctx, {
+          phase: 'phase6', step: `objective-${n + 1}`, reasoning: false,
+          refs: [...ctx.ref.core, ...ctx.ref.chapters('6')],
+          task: `Name the cards that serve the objective ${objective}. Name none if no card does.`,
+          inputs: [['Change description', ctx.description], ['Objective', objective],
+            ['Cards', asLines(refs.map(({ card, ref }) => `- ${ref} | ${card.title} | `
+              + `${list(card.focus).join('; ')} | ${list(card.objectives).join(', ')}`))]],
+          schema: S.objectiveCardsSchema(refs.map((r) => r.ref)),
+        }) : { cards: [] };
+        const named = new Set(answer.cards);
+        for (const { card, ref } of refs) {
+          if (named.has(ref)) card.objectives = [...new Set([...list(card.objectives), objective])];
+        }
+        if (!served()) drop(objective);
       }
     }
   }
-  return { cards, retried };
+  const cards = Object.values(ctx.designed).reduce((n, d) => n + d.cards.length, 0);
+  total.scenarios = Object.values(ctx.designed).reduce((n, d) => n + d.scenarios.length, 0);
+  return { cards, ...total };
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +1045,33 @@ function setSummary(cards) {
 
 export async function phase7(ctx) {
   const { pack, ref, job } = ctx;
+  // An issue pack's cards take their sets first: Full Coverage and BREAK IT by rule.
+  if (!job.suite) {
+    const full = pack.objectives.find((row) => row.objective === ctx.fullCoverageObjective);
+    const designedCards = Object.values(ctx.designed).flatMap((d) => d.cards);
+    if (full && !full.applicable && designedCards.some((card) => card.derivation !== 'Quality')) {
+      // Only when some card lands in the set; otherwise the old decision stands.
+      const before = { ...full };
+      full.applicable = true;
+      if (designedCards.some((card) => setsOf(ctx, card).includes(full.objective))) {
+        full.reason = 'Applicable: this set holds every requirement-derived card.';
+        if (before.reason.endsWith(DROPPED)) ctx.droppedObjectives -= 1;
+      } else Object.assign(full, before);
+    }
+    for (const d of Object.values(ctx.designed)) {
+      d.cards = d.cards.filter((card) => {
+        const sets = setsOf(ctx, card);
+        if (sets.length) card.objectives = sets;
+        else {
+          d.assumptions.push({ assumption: `The card "${card.title}" was left out: no set takes it.`,
+            why: 'Its objectives were not applicable and no other set could hold it.',
+            impact: `Rules ${card.rules.join(', ')} lose this card.`,
+            clarification: 'Design a card for them by hand.' });
+        }
+        return sets.length > 0;
+      });
+    }
+  }
   const order = job.suite ? ctx.suiteSetOrder : ctx.builder.OBJECTIVES;
   const used = order.filter((objective) => Object.values(ctx.designed)
     .some((d) => d.cards.some((card) => list(card.objectives).includes(objective)
@@ -793,8 +1136,10 @@ export function mergeSuite(ctx) {
       ?? 'approved business rules held in the master',
     modules: Object.fromEntries(ctx.documents.map((doc) => [doc.key, [doc.module, doc.abbreviation]])),
   };
-  const merged = ctx.suiteMerge.mergeSuitePack({ exportJson: ctx.exportJson,
-    designed: ctx.designed, narrative });
+  // The merge reads cards as the builder knows them, without the design pass's marks.
+  const designed = Object.fromEntries(Object.entries(ctx.designed).map(([key, d]) => [key,
+    { ...d, cards: d.cards.map(({ scenario, breakIt, key, ...card }) => card) }]));
+  const merged = ctx.suiteMerge.mergeSuitePack({ exportJson: ctx.exportJson, designed, narrative });
   // The merge carries the narrative's coverage rows only for uncovered rules;
   // the review's rows ride on top.
   const rows = new Map(merged.coverage.map((row) => [row.ruleId, row]));

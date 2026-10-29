@@ -25,6 +25,7 @@
   "description": "issues/ISSUE_{issue}_*.md",
   "documentIndex": "docs/LIB/*.md",
   "ruleExport": ["node", "export.mjs", "--doc", "{doc}"],
+  "noRules": "is not in br_doc_map",
   "folderExport": ["node", "export.mjs", "--doc", "docs/{suite}"]
  },
  "builder": {

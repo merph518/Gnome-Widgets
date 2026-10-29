@@ -272,6 +272,16 @@ skill() {
     "$HERE/speak-attention.sh" --config "$CONFIG"
 }
 
+# usage: speech_on; turns speech mode on as speechctl does, with the turn so far marked read.
+speech_on() {
+  mkdir -p "${OWED%/*}" && : > "${OWED%.owed}.replies" &&
+    python3 "$HERE/speak_pending.py" "$TRANSCRIPT" "${OWED%.owed}.cursor" seen
+}
+# usage: speech_alerts; takes speech mode back to Alerts only, as speechctl does.
+speech_alerts() { rm -f "${OWED%.owed}".{replies,queue}; }
+# usage: managed; prints managed while the session is a managed session.
+managed() { [[ -e ${OWED%.owed}.managed ]] && echo managed; }
+
 : > "$TRANSCRIPT"
 reply='## Status
 
@@ -288,12 +298,12 @@ gh run list
 ```'
 prompt human "run the suite"
 check "$(stop 'Done.')" "demo session finished" "speech mode starts off"
-typed "/implement-with-speech 4638"
+speech_on
 prompt human "run the suite"
 said="demo session says: Status Run is green at the following link."
 said+=" See, Worker, 12, Node.js and the following link."
 check "$(stop "$reply")" "$said Spec Result a.spec.ts pass" \
-  "/implement-with-speech reads the reply as plain text"
+  "speech mode reads the reply as plain text"
 prompt human "time it"
 said="demo session says: Took 7.0 seconds, the 30 seconds cap, 5 minutes, 2 hours,"
 said+=" 1 hour 30 minutes and 1 minute; 3e4s, 10ms, option 1 m, the 1990s"
@@ -319,29 +329,31 @@ monitor
 check "$(stop 'Watching.')" "demo session says: Watching." \
   "speech mode reads a reply held by background work"
 stopped
-skill implement "4638"
-check "$(stop 'Working.')" "demo session says: Working." \
-  "the Skill call to implement it hands off to leaves it on"
 typed "please /implement the next one"
-check "$(stop 'Next.')" "demo session says: Next." \
-  "a prompt not opening with /implement leaves it on"
+check "$(stop 'Next.')$(managed)" "demo session says: Next." \
+  "a prompt not opening with /implement leaves it on and makes no managed session"
+skill implement "4638"
+check "$(stop 'Working.')$(managed)" "demo session says: Working.managed" \
+  "a Skill call to implement leaves it on and makes a managed session"
 check "$(label 'https://github.com/o/r/pull/12')" "" "speech mode leaves the label to the reply"
+rm -f "${OWED%.owed}.managed"
 typed "/implement 4639"
-check "$(stop 'Done.')" "demo session finished" "a typed /implement turns it off"
-skill implement-with-speech "214"
-check "$(stop 'Started.')" "demo session says: Started." "a Skill call to it turns it on"
+check "$(stop 'Done.')$(managed)" "demo session says: Done.managed" \
+  "a typed /implement leaves it on and makes a managed session"
+speech_alerts; rm -f "${OWED%.owed}.managed"
 typed "<command-message>implement</command-message>
-<command-name>/implement</command-name>
+<command-name>/general:implement</command-name>
 <command-args>214</command-args>"
-check "$(stop 'Done.')" "demo session finished" "an expanded /implement turns it off"
-typed "<command-name>/implement-with-speech</command-name>"
-check "$(stop 'On.')" "demo session says: On." "an expanded /implement-with-speech turns it on"
+prompt human "go"
+check "$(stop 'Done.')$(managed)" "demo session finishedmanaged" \
+  "an expanded /general:implement leaves Alerts only and makes a managed session"
+speech_on
 prompt human "show the command"
 check "$(stop '```bash
 gh run list
 ```')" "" "a reply that is only code is quiet"
 check "$(ask 'Which suite first?')" "" "speech mode drops the has-a-question announcement"
-typed "/implement-with-speechless 1"
+typed "/implementation 1"
 check "$(stop 'Still.')" "demo session says: Still." "another command leaves the mode alone"
 
 # usage: text <text>; appends an assistant row holding one text block, as the app writes
@@ -489,7 +501,7 @@ check "$(CLAUDE_CODE_MESSAGING_SOCKET=/x/77.sock call)" "demo session says: Push
 Then this." "a socket session still reads aloud"
 check "$(jq -c '[.[].text]' "$XDG_RUNTIME_DIR/voice-bridge/feed/77.json")" \
   '["demo session says: Pushed.\n\nThen this."]' "the blocks reach the voice feed as one entry"
-typed "/implement"
+speech_alerts
 prompt human "run it"
 text "Quiet."
 check "$(call)" "" "a tool call outside speech mode is quiet"
@@ -549,7 +561,7 @@ export NOWLOG="$SANDBOX/now-log"
 QUEUES="$XDG_RUNTIME_DIR/speak-attention"
 # usage: now <jq filter>; the filter applied to every now.json the stubs logged, as an array.
 now() { jq -sc "map($1)" "$NOWLOG"; }
-typed "/implement-with-speech"
+speech_on
 prompt human "write it up"
 : > "$NOWLOG"
 text "Cutting the branch now."
@@ -659,7 +671,7 @@ printf 'Queued earlier.\n' > "$QUEUES/s1.queue"
 call > /dev/null
 check "$(now '[.text, .markdown]')" '[["Queued earlier.",""]]' \
   "a queue line with no source publishes an empty markdown"
-typed "/implement"
+speech_alerts
 prompt human "run the suite"
 : > "$NOWLOG"
 stop 'Done.' > /dev/null
@@ -667,7 +679,98 @@ check "$(now '[.text, .markdown]')" '[["demo session finished",""]]' \
   "an announcement the hook composes publishes an empty markdown"
 unset NOWLOG
 
-typed "/implement"
+# A managed session writes every block to its feed, whatever its speech setting.
+speech_alerts
+: > "$TRANSCRIPT"
+FEED="$QUEUES/s1.feed"
+# usage: fed <jq filter>; the filter applied to every feed entry, as an array.
+fed() { jq -sc "map($1)" "$FEED" 2>/dev/null; }
+# the /implement cases above made this session managed; start from an unmanaged one
+rm -f "$QUEUES/s1.managed" "$FEED" "$QUEUES/s1.feed-cursor"
+prompt human "unmanaged"
+text "Not fed."
+call > /dev/null
+check "$([ -e "$FEED" ] && echo fed)" "" "a session that is not managed has no feed"
+: > "$QUEUES/s1.managed"
+export NOWLOG="$SANDBOX/now-log"
+: > "$NOWLOG"
+prompt human "managed alerts"
+text 'Cutting **the** branch.'
+check "$(call)" "" "a managed session on Alerts reads nothing aloud"
+check "$(fed '[.session, .name, .text, .markdown, (.at | type)]')" \
+  '[["s1","demo session","Cutting the branch.","Cutting **the** branch.","number"]]' \
+  "its block reaches the feed with its name, spoken text and Markdown"
+check "$([ -s "$QUEUES/s1.queue" ] && echo queued)$(cat "$NOWLOG")" "" \
+  "a fed block is not queued and publishes no now.json"
+check "$(call)" "" "a call with no new text is quiet"
+check "$(fed .text | jq length)" "1" "the block is fed once"
+result '{}'
+check "$(stop 'All green.' unwritten)" "demo session finished" \
+  "a managed session on Alerts still announces its stop"
+check "$(fed .text)" '["Cutting the branch.","All green."]' "the final reply reaches the feed"
+prompt human "code only"
+text '```bash
+gh run list
+```'
+call > /dev/null
+check "$(fed .markdown | jq -r '.[-1]')" '```bash
+gh run list
+```' "a block with nothing to say aloud is still fed"
+check "$(fed .text | jq -r '.[-1]')" "" "and its spoken text is empty"
+: > "$QUEUES/s1.muted"
+prompt human "managed off"
+text "Muted line."
+check "$(call)" "" "a managed session set to Off reads nothing aloud"
+result '{}'
+check "$(stop 'Muted reply.' unwritten)" "" "and announces nothing"
+check "$(fed .text | jq -c '.[-2:]')" '["Muted line.","Muted reply."]' \
+  "a managed session set to Off still feeds every block"
+check "$(jq -sc "map(.text)" "$NOWLOG")" '["demo session finished"]' \
+  "the only clip while it was Off or on Alerts was the stop's announcement"
+: > "$NOWLOG"
+speech_on
+prompt human "managed on"
+text "Spoken line."
+check "$(call)" "demo session says: Spoken line." "a managed session set to On still reads aloud"
+check "$(jq -r .text "$NOWLOG")" "demo session says: Spoken line." "and publishes now.json"
+check "$(fed .text | jq -r '.[-1]')" "Spoken line." "and feeds the block too"
+speech_alerts
+unset NOWLOG
+FOLLOW_DIR="$XDG_RUNTIME_DIR/voice-bridge/follow"
+: > "$FOLLOW_DIR/88"
+prompt human "managed and followed"
+text "Followed line."
+CLAUDE_CODE_MESSAGING_SOCKET=/x/88.sock call > /dev/null
+bridge_feed="$XDG_RUNTIME_DIR/voice-bridge/feed/88.json"
+fed_before=$(jq length "$bridge_feed")
+check "$(jq -r '.[-1].text' "$bridge_feed")" "demo session says: Followed line." \
+  "a managed, followed call still sends its text to the voice feed"
+result '{}'
+CLAUDE_CODE_MESSAGING_SOCKET=/x/88.sock stop 'Followed reply.' unwritten > /dev/null
+check "$(jq length "$bridge_feed")" "$fed_before" \
+  "a managed, followed stop still leaves the final reply to the bridge's own hook"
+check "$(fed .text | jq -c '.[-2:]')" '["Followed line.","Followed reply."]' \
+  "while the session's feed gets both blocks"
+rm -f "$FOLLOW_DIR/88"
+# speechctl turning speech on marks the speech cursor read before the hook takes the lock
+prompt human "speech turns on mid-turn"
+text "Written before speech turned on."
+python3 "$HERE/speak_pending.py" "$TRANSCRIPT" "$QUEUES/s1.cursor" seen
+: > "$QUEUES/s1.replies"
+check "$(call)" "" "speech turned on reads nothing already written"
+check "$(fed .text | jq -r '.[-1]')" "Written before speech turned on." \
+  "but the feed still gets the block speech skipped"
+rm -f "$QUEUES/s1.replies"
+for i in $(seq 200); do printf '{"text":"old %s"}\n' "$i"; done > "$FEED"
+prompt human "long session"
+text "Newest."
+call > /dev/null
+check "$(fed .text | jq -c '[length, .[0], .[-1]]')" '[200,"old 2","Newest."]' \
+  "the feed keeps the last 200 blocks"
+rm -f "$QUEUES/s1.managed" "$FEED" "$QUEUES/s1.feed-cursor"
+call > /dev/null
+
+speech_alerts
 : > "$TRANSCRIPT"
 
 [ "$fails" -eq 0 ] || { echo "$fails failed"; exit 1; }
