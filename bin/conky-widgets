@@ -4,7 +4,7 @@
 usage: conky-widgets <widget> [command]
        conky-widgets show | hide | stop | restart | status    (every widget)
 
-  <widget>         spotify | speech
+  <widget>         spotify | orchestrator   (speech still names the orchestrator)
   (no command)     start the widget and show it, or hide it when it is showing
   start | stop | restart | status    (a hidden widget starts hidden)
   show | hide      show a hidden widget, or hide it; a hidden one keeps running
@@ -47,12 +47,18 @@ WIDGETS = {
         conf='~/.config/conky-spotify-nowplaying', cache='~/.cache/conky-spotify-nowplaying',
         autostart='conky-spotify-nowplaying.desktop', icon='conky-spotify-nowplaying',
         contents='nowplaying.py', legacy_pidfile=True),
-    'speech': dict(
-        title='Speech', comment='The managed Claude sessions and what they have replied',
-        conf='~/.config/conky-widgets/speech', cache='~/.cache/conky-widgets/speech',
-        autostart='conky-widgets-speech.desktop', icon='audio-volume-high',
-        contents='speechqueue.py', legacy_pidfile=False),
+    'orchestrator': dict(
+        title='Claude Code Orchestrator', comment='The managed Claude sessions and what they have replied',
+        conf='~/.config/conky-widgets/orchestrator', cache='~/.cache/conky-widgets/orchestrator',
+        autostart='conky-widgets-orchestrator.desktop', icon='audio-volume-high',
+        contents='orchestrator.py', legacy_pidfile=False),
 }
+# The orchestrator was the speech widget: the command that still names it, and the folders and
+# autostart entry it kept under that name, which move to the new name the first time it runs.
+ALIASES = {'speech': 'orchestrator'}
+RENAMED = {'orchestrator': dict(
+    conf='~/.config/conky-widgets/speech', cache='~/.cache/conky-widgets/speech',
+    autostart='conky-widgets-speech.desktop', key='speech')}
 
 
 def conf_dir(widget):
@@ -138,6 +144,32 @@ def migrate(widget):
         old, new = os.path.join(OLD_CONF, f), os.path.join(conf, f)
         if os.path.isfile(old) and not os.path.lexists(new):
             shutil.copy2(old, new)
+
+
+def adopt_renamed(widget):
+    """Moves what a widget kept under its old name to its new one, once: its config and cache
+    folders, when the new ones are not there yet, and the autostart entry, written again under
+    the new name and command. The supervisor's flags for the widget go with it."""
+    old = RENAMED.get(widget)
+    if not old:
+        return
+    for new, was in ((conf_dir(widget), old['conf']), (cache_dir(widget), old['cache'])):
+        was = os.path.expanduser(was)
+        if os.path.isdir(was) and not os.path.lexists(new):
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            os.rename(was, new)
+    for folder in (WANTED, UP):
+        was, new = os.path.join(folder, old['key']), os.path.join(folder, widget)
+        if os.path.lexists(was):
+            if os.path.lexists(new):
+                os.remove(was)
+            else:
+                os.rename(was, new)
+    was = os.path.join(AUTOSTART_DIR, old['autostart'])
+    if os.path.lexists(was):
+        if not os.path.lexists(autostart_file(widget)):
+            write_autostart(widget)
+        os.remove(was)
 
 
 def set_hidden(widget, hidden):
@@ -308,21 +340,26 @@ def supervise():
         pass
 
 
+def write_autostart(widget):
+    path = autostart_file(widget)
+    exe = shutil.which(NAME) or os.path.realpath(__file__)
+    info = WIDGETS[widget]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write('[Desktop Entry]\n'
+                'Type=Application\n'
+                f"Name={info['title']}\n"
+                f"Comment={info['comment']}\n"
+                f'Exec={exe} {widget} start\n'
+                f"Icon={info['icon']}\n"
+                'X-GNOME-Autostart-Delay=5\n'
+                'NoDisplay=true\n')
+
+
 def autostart(widget, on):
     path = autostart_file(widget)
     if on:
-        exe = shutil.which(NAME) or os.path.realpath(__file__)
-        info = WIDGETS[widget]
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            f.write('[Desktop Entry]\n'
-                    'Type=Application\n'
-                    f"Name={info['title']}\n"
-                    f"Comment={info['comment']}\n"
-                    f'Exec={exe} {widget} start\n'
-                    f"Icon={info['icon']}\n"
-                    'X-GNOME-Autostart-Delay=5\n'
-                    'NoDisplay=true\n')
+        write_autostart(widget)
         print('will start at login')
     else:
         if os.path.exists(path):
@@ -364,6 +401,10 @@ def main():
     args = sys.argv[1:]
     if args and args[0] == '_run':
         return supervise()
+    for widget in RENAMED:
+        adopt_renamed(widget)
+    if args and args[0] in ALIASES:
+        args[0] = ALIASES[args[0]]
     if args and args[0] in ('show', 'hide', 'stop', 'restart', 'status') and len(args) == 1:
         if args[0] == 'restart':
             return restart_all()

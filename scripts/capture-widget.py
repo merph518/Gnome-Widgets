@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Save the running widget's window as a PNG.
 
-usage: scripts/capture-widget.py <out.png> [spotify|speech] [--window XID]
+usage: scripts/capture-widget.py <out.png> [spotify|orchestrator] [--window XID]
 
 An isolated copy's windows have a class of their own: scripts/isolated-widgets.py capture
 captures one, or CSN_CLASS_SUFFIX in the environment names the copy's class here; --window
@@ -31,7 +31,7 @@ from gi.repository import GdkPixbuf, GLib  # noqa: E402
 # own_window_class in src/<widget>/conky.conf, with the suffix of an isolated copy's windows
 SUFFIX = os.environ.get('CSN_CLASS_SUFFIX', '')
 WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying' + SUFFIX,
-            'speech': 'ConkySpeechQueue' + SUFFIX}
+            'orchestrator': 'ConkyOrchestrator' + SUFFIX}
 
 
 def find_window(wm_class):
@@ -95,6 +95,7 @@ def read_window(xid):
 
 def main(argv):
     argv = list(argv)
+    argv[2:3] = ['orchestrator' if a == 'speech' else a for a in argv[2:3]]   # its former name
     xid = None
     if '--window' in argv:
         at = argv.index('--window')

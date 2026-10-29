@@ -17,13 +17,13 @@ removes both. Nothing of the user's own copy or another session's is read,
 stopped or captured.
 
 ```bash
-scripts/render-option.py <scratchpad>/today.png speech            # the look as it is today
-scripts/render-option.py <scratchpad>/option-A.png speech --patch <scratchpad>/option-A.diff
+scripts/render-option.py <scratchpad>/today.png orchestrator            # the look as it is today
+scripts/render-option.py <scratchpad>/option-A.png orchestrator --patch <scratchpad>/option-A.diff
 ```
 
 The first call is the widget as drawn today, with its colours, fonts, spacing
 and the rows around the part that changes; read it with the `Read` tool before
-the options are drawn. The speech copy shows fixture sessions, so a rendering of
+the options are drawn. The orchestrator copy shows fixture sessions, so a rendering of
 it starts from those rows. The Spotify copy shows a card only while something is
 playing.
 

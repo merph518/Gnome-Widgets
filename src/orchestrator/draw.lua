@@ -1,4 +1,4 @@
--- Cairo drawing for the speech widget, fed by speechqueue.py:
+-- Cairo drawing for the orchestrator widget, fed by orchestrator.py:
 --   draw.txt      geometry (logical px, from the card's top left); its scale line is the
 --                 display's scale and the text scale, its shadow line the margin round the card
 --   widget.txt    conky's markup (the column headers), shown through conky_widget
@@ -15,12 +15,12 @@ pcall(require, 'cairo_xlib')
 
 -- The shared drawing helpers sit in ../common, installed or in a checkout.
 local here = debug.getinfo(1, 'S').source:match('^@(.*)/[^/]*$')
-    or (os.getenv('CSN_DIR') or '/usr/share/conky-widgets') .. '/speech'
+    or (os.getenv('CSN_DIR') or '/usr/share/conky-widgets') .. '/orchestrator'
 package.path = here .. '/../common/?.lua;' .. package.path
 local theme = require 'theme'
 local set, rounded_rect = theme.set, theme.rounded_rect
 
-local cache = os.getenv('HOME') .. '/.cache/conky-widgets/speech/'
+local cache = os.getenv('HOME') .. '/.cache/conky-widgets/orchestrator/'
 local FONT = 'Ubuntu Sans'
 local hover_x, hover_y = -1, -1           -- window px
 local margin = 0                          -- the shadow margin around the card, in window px
@@ -63,7 +63,7 @@ local function label_after(rest, n)
 end
 
 local function load_sessions(version)
-    -- sessions.txt's lines (speechqueue.py's session_line) as {id, age, flags, name, repo, span,
+    -- sessions.txt's lines (orchestrator.py's session_line) as {id, age, flags, name, repo, span,
     -- header, review, last}
     if version == sessions.version then return end
     local rows = {}
@@ -104,12 +104,12 @@ end
 local function secondary() return theme.secondary(fg, bg) end
 
 function conky_widget()
-    -- conky.text: speechqueue.py's markup
+    -- conky.text: orchestrator.py's markup
     return read('widget.txt') or ''
 end
 
 function conky_fg(which)
-    -- ${lua_parse fg title} and ${lua_parse fg text} in speechqueue.py's markup
+    -- ${lua_parse fg title} and ${lua_parse fg text} in orchestrator.py's markup
     return theme.conky_colour(which == 'title' and fg or secondary())
 end
 
@@ -278,8 +278,8 @@ local function term_offset(count, shown_lines)
     return said.shown
 end
 
-local BULLET_MARK, PROMPT_MARK, DONE_MARK, META_MARK = 2, 4, 5, '\6'   -- speechqueue.py's: a line's first byte, for the first line of a message's text, its speaker's name and its closing line
-local STYLE_MARK = '\31'                   -- speechqueue.py's: before each run of a styled line, its style letter
+local BULLET_MARK, PROMPT_MARK, DONE_MARK, META_MARK = 2, 4, 5, '\6'   -- orchestrator.py's: a line's first byte, for the first line of a message's text, its speaker's name and its closing line
+local STYLE_MARK = '\31'                   -- orchestrator.py's: before each run of a styled line, its style letter
 
 local function mono(cr, text, s, bold, italic)
     font(cr, 12, text, s, bold, italic, true)

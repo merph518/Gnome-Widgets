@@ -79,7 +79,7 @@ function theme.fade(bg, path)
     -- and the foreground for it and the colour drawn on that foreground. path is the Spotify
     -- widget's bg.txt, 'r g b  from_r from_g from_b  start boot_id' (colours from 0 to 1),
     -- whose fade both widgets work out from the same numbers and so show alike in every frame;
-    -- a start from another boot is long finished. A file with only 'r g b' (the speech
+    -- a start from another boot is long finished. A file with only 'r g b' (the orchestrator
     -- widget's background setting can name one), or none, which fades to Spotify's #181818,
     -- starts its fade here, from the colour shown when it changed.
     local f = io.open(path)

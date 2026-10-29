@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run an isolated copy of the widgets for one working session, beside the user's own.
 
-usage: scripts/isolated-widgets.py [--name NAME] [--installed] start [spotify|speech] [--at X,Y]
+usage: scripts/isolated-widgets.py [--name NAME] [--installed] start [spotify|orchestrator] [--at X,Y]
        scripts/isolated-widgets.py [--name NAME] stop | status | path
-       scripts/isolated-widgets.py [--name NAME] capture <out.png> [spotify|speech]
+       scripts/isolated-widgets.py [--name NAME] capture <out.png> [spotify|orchestrator]
 
   start     runs the checkout's launcher (--installed: the installed one, once a release has the
             window class suffix) in a copy of its own;
@@ -24,7 +24,7 @@ The copy is isolated by where it lives, so the launcher and the widgets run unch
   - ~/.claude/sessions there holds fixture Claude sessions (three managed, with replies in
     their feeds from a minute to 40 minutes old, and one not managed), and $XDG_RUNTIME_DIR holds a
     speak-attention folder of fixture hook state beside links to everything else the desktop
-    keeps there, so the speech widget reads those and never a real session's files
+    keeps there, so the orchestrator widget reads those and never a real session's files
   - there is no tray icon (CSN_NO_TRAY)
   - the windows have a class of their own (CSN_CLASS_SUFFIX), since each widget's mouse helper
     finds its window by class and two copies with one class would move each other's windows
@@ -54,11 +54,12 @@ INSTALLED_LAUNCHER = '/usr/bin/conky-widgets'
 INSTALLED_SRC = '/usr/share/conky-widgets'
 REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir          # HOME may already be a copy's
 BASE = os.path.join(REAL_HOME, '.cache', 'conky-widgets-isolated')
-WIDGETS = ('spotify', 'speech')
-WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying', 'speech': 'ConkySpeechQueue'}
+WIDGETS = ('spotify', 'orchestrator')
+ALIASES = {'speech': 'orchestrator'}     # the orchestrator's former name, which old commands still use
+WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying', 'orchestrator': 'ConkyOrchestrator'}
 CARD_W = 1500                  # px a card and its shadow can span at the largest display scale
 SLOT = 48                      # px between one copy's windows and the next's
-SPEECH_BELOW = 300             # px the speech widget sits below the Spotify one, as the defaults do
+ORCHESTRATOR_BELOW = 300       # px the orchestrator widget sits below the Spotify one, as the defaults do
 FIXTURE_TAG = 'csn-isolated-fixture'
 
 
@@ -84,7 +85,7 @@ class Copy:
     def config(self, widget):
         if widget == 'spotify':
             return os.path.join(self.home, '.config', 'conky-spotify-nowplaying')
-        return os.path.join(self.home, '.config', 'conky-widgets', 'speech')
+        return os.path.join(self.home, '.config', 'conky-widgets', 'orchestrator')
 
     def env(self):
         """The launcher's environment: the desktop's own variables, with HOME and
@@ -167,7 +168,7 @@ def position_for(slot, monitor, widget, at=None):
     else:
         mx, my, mw, _ = monitor
         x, y = mx + mw - CARD_W - slot * SLOT, my + 80 + slot * SLOT
-    return x, y + (SPEECH_BELOW if widget == 'speech' else 0)
+    return x, y + (ORCHESTRATOR_BELOW if widget == 'orchestrator' else 0)
 
 
 def fixture_sessions(copy, pids):
@@ -317,7 +318,7 @@ def start(copy, widgets, at=None, installed=False):
     with open(copy.slot_file) as f:
         slot = int(f.read())
     link_runtime(copy, real_runtime_dir())
-    if 'speech' in widgets and not (running and fixture_alive(copy)):
+    if 'orchestrator' in widgets and not (running and fixture_alive(copy)):
         write_fixtures(copy, start_fixture_processes(copy))
     mon = monitor()
     for widget in widgets:
@@ -386,7 +387,7 @@ def main(argv=None):
     if not re.fullmatch(r'\w[\w.-]*', args.name):     # never '.' or '..': stop removes the folder
         sys.exit('the name is letters, digits, dots, dashes and underscores, starting with a letter or digit')
     copy = Copy(args.name)
-    cmd, rest = args.command, args.rest
+    cmd, rest = args.command, [ALIASES.get(w, w) for w in args.rest]
     if cmd == 'start':
         widgets = [w for w in rest if w in WIDGETS] or list(WIDGETS)
         at = tuple(map(int, args.at.split(','))) if args.at else None
@@ -397,7 +398,7 @@ def main(argv=None):
         status(copy)
     elif cmd == 'path':
         print(copy.root)
-    elif cmd == 'capture' and rest and rest[1:2] in ([], ['spotify'], ['speech']):
+    elif cmd == 'capture' and rest and rest[1:2] in ([], ['spotify'], ['orchestrator']):
         sys.exit(capture(copy, rest[0], rest[1] if len(rest) > 1 else 'spotify'))
     else:
         sys.exit(__doc__)

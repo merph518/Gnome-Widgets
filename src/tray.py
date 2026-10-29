@@ -2,7 +2,7 @@
 """The one top-bar (AppIndicator) icon for every widget, started by the launcher's
 supervisor while any widget runs. Its menu shows the current track; shows or hides each
 widget on its own; holds a submenu of settings for each (Spotify: text scaling, size, lyrics,
-always on top; Speech: text scaling, size, collapse when idle, always on top); turns
+always on top; Claude Code Orchestrator: text scaling, size, collapse when idle, always on top); turns
 start-at-login on or off; and quits every widget. What it reads and writes is in tray_model.py."""
 import ctypes, os, signal, subprocess, sys
 
@@ -217,18 +217,18 @@ def main():
     spotify.set_submenu(spotify_menu)
     menu.append(spotify)
 
-    # Speech: its size, collapsing when idle and always on top.
-    speech_menu = Gtk.Menu()
-    scaling, reset = size_items('speech')
-    speech_on_top = on_top_check('speech')
+    # Claude Code Orchestrator: its size, collapsing when idle and always on top.
+    orchestrator_menu = Gtk.Menu()
+    scaling, reset = size_items('orchestrator')
+    orchestrator_on_top = on_top_check('orchestrator')
     collapse = Check('Collapse when idle', tray_model.collapse_idle, tray_model.set_collapse_idle)
-    for entry in (scaling.item, reset, collapse.item, speech_on_top.item):
-        speech_menu.append(entry)
-    checks += [collapse, speech_on_top]
+    for entry in (scaling.item, reset, collapse.item, orchestrator_on_top.item):
+        orchestrator_menu.append(entry)
+    checks += [collapse, orchestrator_on_top]
     radios.append(scaling)
-    speech = Gtk.MenuItem(label='Speech')
-    speech.set_submenu(speech_menu)
-    menu.append(speech)
+    orchestrator = Gtk.MenuItem(label='Claude Code Orchestrator')
+    orchestrator.set_submenu(orchestrator_menu)
+    menu.append(orchestrator)
     menu.append(Gtk.SeparatorMenuItem())
 
     autostart = Check('Start at login', tray_model.starts_at_login, set_autostart)

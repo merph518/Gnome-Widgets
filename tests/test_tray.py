@@ -40,25 +40,25 @@ class FlagsTest(support.TempDirTest):
         self.assertEqual(tray_model.hidden_file('spotify'), self.mouse.HIDDEN)
 
     def test_ticks_follow_the_menu(self):
-        tray_model.show('speech', False)
-        self.assertEqual(self.ticks(), {'spotify': True, 'speech': False})
-        tray_model.show('speech', True)
-        self.assertEqual(self.ticks(), {'spotify': True, 'speech': True})
+        tray_model.show('orchestrator', False)
+        self.assertEqual(self.ticks(), {'spotify': True, 'orchestrator': False})
+        tray_model.show('orchestrator', True)
+        self.assertEqual(self.ticks(), {'spotify': True, 'orchestrator': True})
         self.popen.assert_not_called()                     # both were running
 
     def test_ticks_follow_the_launcher(self):
         with mock.patch.object(launcher.sys, 'argv', ['conky-widgets', 'spotify', 'hide']):
             launcher.main()
-        self.assertEqual(self.ticks(), {'spotify': False, 'speech': True})
+        self.assertEqual(self.ticks(), {'spotify': False, 'orchestrator': True})
         with mock.patch.object(launcher.sys, 'argv', ['conky-widgets', 'spotify', 'show']):
             launcher.main()
-        self.assertEqual(self.ticks(), {'spotify': True, 'speech': True})
+        self.assertEqual(self.ticks(), {'spotify': True, 'orchestrator': True})
 
     def test_ticks_follow_the_buttons(self):
         for button in ('minimize', 'close'):
             with self.subTest(button=button):
                 self.mouse.press(1, 0x111, button)
-                self.assertEqual(self.ticks(), {'spotify': False, 'speech': True})
+                self.assertEqual(self.ticks(), {'spotify': False, 'orchestrator': True})
                 tray_model.show('spotify', True)
 
     def test_one_widgets_buttons_leave_the_others_window_and_flag_alone(self):
@@ -70,25 +70,25 @@ class FlagsTest(support.TempDirTest):
                 self.mouse.press(1, 0x111, button)
                 self.mouse.x11.XUnmapWindow.assert_called_once_with(1, 0x111)
                 self.mouse.x11.XMapWindow.assert_not_called()
-                self.assertFalse(os.path.exists(tray_model.hidden_file('speech')))
+                self.assertFalse(os.path.exists(tray_model.hidden_file('orchestrator')))
                 hook.assert_not_called()
                 popen.assert_not_called()                  # × starts nothing, stopping included
                 tray_model.show('spotify', True)
 
     def test_a_tick_starts_a_widget_that_is_not_running(self):
-        launcher.flag(os.path.join(tray_model.UP, 'speech'), False)
-        tray_model.set_hidden('speech', True)
-        self.assertFalse(tray_model.shown('speech'))
-        tray_model.show('speech', True)
-        self.assertFalse(os.path.exists(tray_model.hidden_file('speech')))
-        self.assertEqual(self.popen.call_args[0][0][1:], ['speech', 'start'])
+        launcher.flag(os.path.join(tray_model.UP, 'orchestrator'), False)
+        tray_model.set_hidden('orchestrator', True)
+        self.assertFalse(tray_model.shown('orchestrator'))
+        tray_model.show('orchestrator', True)
+        self.assertFalse(os.path.exists(tray_model.hidden_file('orchestrator')))
+        self.assertEqual(self.popen.call_args[0][0][1:], ['orchestrator', 'start'])
 
     def test_a_stopped_widget_is_not_ticked(self):
-        launcher.flag(os.path.join(tray_model.UP, 'speech'), False)
-        self.assertEqual(self.ticks(), {'spotify': True, 'speech': False})
+        launcher.flag(os.path.join(tray_model.UP, 'orchestrator'), False)
+        self.assertEqual(self.ticks(), {'spotify': True, 'orchestrator': False})
 
     def test_each_widget_has_its_own_size_and_on_top(self):
-        self.assertNotEqual(tray_model.size_file('spotify'), tray_model.size_file('speech'))
-        tray_model.set_on_top('speech', False)
-        self.assertEqual((tray_model.on_top('spotify'), tray_model.on_top('speech')), (True, False))
+        self.assertNotEqual(tray_model.size_file('spotify'), tray_model.size_file('orchestrator'))
+        tray_model.set_on_top('orchestrator', False)
+        self.assertEqual((tray_model.on_top('spotify'), tray_model.on_top('orchestrator')), (True, False))
         self.assertEqual(tray_model.on_top_file('spotify'), self.mouse.ON_TOP)

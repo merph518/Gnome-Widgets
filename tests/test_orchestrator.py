@@ -1,8 +1,8 @@
-"""speechqueue.py: the speech widget's state, read from fixture files, and the files it writes.
+"""orchestrator.py: the orchestrator widget's state, read from fixture files, and the files it writes.
 
-The golden samples under tests/golden/speech/<case>/ are what render() writes for each
+The golden samples under tests/golden/orchestrator/<case>/ are what render() writes for each
 case. After a change to the layout that is meant, write them again with
-    SPEECH_GOLDEN=write python3 -m unittest tests.test_speechqueue
+    ORCHESTRATOR_GOLDEN=write python3 -m unittest tests.test_orchestrator
 and read the diff before committing it.
 """
 import datetime
@@ -17,10 +17,10 @@ from unittest import mock
 
 import support
 
-speechqueue = support.load_speechqueue()
+orchestrator = support.load_orchestrator()
 import sessions  # noqa: E402
 
-GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'golden', 'speech')
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'golden', 'orchestrator')
 OUTPUTS = ('widget.txt', 'draw.txt', 'regions.json', 'sessions.txt')
 ME = '11111111-aaaa'
 OTHER = '22222222-bbbb'
@@ -30,13 +30,13 @@ NOW = 1000.0
 
 class Fixture(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix='speechqueue-test-')
+        self.root = tempfile.mkdtemp(prefix='orchestrator-test-')
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.f = support.SpeechFixture(self.root)
+        self.f = support.OrchestratorFixture(self.root)
         cache = os.path.join(self.root, 'cache')
         for name, path in (('OUT', 'widget.txt'), ('DRAW', 'draw.txt'),
                            ('REGIONS', 'regions.json'), ('SESSIONS', 'sessions.txt')):
-            p = mock.patch.object(speechqueue, name, os.path.join(cache, path))
+            p = mock.patch.object(orchestrator, name, os.path.join(cache, path))
             p.start()
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
@@ -44,17 +44,17 @@ class Fixture(unittest.TestCase):
                             ('_feeds', {}), ('_message_lines', {}),
                             ('LEDGERS', self.f.ledgers),
                             ('SCALE', 1)):
-            p = mock.patch.object(speechqueue, name, value)
+            p = mock.patch.object(orchestrator, name, value)
             p.start()
             self.addCleanup(p.stop)
         try:
-            os.remove(speechqueue.SIZE)
+            os.remove(orchestrator.SIZE)
         except FileNotFoundError:
             pass
         self.cache = cache
 
     def state(self, now=NOW):
-        return speechqueue.read_state(self.f.speak, self.f.sessions, self.f.proc, now=now)
+        return orchestrator.read_state(self.f.speak, self.f.sessions, self.f.proc, now=now)
 
     def three(self):
         """This session working, another and a third idle."""
@@ -95,12 +95,12 @@ class ReadState(Fixture):
         self.f.session(400, '99999999-jobs', 'Relay Authority', kind='bg', status='waiting', waiting_for='input needed')
         by_id = {x['id']: x for x in self.state()['sessions']}
         self.assertTrue(by_id['99999999-jobs']['question'])
-        self.assertEqual(speechqueue.status_group(by_id['99999999-jobs']), 'Needs input')
+        self.assertEqual(orchestrator.status_group(by_id['99999999-jobs']), 'Needs input')
         self.assertFalse(by_id[ME]['question'])
 
     def test_waiting_on_ci_or_a_merge_by_the_sessions_ledger(self):
         self.three()
-        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+        flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2].split(',')
         self.assertEqual(flags(OTHER), ['idle'])
         self.f.ledger(OTHER, ('pr:107', 'done'), ('pr:111', 'open'))
@@ -116,7 +116,7 @@ class ReadState(Fixture):
 
     def test_waiting_on_tests_while_a_test_run_is_under_the_session(self):
         self.three()
-        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+        flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2]
         self.f.process(110, 100, 'bash', '-c', 'python3 -m unittest discover -s tests')
         self.assertEqual(flags(OTHER), 'idle')                    # the shell's -c is not one
@@ -130,7 +130,7 @@ class ReadState(Fixture):
 
     def test_waiting_on_tests_while_a_ci_run_is_open_in_a_skills_ledger(self):
         self.three()
-        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+        flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2]
         self.f.sweep(OTHER, 'done', 'done')
         self.assertEqual(flags(OTHER), 'idle')
@@ -140,7 +140,7 @@ class ReadState(Fixture):
 
     def test_waiting_on_a_systemd_unit_a_shell_polls(self):
         self.three()
-        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+        flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2]
         loop = 'while systemctl --user is-active -q {} ; do sleep 60; done'
         self.f.process(110, 100, '/bin/bash', '-c', loop.format('build-pack-now'))
@@ -158,16 +158,16 @@ class ReadState(Fixture):
                 ['bash', 'speechctl_test.sh'], ['./speechctl_test.sh'], ['npm', 'test'],
                 ['npm', 'run', 'test'], ['go', 'test', './...'], ['cargo', 'test'],
                 ['node', 'node_modules/.bin/playwright', 'test'])
-        others = ([], ['grep', 'unittest'], ['bash', '-c', 'pytest'], ['python3', 'speechqueue.py'],
+        others = ([], ['grep', 'unittest'], ['bash', '-c', 'pytest'], ['python3', 'orchestrator.py'],
                   ['python3', '-m'], ['npm', 'install'], ['go', 'build'], ['playwright', 'show-report'])
         for argv in runs:
-            self.assertTrue(speechqueue.is_test_run(argv), argv)
+            self.assertTrue(orchestrator.is_test_run(argv), argv)
         for argv in others:
-            self.assertFalse(speechqueue.is_test_run(argv), argv)
+            self.assertFalse(orchestrator.is_test_run(argv), argv)
 
     def test_one_tag_a_question_first(self):
         self.three()
-        flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
+        flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2]
         self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'idle'))
         self.f.session(300, ME, 'Claude Voice Widget', status='waiting')
@@ -237,7 +237,7 @@ class ReadState(Fixture):
             state = self.state()
         self.assertEqual(sorted(state), ['feed', 'sessions'])
         self.assertEqual(state['feed'], [])
-        self.assertEqual({'now', 'speech', 'speaking', 'queued', 'own_voice'} & set(state['sessions'][0]), set())
+        self.assertEqual({'now', 'orchestrator', 'speaking', 'queued', 'own_voice'} & set(state['sessions'][0]), set())
 
 
 class Feed(Fixture):
@@ -313,21 +313,21 @@ class Feed(Fixture):
 
     def test_the_feed_keeps_the_newest_replies_within_the_text_it_holds(self):
         self.f.session(100, ME, 'One')
-        for i in range(speechqueue.SCROLLBACK_KEEP + 7):
+        for i in range(orchestrator.SCROLLBACK_KEEP + 7):
             self.f.feed(ME, 100.0 + i, f'Reply {i}.')
         feed = self.state()['feed']
         self.assertEqual((len(feed), feed[0]['text'], feed[-1]['text']),
-                         (speechqueue.SCROLLBACK_KEEP, 'Reply 7.', f'Reply {speechqueue.SCROLLBACK_KEEP + 6}.'))
-        with mock.patch.object(speechqueue, 'SCROLLBACK_CHARS', 40):
+                         (orchestrator.SCROLLBACK_KEEP, 'Reply 7.', f'Reply {orchestrator.SCROLLBACK_KEEP + 6}.'))
+        with mock.patch.object(orchestrator, 'SCROLLBACK_CHARS', 40):
             feed = self.state()['feed']
-        self.assertTrue(1 < len(feed) < speechqueue.SCROLLBACK_KEEP)
-        self.assertEqual(feed[-1]['text'], f'Reply {speechqueue.SCROLLBACK_KEEP + 6}.')
+        self.assertTrue(1 < len(feed) < orchestrator.SCROLLBACK_KEEP)
+        self.assertEqual(feed[-1]['text'], f'Reply {orchestrator.SCROLLBACK_KEEP + 6}.')
 
     def test_a_reply_says_how_long_ago_it_was(self):
         for seconds, want in ((-5, 'now'), (0, 'now'), (59, 'now'), (60, '1m'), (119, '1m'), (1500, '25m'),
                               (3599, '59m'), (3600, '1h'), (7300, '2h'), (86399, '23h'), (86400, '1d'),
                               (3 * 86400 + 5, '3d')):
-            self.assertEqual(speechqueue.age_text(seconds), want, seconds)
+            self.assertEqual(orchestrator.age_text(seconds), want, seconds)
 
     def test_a_row_ends_with_the_age_of_its_sessions_last_reply(self):
         self.three()
@@ -338,15 +338,15 @@ class Feed(Fixture):
         ages = {s['id']: s['age'] for s in state['sessions']}
         self.assertEqual(ages, {ME: '1m', OTHER: '25m', QUIET: ''})
         by_id = {s['id']: s for s in state['sessions']}
-        self.assertEqual(speechqueue.session_line(by_id[ME]).split('\t')[1], '1m')
-        self.assertEqual(speechqueue.session_line(by_id[QUIET]).split('\t')[1], '')
+        self.assertEqual(orchestrator.session_line(by_id[ME]).split('\t')[1], '1m')
+        self.assertEqual(orchestrator.session_line(by_id[QUIET]).split('\t')[1], '')
         later = {s['id']: s['age'] for s in self.state(now=NOW + 3600)['sessions']}
         self.assertEqual(later, {ME: '1h', OTHER: '1h', QUIET: ''})                       # it follows the clock
 
     def test_a_quiet_session_keeps_its_age_when_a_busier_one_fills_the_pane(self):
         self.three()
         self.f.feed(QUIET, NOW - 1500, 'Long ago.')
-        for i in range(speechqueue.SCROLLBACK_KEEP + 1):
+        for i in range(orchestrator.SCROLLBACK_KEEP + 1):
             self.f.feed(ME, NOW - 100 + i, f'Reply {i}.')
         state = self.state()
         self.assertNotIn(QUIET, {e['session'] for e in state['feed']})
@@ -361,9 +361,9 @@ class Feed(Fixture):
         self.assertEqual((by_id[ME]['last'], by_id[ME]['age']), ('Newest reply.', '9m'))
         self.assertEqual((by_id[OTHER]['last'], by_id[OTHER]['age']), ('', '10m'))
         self.assertEqual((by_id[QUIET]['last'], by_id[QUIET]['age']), ('', '25m'))
-        self.assertEqual(speechqueue.LAST_LINE_WITHIN, 600)
-        self.assertEqual(speechqueue.session_line(by_id[ME]).split('\t')[8], 'Newest reply.')
-        self.assertEqual(speechqueue.session_line(by_id[OTHER]).split('\t')[8], '')
+        self.assertEqual(orchestrator.LAST_LINE_WITHIN, 600)
+        self.assertEqual(orchestrator.session_line(by_id[ME]).split('\t')[8], 'Newest reply.')
+        self.assertEqual(orchestrator.session_line(by_id[OTHER]).split('\t')[8], '')
 
     def test_the_last_line_is_the_newest_reply_on_one_line(self):
         self.f.session(100, ME, 'One')
@@ -402,7 +402,7 @@ class Repos(Fixture):
         os.makedirs(os.path.join(wt, 'src'))
         with open(os.path.join(wt, '.git'), 'w') as f:
             f.write(f'gitdir: {gitdir}\n')
-        self.assertEqual(speechqueue.repo_name(os.path.join(wt, 'src')), 'Gnome-Widgets')
+        self.assertEqual(orchestrator.repo_name(os.path.join(wt, 'src')), 'Gnome-Widgets')
 
     def test_repo_name_follows_a_relative_gitdir(self):
         top = self.repo('Overmind')
@@ -413,17 +413,17 @@ class Repos(Fixture):
         os.makedirs(wt)
         with open(os.path.join(wt, '.git'), 'w') as f:
             f.write('gitdir: ../.git/worktrees/wt\n')
-        self.assertEqual(speechqueue.repo_name(wt), 'Overmind')
+        self.assertEqual(orchestrator.repo_name(wt), 'Overmind')
 
     def test_repo_name_without_a_remote_is_the_folder(self):
-        self.assertEqual(speechqueue.repo_name(self.repo('LaundryBot')), 'LaundryBot')
+        self.assertEqual(orchestrator.repo_name(self.repo('LaundryBot')), 'LaundryBot')
 
     def test_the_session_line_carries_the_whole_repository_name(self):
         top = self.repo('x', 'git@github.com:someone/fagerteam-health-coach.git')
-        self.assertEqual(speechqueue.session_repo(top), 'fagerteam-health-coach')
+        self.assertEqual(orchestrator.session_repo(top), 'fagerteam-health-coach')
         self.f.session(100, ME, 'One')
         s = dict(self.state()['sessions'][0], repo='fagerteam-health-coach')
-        self.assertEqual(speechqueue.session_line(s).split('\t')[4], 'fagerteam-health-coach')
+        self.assertEqual(orchestrator.session_line(s).split('\t')[4], 'fagerteam-health-coach')
 
 
 class Links(Repos):
@@ -432,7 +432,7 @@ class Links(Repos):
 
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(speechqueue, '_git', {})
+        p = mock.patch.object(orchestrator, '_git', {})
         p.start()
         self.addCleanup(p.stop)
 
@@ -458,12 +458,12 @@ class Links(Repos):
 
     def test_the_issue_is_the_branchs_issue_number_on_the_origin_repository(self):
         wt = self.worktree('ref: refs/heads/feat/issue-123-session-row-links')
-        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(wt)),
+        self.assertEqual(orchestrator.session_issue(*orchestrator.session_branch(wt)),
                          'https://github.com/someone/Gnome-Widgets/issues/123')
         top =self.repo('plain', 'https://github.com/someone/Overmind.git')
         with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
             f.write('ref: refs/heads/fix/issue-7-x\n')
-        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(top)),
+        self.assertEqual(orchestrator.session_issue(*orchestrator.session_branch(top)),
                          'https://github.com/someone/Overmind/issues/7')
 
     def test_no_issue_without_one_in_the_branch_a_branch_or_github(self):
@@ -472,11 +472,11 @@ class Links(Repos):
                           ('ref: refs/heads/feat/tissue-5', None)):
             with self.subTest(head=head):
                 shutil.rmtree(os.path.join(self.root, 'code'), ignore_errors=True)
-                speechqueue._git.clear()
+                orchestrator._git.clear()
                 wt = self.worktree(head, url or 'git@github.com:someone/Gnome-Widgets.git')
-                self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(wt)), '')
-        nowhere = speechqueue.session_branch(os.path.join(self.root, 'nowhere'))
-        self.assertEqual((nowhere, speechqueue.session_issue(*nowhere)), (('', ''), ''))
+                self.assertEqual(orchestrator.session_issue(*orchestrator.session_branch(wt)), '')
+        nowhere = orchestrator.session_branch(os.path.join(self.root, 'nowhere'))
+        self.assertEqual((nowhere, orchestrator.session_issue(*nowhere)), (('', ''), ''))
 
     def test_the_origin_is_the_url_and_not_a_pushurl_before_it(self):
         top = self.repo('fork')
@@ -485,9 +485,9 @@ class Links(Repos):
                     '\turl = https://github.com/org/repo.git\n')
         with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
             f.write('ref: refs/heads/feat/issue-9-x\n')
-        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(top)),
+        self.assertEqual(orchestrator.session_issue(*orchestrator.session_branch(top)),
                          'https://github.com/org/repo/issues/9')
-        self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
+        self.assertEqual(orchestrator.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
     def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
         self.f.session(100, ME, 'One')
@@ -521,7 +521,7 @@ class Links(Repos):
         listed = [dict(github='o/a', issue=issue('o/a', 31)), dict(github='o/a', issue=issue('o/a', 7)),
                   dict(github='o/a', issue=issue('o/a', 31)), dict(github='o/a', issue=''),
                   dict(github='o/b', issue=issue('o/b', 2)), dict(github='', issue='')]
-        speechqueue.repo_issues(listed)
+        orchestrator.repo_issues(listed)
         self.assertEqual([[n for n, _ in s['issues']] for s in listed],
                          [['#7', '#31']] * 4 + [['#2'], []])
         self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
@@ -529,7 +529,7 @@ class Links(Repos):
     def test_the_sessions_are_listed_in_the_sections_the_cli_names_for_their_state(self):
         listed = [dict(id='a', busy=False), dict(id='b', busy=True), dict(id='c', busy=False, question=True),
                   dict(id='e', busy=False, waiting='merge')]
-        self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
+        self.assertEqual([(orchestrator.status_group(x), x['id']) for x in orchestrator.grouped(listed)],
                          [('Needs input', 'c'), ('Working', 'b'), ('Working', 'e'), ('Completed', 'a')])
 
     def test_an_idle_session_with_a_pull_request_open_is_in_review_under_needs_input(self):
@@ -542,21 +542,21 @@ class Links(Repos):
         for s in by_id.values():
             s['repo'] = 'Gnome-Widgets'
         one, two, three = by_id[ME], by_id[OTHER], by_id[QUIET]
-        self.assertEqual(speechqueue.review_label(one), 'In review \u00b7 Gnome-Widgets #151, #152')
-        self.assertEqual(speechqueue.status_group(one), 'Needs input')
-        self.assertEqual(speechqueue.session_line(one).split('\t')[7], speechqueue.review_label(one))
-        self.assertEqual((speechqueue.status_group(two), speechqueue.review_label(two)), ('Working', ''))   # busy: still working
-        self.assertEqual((speechqueue.status_group(three), speechqueue.review_label(three)), ('Completed', ''))
+        self.assertEqual(orchestrator.review_label(one), 'In review \u00b7 Gnome-Widgets #151, #152')
+        self.assertEqual(orchestrator.status_group(one), 'Needs input')
+        self.assertEqual(orchestrator.session_line(one).split('\t')[7], orchestrator.review_label(one))
+        self.assertEqual((orchestrator.status_group(two), orchestrator.review_label(two)), ('Working', ''))   # busy: still working
+        self.assertEqual((orchestrator.status_group(three), orchestrator.review_label(three)), ('Completed', ''))
 
     def test_a_session_is_one_row_and_a_section_adds_its_title_and_a_blank_row_after_the_first(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
         state = self.state()
         state['sessions'][0].update(busy=True)
-        speechqueue.render(state)
-        with open(speechqueue.SESSIONS) as f:
+        orchestrator.render(state)
+        with open(orchestrator.SESSIONS) as f:
             lines = [line.split('\t') for line in f.read().splitlines()]
-        with open(speechqueue.REGIONS) as f:
+        with open(orchestrator.REGIONS) as f:
             regions = json.load(f)
         self.assertEqual([(l[5], l[6]) for l in lines], [('2', 'Working'), ('3', 'Completed')])
         row = regions['list_scroll'][1]
@@ -570,29 +570,29 @@ class Links(Repos):
     def test_the_numbers_of_a_sessions_issues_and_pull_requests_head_its_messages(self):
         sess = dict(id='aaaa', issues=[('#123', 'https://o/r/issues/123'), ('#125', 'https://o/r/issues/125')],
                     prs=['https://o/r/pull/124', 'https://o/r/pull/126'])
-        segments = speechqueue.meta_segments(sess)
+        segments = orchestrator.meta_segments(sess)
         self.assertEqual(''.join(t for t, _ in segments), '[ Issue #123, #125 | PR #124, #126 ]')
         self.assertEqual([info['issue'] for _, info in segments if info],
                          ['https://o/r/issues/123', 'https://o/r/issues/125', 'https://o/r/pull/124',
                           'https://o/r/pull/126'])
-        self.assertEqual(''.join(t for t, _ in speechqueue.meta_segments(dict(sess, issues=[]))), '[ PR #124, #126 ]')
-        self.assertEqual(speechqueue.meta_segments(dict(id='aaaa')), [])
-        self.assertEqual(speechqueue.meta_segments(None), [])
+        self.assertEqual(''.join(t for t, _ in orchestrator.meta_segments(dict(sess, issues=[]))), '[ PR #124, #126 ]')
+        self.assertEqual(orchestrator.meta_segments(dict(id='aaaa')), [])
+        self.assertEqual(orchestrator.meta_segments(None), [])
 
     def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
         self.f.session(100, ME, 'One')
-        speechqueue.render(self.state())
-        with open(speechqueue.REGIONS) as f:
+        orchestrator.render(self.state())
+        with open(orchestrator.REGIONS) as f:
             regions = json.load(f)
         prompt, (_, top, _, bottom) = regions['confirm'], regions['list']
-        x0, x1 = speechqueue.MARGIN, speechqueue.MARGIN + speechqueue.widget_width        # over both columns
+        x0, x1 = orchestrator.MARGIN, orchestrator.MARGIN + orchestrator.widget_width        # over both columns
         box = prompt['box']
         self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
         for key in ('cancel', 'ok'):
             self.assertTrue(box[0] <= prompt[key][0] < prompt[key][2] <= box[2], key)
             self.assertTrue(box[1] <= prompt[key][1] < prompt[key][3] <= box[3], key)
         self.assertLess(prompt['cancel'][2], prompt['ok'][0])
-        with open(speechqueue.DRAW) as f:
+        with open(orchestrator.DRAW) as f:
             line = next(l for l in f.read().splitlines() if l.startswith('confirm '))
         self.assertEqual([float(v) for v in line.split()[1:5]], box)
 
@@ -608,22 +608,22 @@ class Terminal(Fixture):
         self.f.file(ME + '.feed')
         if text:
             self.f.feed(ME, NOW - 2, text, markdown=markdown, name='Claude Voice Widget')
-        with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
-            widget = speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        with mock.patch.object(orchestrator.size_file, 'load', return_value=size or (660, 128, 1.0)):
+            widget = orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             raw = f.read().splitlines()
         lines = {l.split()[0]: l.split(None, 1)[1] for l in raw if len(l.split()) > 1 and not l.startswith('line ')}
         lines['line'] = [l[5:] for l in raw if l.startswith('line ')]
-        lines['text'] = [l.lstrip(speechqueue.BULLET_MARK) for l in lines['line']
-                         if l and not l.startswith((speechqueue.PROMPT_MARK, speechqueue.DONE_MARK))]
-        with open(speechqueue.REGIONS) as f:
+        lines['text'] = [l.lstrip(orchestrator.BULLET_MARK) for l in lines['line']
+                         if l and not l.startswith((orchestrator.PROMPT_MARK, orchestrator.DONE_MARK))]
+        with open(orchestrator.REGIONS) as f:
             return lines, json.load(f), widget
 
     def test_the_title_is_along_the_top_level_with_minimize_and_close(self):
         lines, regions, _ = self.draw()
         x, cy, track, text = lines['title'].split(None, 3)
-        self.assertEqual(text, 'CLAUDE CODE SESSION MANAGEMENT')
-        self.assertEqual((float(x), float(track)), (speechqueue.MARGIN, speechqueue.TITLE_TRACK))
+        self.assertEqual(text, 'CLAUDE CODE ORCHESTRATOR')
+        self.assertEqual((float(x), float(track)), (orchestrator.MARGIN, orchestrator.TITLE_TRACK))
         self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
         self.assertLess(float(cy), regions['list'][1])                # above the list
 
@@ -633,15 +633,15 @@ class Terminal(Fixture):
         list_x0, list_y0, list_x1, list_y1 = regions['list']
         self.assertEqual((y0, y1), (list_y0, list_y1))                    # the sessions column, no controls under it
         self.assertLess(list_x1, x0)                                      # right of the sessions
-        self.assertEqual(x0 - list_x1, speechqueue.COLUMN_GAP)
-        self.assertEqual(x1, speechqueue.MARGIN + speechqueue.widget_width)
-        self.assertEqual(pad, speechqueue.TERM_PAD)
+        self.assertEqual(x0 - list_x1, orchestrator.COLUMN_GAP)
+        self.assertEqual(x1, orchestrator.MARGIN + orchestrator.widget_width)
+        self.assertEqual(pad, orchestrator.TERM_PAD)
         self.assertEqual(regions['terminal'], [x0, y0, x1, y1])
 
     def test_the_card_ends_a_margin_under_the_list_and_the_divider_ends_with_it(self):
         lines, regions, _ = self.draw()
         x, y0, y1 = (float(v) for v in lines['divider'].split())
-        self.assertEqual(y1, regions['list'][3] + speechqueue.MARGIN - 4)
+        self.assertEqual(y1, regions['list'][3] + orchestrator.MARGIN - 4)
         self.assertEqual(regions['divider'][3], y1)
 
     def test_the_divider_is_a_line_in_the_gap_between_the_columns_with_a_grab_area_over_it(self):
@@ -656,23 +656,23 @@ class Terminal(Fixture):
         self.assertTrue(gap0 <= grab[0] < x < grab[2] <= gap1)
         self.assertEqual((grab[1], grab[3]), (y0, y1))
         left, avail, gap, low, high = regions['divider_drag']
-        self.assertEqual((left, gap), (speechqueue.MARGIN, speechqueue.COLUMN_GAP))
-        self.assertEqual(left + avail + gap, speechqueue.MARGIN + speechqueue.widget_width)
-        self.assertEqual(speechqueue.COLUMN_GAP, 24)
+        self.assertEqual((left, gap), (orchestrator.MARGIN, orchestrator.COLUMN_GAP))
+        self.assertEqual(left + avail + gap, orchestrator.MARGIN + orchestrator.widget_width)
+        self.assertEqual(orchestrator.COLUMN_GAP, 24)
         self.assertTrue(0 < low <= 0.5 <= high < 1)
 
     def test_the_divider_file_sets_the_sessions_share_within_the_least_each_column_keeps(self):
-        with open(speechqueue.SPLIT, 'w') as f:
+        with open(orchestrator.SPLIT, 'w') as f:
             f.write('0.6\n')
         lines, regions, _ = self.draw()
         left, avail, gap, low, high = regions['divider_drag']
         self.assertEqual(regions['list'][2], left + round(avail * 0.6))
-        for share, want in (('0.0', low), ('1.0', high), ('junk', speechqueue.SPLIT_DEFAULT)):
-            with open(speechqueue.SPLIT, 'w') as f:
+        for share, want in (('0.0', low), ('1.0', high), ('junk', orchestrator.SPLIT_DEFAULT)):
+            with open(orchestrator.SPLIT, 'w') as f:
                 f.write(share)
             _, regions, _ = self.draw()
             self.assertEqual(regions['list'][2], left + round(avail * want), share)
-        self.assertGreaterEqual(regions['list'][2] - left, speechqueue.LIST_MIN)
+        self.assertGreaterEqual(regions['list'][2] - left, orchestrator.LIST_MIN)
 
     def test_nothing_of_playback_is_drawn_or_a_click_area(self):
         lines, regions, _ = self.draw(text=self.LONG)
@@ -698,19 +698,19 @@ class Terminal(Fixture):
     def test_the_pane_prints_the_whole_text_behind_a_left_margin_for_the_bullet_and_names_the_speaker(self):
         lines, _, _ = self.draw(text=self.LONG)
         x0, y0, x1, y1, pad = (float(v) for v in lines['terminal'].split()[:5])
-        self.assertEqual(lines['speaker'], speechqueue.TERM_TITLE)                  # static, whoever replies
+        self.assertEqual(lines['speaker'], orchestrator.TERM_TITLE)                  # static, whoever replies
         step = float(lines['terminal'].split()[7])
         shown = int(lines['terminal'].split()[8])                                  # lines shown at once
-        self.assertEqual(shown, max(int((y1 - y0 - 2 * pad - (speechqueue.TERM_BANNER_LINES + 1) * step) // step), 1))
-        self.assertEqual(lines['line'][0], speechqueue.PROMPT_MARK + 'Claude Voice Widget')   # who replied, as the prompt
+        self.assertEqual(shown, max(int((y1 - y0 - 2 * pad - (orchestrator.TERM_BANNER_LINES + 1) * step) // step), 1))
+        self.assertEqual(lines['line'][0], orchestrator.PROMPT_MARK + 'Claude Voice Widget')   # who replied, as the prompt
         self.assertEqual(lines['line'][1], '')
-        self.assertTrue(lines['line'][2].startswith(speechqueue.BULLET_MARK))             # then the text behind its bullet
+        self.assertTrue(lines['line'][2].startswith(orchestrator.BULLET_MARK))             # then the text behind its bullet
         when = datetime.datetime.fromtimestamp(NOW - 2).strftime('%A %-I:%M %p')
-        self.assertEqual(lines['line'][-1], speechqueue.DONE_MARK + 'Replied · ' + when)
+        self.assertEqual(lines['line'][-1], orchestrator.DONE_MARK + 'Replied · ' + when)
         self.assertEqual(' '.join(l.strip() for l in lines['text']), self.LONG)   # every word, none cut
-        self.assertTrue(all(l.startswith(speechqueue.TERM_INDENT) for l in lines['text']))
+        self.assertTrue(all(l.startswith(orchestrator.TERM_INDENT) for l in lines['text']))
         for line in lines['text']:
-            self.assertLess(speechqueue.text_width(line, speechqueue.TERM_FONT) * speechqueue.BLOCK_SLACK,
+            self.assertLess(orchestrator.text_width(line, orchestrator.TERM_FONT) * orchestrator.BLOCK_SLACK,
                             x1 - x0 - 2 * pad)
 
     def test_a_word_wider_than_the_pane_is_broken_across_lines_and_none_is_lost(self):
@@ -719,7 +719,7 @@ class Terminal(Fixture):
         x0, _, x1, _, pad = (float(v) for v in lines['terminal'].split()[:5])
         self.assertEqual(''.join(lines['text']).replace(' ', ''), 'See' + word + 'now')
         for line in lines['text']:
-            self.assertLess(speechqueue.text_width(line, speechqueue.TERM_FONT) * speechqueue.BLOCK_SLACK,
+            self.assertLess(orchestrator.text_width(line, orchestrator.TERM_FONT) * orchestrator.BLOCK_SLACK,
                             x1 - x0 - 2 * pad)
 
     def test_the_pane_is_a_wheel_area_and_counts_the_lines_past_what_it_shows(self):
@@ -732,25 +732,25 @@ class Terminal(Fixture):
         self.assertEqual(regions['terminal_scroll'], 0)
         self.assertIn('terminal', regions)                               # the pane stays with nothing to print
 
-    MARKDOWN = ('## What changed\n\nBoth changes are **pushed** (`cfd3cda`), and your *speech* widget restarted.\n\n'
+    MARKDOWN = ('## What changed\n\nBoth changes are **pushed** (`cfd3cda`), and your *orchestrator* widget restarted.\n\n'
                 '- Spacing: **12 px**\n- Avatar: trimmed\n\n```\nsudo apt install lua5.3\n```')
 
     def test_the_pane_draws_the_markdown_the_feed_holds_with_each_runs_style(self):
         self.three()
         self.f.feed(ME, NOW - 2, 'flat', markdown=self.MARKDOWN, name='Claude Voice Widget')
-        with mock.patch.object(speechqueue.size_file, 'load', return_value=(1400, 128, 1.0)):
-            speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        with mock.patch.object(orchestrator.size_file, 'load', return_value=(1400, 128, 1.0)):
+            orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             lines = [l[5:] for l in f.read().split('\n') if l.startswith('line ')]
-        self.assertEqual(lines[:2], [speechqueue.PROMPT_MARK + 'Claude Voice Widget', ''])
+        self.assertEqual(lines[:2], [orchestrator.PROMPT_MARK + 'Claude Voice Widget', ''])
         lines = lines[2:]
-        lines[0] = lines[0].lstrip(speechqueue.BULLET_MARK)
-        mark = speechqueue.STYLE_MARK
+        lines[0] = lines[0].lstrip(orchestrator.BULLET_MARK)
+        mark = orchestrator.STYLE_MARK
         self.assertEqual(lines[0], f'{mark}n  {mark}bWhat changed')              # a heading is bold, behind the margin
         self.assertEqual(lines[1].strip(), '')                                   # and a paragraph follows a blank line
         self.assertIn(mark + 'bpushed', lines[2])
         self.assertIn(mark + 'ccfd3cda', lines[2])
-        self.assertIn(mark + 'ispeech', lines[2])
+        self.assertIn(mark + 'iorchestrator', lines[2])
         self.assertNotIn('*', ''.join(lines))
         self.assertNotIn('`', ''.join(lines))
         self.assertTrue(any(l.startswith(mark + 'n  • Spacing: ') and mark + 'b12 px' in l for l in lines))
@@ -759,13 +759,13 @@ class Terminal(Fixture):
     def test_without_markdown_the_pane_keeps_the_plain_line(self):
         lines, _, _ = self.draw(text='Done and dusted.')
         prompt, blank, bullet, blank2, done = lines['line']
-        self.assertEqual((prompt, blank, bullet, blank2), (speechqueue.PROMPT_MARK + 'Claude Voice Widget', '',
-                                                           speechqueue.BULLET_MARK + '  Done and dusted.', ''))
-        self.assertTrue(done.startswith(speechqueue.DONE_MARK + 'Replied · '))
-        self.assertNotIn(speechqueue.STYLE_MARK, ''.join(lines['line']))
+        self.assertEqual((prompt, blank, bullet, blank2), (orchestrator.PROMPT_MARK + 'Claude Voice Widget', '',
+                                                           orchestrator.BULLET_MARK + '  Done and dusted.', ''))
+        self.assertTrue(done.startswith(orchestrator.DONE_MARK + 'Replied · '))
+        self.assertNotIn(orchestrator.STYLE_MARK, ''.join(lines['line']))
 
     def test_markdown_is_blocks_of_paragraphs_headings_list_items_and_code(self):
-        blocks = speechqueue.markdown_blocks('# Title\nfirst line\nsecond line\n\n- a **b**\n2. c\n> quoted\n---\n```\nx  y\n```')
+        blocks = orchestrator.markdown_blocks('# Title\nfirst line\nsecond line\n\n- a **b**\n2. c\n> quoted\n---\n```\nx  y\n```')
         self.assertEqual([(k, m) for k, m, _ in blocks],
                          [('h', ''), ('p', ''), ('li', '\u2022'), ('li', '2.'), ('p', ''), ('code', '')])
         self.assertEqual(blocks[1][2], [('first line second line', '')])           # a paragraph's lines join
@@ -774,14 +774,14 @@ class Terminal(Fixture):
         self.assertEqual(blocks[5][2], [('x  y', 'c')])                            # a code line is kept as written
 
     def test_inline_marks_nest_and_a_link_is_its_label(self):
-        self.assertEqual(speechqueue.inline_runs('a **b *c* d** [e](http://f) `g*h*`'),
+        self.assertEqual(orchestrator.inline_runs('a **b *c* d** [e](http://f) `g*h*`'),
                          [('a ', ''), ('b ', 'b'), ('c', 'x'), (' d', 'b'), (' ', ''), ('e', ''), (' ', ''),
                           ('g*h*', 'c')])
-        self.assertEqual(speechqueue.inline_runs('snake_case_name and 2 * 3 * 4'),
+        self.assertEqual(orchestrator.inline_runs('snake_case_name and 2 * 3 * 4'),
                          [('snake_case_name and 2 * 3 * 4', '')])
 
     def test_a_list_items_second_line_hangs_under_its_first_word(self):
-        wide = speechqueue.markdown_lines('- ' + 'word ' * 30, 200)
+        wide = orchestrator.markdown_lines('- ' + 'word ' * 30, 200)
         self.assertGreater(len(wide), 2)
         first, second = wide[0][0], wide[1][0]
         self.assertTrue(first.startswith('  \u2022 ') and second.startswith('    '))
@@ -789,24 +789,24 @@ class Terminal(Fixture):
             self.assertLessEqual(width, 200)
 
     def test_the_markdown_a_line_publishes_is_cleaned_and_capped(self):
-        self.assertEqual(speechqueue.clean_markdown('a\u200b\r\nb  '), 'a\nb')
-        self.assertEqual(speechqueue.clean_markdown(None), '')
-        self.assertEqual(speechqueue.clean_markdown(5), '')
-        self.assertEqual(len(speechqueue.clean_markdown('x' * 99999)), speechqueue.MARKDOWN_MAX)
+        self.assertEqual(orchestrator.clean_markdown('a\u200b\r\nb  '), 'a\nb')
+        self.assertEqual(orchestrator.clean_markdown(None), '')
+        self.assertEqual(orchestrator.clean_markdown(5), '')
+        self.assertEqual(len(orchestrator.clean_markdown('x' * 99999)), orchestrator.MARKDOWN_MAX)
 
     def test_the_title_on_the_pane_is_static_whichever_session_replies(self):
         self.three()
         self.f.feed(ME, NOW - 2, 'Checks pass.', name='Table Headers session')
-        speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             self.assertIn('speaker Combined Session Output', f.read().splitlines())
 
     def test_the_pane_names_a_session_as_the_list_does_not_as_the_feed_did(self):
         self.three()
         self.f.feed(ME, NOW - 2, 'Hello.', name='A name it had before')
-        speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
-            self.assertIn('line ' + speechqueue.PROMPT_MARK + 'Claude Voice Widget', f.read().splitlines())
+        orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
+            self.assertIn('line ' + orchestrator.PROMPT_MARK + 'Claude Voice Widget', f.read().splitlines())
 
     def test_the_card_is_as_big_with_replies_as_without(self):
         with_lines, with_regions, with_replies = self.draw(text=self.LONG)
@@ -819,12 +819,12 @@ class Terminal(Fixture):
         for sid, ago, text in ((ME, 90, 'First.'), (ME, 80, 'Second.'), (OTHER, 70, 'Third.'), (ME, 60, 'Fourth.')):
             self.f.feed(sid, NOW - ago, text)
         for _ in range(2):                                              # rendered again: not printed twice
-            speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+            orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             lines = [l[5:] for l in f.read().splitlines() if l.startswith('line ')]
-        bullets = [l[1:].strip() for l in lines if l.startswith(speechqueue.BULLET_MARK)]
+        bullets = [l[1:].strip() for l in lines if l.startswith(orchestrator.BULLET_MARK)]
         self.assertEqual(bullets, ['First.', 'Second.', 'Third.', 'Fourth.'])
-        names = [l[1:] for l in lines if l.startswith(speechqueue.PROMPT_MARK)]
+        names = [l[1:] for l in lines if l.startswith(orchestrator.PROMPT_MARK)]
         self.assertEqual(names, ['Claude Voice Widget', 'Release 1.2', 'Claude Voice Widget'])
 
     def test_the_speakers_header_is_printed_only_when_the_speaker_changes(self):
@@ -833,58 +833,58 @@ class Terminal(Fixture):
                                               ('c', 's2', 'Two', 'Third.'), ('d', 's1', 'One', 'Fourth.'))]
         said, previous = [], None
         for entry in entries:
-            said.extend(speechqueue.message_lines(entry, 600, (), entry['session'] != previous))
+            said.extend(orchestrator.message_lines(entry, 600, (), entry['session'] != previous))
             previous = entry['session']
-        names = [l[1:] for l in said if l.startswith(speechqueue.PROMPT_MARK)]
+        names = [l[1:] for l in said if l.startswith(orchestrator.PROMPT_MARK)]
         self.assertEqual(names, ['One', 'Two', 'One'])
-        self.assertEqual(sum(l.startswith(speechqueue.DONE_MARK) for l in said), 4)
+        self.assertEqual(sum(l.startswith(orchestrator.DONE_MARK) for l in said), 4)
 
     def test_the_same_words_replied_again_are_a_second_message(self):
         self.three()
         self.f.feed(ME, NOW - 100, 'Finished.')
         self.f.feed(ME, NOW - 98, 'Finished.')
-        speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             lines = f.read().splitlines()
-        self.assertEqual(lines.count('line ' + speechqueue.BULLET_MARK + '  Finished.'), 2)
+        self.assertEqual(lines.count('line ' + orchestrator.BULLET_MARK + '  Finished.'), 2)
 
     def test_every_message_keeps_its_closing_line(self):
         self.three()
         self.f.feed(ME, NOW - 100, 'First.')
         self.f.feed(ME, NOW - 50, 'Second one.')
-        speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             lines = [l[5:] for l in f.read().splitlines() if l.startswith('line ')]
-        done = [l for l in lines if l.startswith(speechqueue.DONE_MARK)]
-        prompts = sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines)
+        done = [l for l in lines if l.startswith(orchestrator.DONE_MARK)]
+        prompts = sum(l.startswith(orchestrator.PROMPT_MARK) for l in lines)
         self.assertEqual((len(done), prompts), (2, 1))
         self.assertEqual(lines[-1], done[-1])                            # the last line of the pane
 
     def test_a_message_is_laid_out_again_under_another_name(self):
         entry = {'key': 'k', 'session': 's1', 'name': 'One', 'text': 'Hi.', 'markdown': '', 'at': 1.0}
-        self.assertEqual(speechqueue.message_lines(entry, 600)[0], speechqueue.PROMPT_MARK + 'One')
-        self.assertEqual(speechqueue.message_lines(dict(entry, name='Two'), 600)[0], speechqueue.PROMPT_MARK + 'Two')
+        self.assertEqual(orchestrator.message_lines(entry, 600)[0], orchestrator.PROMPT_MARK + 'One')
+        self.assertEqual(orchestrator.message_lines(dict(entry, name='Two'), 600)[0], orchestrator.PROMPT_MARK + 'Two')
 
     def test_only_the_newest_replies_are_printed(self):
         self.three()
-        for i in range(speechqueue.SCROLLBACK_KEEP + 5):
+        for i in range(orchestrator.SCROLLBACK_KEEP + 5):
             self.f.feed(ME, 100.0 + i, f'Reply {i}.')
-        speechqueue.render(self.state())
-        with open(speechqueue.DRAW) as f:
+        orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
             lines = [l[5:] for l in f.read().splitlines() if l.startswith('line ')]
-        self.assertEqual(sum(l.startswith(speechqueue.DONE_MARK) for l in lines), speechqueue.SCROLLBACK_KEEP)
-        self.assertIn(speechqueue.BULLET_MARK + f'  Reply {speechqueue.SCROLLBACK_KEEP + 4}.', lines)
-        self.assertNotIn(speechqueue.BULLET_MARK + '  Reply 4.', lines)
+        self.assertEqual(sum(l.startswith(orchestrator.DONE_MARK) for l in lines), orchestrator.SCROLLBACK_KEEP)
+        self.assertIn(orchestrator.BULLET_MARK + f'  Reply {orchestrator.SCROLLBACK_KEEP + 4}.', lines)
+        self.assertNotIn(orchestrator.BULLET_MARK + '  Reply 4.', lines)
 
     def test_a_row_with_a_last_line_takes_a_second_row_under_its_name_and_the_age_is_on_the_first(self):
         self.three()
         self.f.feed(ME, NOW - 60, 'Working on the feed.')
         self.f.feed(OTHER, NOW - 1500, 'Done an hour ago.')
-        with mock.patch.object(speechqueue.size_file, 'load', return_value=(660, 290, 1.0)):
-            speechqueue.render(self.state())
-        with open(speechqueue.SESSIONS) as f:
+        with mock.patch.object(orchestrator.size_file, 'load', return_value=(660, 290, 1.0)):
+            orchestrator.render(self.state())
+        with open(orchestrator.SESSIONS) as f:
             lines = [l.split('\t') for l in f.read().splitlines()]
-        with open(speechqueue.REGIONS) as f:
+        with open(orchestrator.REGIONS) as f:
             regions = json.load(f)
         by_id = {l[0]: l for l in lines}
         self.assertEqual((by_id[ME][1], by_id[ME][8]), ('1m', 'Working on the feed.'))
@@ -900,7 +900,7 @@ class Terminal(Fixture):
         self.assertEqual(by_id[ME][5], '3')
 
     def test_a_collapsed_card_is_the_title_alone_while_no_session_works(self):
-        with open(speechqueue.COLLAPSE, 'w') as f:
+        with open(orchestrator.COLLAPSE, 'w') as f:
             f.write('on')
         lines, _, _ = self.draw(setup=self.idle)
         self.assertEqual(sorted(k for k in lines if k in ('title', 'terminal', 'speaker', 'list')), ['title'])
@@ -909,7 +909,7 @@ class Terminal(Fixture):
                          ['list', 'speaker', 'terminal', 'title'])
 
     def test_a_session_waiting_on_input_keeps_a_collapsed_card_open(self):
-        with open(speechqueue.COLLAPSE, 'w') as f:
+        with open(orchestrator.COLLAPSE, 'w') as f:
             f.write('on')
         lines, _, _ = self.draw(setup=lambda: self.f.session(100, ME, 'One', status='waiting'))
         self.assertIn('terminal', lines)
@@ -917,17 +917,17 @@ class Terminal(Fixture):
     def test_a_narrow_card_at_a_large_scale_cuts_the_title_to_what_clears_minimize(self):
         lines, regions, _ = self.draw((400, 128, 2.0))
         text = lines['title'].split(None, 3)[3]
-        self.assertTrue(text.endswith('…') and len(text) < len('CLAUDE CODE SESSION MANAGEMENT'))
-        spaced = speechqueue.text_width(text, speechqueue.LABEL_FONT) + len(text) * speechqueue.TITLE_TRACK * 2.0 * 11 * 96 / 72
-        self.assertLess(speechqueue.MARGIN + spaced, regions['minimize'][0])
+        self.assertTrue(text.endswith('…') and len(text) < len('CLAUDE CODE ORCHESTRATOR'))
+        spaced = orchestrator.text_width(text, orchestrator.LABEL_FONT) + len(text) * orchestrator.TITLE_TRACK * 2.0 * 11 * 96 / 72
+        self.assertLess(orchestrator.MARGIN + spaced, regions['minimize'][0])
 
 
 class Golden(Fixture):
     def check(self, case, state):
-        text = speechqueue.render(state)
-        speechqueue.write_atomic(speechqueue.OUT, text)
+        text = orchestrator.render(state)
+        orchestrator.write_atomic(orchestrator.OUT, text)
         folder = os.path.join(GOLDEN, case)
-        if os.environ.get('SPEECH_GOLDEN') == 'write':
+        if os.environ.get('ORCHESTRATOR_GOLDEN') == 'write':
             os.makedirs(folder, exist_ok=True)
             for name in OUTPUTS:
                 shutil.copy(os.path.join(self.cache, name), os.path.join(folder, name))
@@ -943,7 +943,7 @@ class Golden(Fixture):
         self.three()
         self.f.feed(OTHER, NOW - 1500, 'The build is green.', name='Release 1.2')
         self.f.feed(ME, NOW - 2400, 'Opened the pull request.', name='Claude Voice Widget')
-        self.f.feed(ME, NOW - 60, 'The data layer is in: speechqueue.py writes the '
+        self.f.feed(ME, NOW - 60, 'The data layer is in: orchestrator.py writes the '
                     'widget, draw and regions files four times a second.', name='Claude Voice Widget')
         self.check('replies', self.state())
 
@@ -965,7 +965,7 @@ class Golden(Fixture):
 
     def test_collapse_when_idle(self):
         self.idle()
-        with open(speechqueue.COLLAPSE, 'w') as fh:
+        with open(orchestrator.COLLAPSE, 'w') as fh:
             fh.write('on\n')
         self.check('collapse', self.state())
 

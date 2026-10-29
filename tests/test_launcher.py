@@ -52,6 +52,11 @@ class LauncherTest(support.TempDirTest):
         super().setUp()
         self.redirect(launcher, SHARED_CACHE='shared', PIDFILE='shared/run.pid',
                       WANTED='shared/wanted', UP='shared/up', AUTOSTART_DIR='autostart')
+        old = lambda name: os.path.join(self.dir, 'old', name)
+        patcher = mock.patch.dict(launcher.RENAMED, orchestrator=dict(
+            conf=old('conf'), cache=old('cache'), autostart='conky-widgets-speech.desktop', key='speech'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.supervisor = None                              # the pid of a running supervisor
         self.legacy = {}                                    # widget -> pid of a pre-bundle supervisor
         self.spawned, self.killed = [], []
@@ -93,8 +98,8 @@ class LauncherTest(support.TempDirTest):
 class CommandsTest(LauncherTest):
 
     def test_a_widget_has_its_own_state_folders(self):
-        self.assertTrue(launcher.WIDGETS['speech']['cache'].endswith('/.cache/conky-widgets/speech'))
-        self.assertTrue(launcher.WIDGETS['speech']['conf'].endswith('/.config/conky-widgets/speech'))
+        self.assertTrue(launcher.WIDGETS['orchestrator']['cache'].endswith('/.cache/conky-widgets/orchestrator'))
+        self.assertTrue(launcher.WIDGETS['orchestrator']['conf'].endswith('/.config/conky-widgets/orchestrator'))
 
     def test_the_spotify_widget_keeps_the_folders_and_autostart_entry_it_had(self):
         spotify = launcher.WIDGETS['spotify']
@@ -104,16 +109,16 @@ class CommandsTest(LauncherTest):
 
     def test_start_runs_one_supervisor_for_every_widget(self):
         self.run_main('spotify', 'start')
-        self.run_main('speech', 'start')
+        self.run_main('orchestrator', 'start')
         self.assertEqual(len(self.spawned), 1)
-        self.assertEqual(launcher.wanted(), ['spotify', 'speech'])
+        self.assertEqual(launcher.wanted(), ['spotify', 'orchestrator'])
 
     def test_the_supervisor_is_findable_before_it_writes_its_own_pid(self):
         self.run_main('spotify', 'start')
         self.assertEqual(open(launcher.PIDFILE).read(), '4242')
 
     def test_flags_left_by_a_supervisor_that_did_not_exit_are_not_started(self):
-        launcher.flag(os.path.join(launcher.WANTED, 'speech'), True)
+        launcher.flag(os.path.join(launcher.WANTED, 'orchestrator'), True)
         self.run_main('spotify', 'start')
         self.assertEqual(launcher.wanted(), ['spotify'])
 
@@ -136,17 +141,17 @@ class CommandsTest(LauncherTest):
         self.assertFalse(self.hidden('spotify'))
 
     def test_a_widget_that_is_not_installed_is_not_started(self):
-        with mock.patch.object(launcher, 'installed', lambda w: w != 'speech'):
-            self.run_main('speech', 'start')
+        with mock.patch.object(launcher, 'installed', lambda w: w != 'orchestrator'):
+            self.run_main('orchestrator', 'start')
         self.assertEqual((self.spawned, launcher.wanted()), ([], []))
 
     def test_stop_ends_only_that_widget(self):
         self.run_main('spotify', 'start')
-        self.run_main('speech', 'start')
-        self.run_main('speech', 'stop')
+        self.run_main('orchestrator', 'start')
+        self.run_main('orchestrator', 'stop')
         self.assertEqual((launcher.wanted(), self.killed), (['spotify'], []))
         self.assertTrue(launcher.is_running('spotify'))
-        self.assertFalse(launcher.is_running('speech'))
+        self.assertFalse(launcher.is_running('orchestrator'))
 
     def test_stopping_the_last_widget_ends_the_supervisor(self):
         self.run_main('spotify', 'start')
@@ -160,9 +165,9 @@ class CommandsTest(LauncherTest):
 
     def test_restart_with_no_widget_starts_the_running_ones_again(self):
         self.run_main('spotify', 'start')
-        self.run_main('speech', 'start')
+        self.run_main('orchestrator', 'start')
         self.run_main('restart')
-        self.assertEqual((len(self.spawned), launcher.wanted()), (2, ['spotify', 'speech']))
+        self.assertEqual((len(self.spawned), launcher.wanted()), (2, ['spotify', 'orchestrator']))
 
     def test_restart_with_no_widget_leaves_a_stopped_one_stopped(self):
         self.run_main('restart')
@@ -181,55 +186,106 @@ class CommandsTest(LauncherTest):
         self.assertEqual(self.killed, [777])
 
     def test_toggle_shows_then_minimizes_then_shows(self):
-        self.run_main('speech')                             # not running: starts, showing
-        self.assertEqual(launcher.wanted(), ['speech'])
-        self.assertFalse(self.hidden('speech'))
-        self.run_main('speech')                             # showing: minimizes
-        self.assertTrue(self.hidden('speech'))
-        self.run_main('speech', 'toggle')                   # minimized: shows
-        self.assertFalse(self.hidden('speech'))
+        self.run_main('orchestrator')                             # not running: starts, showing
+        self.assertEqual(launcher.wanted(), ['orchestrator'])
+        self.assertFalse(self.hidden('orchestrator'))
+        self.run_main('orchestrator')                             # showing: minimizes
+        self.assertTrue(self.hidden('orchestrator'))
+        self.run_main('orchestrator', 'toggle')                   # minimized: shows
+        self.assertFalse(self.hidden('orchestrator'))
         self.assertEqual(self.killed, [])                   # never stops it
 
     def test_show_and_hide_name_a_widget(self):
         self.run_main('spotify', 'hide')
         self.assertTrue(self.hidden('spotify'))
-        self.assertFalse(self.hidden('speech'))
+        self.assertFalse(self.hidden('orchestrator'))
         self.run_main('spotify', 'show')
         self.assertFalse(self.hidden('spotify'))
 
     def test_show_and_hide_with_no_widget_act_on_every_running_widget(self):
         self.run_main('spotify', 'start')
-        self.run_main('speech', 'start')
+        self.run_main('orchestrator', 'start')
         self.run_main('hide')
-        self.assertTrue(self.hidden('spotify') and self.hidden('speech'))
+        self.assertTrue(self.hidden('spotify') and self.hidden('orchestrator'))
         self.run_main('show')
-        self.assertFalse(self.hidden('spotify') or self.hidden('speech'))
+        self.assertFalse(self.hidden('spotify') or self.hidden('orchestrator'))
 
     def test_hide_with_no_widget_leaves_a_stopped_widget_alone(self):
         self.run_main('spotify', 'start')
         self.run_main('hide')
-        self.assertFalse(self.hidden('speech'))
+        self.assertFalse(self.hidden('orchestrator'))
 
     def test_stop_with_no_widget_ends_all(self):
         self.run_main('spotify', 'start')
-        self.run_main('speech', 'start')
+        self.run_main('orchestrator', 'start')
         self.run_main('stop')
         self.assertEqual((launcher.wanted(), self.killed), ([], [4242]))
 
     def test_autostart_is_one_entry_per_widget(self):
         with mock.patch.object(launcher.shutil, 'which', return_value='/usr/bin/conky-widgets'):
-            self.run_main('speech', 'autostart', 'on')
+            self.run_main('orchestrator', 'autostart', 'on')
             self.run_main('spotify', 'autostart', 'on')
-        speech = support.read(os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop'))
+        orchestrator = support.read(os.path.join(self.dir, 'autostart', 'conky-widgets-orchestrator.desktop'))
         spotify = support.read(os.path.join(self.dir, 'autostart', 'conky-spotify-nowplaying.desktop'))
-        self.assertIn('Exec=/usr/bin/conky-widgets speech start\n', speech)
+        self.assertIn('Exec=/usr/bin/conky-widgets orchestrator start\n', orchestrator)
         self.assertIn('Exec=/usr/bin/conky-widgets spotify start\n', spotify)
-        self.run_main('speech', 'autostart', 'off')
-        self.assertFalse(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop')))
+        self.run_main('orchestrator', 'autostart', 'off')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-widgets-orchestrator.desktop')))
         self.assertTrue(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-spotify-nowplaying.desktop')))
 
+    def test_speech_is_the_orchestrator_under_its_former_name(self):
+        self.run_main('speech', 'start')
+        self.assertEqual(launcher.wanted(), ['orchestrator'])
+        self.run_main('speech', 'hide')
+        self.assertTrue(self.hidden('orchestrator'))
+        self.run_main('speech', 'stop')
+        self.assertEqual(launcher.wanted(), [])
+
+    def old(self, *parts):
+        return os.path.join(self.dir, 'old', *parts)
+
+    def test_what_the_speech_widget_kept_moves_to_the_orchestrator_once(self):
+        for name, text in (('on-top', 'off'), ('size', '700 150 1.25'), ('position', '10 20')):
+            support.write(self.old('conf', name), text)
+        support.write(self.old('cache', 'hidden'), '')
+        support.write(os.path.join(launcher.WANTED, 'speech'), '')
+        support.write(os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop'),
+                      '[Desktop Entry]\nExec=/usr/bin/conky-widgets speech start\n')
+        with mock.patch.object(launcher.shutil, 'which', return_value='/usr/bin/conky-widgets'):
+            self.run_main('status')
+        conf = os.path.join(self.dir, 'conf', 'orchestrator')
+        self.assertEqual([support.read(os.path.join(conf, n)) for n in ('on-top', 'size', 'position')],
+                         ['off', '700 150 1.25', '10 20'])
+        self.assertTrue(self.hidden('orchestrator'))
+        self.assertEqual(launcher.wanted(), ['orchestrator'])
+        entry = support.read(os.path.join(self.dir, 'autostart', 'conky-widgets-orchestrator.desktop'))
+        self.assertIn('Exec=/usr/bin/conky-widgets orchestrator start\n', entry)
+        self.assertIn('Name=Claude Code Orchestrator\n', entry)
+        for gone in (self.old('conf'), self.old('cache'), os.path.join(launcher.WANTED, 'speech'),
+                     os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop')):
+            self.assertFalse(os.path.exists(gone), gone)
+
+    def test_nothing_moves_when_the_orchestrator_has_folders_of_its_own(self):
+        support.write(self.old('conf', 'on-top'), 'off')
+        support.write(self.old('cache', 'hidden'), '')
+        support.write(os.path.join(self.dir, 'conf', 'orchestrator', 'on-top'), 'on')
+        support.write(os.path.join(self.dir, 'cache', 'orchestrator', 'x'), '')
+        self.run_main('status')
+        self.assertEqual(support.read(os.path.join(self.dir, 'conf', 'orchestrator', 'on-top')), 'on')
+        self.assertFalse(self.hidden('orchestrator'))
+        self.assertTrue(os.path.exists(self.old('conf', 'on-top')))
+        self.assertTrue(os.path.exists(self.old('cache', 'hidden')))
+
+    def test_an_autostart_entry_the_orchestrator_already_has_is_kept(self):
+        new = os.path.join(self.dir, 'autostart', 'conky-widgets-orchestrator.desktop')
+        support.write(new, 'mine\n')
+        support.write(os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop'), 'old\n')
+        self.run_main('status')
+        self.assertEqual(support.read(new), 'mine\n')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-widgets-speech.desktop')))
+
     def test_a_command_for_no_such_widget_is_a_usage_error(self):
-        for args in (('nothing', 'start'), (), ('start',), ('speech', 'login'), ('spotify', 'autostart', 'maybe')):
+        for args in (('nothing', 'start'), (), ('start',), ('orchestrator', 'login'), ('spotify', 'autostart', 'maybe')):
             with self.subTest(args=args), self.assertRaises(SystemExit):
                 self.run_main(*args)
 
@@ -338,27 +394,27 @@ class SuperviseTest(LauncherTest):
     def test_each_widget_has_its_own_processes_and_goes_when_it_is_no_longer_wanted(self):
         def at_pass(n, procs):
             if n == 5:
-                launcher.flag(os.path.join(launcher.WANTED, 'speech'), False)
+                launcher.flag(os.path.join(launcher.WANTED, 'orchestrator'), False)
         with mock.patch.object(launcher, 'processes', lambda w: [] if w == launcher.BUNDLE else [
                 ('nowplaying', ['py', f'{w}-contents.py']), ('conky', ['conky', '-c', w])]):
-            started = self.run_supervisor(8, at_pass, widgets=('spotify', 'speech'))
-        self.assertEqual(self.names(started), ['spotify-contents', 'conky', 'speech-contents', 'conky'])
+            started = self.run_supervisor(8, at_pass, widgets=('spotify', 'orchestrator'))
+        self.assertEqual(self.names(started), ['spotify-contents', 'conky', 'orchestrator-contents', 'conky'])
         self.assertEqual([p.ended for p in started], [False, False, True, True])
         self.assertTrue(os.path.exists(os.path.join(launcher.UP, 'spotify')))
-        self.assertFalse(os.path.exists(os.path.join(launcher.UP, 'speech')))
+        self.assertFalse(os.path.exists(os.path.join(launcher.UP, 'orchestrator')))
 
     def test_a_scale_change_in_one_widget_leaves_the_other_alone(self):
         def at_pass(n, procs):
             if n == 5:
-                procs[5].returncode = launcher.RESCALED          # speech's mouse helper
+                procs[5].returncode = launcher.RESCALED          # the orchestrator's mouse helper
         with mock.patch.object(launcher, 'processes', lambda w: [] if w == launcher.BUNDLE else [
                 ('nowplaying', ['py', f'{w}-contents.py']), ('conky', ['conky', '-c', w]),
                 ('mouse', ['py', f'{w}-mouse.py'])]):
-            started = self.run_supervisor(8, at_pass, widgets=('spotify', 'speech'))
+            started = self.run_supervisor(8, at_pass, widgets=('spotify', 'orchestrator'))
         self.assertEqual(self.names(started[:6]),
-                         ['spotify-contents', 'conky', 'spotify-mouse', 'speech-contents', 'conky', 'speech-mouse'])
+                         ['spotify-contents', 'conky', 'spotify-mouse', 'orchestrator-contents', 'conky', 'orchestrator-mouse'])
         self.assertEqual([p.ended for p in started[:6]], [False, False, False, True, True, False])
-        self.assertEqual(self.names(started[6:]), ['speech-contents', 'conky', 'speech-mouse'])
+        self.assertEqual(self.names(started[6:]), ['orchestrator-contents', 'conky', 'orchestrator-mouse'])
 
     def test_one_tray_serves_every_widget_and_goes_with_the_last(self):
         tray_ended = {}
@@ -369,12 +425,12 @@ class SuperviseTest(LauncherTest):
             if n == 3:
                 launcher.flag(os.path.join(launcher.WANTED, 'spotify'), False)
             if n == 5:
-                launcher.flag(os.path.join(launcher.WANTED, 'speech'), False)
+                launcher.flag(os.path.join(launcher.WANTED, 'orchestrator'), False)
         with mock.patch.object(launcher, 'processes', lambda w: [
                 ('tray', ['py', 'tray.py'])] if w == launcher.BUNDLE else [('conky', ['conky', '-c', w])]):
-            started = self.run_supervisor(7, at_pass, widgets=('spotify', 'speech'))
+            started = self.run_supervisor(7, at_pass, widgets=('spotify', 'orchestrator'))
         self.assertEqual(self.names(started), ['conky', 'conky', 'tray'])
-        self.assertEqual((tray_ended[4], tray_ended[6]), (False, True))   # kept for speech, then gone
+        self.assertEqual((tray_ended[4], tray_ended[6]), (False, True))   # kept for the orchestrator, then gone
         self.assertEqual(os.listdir(launcher.UP), [])
 
     def test_no_tray_is_started_when_csn_no_tray_is_set(self):
@@ -393,7 +449,7 @@ class SuperviseTest(LauncherTest):
         def at_pass(n, procs):
             if n == 2:
                 launcher.signal.signal.call_args_list[0][0][1]()   # what SIGTERM calls
-        started = self.run_supervisor(3, at_pass, widgets=('spotify', 'speech'), stops=True)
+        started = self.run_supervisor(3, at_pass, widgets=('spotify', 'orchestrator'), stops=True)
         self.assertTrue(started and all(p.ended for p in started))
         self.assertFalse(os.path.exists(launcher.PIDFILE))
         self.assertEqual(os.listdir(launcher.UP), [])

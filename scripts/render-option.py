@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render a widget as it would look with one option applied, and save it as a PNG.
 
-usage: scripts/render-option.py <out.png> [spotify|speech] [--patch FILE]
+usage: scripts/render-option.py <out.png> [spotify|orchestrator] [--patch FILE]
 
 The widget is drawn by the real code, not imitated: a temporary worktree of origin/main
 gets the option's patch (a `git diff` of its change to src/, none for the look as it is
@@ -66,7 +66,7 @@ def render(out, widget, patch):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('out')
-    parser.add_argument('widget', nargs='?', choices=('spotify', 'speech'), default='speech')
+    parser.add_argument('widget', nargs='?', choices=('spotify', 'orchestrator'), default='orchestrator')
     parser.add_argument('--patch')
     args = parser.parse_args()
     render(args.out, args.widget, args.patch)
