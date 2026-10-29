@@ -72,8 +72,11 @@ The checks cannot see a Lua runtime error or a path that only exists under
 `/usr`. A change that touches `src/`, `bin/`, `packaging/` or `debian/` has not
 been checked until it has run: as an isolated copy of the widgets that belongs to
 the session, as in `/implement` Section 6, or installed, as in `/release` step 4.
-The isolated copy is the standard way to run from a working session, and its
-`--installed` option runs the installed launcher in the same isolation:
+The isolated copy is the standard way to run from a working session. Its
+`--installed` option runs the installed launcher in the same isolation, but the
+script refuses it while the installed widgets predate the window class suffix
+(`CSN_CLASS_SUFFIX`), since that copy would share the user's window class; a path
+bug under `/usr` is then left to the user's `/release` step 4:
 
 ```bash
 scripts/isolated-widgets.py start                  # a copy of its own, beside the user's
