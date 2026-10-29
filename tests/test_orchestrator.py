@@ -54,17 +54,17 @@ class Fixture(unittest.TestCase):
         self.cache = cache
 
     def state(self, now=NOW):
-        return orchestrator.read_state(self.f.speak, self.f.sessions, self.f.proc, now=now)
+        return orchestrator.read_state(self.f.hook_dir, self.f.sessions, self.f.proc, now=now)
 
     def three(self):
         """This session working, another and a third idle."""
-        self.f.session(300, ME, 'Claude Voice Widget', status='busy')
+        self.f.session(300, ME, 'Feed widget', status='busy')
         self.f.session(100, OTHER, 'Release 1.2')
         self.f.session(200, QUIET, 'Docs pass')
 
     def idle(self):
         """Three sessions, none of them working."""
-        self.f.session(300, ME, 'Claude Voice Widget')
+        self.f.session(300, ME, 'Feed widget')
         self.f.session(100, OTHER, 'Release 1.2')
         self.f.session(200, QUIET, 'Docs pass')
 
@@ -155,7 +155,7 @@ class ReadState(Fixture):
     def test_what_counts_as_a_test_run(self):
         runs = (['pytest', '-q'], ['python3', '-I', '-m', 'pytest'], ['python3', 'tests/test_x.py'],
                 ['python3', '-W', 'ignore', 'test_x.py'],
-                ['bash', 'speechctl_test.sh'], ['./speechctl_test.sh'], ['npm', 'test'],
+                ['bash', 'run_test.sh'], ['./run_test.sh'], ['npm', 'test'],
                 ['npm', 'run', 'test'], ['go', 'test', './...'], ['cargo', 'test'],
                 ['node', 'node_modules/.bin/playwright', 'test'])
         others = ([], ['grep', 'unittest'], ['bash', '-c', 'pytest'], ['python3', 'orchestrator.py'],
@@ -170,7 +170,7 @@ class ReadState(Fixture):
         flags = lambda sid: next(orchestrator.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[2]
         self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'idle'))
-        self.f.session(300, ME, 'Claude Voice Widget', status='waiting')
+        self.f.session(300, ME, 'Feed widget', status='waiting')
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), 'question')                   # over busy and waiting
         self.f.session(200, QUIET, 'Docs pass', status='waiting')
@@ -187,9 +187,9 @@ class ReadState(Fixture):
         self.f.session(100, ME, 'Managed')
         self.f.session(200, OTHER, 'Plain', managed=False)
         self.f.session(300, QUIET, 'Marker gone')
-        os.remove(os.path.join(self.f.speak, QUIET + '.managed'))
+        os.remove(os.path.join(self.f.hook_dir, QUIET + '.managed'))
         self.assertEqual([x['name'] for x in self.state()['sessions']], ['Managed'])
-        self.assertEqual([x['id'] for x in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.speak)], [ME])
+        self.assertEqual([x['id'] for x in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.hook_dir)], [ME])
 
     def test_a_session_becomes_managed_when_its_marker_appears(self):
         self.f.session(100, ME, 'Plain', managed=False)
@@ -201,7 +201,7 @@ class ReadState(Fixture):
         self.f.session(300, QUIET, 'Widget')
         self.f.session(100, ME, 'Widget')
         self.f.session(200, OTHER, 'widget')
-        names = {s['id']: s['name'] for s in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.speak)}
+        names = {s['id']: s['name'] for s in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.hook_dir)}
         self.assertEqual(names, {ME: 'Widget', OTHER: 'widget 2', QUIET: 'Widget 3'})
 
     def test_key_files_are_never_opened(self):
@@ -218,27 +218,6 @@ class ReadState(Fixture):
         with mock.patch('builtins.open', guarded):
             self.assertEqual(len(self.state()['sessions']), 1)
 
-    def test_what_the_speech_hook_keeps_for_playback_is_not_read(self):
-        self.three()
-        self.f.file('now.json', '{"session": "%s", "text": "Playing."}' % ME)
-        self.f.file('settings.json', '{"voice": "x", "volume": 2}')
-        self.f.file('paused')
-        self.f.file(ME + '.queue', 'A line waits.\n')
-        self.f.file(ME + '.replies')
-        self.f.file(OTHER + '.muted')
-        real = open
-        playback = ('now.json', 'settings.json', 'paused', '.queue', '.replies', '.muted', '.voice')
-
-        def guarded(path, *a, **k):
-            self.assertFalse(str(path).endswith(playback), path)
-            return real(path, *a, **k)
-
-        with mock.patch('builtins.open', guarded):
-            state = self.state()
-        self.assertEqual(sorted(state), ['feed', 'sessions'])
-        self.assertEqual(state['feed'], [])
-        self.assertEqual({'now', 'orchestrator', 'speaking', 'queued', 'own_voice'} & set(state['sessions'][0]), set())
-
 
 class Feed(Fixture):
     """The replies read from <session>.feed, and what the rows take from them."""
@@ -253,7 +232,7 @@ class Feed(Fixture):
         feed = self.state()['feed']
         self.assertEqual([(e['text'], e['name'], e['session'], e['at']) for e in feed],
                          [('First.', 'Release 1.2', OTHER, 900.0), ('Second.', 'Docs pass', QUIET, 950.0),
-                          ('Third.', 'Claude Voice Widget', ME, 990.0)])
+                          ('Third.', 'Feed widget', ME, 990.0)])
 
     def test_an_entry_has_the_markdown_and_the_text_on_one_line(self):
         self.f.session(100, ME, 'One')
@@ -288,10 +267,10 @@ class Feed(Fixture):
     def test_a_last_line_still_being_written_is_skipped_until_it_is_whole(self):
         self.f.session(100, ME, 'One')
         self.f.feed(ME, 900.0, 'First.')
-        with open(os.path.join(self.f.speak, ME + '.feed'), 'a') as f:
+        with open(os.path.join(self.f.hook_dir, ME + '.feed'), 'a') as f:
             f.write('{"at": 950, "text": "Sec')
         self.assertEqual([e['text'] for e in self.state()['feed']], ['First.'])
-        with open(os.path.join(self.f.speak, ME + '.feed'), 'a') as f:
+        with open(os.path.join(self.f.hook_dir, ME + '.feed'), 'a') as f:
             f.write('ond."}\n')
         self.assertEqual([e['text'] for e in self.state()['feed']], ['First.', 'Second.'])
 
@@ -308,7 +287,7 @@ class Feed(Fixture):
         self.assertEqual(len(self.state()['feed']), 1)
         self.f.feed(ME, 910.0, 'Second.')
         self.assertEqual([e['text'] for e in self.state()['feed']], ['First.', 'Second.'])
-        os.remove(os.path.join(self.f.speak, ME + '.feed'))
+        os.remove(os.path.join(self.f.hook_dir, ME + '.feed'))
         self.assertEqual(self.state()['feed'], [])
 
     def test_the_feed_keeps_the_newest_replies_within_the_text_it_holds(self):
@@ -371,15 +350,6 @@ class Feed(Fixture):
         self.f.feed(ME, NOW - 90, 'Older.')
         self.f.feed(ME, NOW - 60, 'Not the newest.')
         self.assertEqual(self.state()['sessions'][0]['last'], 'Two lines here.')
-
-    def test_the_speech_setting_changes_nothing_in_the_feed(self):
-        self.three()
-        self.f.feed(ME, NOW - 60, 'Said.')
-        before = self.state()
-        self.f.file(ME + '.replies')
-        self.f.file(ME + '.muted')
-        self.f.file('now.json', '{"session": "x"}')
-        self.assertEqual(self.state(), before)
 
 
 class Repos(Fixture):
@@ -607,7 +577,7 @@ class Terminal(Fixture):
         (setup or self.three)()
         self.f.file(ME + '.feed')
         if text:
-            self.f.feed(ME, NOW - 2, text, markdown=markdown, name='Claude Voice Widget')
+            self.f.feed(ME, NOW - 2, text, markdown=markdown, name='Feed widget')
         with mock.patch.object(orchestrator.size_file, 'load', return_value=size or (660, 128, 1.0)):
             widget = orchestrator.render(self.state())
         with open(orchestrator.DRAW) as f:
@@ -702,7 +672,7 @@ class Terminal(Fixture):
         step = float(lines['terminal'].split()[7])
         shown = int(lines['terminal'].split()[8])                                  # lines shown at once
         self.assertEqual(shown, max(int((y1 - y0 - 2 * pad - (orchestrator.TERM_BANNER_LINES + 1) * step) // step), 1))
-        self.assertEqual(lines['line'][0], orchestrator.PROMPT_MARK + 'Claude Voice Widget')   # who replied, as the prompt
+        self.assertEqual(lines['line'][0], orchestrator.PROMPT_MARK + 'Feed widget')   # who replied, as the prompt
         self.assertEqual(lines['line'][1], '')
         self.assertTrue(lines['line'][2].startswith(orchestrator.BULLET_MARK))             # then the text behind its bullet
         when = datetime.datetime.fromtimestamp(NOW - 2).strftime('%A %-I:%M %p')
@@ -737,12 +707,12 @@ class Terminal(Fixture):
 
     def test_the_pane_draws_the_markdown_the_feed_holds_with_each_runs_style(self):
         self.three()
-        self.f.feed(ME, NOW - 2, 'flat', markdown=self.MARKDOWN, name='Claude Voice Widget')
+        self.f.feed(ME, NOW - 2, 'flat', markdown=self.MARKDOWN, name='Feed widget')
         with mock.patch.object(orchestrator.size_file, 'load', return_value=(1400, 128, 1.0)):
             orchestrator.render(self.state())
         with open(orchestrator.DRAW) as f:
             lines = [l[5:] for l in f.read().split('\n') if l.startswith('line ')]
-        self.assertEqual(lines[:2], [orchestrator.PROMPT_MARK + 'Claude Voice Widget', ''])
+        self.assertEqual(lines[:2], [orchestrator.PROMPT_MARK + 'Feed widget', ''])
         lines = lines[2:]
         lines[0] = lines[0].lstrip(orchestrator.BULLET_MARK)
         mark = orchestrator.STYLE_MARK
@@ -759,7 +729,7 @@ class Terminal(Fixture):
     def test_without_markdown_the_pane_keeps_the_plain_line(self):
         lines, _, _ = self.draw(text='Done and dusted.')
         prompt, blank, bullet, blank2, done = lines['line']
-        self.assertEqual((prompt, blank, bullet, blank2), (orchestrator.PROMPT_MARK + 'Claude Voice Widget', '',
+        self.assertEqual((prompt, blank, bullet, blank2), (orchestrator.PROMPT_MARK + 'Feed widget', '',
                                                            orchestrator.BULLET_MARK + '  Done and dusted.', ''))
         self.assertTrue(done.startswith(orchestrator.DONE_MARK + 'Replied · '))
         self.assertNotIn(orchestrator.STYLE_MARK, ''.join(lines['line']))
@@ -806,7 +776,7 @@ class Terminal(Fixture):
         self.f.feed(ME, NOW - 2, 'Hello.', name='A name it had before')
         orchestrator.render(self.state())
         with open(orchestrator.DRAW) as f:
-            self.assertIn('line ' + orchestrator.PROMPT_MARK + 'Claude Voice Widget', f.read().splitlines())
+            self.assertIn('line ' + orchestrator.PROMPT_MARK + 'Feed widget', f.read().splitlines())
 
     def test_the_card_is_as_big_with_replies_as_without(self):
         with_lines, with_regions, with_replies = self.draw(text=self.LONG)
@@ -825,7 +795,7 @@ class Terminal(Fixture):
         bullets = [l[1:].strip() for l in lines if l.startswith(orchestrator.BULLET_MARK)]
         self.assertEqual(bullets, ['First.', 'Second.', 'Third.', 'Fourth.'])
         names = [l[1:] for l in lines if l.startswith(orchestrator.PROMPT_MARK)]
-        self.assertEqual(names, ['Claude Voice Widget', 'Release 1.2', 'Claude Voice Widget'])
+        self.assertEqual(names, ['Feed widget', 'Release 1.2', 'Feed widget'])
 
     def test_the_speakers_header_is_printed_only_when_the_speaker_changes(self):
         entries = [{'key': k, 'session': sid, 'name': name, 'text': text, 'at': 1.0}
@@ -942,14 +912,14 @@ class Golden(Fixture):
     def test_replies(self):
         self.three()
         self.f.feed(OTHER, NOW - 1500, 'The build is green.', name='Release 1.2')
-        self.f.feed(ME, NOW - 2400, 'Opened the pull request.', name='Claude Voice Widget')
+        self.f.feed(ME, NOW - 2400, 'Opened the pull request.', name='Feed widget')
         self.f.feed(ME, NOW - 60, 'The data layer is in: orchestrator.py writes the '
-                    'widget, draw and regions files four times a second.', name='Claude Voice Widget')
+                    'widget, draw and regions files four times a second.', name='Feed widget')
         self.check('replies', self.state())
 
     def test_issue_numbers_head_the_message_of_their_session(self):
         self.three()
-        self.f.feed(ME, NOW - 60, 'Three issues, then one, then too many for a line.', name='Claude Voice Widget')
+        self.f.feed(ME, NOW - 60, 'Three issues, then one, then too many for a line.', name='Feed widget')
         state = self.state()
         other, quiet, mine = state['sessions']
         issues = lambda *numbers: [(f'#{n}', f'https://github.com/o/r/issues/{n}') for n in numbers]

@@ -93,7 +93,7 @@ class IsolatedTest(support.TempDirTest):
     def test_the_fixture_feeds_show_a_recent_reply_an_older_one_and_none(self):
         orchestrator = support.load_orchestrator()
         iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
-        state = orchestrator.read_state(self.copy.speak, self.copy.sessions, now=time.time())
+        state = orchestrator.read_state(self.copy.hook_dir, self.copy.sessions, now=time.time())
         rows = {s['name']: s for s in state['sessions']}
         self.assertEqual(sorted(rows), ['Feed widget', 'Retry fix', 'Waiting on tests'])
         self.assertEqual(rows['Feed widget']['age'], '1m')
@@ -106,15 +106,15 @@ class IsolatedTest(support.TempDirTest):
         iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
         sessions = iso.fixture_sessions(self.copy, [1, 2, 3, 4])
         self.assertEqual([x[-1] for x in sessions], [True, True, True, False])
-        state = support.load_orchestrator().read_state(self.copy.speak, self.copy.sessions)
+        state = support.load_orchestrator().read_state(self.copy.hook_dir, self.copy.sessions)
         self.assertNotIn('Not managed', [s['name'] for s in state['sessions']])
-        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sessions[0][1] + '.managed')))
-        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.managed')))
-        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.feed')))
+        self.assertTrue(os.path.exists(os.path.join(self.copy.hook_dir, sessions[0][1] + '.managed')))
+        self.assertFalse(os.path.exists(os.path.join(self.copy.hook_dir, sessions[3][1] + '.managed')))
+        self.assertFalse(os.path.exists(os.path.join(self.copy.hook_dir, sessions[3][1] + '.feed')))
 
     def test_the_fixture_has_nothing_that_plays(self):
         iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
-        self.assertEqual(sorted(f for f in os.listdir(self.copy.speak) if not f.endswith(('.managed', '.feed'))), [])
+        self.assertEqual(sorted(f for f in os.listdir(self.copy.hook_dir) if not f.endswith(('.managed', '.feed'))), [])
 
     def test_only_a_process_named_for_the_copy_is_signalled_on_stop(self):
         iso.write(self.copy.pids, f'{os.getpid()}\n')           # this very process: not a fixture

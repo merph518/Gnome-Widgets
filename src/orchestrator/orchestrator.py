@@ -5,10 +5,10 @@ Four times a second this reads, and only reads:
   - the open Claude sessions, from ~/.claude/sessions/<pid>.json (sessions.py), the
     processes under each in /proc (a test run, or a wait on a systemd unit) and its
     catchup.py ledgers
-  - the speaking hook's folder, $XDG_RUNTIME_DIR/speak-attention/: <session>.managed marks a
+  - the hooks' folder, $XDG_RUNTIME_DIR/speak-attention/: <session>.managed marks a
     managed session (sessions.py lists only those) and <session>.feed holds its replies, one
-    JSON object a line (session, name, text, markdown, at), written whatever the session's
-    speech setting. The .key files beside the session files are never opened.
+    JSON object a line (session, name, text, markdown, at), written by the hooks.
+    The .key files beside the session files are never opened.
 
 and writes, under ~/.cache/conky-widgets/orchestrator/, the files the Spotify widget's
 nowplaying.py writes for its own card:
@@ -55,7 +55,7 @@ WAITS = (('run:', 'tests'), ('lp:', 'ci'), ('pr:', 'merge'))   # an open row's k
 UNIT_WAIT = re.compile(r'systemctl --user is-active (?:-q |--quiet )?([\w@.-]+)')
 UNITS = {'build-pack-now': 'local ai'}          # build-test-pack's local model pipeline
 TEST_FILE = re.compile(r'(test_[\w.-]*|[\w.-]*_test)\.(py|sh)$')   # test_x.py, x_test.sh
-SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
+HOOK_DIR = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
@@ -370,13 +370,13 @@ def feed_entries(path):
     return _feeds[path][1]
 
 
-def feed(speak, listed):
+def feed(hook_dir, listed):
     """The replies the terminal pane prints: those of the listed sessions, each under the name the
     list gives it, the newest SCROLLBACK_KEEP of them within SCROLLBACK_CHARS of text, oldest
     first."""
     entries = []
     for s in listed:
-        entries += [dict(e, session=s['id'], name=s['name']) for e in feed_entries(os.path.join(speak, s['id'] + '.feed'))]
+        entries += [dict(e, session=s['id'], name=s['name']) for e in feed_entries(os.path.join(hook_dir, s['id'] + '.feed'))]
     entries.sort(key=lambda e: e['at'])
     entries = entries[-SCROLLBACK_KEEP:]
     while len(entries) > 1 and sum(len(e['markdown']) + len(e['text']) for e in entries) > SCROLLBACK_CHARS:
@@ -393,12 +393,12 @@ def age_text(seconds):
     return 'now'
 
 
-def last_replies(speak, listed, now):
+def last_replies(hook_dir, listed, now):
     """Gives each session the age of its last reply ('' with none) and, while that reply is newer
     than LAST_LINE_WITHIN, its line for the row to carry under it. Read from the session's own
     feed, not the pane's, which a busier session can push a quiet one's replies out of."""
     for s in listed:
-        own = feed_entries(os.path.join(speak, s['id'] + '.feed'))
+        own = feed_entries(os.path.join(hook_dir, s['id'] + '.feed'))
         e = max(own, key=lambda r: r['at'], default=None)
         s['age'], s['last'] = '', ''
         if e:
@@ -493,13 +493,13 @@ def repo_issues(listed):
                        for n in sorted(found.get(s['github'], ()))]
 
 
-def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None, now=None):
+def read_state(hook_dir=None, sessions_dir=None, proc_dir=None, ledgers=None, now=None):
     """Everything the widget shows, from the files alone."""
-    speak = speak or SPEAK
+    hook_dir = hook_dir or HOOK_DIR
     proc = proc_dir or '/proc'
     now = time.time() if now is None else now
     listed = []
-    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir, speak)
+    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir, hook_dir)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
     for s in open_sessions:
         if s['spare']:
@@ -511,8 +511,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None, now=N
                            issue=session_issue(*branch), branch=branch[0], prs=ledger_prs(ledger),
                            repo=session_repo(s['cwd']), github=branch[1]))
     repo_issues(listed)
-    replies = feed(speak, listed)
-    last_replies(speak, listed, now)
+    replies = feed(hook_dir, listed)
+    last_replies(hook_dir, listed, now)
     return {'sessions': listed, 'feed': replies}
 
 

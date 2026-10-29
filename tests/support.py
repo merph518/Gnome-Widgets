@@ -46,17 +46,17 @@ def load_orchestrator():
 
 
 class OrchestratorFixture:
-    """A speaking hook's state folder, Claude's sessions folder and a /proc, under `root`,
+    """The hooks' state folder, Claude's sessions folder and a /proc, under `root`,
     for orchestrator and the orchestrator widget's mouse helper to read. Sessions are added with
     session(), managed unless managed=False, their replies with feed() and the hook's other files
     with file(); every pid added is alive unless stale=True."""
 
     def __init__(self, root):
-        self.speak = os.path.join(root, 'speak-attention')
+        self.hook_dir = os.path.join(root, 'speak-attention')
         self.sessions = os.path.join(root, 'sessions')
         self.proc = os.path.join(root, 'proc')
         self.ledgers = os.path.join(root, 'ledgers')
-        for d in (self.speak, self.sessions, self.proc, self.ledgers):
+        for d in (self.hook_dir, self.sessions, self.proc, self.ledgers):
             os.makedirs(d)
 
     def alive(self, pid, state='S'):
@@ -91,12 +91,12 @@ class OrchestratorFixture:
             self.alive(pid)
 
     def file(self, name, text=''):
-        with open(os.path.join(self.speak, name), 'w') as f:
+        with open(os.path.join(self.hook_dir, name), 'w') as f:
             f.write(text)
 
     def feed(self, sid, at, text, markdown=None, name='A session'):
         """Appends a reply to session `sid`'s feed as the hook writes it: a JSON line."""
-        with open(os.path.join(self.speak, f'{sid}.feed'), 'a') as f:
+        with open(os.path.join(self.hook_dir, f'{sid}.feed'), 'a') as f:
             f.write(json.dumps({'session': sid, 'name': name, 'text': text,
                                 'markdown': text if markdown is None else markdown, 'at': at}) + '\n')
 
