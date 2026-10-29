@@ -10,8 +10,8 @@ handed over, and ends in the ready signal. The loop is in
 `.claude/skills/_shared/ready-signal.md`, and the static checks every push
 passes in `.claude/skills/_shared/static-checks.md`.
 
-A layout, control or look to decide is put to the user as screenshots of the
-widget drawing each option, and a question, before any drawing code. How is in
+A layout, control or look to decide is put to the user as an Artifact page of pictures of
+the widget drawing each option, and a question, before any drawing code. How is in
 `.claude/skills/_shared/ui-options.md`.
 
 Issues are filed with `/create-issue`, titled `[<area>] <description>` and
