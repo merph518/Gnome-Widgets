@@ -173,18 +173,24 @@ def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
     except OSError as e:
         core.log(f'open: {e}')
     finally:
-        opening.discard((row['id'], kind))
+        opening.discard(click_key(row, kind))
 
 
-opening = set()                                # (session id, kind) a click is still opening
-opened = {}                                    # (session id, kind): when a click last opened it
+opening = set()                                # click_key()s a click is still opening
+opened = {}                                    # click_key(): when a click last opened it
+
+
+def click_key(row, kind):
+    """What a click opens, for telling a double click from a click on another: a session's pull
+    requests or its close prompt, or one of its issues, each issue number its own."""
+    return (row['id'], row.get('issue') if kind == 'issue' else kind)
 
 
 def open_once(row, kind, now=time.monotonic):
     """Opens a session's issue or pull requests on a thread, as gh reads each pull request,
     which takes a moment. A second click on the same one while it is still opening, or within
     OPEN_AGAIN s of the last (a double click), does nothing."""
-    key = (row['id'], kind)
+    key = click_key(row, kind)
     if key in opening or now() - opened.get(key, -OPEN_AGAIN) < OPEN_AGAIN:
         return
     opening.add(key)

@@ -453,6 +453,16 @@ class LinksTest(StubSpeechctl):
             speech_mouse.open_once(self.regions['rows'][0], 'prs', now=clock)
         self.assertEqual(len(started), 3)
 
+    def test_a_second_issue_number_opens_while_the_first_is_a_double_click_away(self):
+        started, clock = [], mock.Mock(return_value=100.0)
+        first, second = (dict(self.regions['rows'][0], issue=i) for i in (ISSUE, ISSUE2))
+        with mock.patch.object(speech_mouse.threading, 'Thread',
+                               side_effect=lambda **kw: mock.Mock(start=lambda: started.append(kw))):
+            speech_mouse.open_once(first, 'issue', now=clock)
+            speech_mouse.open_once(first, 'issue', now=clock)       # the same number again: a double click
+            speech_mouse.open_once(second, 'issue', now=clock)      # another number of the same session
+        self.assertEqual([kw['args'][0]['issue'] for kw in started], [ISSUE, ISSUE2])
+
     def test_a_pull_request_gh_cannot_read_is_not_opened(self):
         def fails(args, **kwargs):
             raise FileNotFoundError('gh')
