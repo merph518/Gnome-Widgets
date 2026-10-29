@@ -924,11 +924,11 @@ def render(state, now=None):
     # click areas, while no clip plays. The open list is drawn above the controls, over the
     # progress bar and the sessions, when conky-mouse.py has it open.
     out.gap(FOOTER_GAP)
-    # The speaker's avatar, level with the bubble's bottom, and the line being read aloud in a
-    # bubble whose tail points at it:
-    # the speaker's name, then up to BUBBLE_LINES lines of the text. The bubble is as tall
-    # whatever the line holds, so the card's size does not change as lines play. While
-    # nothing plays it keeps the last line read, dimmed. draw.lua draws it from these lines.
+    # The speaker's avatar, level with the bottom of a bubble whose tail points at it. The
+    # bubble holds the speaker's name, then up to BUBBLE_LINES lines of the line being read
+    # aloud, and is as tall whatever the line holds, so the card's size does not change as
+    # lines play. While nothing plays it keeps the last line read, dimmed. draw.lua draws it
+    # from these lines.
     name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
     bubble_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
     bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP

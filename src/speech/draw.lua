@@ -290,11 +290,10 @@ local function avatar_image(path)
     return img
 end
 
-local function draw_avatar(cr, a, path, s, state)
-    -- the speaker's avatar, dimmed while paused and more so while idle: the image at a[4], or
-    -- without one a spark of white rays on an orange circle
+local function draw_avatar(cr, a, path, s)
+    -- the speaker's avatar, always at full strength: the image at path, or without one a spark of
+    -- white rays on an orange circle
     local cx, cy, r = a[1] * s, a[2] * s, a[3] / 2 * s
-    local alpha = state == 'playing' and 1 or state == 'paused' and 0.66 or 0.4
     local img = path ~= '' and avatar_image(path)
     if img then
         local k = 2 * r / cairo_image_surface_get_width(img)
@@ -302,15 +301,15 @@ local function draw_avatar(cr, a, path, s, state)
         cairo_translate(cr, cx - r, cy - r)
         cairo_scale(cr, k, k)
         cairo_set_source_surface(cr, img, 0, 0)
-        cairo_paint_with_alpha(cr, alpha)
+        cairo_paint(cr)
         cairo_restore(cr)
         return
     end
-    cairo_set_source_rgba(cr, ORANGE[1], ORANGE[2], ORANGE[3], alpha)
+    cairo_set_source_rgb(cr, ORANGE[1], ORANGE[2], ORANGE[3])
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, r, 0, 2 * math.pi)
     cairo_fill(cr)
-    cairo_set_source_rgba(cr, 1, 1, 1, alpha)
+    cairo_set_source_rgb(cr, 1, 1, 1)
     for i, share in ipairs(SPARK) do
         local angle = (i - 1) * math.pi / 6 - math.pi / 2
         local x0, y0 = cx + 0.12 * r * math.cos(angle), cy + 0.12 * r * math.sin(angle)
@@ -745,7 +744,7 @@ function conky_draw_widget()
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.title then draw_title(cr, d.title, label_after(d.text.title, 3), s, text) end
-        if d.avatar then draw_avatar(cr, d.avatar, label_after(d.text.avatar, 3), s, d.state and d.state[1] or 'idle') end
+        if d.avatar then draw_avatar(cr, d.avatar, label_after(d.text.avatar, 3), s) end
         if d.bubble then draw_bubble(cr, d.bubble, d.text.speaker or '', d.lines, s, text) end
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
