@@ -342,17 +342,20 @@ class SegmentsTest(StubSpeechctl):
 
 
 ISSUE = 'https://github.com/o/r/issues/123'
+ISSUE2 = 'https://github.com/o/r/issues/131'
 PR = 'https://github.com/o/r/pull/'
 
 
 class LinksTest(StubSpeechctl):
-    """A click on a session's repository box opens its issue, and one on its name or pill its
-    ready pull requests; with nothing to open, neither is a click area."""
+    """A click on an issue number under a session's repository name opens that issue, and one on
+    its name or pill its ready pull requests; with nothing to open, neither is a click area."""
 
     def setUp(self):
         super().setUp()
         rows = [dict(r) for r in REGIONS['rows']]
-        rows[0].update(box=[16.0, 92.0], issue=ISSUE, link=[96.0, 260.0], branch='feat/issue-123-x',
+        # two issue chips, the first on the block's first line and the second on its next
+        rows[0].update(issues=[[25.0, 5.0, 60.0, 19.0, ISSUE], [25.0, 29.0, 60.0, 43.0, ISSUE2]],
+                       link=[96.0, 260.0], branch='feat/issue-123-x',
                        prs=[PR + '151', PR + '152'])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
@@ -390,17 +393,20 @@ class LinksTest(StubSpeechctl):
         self.assertIsNone(self.open(self.regions['rows'][0], {}))
         self.assertIn('aaaa: no ready pull request to open', support.read(conky_mouse.LOG))
 
-    def test_the_box_opens_the_issue(self):
-        self.assertEqual(self.open(self.regions['rows'][0], {}, 'issue'), [ISSUE])
+    def test_an_issue_number_opens_its_issue(self):
+        self.assertEqual(self.open(dict(self.regions['rows'][0], issue=ISSUE2), {}, 'issue'), [ISSUE2])
 
-    def test_the_box_and_the_name_on_the_first_line_are_the_links(self):
-        at = lambda x, y: (lambda hit: hit and (hit[0]['id'], hit[1]))(speech_mouse.link_at(self.regions, 1, x, y))
-        self.assertEqual(at(50, 106), ('aaaa', 'issue'))
-        self.assertEqual(at(200, 106), ('aaaa', 'prs'))
-        self.assertIsNone(at(94, 106))                          # between the box and the name
+    def test_each_issue_number_is_a_link_on_any_line_and_the_name_only_on_the_first(self):
+        at = lambda x, y: (lambda hit: hit and (hit[0]['id'], hit[0].get('issue'), hit[1]))(
+            speech_mouse.link_at(self.regions, 1, x, y))
+        self.assertEqual(at(50, 106), ('aaaa', ISSUE, 'issue'))
+        self.assertEqual(at(50, 130), ('aaaa', ISSUE2, 'issue'))  # the next line of the block
+        self.assertEqual(at(200, 106), ('aaaa', None, 'prs'))
+        self.assertIsNone(at(50, 122))                          # between the two chips
+        self.assertIsNone(at(80, 106))                          # between the chip and the name
         self.assertIsNone(at(270, 106))                         # past the pill
-        self.assertIsNone(at(200, 130))                         # its second line
-        self.assertIsNone(at(50, 154 - 12))                     # a box without an issue
+        self.assertIsNone(at(200, 130))                         # the name's second line
+        self.assertIsNone(at(50, 154 - 12))                     # a session without issues
         self.assertIsNone(at(120, 154 - 12))                    # a name without pull requests
         self.assertIsNone(at(425, 106))                         # the setting
 

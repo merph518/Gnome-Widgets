@@ -10,8 +10,8 @@ holds).
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
-  - a session's repository box: a click or tap opens the issue its branch names in a new
-    Chrome tab
+  - an issue number under a session's repository name: a click or tap opens that issue in a
+    new Chrome tab
   - a session's name or the pill after it: a click or tap opens, in new Chrome tabs, its
     pull requests still open with the ready label
   - the wheel: over the volume slider or its speaker it turns it down or up, over the closed
@@ -101,17 +101,20 @@ def row_at(regions, s, x, y):
 
 
 def link_at(regions, s, x, y):
-    """(session row, 'issue') when its repository box is under card-relative (x, y), (row,
-    'prs') when its name or pill is, else None. Each is there only with something to open."""
+    """(session row, 'issue') when an issue number of its repository is under card-relative
+    (x, y), with the row's 'issue' set to that issue's link, (row, 'prs') when its name or
+    pill is, else None. Each is there only with something to open."""
     row, _ = row_at(regions, s, x, y)
     if not row:
         return None
     at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
+    for x0, y0, x1, y1, link in row.get('issues', ()):        # on any line of the row's block
+        if x0 * s <= x <= x1 * s and (row['top'] + y0) <= at <= (row['top'] + y1):
+            return dict(row, issue=link), 'issue'
     if at >= row['top'] + regions['list_scroll'][1]:          # its second line
         return None
-    for key, kind in (('box', 'issue'), ('link', 'prs')):
-        if row.get(key) and row[key][0] * s <= x <= row[key][1] * s:
-            return row, kind
+    if row.get('link') and row['link'][0] * s <= x <= row['link'][1] * s:
+        return row, 'prs'
     return None
 
 
@@ -138,8 +141,8 @@ def ready_prs(links, branch, run=subprocess.run):
 
 
 def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
-    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on its box)
-    or its ready pull requests ('prs', a click on its name). Chrome takes them all at once;
+    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on an issue
+    number) or its ready pull requests ('prs', a click on its name). Chrome takes them all at once;
     without it, xdg-open takes each."""
     try:
         if kind == 'issue':
@@ -386,7 +389,7 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     """A press on the volume slider sets the volume along it. A press on the voice drop down:
     a click or tap opens the list of voices, a drag from it moves the widget. A press on a
     session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. A press on a session's box, or its name or pill: a click or
+    with a finger scrolls the list. A press on a session's issue number, or its name or pill: a click or
     tap opens its issue, or its pull requests; a drag moves the widget, or with a finger
     scrolls the list when it can scroll.
     Returns whether the press was on any of them."""

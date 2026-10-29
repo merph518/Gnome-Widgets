@@ -78,17 +78,16 @@ itself.
   runs in the background), else **idle**
 - A footer with pause / resume, the volume and a drop down for the voice
 
-Each session in the speech widget's list starts with a four-letter label for its repository,
-named after its GitHub origin remote (or its folder, without one). The labels are read from
-`~/.config/conky-widgets/speech/labels.json`, repository name to label, written with a starting
-set the first time the widget runs; a repository not in it gets the first letter of each word
-of its name, filled out from the last word (`LaundryBot` reads `LBOT`).
-
-The label's box also carries the issue the session works, on a branch named
-`<type>/issue-<N>-...` as `/implement` names them: **GWID #127**, or **GWID n/a** in grey
-without one. Every box is as wide as the widest in the list, so the names still line up. A
-click or tap on a box with a number opens that issue in a new Google Chrome tab, and the box
-is tinted under the pointer; a box reading n/a opens nothing.
+Each session in the speech widget's list starts with its repository's whole name, named after
+its GitHub origin remote (or its folder, without one), in bold with a rule at its left, cut with
+an ellipsis when it is longer than the block. Under it are the issue numbers of that repository,
+each in a chip: the issue a session's branch names, on a branch named `<type>/issue-<N>-...` as
+`/implement` names them, and the same for any other open session in that repository, in number
+order. They wrap onto more lines when they do not fit, and the session's row grows to hold them.
+While the session is speaking, the rule is thicker and the chips are lit. Every block is as wide
+as the longest name in the list (between 90 and 170 px), so the names after it still line up. A
+click or tap on a chip opens that issue in a new Google Chrome tab, and the chip is tinted under
+the pointer; a repository with no issue shows its name alone.
 
 Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
 ledger, which `/implement` adds after the ready signal), a white pill after its name reads
@@ -119,7 +118,7 @@ fade of the same length each time its colour changes.
 The controls run `speechctl`, the same one the tray menu uses: ⏭ skips the line playing, ⏩
 skips it and the rest of that session's queue, the round button pauses or resumes, the
 **Voice:** drop down picks the voice, a session's **On**, **Alerts** and **Off** set how it
-is read, a session's box opens its issue, and its name its ready pull requests. The
+is read, an issue number under a session's repository opens that issue, and its name its ready pull requests. The
 volume slider, drawn like the Spotify widget's, sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
