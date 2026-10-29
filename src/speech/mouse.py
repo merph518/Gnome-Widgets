@@ -108,35 +108,58 @@ def link_at(regions, s, x, y):
 
 
 def ready_prs(links, run=subprocess.run):
-    """The pull requests of `links` still open and carrying READY_LABEL, read from GitHub."""
+    """The pull requests of `links` still open and carrying READY_LABEL, read from GitHub. One
+    gh cannot read (not installed, logged out, offline) is kept, since the ledger still waits
+    on it, and the failed read is logged."""
     ready = []
-    for link in links:
+    for link in dict.fromkeys(links):
         try:
             out = run(['gh', 'pr', 'view', link, '--json', 'state,labels'], capture_output=True,
                       text=True, timeout=15)
-            pr = json.loads(out.stdout) if out.returncode == 0 else {}
+            pr = json.loads(out.stdout) if out.returncode == 0 else None
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            pr = {}
-        if pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]:
+            pr = None
+        if pr is None:
+            core.log(f'{link}: gh could not read it, opened as the ledger has it')
+            ready.append(link)
+        elif pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]:
             ready.append(link)
         else:
-            core.log(f'{link}: not ready ({pr.get("state", "unread")})')
+            core.log(f'{link}: not ready ({pr.get("state")})')
     return ready
 
 
 def open_links(row, run=subprocess.run, popen=subprocess.Popen):
-    """Opens what a click on a session's name opens, each in a new Chrome tab: its ready pull
-    requests, else its issue."""
-    links = ready_prs(row.get('prs') or [], run) or ([row['issue']] if row.get('issue') else [])
-    if not links:
-        core.log(f'session {row["id"]}: no issue or ready pull request to open')
-        return
-    core.log('open: ' + ' '.join(links))
+    """Opens what a click on a session's name opens, each in a new browser tab: its ready pull
+    requests, else its issue. Chrome takes them all at once; without it, xdg-open takes each."""
     try:
-        popen([BROWSER, *links], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-              start_new_session=True)
+        links = ready_prs(row.get('prs') or [], run) or ([row['issue']] if row.get('issue') else [])
+        if not links:
+            core.log(f'session {row["id"]}: no issue or ready pull request to open')
+            return
+        core.log('open: ' + ' '.join(links))
+        quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            popen([BROWSER, *links], **quiet)
+        except OSError:
+            for link in links:
+                popen(['xdg-open', link], **quiet)
     except OSError as e:
-        core.log(f'{BROWSER}: {e}')
+        core.log(f'open: {e}')
+    finally:
+        opening.discard(row['id'])
+
+
+opening = set()                                # the sessions whose links a click is opening
+
+
+def open_once(row):
+    """Opens a session's links on a thread, as gh reads each pull request, which takes a
+    moment; a second click while they are still opening does nothing."""
+    if row['id'] in opening:
+        return
+    opening.add(row['id'])
+    threading.Thread(target=open_links, args=(row,), daemon=True).start()
 
 
 def segment_at(regions, s, x, y):
@@ -345,7 +368,9 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     """A press on the volume slider sets the volume along it. A press on the voice drop down:
     a click or tap opens the list of voices, a drag from it moves the widget. A press on a
     session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. Returns whether the press was on any of them."""
+    with a finger scrolls the list. A press on a session's name or pill: a click or tap opens
+    its links; a drag moves the widget, or with a finger scrolls the list when it can scroll.
+    Returns whether the press was on any of them."""
     x, y, start = at
     if hit == 'volume' and regions.get('volume_bar'):
         set_volume(d, win, regions, s, track)
@@ -364,9 +389,8 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
         if segment:
             speechctl('speech', *segment)
         else:
-            # gh reads each pull request, which takes a moment, so the pointer is not held for it
-            threading.Thread(target=open_links, args=(link,), daemon=True).start()
-    elif touch:
+            open_once(link)
+    elif touch and (segment or scrollable(regions, s, x, y)):
         swipe(regions, s, x, y, start[1], track)
     else:
         core.remember(*core.drag(d, root, win, s, track, start))

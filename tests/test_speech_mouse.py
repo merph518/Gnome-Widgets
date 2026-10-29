@@ -355,6 +355,7 @@ class LinksTest(StubSpeechctl):
         rows[1].update(link=[73.0, 150.0], issue='', prs=[])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
+        speech_mouse.opening.clear()
 
     def gh(self, states):
         """A gh that answers `gh pr view <link>` with states[link]: (state, labels)."""
@@ -402,6 +403,43 @@ class LinksTest(StubSpeechctl):
                 self.assertTrue(hit)
         self.assertEqual([r['id'] for r in opened], ['aaaa'])
         self.assertEqual(self.ran(), ['speech aaaa on'])
+
+    def test_a_second_click_while_it_opens_does_nothing(self):
+        started = []
+        with mock.patch.object(speech_mouse.threading, 'Thread',
+                               side_effect=lambda **kw: mock.Mock(start=lambda: started.append(kw))):
+            speech_mouse.open_once(self.regions['rows'][0])
+            speech_mouse.open_once(self.regions['rows'][0])
+        self.assertEqual(len(started), 1)
+
+    def test_a_pull_request_gh_cannot_read_is_opened_and_each_opens_once(self):
+        def fails(args, **kwargs):
+            raise FileNotFoundError('gh')
+        row = dict(self.regions['rows'][0], prs=[PR + '151', PR + '151'])
+        speech_mouse.open_links(row, run=fails, popen=lambda args, **kw: self.opened.append(args[1:]))
+        self.assertEqual(self.opened, [[PR + '151']])
+        self.assertIn('gh could not read it', support.read(conky_mouse.LOG))
+
+    def test_without_chrome_each_link_goes_to_xdg_open(self):
+        def popen(args, **kwargs):
+            if args[0] == speech_mouse.BROWSER:
+                raise FileNotFoundError(args[0])
+            self.opened.append(args)
+        speech_mouse.open_links(self.regions['rows'][0], run=self.gh({}), popen=popen)
+        self.assertEqual(self.opened, [['xdg-open', ISSUE]])
+
+    def test_a_finger_dragged_from_a_name_moves_the_widget_unless_the_list_scrolls(self):
+        regions = dict(self.regions, list_scroll=[0, 24.0])
+        steps = [(240, 106, True), (200, 106, False)]
+        for regions, swiped in ((regions, False), (self.regions, True)):
+            track = mock.Mock(side_effect=steps + [steps[-1]] * 50)
+            with mock.patch.object(conky_mouse.time, 'sleep'), \
+                    mock.patch.object(conky_mouse, 'drag', return_value=(0, 0, 1, 1)) as drag, \
+                    mock.patch.object(conky_mouse, 'remember'), \
+                    mock.patch.object(speech_mouse, 'swipe') as swipe:
+                speech_mouse.pull_control(None, None, None, 1, regions, None, track,
+                                          (200, 106, (200, 106)), True)
+            self.assertEqual((swipe.called, drag.called), (swiped, not swiped))
 
 
 class WheelTest(StubSpeechctl):

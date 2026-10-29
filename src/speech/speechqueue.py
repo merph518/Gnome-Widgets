@@ -189,7 +189,7 @@ def waiting_on(rows):
 def ledger_prs(rows):
     """The links of the pull requests a session's open ledger rows wait on to merge, which
     /implement records once it has sent the ready signal."""
-    return [f[2] for f in rows if f[1].startswith('pr:') and '/pull/' in f[2]]
+    return list(dict.fromkeys(f[2] for f in rows if f[1].startswith('pr:') and '/pull/' in f[2]))
 
 
 def link_pill(issue, prs):
