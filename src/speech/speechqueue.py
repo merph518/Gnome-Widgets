@@ -599,7 +599,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     except (TypeError, ValueError):
         volume = DEFAULT_VOLUME
     listed = []
-    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
+    open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir, speak)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
     for s in open_sessions:
         if s['spare']:

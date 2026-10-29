@@ -53,18 +53,18 @@ top-bar icon serves them.
   its size, and the size is remembered
 - Works by touch too: a tap does what a click does, once the finger lifts on the same
   control, and dragging a finger seeks, moves or resizes the widget like the mouse
-- One top-bar icon for both widgets with the current track and what speech is saying, a Show
+- One top-bar icon for both widgets with the current track, a Show
   toggle for each widget, a Spotify submenu (Text scaling from 70% to 200%, where the widget
   keeps its size unless larger text wraps a title onto another line; Reset widget size; a
   Lyrics toggle; Lyrics scrolling, Autoscroll or Static; Always on top), a Speech submenu
-  (pause, skip, clear, Voice, Volume, Pace, and the widget's own settings),
+  (the widget's own settings),
   a Start at login toggle and Quit
 
 ## Speech widget
 
 The speech widget shows what the Claude Code sessions on this machine are reading aloud
-through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `voice` plugin
-(`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
+through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `voice` plugin,
+and controls it. It reads the hooks' state and never speaks
 itself.
 
 The card is laid out as an application: a header across the top with the title,
@@ -187,8 +187,7 @@ Each session's **On**, **Alerts** and **Off**, set on its page in the settings m
 - **Alerts** (a new session's default): only its announcements
 - **Off**: nothing; a clip of it that is playing stops
 
-The voice plugin's phone feed carries on whatever the setting, and `/implement-with-speech`
-and `/implement` change it too.
+The voice plugin's phone feed carries on whatever the setting.
 
 ### Voice per session (experiment)
 
@@ -203,7 +202,7 @@ session is still read in the global voice.
 
 ### speechctl
 
-Every control, the tray menu's speech items and the keyboard shortcuts below run `speechctl`,
+Every control runs `speechctl`,
 which ships with the Overmind `voice` plugin, not with this package. The widget uses the one
 on `PATH`, or the one whose path is the first line of
 `~/.config/conky-widgets/speech/speechctl`. With the plugin installed from its marketplace
@@ -219,41 +218,14 @@ press is logged in `~/.cache/conky-widgets/speech/mouse.log`).
 
 ### Voices and pace
 
-The Speech submenu's **Voice** and the settings menu's voice pages list the Piper voices in
-`~/.local/share/piper/` (or `SPEAK_PIPER_DIR`), a voice being its `.onnx` model and its
-`.onnx.json` file. `conky-widgets-voices` lists the voices Piper publishes and fetches the ones
-you pick from its [voice repository](https://huggingface.co/rhasspy/piper-voices); it downloads
-nothing unless you run `add`:
-
-```sh
-conky-widgets-voices list              # English voices, with their quality, speakers and size; * is installed
-conky-widgets-voices list de_          # any other language, or part of a name
-conky-widgets-voices add en_GB-alan-medium en_US-ryan-medium
-```
-
-A medium voice is about 63 MB and a high one 110 to 135 MB; each download is checked against
-the sizes and checksums of Piper's catalog and kept only when they match.
-The widget's voice list shows a new voice within ten seconds, and the tray's Voice menu within half a minute.
+The settings menu's voice pages list the Piper voices in `~/.local/share/piper/` (or
+`SPEAK_PIPER_DIR`), a voice being its `.onnx` model and its `.onnx.json` file; a voice
+installed there shows within ten seconds.
 A model with several speakers (`arctic`, `libritts`, `vctk`) speaks as its first one for now.
 
-**Pace** in the same submenu is how fast a voice speaks, from 0.6 (fastest) to 1.4 (slowest),
+**Pace** in the settings menu is how fast a voice speaks, from 0.6 (fastest) to 1.4 (slowest),
 0.85 by default. It is Piper's length scale, kept in the voice settings (`pace` in
 `settings.json`), and the next line spoken uses it.
-
-### Keyboard shortcuts
-
-GNOME can run `speechctl` from the keyboard. In **Settings → Keyboard → View and Customize
-Shortcuts → Custom Shortcuts**, add one shortcut per row, with `speechctl`'s full path in
-place of `speechctl`:
-
-| Shortcut | Command | Does |
-| --- | --- | --- |
-| Super+Alt+S | `speechctl skip` | Skips the line playing |
-| Super+Alt+N | `speechctl next` | Skips it and the rest of that session's queue |
-| Super+Alt+P | `speechctl toggle` | Pauses or resumes |
-| Super+Alt+↑ | `speechctl volume up` | Volume up a tenth |
-| Super+Alt+↓ | `speechctl volume down` | Volume down a tenth |
-| Super+Alt+V | `speechctl voice next` | The next installed voice |
 
 ## Install
 
@@ -286,7 +258,7 @@ shows it if it is hidden.
 
 The – and × buttons at a widget's top right both hide that widget, and only that one. While
 any widget runs there's one icon in the top bar for all of them. Click it to see the current
-track and what speech is saying (or **Speech idle** / **Speech paused**), tick **Show Spotify
+track, tick **Show Spotify
 widget** or **Show speech widget** to show or hide each one (ticking one that isn't running
 starts it), toggle **Start at login** for both, or **Quit**, which stops both. A hidden widget
 keeps running, so it comes back at once and where it was, and hidden speech keeps talking.
@@ -294,11 +266,9 @@ Hidden or shown is remembered: a widget hidden when you quit or log out starts h
 the icon stays while both are hidden.
 
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
-scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
-**Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
+scrolling and Always on top. The **Speech** submenu holds the speech widget's own Text scaling, Reset widget
 size, **Collapse when idle** (off by default: on, the widget shrinks to its title
-while nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
-[Speech widget](#speech-widget)); without one they're greyed out.
+while nothing is said or queued) and Always on top.
 
 Two of the Spotify settings are about lyrics, and both are remembered:
 
@@ -401,7 +371,7 @@ bin/conky-widgets spotify start
 ```
 
 To run a change beside the copy on your desktop without touching it, start an isolated copy.
-It has a home, cache and config of its own, three fixture Claude sessions for the speech widget
+It has a home, cache and config of its own, four fixture Claude sessions for the speech widget (one not managed, so the widget does not list it)
 and no sound, no tray icon, no Spotify login (so it sends no Web API request), and its windows
 have a class and a position of their own on your laptop's built-in display (the primary monitor
 when there is none; `--at X,Y` places it elsewhere), so any number run at once, one per checkout:
@@ -443,7 +413,6 @@ registered on Launchpad), followed until Launchpad publishes it.
 | --- | --- |
 | `bin/conky-widgets` | Launcher: `conky-widgets <spotify\|speech> start/stop, show/hide, autostart, login`; one supervisor for every widget that runs, which restarts their processes if they exit |
 | `scripts/isolated-widgets.py` | Starts, stops and captures an isolated copy of the widgets for one checkout: its own home, fixture speech sessions, no tray, no Spotify login |
-| `bin/conky-widgets-voices` | Lists Piper's published voices and downloads the ones you name into the folder `speechctl voices` reads |
 | `bin/conky-spotify-nowplaying` | The Spotify widget's old launcher, kept as `conky-widgets spotify …` for the app-grid and autostart entries of older versions |
 | `src/spotify/conky.conf` | Conky window setup; renders the text generated by `nowplaying.py`, and sizes the window to it |
 | `src/spotify/nowplaying.py` | Reads Spotify via `playerctl` (MPRIS), fetches art/lyrics/like state, lays the widget out at its size settings, and writes the widget text plus geometry for `draw.lua` and click areas for `conky-mouse.py` |
@@ -451,7 +420,7 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/common/conky-mouse.py` | Started as `conky-mouse.py spotify` or `conky-mouse.py speech`; handles clicks and taps, the mouse wheel and swipes over static lyrics, dragging and resizing (Conky's own mouse hook gets no button presses under XWayland), keeps the window at its saved position and always on top when set, and unmaps it while hidden |
 | `src/speech/conky.conf` | The speech widget's conky window; renders the text generated by `speechqueue.py` |
 | `src/speech/speechqueue.py` | Reads the open Claude sessions and the speaking hook's state (read only), lays the speech widget out, and writes its text, geometry for its `draw.lua`, click areas and the sessions list |
-| `src/speech/sessions.py` | Lists the open Claude sessions from `~/.claude/sessions`, as `speechctl` finds them |
+| `src/speech/sessions.py` | Lists the open managed Claude sessions from `~/.claude/sessions`, as `speechctl` finds them; a session is managed while its `.managed` marker is in the speaking hook's folder |
 | `src/speech/draw.lua`, `src/speech/mouse.py` | The speech widget's Cairo drawing, and what its controls, the volume's mute speaker, the close prompt, the wheel and swipes over its list do for `conky-mouse.py`, through `speechctl` |
 | `src/speech/menu.py` | The speech widget's settings menu: its pages, rows and what a change does, read and written through the tray's own settings |
 | `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, the volume slider, and the foreground that follows a fading background |
@@ -461,8 +430,8 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/spotify/art_colours.py` | Takes the background colour from the spot clicked on the album art, and keeps it per artwork |
 | `src/spotify/spotify_api.py` | Minimal Spotify Web API client (PKCE login, like/unlike, Liked Songs index, rate-limit backoff) |
 | `src/spotify/spotify_local.py` | Reads the Spotify desktop app's Liked Songs from its LevelDB on disk, read-only, for the heart |
-| `src/tray.py` | The one top-bar (AppIndicator) icon for every widget: current track and speech line, Show per widget, Spotify and Speech submenus, start at login, Quit |
-| `src/tray_model.py` | What the tray reads and writes: each widget's hidden flag and settings files, the speech state, and `speechctl` |
+| `src/tray.py` | The one top-bar (AppIndicator) icon for every widget: current track, Show per widget, Spotify and Speech submenus, start at login, Quit |
+| `src/tray_model.py` | What the tray reads and writes: each widget's hidden flag and settings files, the speech settings, and `speechctl` |
 | `debian/`, `packaging/` | Debian packaging (also used for the PPA), desktop entry, icons |
 
 Settings of the Spotify widget live in `~/.config/conky-spotify-nowplaying/` (`position`, `size`, `on-top`, `lyrics`,

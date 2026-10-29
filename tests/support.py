@@ -50,7 +50,7 @@ def load_speechqueue():
 class SpeechFixture:
     """A speaking hook's state folder, Claude's sessions folder and a /proc, under `root`,
     for speechqueue and the speech widget's mouse helper to read. Sessions are added with
-    session(), the hook's files with the other methods; every pid added is alive unless
+    session(), managed unless managed=False, the hook's files with the other methods; every pid added is alive unless
     stale=True."""
 
     def __init__(self, root):
@@ -76,7 +76,7 @@ class SpeechFixture:
         with open(os.path.join(self.proc, str(pid), 'cmdline'), 'wb') as f:
             f.write(b''.join(a.encode() + b'\0' for a in argv))
 
-    def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True, spare=False, waiting_for=None):
+    def session(self, pid, sid, name, kind='interactive', status='idle', stale=False, socket=True, spare=False, waiting_for=None, managed=True):
         entry = {'pid': pid, 'sessionId': sid, 'name': name, 'cwd': f'/home/user/{name}',
                  'kind': kind, 'status': status}
         if spare:
@@ -87,6 +87,8 @@ class SpeechFixture:
             entry['messagingSocketPath'] = f'/tmp/{sid}.sock'
         with open(os.path.join(self.sessions, f'{pid}.json'), 'w') as f:
             json.dump(entry, f)
+        if managed:
+            self.file(f'{sid}.managed')
         if not stale:
             self.alive(pid)
 

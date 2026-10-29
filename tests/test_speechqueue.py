@@ -204,11 +204,25 @@ class ReadState(Fixture):
         self.f.session(400, 'dddd', 'Other kind', kind='sdk')
         self.assertEqual([x['name'] for x in self.state()['sessions']], ['Live'])
 
+    def test_only_managed_sessions_are_listed(self):
+        self.f.session(100, ME, 'Managed')
+        self.f.session(200, OTHER, 'Plain', managed=False)
+        self.f.session(300, QUIET, 'Marker gone')
+        os.remove(os.path.join(self.f.speak, QUIET + '.managed'))
+        self.assertEqual([x['name'] for x in self.state()['sessions']], ['Managed'])
+        self.assertEqual([x['id'] for x in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.speak)], [ME])
+
+    def test_a_session_becomes_managed_when_its_marker_appears(self):
+        self.f.session(100, ME, 'Plain', managed=False)
+        self.assertEqual(self.state()['sessions'], [])
+        self.f.file(ME + '.managed')
+        self.assertEqual([x['name'] for x in self.state()['sessions']], ['Plain'])
+
     def test_duplicate_names_are_numbered_in_pid_order(self):
         self.f.session(300, QUIET, 'Widget')
         self.f.session(100, ME, 'Widget')
         self.f.session(200, OTHER, 'widget')
-        names = {s['id']: s['name'] for s in sessions.list_sessions(self.f.sessions, self.f.proc)}
+        names = {s['id']: s['name'] for s in sessions.list_sessions(self.f.sessions, self.f.proc, self.f.speak)}
         self.assertEqual(names, {ME: 'Widget', OTHER: 'widget 2', QUIET: 'Widget 3'})
 
     def test_key_files_are_never_opened(self):

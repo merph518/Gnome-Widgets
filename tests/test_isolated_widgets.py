@@ -94,7 +94,7 @@ class IsolatedTest(support.TempDirTest):
 
     def test_the_fixture_sessions_read_as_on_alerts_and_off_to_the_speech_widget(self):
         speechqueue = support.load_speechqueue()
-        pids = [os.getpid(), os.getppid(), 1]
+        pids = [os.getpid(), os.getppid(), 1, 2]
         iso.write_fixtures(self.copy, pids)
         state = speechqueue.read_state(self.copy.speak, self.copy.sessions)
         rows = {s['name']: s for s in state['sessions']}
@@ -102,9 +102,30 @@ class IsolatedTest(support.TempDirTest):
                          {'Reading aloud': 'on', 'Waiting on tests': 'alerts', 'Muted': 'off'})
         self.assertEqual((state['now']['name'], state['sessions'][0]['speaking']), ('Reading aloud', True))
 
+    def test_the_fixture_has_an_unmanaged_session_the_widget_does_not_list(self):
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        sessions = iso.fixture_sessions(self.copy, [1, 2, 3, 4])
+        self.assertEqual([x[-1] for x in sessions], [True, True, True, False])
+        state = support.load_speechqueue().read_state(self.copy.speak, self.copy.sessions)
+        self.assertNotIn('Not managed', [s['name'] for s in state['sessions']])
+        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sessions[0][1] + '.managed')))
+        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.managed')))
+
+    def test_the_stub_speechctl_reports_and_sets_managed(self):
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        with mock.patch('builtins.print') as shown:
+            iso.speechctl(self.copy, ['sessions', '--json'])
+        listed = {s['name']: s['managed'] for s in json.loads(shown.call_args[0][0])}
+        self.assertEqual(listed, {'Reading aloud': True, 'Waiting on tests': True, 'Muted': True, 'Not managed': False})
+        sid = iso.fixture_sessions(self.copy, [1, 2, 3, 4])[3][1]
+        iso.speechctl(self.copy, ['managed', sid, 'on'])
+        self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sid + '.managed')))
+        iso.speechctl(self.copy, ['managed', sid, 'off'])
+        self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sid + '.managed')))
+
     def test_the_stub_speechctl_edits_the_fixture_and_lists_voices(self):
-        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1])
-        sid = iso.fixture_sessions(self.copy, [1, 2, 3])[1][1]
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
+        sid = iso.fixture_sessions(self.copy, [1, 2, 3, 4])[1][1]
         iso.speechctl(self.copy, ['speech', sid, 'on'])
         self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sid + '.replies')))
         iso.speechctl(self.copy, ['speech', sid, 'off'])
@@ -121,7 +142,7 @@ class IsolatedTest(support.TempDirTest):
         self.assertEqual(shown.call_args[0][0].splitlines()[1], '* ' + iso.VOICES[1])
 
     def test_the_stub_is_found_through_the_copys_own_config_and_runs_from_a_shell(self):
-        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1])
+        iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
         iso.write_stub(self.copy)
         with open(os.path.join(self.copy.config('speech'), 'speechctl')) as f:
             self.assertEqual(f.read().strip(), self.copy.stub)

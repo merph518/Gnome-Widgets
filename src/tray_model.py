@@ -1,15 +1,13 @@
-"""What the tray menu reads and writes, apart from GTK: whether each widget shows, the
-speech line, the speech settings and voices, and the speechctl that carries out the
-Speech submenu's items.
+"""What the tray menu reads and writes, apart from GTK: whether each widget shows, and the
+speech settings and voices and the speechctl that the speech widget's own menu uses.
 
 Each widget is shown or hidden by its own flag file, hidden in its cache folder, which the
 tray's Show ticks, the widget's own – and × buttons (conky-mouse.py) and the launcher's
 show/hide all write. A Show tick is ticked while that widget runs and has no flag, so the
 ticks follow the flags whichever of the three changed them.
 
-Speech is read from the files the speaking hook keeps in $XDG_RUNTIME_DIR/speak-attention/:
-now.json while a clip plays, paused while paused, settings.json for the voice, volume and pace.
-The commands go through speechctl, from ~/.config/conky-widgets/speech/speechctl when that
+The speech settings are read from settings.json in the speaking hook's folder,
+$XDG_RUNTIME_DIR/speak-attention/, for the voice, volume and pace. The commands go through speechctl, from ~/.config/conky-widgets/speech/speechctl when that
 file names one, otherwise from PATH.
 """
 import fcntl, json, os, shutil, subprocess, tempfile
@@ -27,8 +25,6 @@ UP = os.path.expanduser('~/.cache/conky-widgets/up')     # a file per widget the
 AUTOSTART_DIR = os.path.expanduser('~/.config/autostart')
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
 SPEECHCTL = os.path.expanduser('~/.config/conky-widgets/speech/speechctl')   # a path to speechctl
-SPEECH_LINE = 60                                          # characters of the spoken line the menu shows
-VOLUMES = (0.25, 0.5, 0.75, 1.0, 1.2, 1.5, 2.0)          # the Volume menu's presets
 DEFAULT_VOLUME = 1.2                                      # what speech plays at with no setting
 DEFAULT_VOICE = 'en_US-amy-medium'                        # and the voice it uses (speechctl's)
 SCALES = (0.7, 0.85, 1.0, 1.25, 1.5, 1.75, 2.0)          # the Text scaling menu's presets
@@ -134,24 +130,6 @@ def _json(path):
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
-
-
-def speech_line():
-    """The menu's speech line: who is speaking and what, or Speech paused or Speech idle."""
-    if os.path.exists(os.path.join(SPEAK, 'paused')):
-        return 'Speech paused'
-    now = _json(os.path.join(SPEAK, 'now.json'))
-    text = ' '.join(str(now.get('text') or '').split())
-    if not text:
-        return 'Speech idle'
-    if len(text) > SPEECH_LINE:
-        text = text[:SPEECH_LINE - 1].rstrip() + '…'
-    name = str(now.get('name') or '').strip()
-    return f'{name}: “{text}”' if name else f'“{text}”'
-
-
-def paused():
-    return os.path.exists(os.path.join(SPEAK, 'paused'))
 
 
 def speech_settings():

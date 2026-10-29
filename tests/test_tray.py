@@ -1,6 +1,6 @@
 """Tests for the tray menu's model: each widget's Show tick follows its own hidden flag
 whichever way the flag changed (the menu, the widget's – and × buttons, the launcher), one
-widget's buttons leave the other alone, and the speech line, settings and speechctl."""
+widget's buttons leave the other alone, and the speech settings and speechctl."""
 import json
 import os
 import shutil
@@ -112,20 +112,6 @@ class SpeechTest(support.TempDirTest):
             f.write('#!/bin/sh\n')
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
         return path
-
-    def test_idle_speaking_and_paused(self):
-        self.assertEqual(tray_model.speech_line(), 'Speech idle')
-        self.write('now.json', {'name': 'Overmind #19', 'text': 'Waiting on\nPR 12'})
-        self.assertEqual(tray_model.speech_line(), 'Overmind #19: “Waiting on PR 12”')
-        self.write('paused', '')
-        self.assertEqual(tray_model.speech_line(), 'Speech paused')
-
-    def test_a_long_line_is_cut_and_a_bad_file_is_idle(self):
-        self.write('now.json', {'text': 'word ' * 40})
-        line = tray_model.speech_line()
-        self.assertTrue(line.endswith('…”') and len(line) <= tray_model.SPEECH_LINE + 2)
-        self.write('now.json', '{not json')
-        self.assertEqual(tray_model.speech_line(), 'Speech idle')
 
     def test_settings_and_their_defaults(self):
         self.assertEqual(tray_model.speech_settings(), (tray_model.DEFAULT_VOICE, tray_model.DEFAULT_VOLUME))
