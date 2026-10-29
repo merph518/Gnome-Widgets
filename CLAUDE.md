@@ -19,7 +19,7 @@ labelled by area and kind. They are worked end to end with
 `/implement <number>`: claim, branch, work, pull request, self review,
 handoff, and cleanup after the merge.
 
-The skills `implement`, `implement-with-speech` and `voice-bridge-hooks` are
+The skills `implement` and `voice-bridge-hooks` are
 thin extensions of the general skills in
 [merph518/Overmind](https://github.com/merph518/Overmind), vendored at
 `.claude/att-docs/` and pinned by `.claude/att-docs.lock`. The vendored copy is

@@ -86,7 +86,7 @@ grep 'api:' "$RUN/conky-spotify-nowplaying/nowplaying.log"    # must print nothi
 scripts/isolated-widgets.py stop
 ```
 
-The copy has its own home, fixture Claude sessions and no sound, no tray icon, no
+The copy has its own home, fixture Claude sessions, no tray icon, no
 Spotify login and window class and position of its own. A session never stops,
 replaces, restarts or captures a copy it did not start: the user's, installed or
 from a checkout, or another session's. `critical` is there for GLib's
