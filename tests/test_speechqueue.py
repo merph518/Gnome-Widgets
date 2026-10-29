@@ -681,9 +681,21 @@ class TitleAndFooter(Fixture):
         lines, _, _ = self.draw(text='Second one.')
         os.utime(os.path.join(self.f.speak, 'now.json'), (999.0, 999.0))
         lines, _, _ = self.draw(text='Second one.')
-        self.assertEqual(sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line']), 2)
+        self.assertEqual(sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line']), 1)   # the same session: no second header
         self.assertIn('  First.', lines['text'])
         self.assertEqual(lines['text'][-1], '  Second one.')            # the newest at the end
+
+    def test_the_speakers_header_is_printed_only_when_the_speaker_changes(self):
+        entries = [{'key': k, 'session': sid, 'name': name, 'text': text, 'at': 1.0}
+                   for k, sid, name, text in (('a', 's1', 'One', 'First.'), ('b', 's1', 'One', 'Second.'),
+                                              ('c', 's2', 'Two', 'Third.'), ('d', 's1', 'One', 'Fourth.'))]
+        said, previous = [], None
+        for entry in entries:
+            said.extend(speechqueue.message_lines(entry, 600, (), entry['session'] != previous))
+            previous = entry['session']
+        names = [l[1:] for l in said if l.startswith(speechqueue.PROMPT_MARK)]
+        self.assertEqual(names, ['One', 'Two', 'One'])
+        self.assertEqual(sum(l.startswith(speechqueue.DONE_MARK) for l in said), 4)
 
     def test_a_clip_published_again_or_the_same_words_said_again_at_once_print_once(self):
         self.draw(text='Finished.')
@@ -705,7 +717,7 @@ class TitleAndFooter(Fixture):
         lines, _, _ = self.draw(text='Second one.')
         done = [l for l in lines['line'] if l.startswith(speechqueue.DONE_MARK)]
         prompts = sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line'])
-        self.assertEqual((len(done), prompts), (2, 2))
+        self.assertEqual((len(done), prompts), (2, 1))
         self.assertEqual(lines['line'][-1], done[-1])                    # the last line of the pane
 
     def test_the_printed_messages_are_kept_across_a_restart_and_capped(self):

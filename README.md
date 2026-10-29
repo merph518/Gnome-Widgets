@@ -101,8 +101,9 @@ left and right (the sessions column's share of the width is kept in
   line closing it, which every message keeps: while the message is read it is the CLI's working
   line, an orange turning spinner and **Reading aloud…** with the clip's time and length and the
   queued lines (or **Paused**), and when the speech ends it becomes the gray resting spinner
-  with "Read aloud for 7s, done Thursday 9:47 AM". The speaker's line
-  carries the session's issue and pull request numbers at its right,
+  with "Read aloud for 7s, done Thursday 9:47 AM". The speaker's line, printed only
+  when the speaker differs from the message before's (a run of messages from one session shares
+  one), carries the session's issue and pull request numbers at its right,
   `[ Issue #123, #125 | PR #124, #126 ]`, each number a bold link (below). A message is printed when it starts to be
   read aloud, not when it was received, once (the same words from one session within 30
   seconds, or one clip published again, are one message), and stays: the text scrolls like a

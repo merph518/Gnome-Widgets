@@ -994,14 +994,15 @@ def meta_segments(sess):
     return out + [(' ]', None)]
 
 
-def message_lines(entry, width, segments=()):
+def message_lines(entry, width, segments=(), header=True):
     """draw.txt's lines for one printed message, wrapped to `width`, as the CLI prints a turn: the
     speaker's name as the prompt with the session's issue and pull request numbers
     (`segments`, meta_segments') right-aligned on it, a blank line, the text behind a bullet (its
     markdown formatted when the hook published it), a blank line, and a closing line with how
-    long it was read and when. Kept until the width, the text scale or the message changes,
+    long it was read and when. The prompt line and the blank after it are left out when `header`
+    is false, for a message from the session the one before it was from. Kept until the width, the text scale or the message changes,
     since a scrollback of them is laid out four times a second."""
-    key = (entry['key'], width, text_scale, entry.get('duration'), tuple((t, bool(i)) for t, i in segments))
+    key = (entry['key'], width, text_scale, entry.get('duration'), header, tuple((t, bool(i)) for t, i in segments))
     if key not in _message_lines:
         if len(_message_lines) > 4 * SCROLLBACK_KEEP:
             _message_lines.clear()
@@ -1019,7 +1020,7 @@ def message_lines(entry, width, segments=()):
         meta_w = sum(text_width(t, TERM_FONT) for t, _ in segments) + (2 * cw if segments else 0)
         name = fit(entry['name'], TERM_FONT, width - 2 * cw - meta_w)
         prompt = PROMPT_MARK + name + ''.join(META_MARK + ('k' if info else 'n') + t for t, info in segments)
-        _message_lines[key] = ([prompt, ''] + body
+        _message_lines[key] = (([prompt, ''] if header else []) + body
                                + ['', DONE_MARK + fit(done, TERM_FONT, width - 2 * cw)])
     return _message_lines[key]
 
@@ -1146,13 +1147,16 @@ def render(state, now=None):
     inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
     said, links = [], {}
     open_by_id = {x['id']: x for x in listed}
+    previous = None
     for entry in spoken:
         if said:
             said.append('')                                    # a blank line between messages
+        header = entry.get('session') != previous              # the speaker's name only when the speaker changes
+        previous = entry.get('session')
         segments = meta_segments(open_by_id.get(entry.get('session')))
-        if segments:                                           # what each number in this prompt line opens
+        if header and segments:                                # what each number in this prompt line opens
             links[str(len(said))] = [info for _, info in segments if info]
-        said.extend(message_lines(entry, inner, segments))
+        said.extend(message_lines(entry, inner, segments, header))
     regions['terminal_links'] = links
     queued = sum(s['queued'] for s in listed)
     draw.append(f'terminal {term_left} {box_top:.2f} {right} {bottom:.2f} {TERM_PAD} '
