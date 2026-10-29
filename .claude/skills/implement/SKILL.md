@@ -147,7 +147,9 @@ never run, and observed-value constraints. The repository's own constraints:
 
 - Match the code around the change: its comment density, naming and idiom.
 - A layout, control or look the issue leaves open is put to the user per
-  [ui-options.md](../_shared/ui-options.md) before any drawing code.
+  [ui-options.md](../_shared/ui-options.md) before any drawing code. This adds
+  a fourth stop to the general skill's third gate: such a choice is asked, not
+  settled as a judgment call.
 - A new file the installed program reads at runtime is listed in
   `debian/install`, and a new runtime dependency is in `debian/control`
   (installed with apt, as every dependency is on this machine).
@@ -171,7 +173,7 @@ copy that was running is still up.
 
 ```bash
 pgrep -af 'nowplaying.py'               # which copy runs, if any: note it
-scripts/capture-widget.py <scratchpad>/widget-before.png   # visual changes only
+scripts/capture-widget.py <scratchpad>/widget-before.png <spotify|speech>   # visual changes only, unless ui-options.md took it
 bin/conky-widgets spotify stop
 : > ~/.cache/conky-widgets/run.log
 bin/conky-widgets spotify start
@@ -183,7 +185,9 @@ The processes should run from this worktree's `src/`, and the log should hold
 nothing but the harmless `libayatana-appindicator is deprecated` warning.
 Anything that changes how the widget looks gets a capture after the change
 (`scripts/capture-widget.py <scratchpad>/widget-after.png`), read with the
-`Read` tool next to the before capture. When nothing is playing, say so and say
+`Read` tool next to the before capture and, when the layout was put to the
+user per [ui-options.md](../_shared/ui-options.md), the mockup of the option
+picked. When nothing is playing, say so and say
 what could not be looked at. A change to how the program finds its files or
 starts is also checked installed, as in `/release` step 4, because a path bug
 can exist only under `/usr`; afterwards the stop and start above run from the
