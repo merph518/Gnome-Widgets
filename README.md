@@ -102,8 +102,10 @@ left and right (the sessions column's share of the width is kept in
   in its look: its welcome banner (the creature, the title and how many managed sessions are
   listed), then each reply as the CLI prints a turn: the speaker's name as the prompt on a grey
   band behind a chevron, the text behind a white bullet, in monospace, with its markdown
-  formatted (headings, **bold**, *italic*, `code` in orange, lists, code blocks and links as
-  their labels) from the feed's `markdown` field, else as the plain line, and a dim
+  formatted (headings, **bold**, *italic*, `code` in orange, lists nested two spaces a level,
+  block quotes behind a dim bar, horizontal rules as a dim line, tables in box-drawing rules with
+  a bold header and cells cut with an ellipsis when the table is wider than the pane, code
+  blocks on a lighter band under their dim language tag, and links as their labels) from the feed's `markdown` field, else as the plain line, and a dim
   line closing it, the gray resting spinner and "Replied · Thursday 9:47 AM". The speaker's line, printed only
   when the speaker differs from the message before's (a run of messages from one session shares
   one), carries the session's issue and pull request numbers at its right,

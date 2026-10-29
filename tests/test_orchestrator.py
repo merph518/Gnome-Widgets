@@ -724,7 +724,7 @@ class Terminal(Fixture):
         self.assertNotIn('*', ''.join(lines))
         self.assertNotIn('`', ''.join(lines))
         self.assertTrue(any(l.startswith(mark + 'n  • Spacing: ') and mark + 'b12 px' in l for l in lines))
-        self.assertIn(mark + 'n    ' + mark + 'csudo apt install lua5.3', lines)  # a code line, in the code style
+        self.assertIn(orchestrator.BAND_MARK + mark + 'n    ' + mark + 'csudo apt install lua5.3', lines)  # a code line, in the code style
 
     def test_without_markdown_the_pane_keeps_the_plain_line(self):
         lines, _, _ = self.draw(text='Done and dusted.')
@@ -734,14 +734,100 @@ class Terminal(Fixture):
         self.assertTrue(done.startswith(orchestrator.DONE_MARK + 'Replied · '))
         self.assertNotIn(orchestrator.STYLE_MARK, ''.join(lines['line']))
 
-    def test_markdown_is_blocks_of_paragraphs_headings_list_items_and_code(self):
+    def test_markdown_is_blocks_of_paragraphs_headings_list_items_quotes_rules_and_code(self):
         blocks = orchestrator.markdown_blocks('# Title\nfirst line\nsecond line\n\n- a **b**\n2. c\n> quoted\n---\n```\nx  y\n```')
         self.assertEqual([(k, m) for k, m, _ in blocks],
-                         [('h', ''), ('p', ''), ('li', '\u2022'), ('li', '2.'), ('p', ''), ('code', '')])
+                         [('h', ''), ('p', ''), ('li', '\u2022'), ('li', '2.'), ('q', ''), ('hr', ''), ('code', '')])
         self.assertEqual(blocks[1][2], [('first line second line', '')])           # a paragraph's lines join
         self.assertEqual(blocks[2][2], [('a ', ''), ('b', 'b')])
         self.assertEqual(blocks[4][2], [('quoted', '')])
-        self.assertEqual(blocks[5][2], [('x  y', 'c')])                            # a code line is kept as written
+        self.assertEqual(blocks[6][2], [('x  y', 'c')])                            # a code line is kept as written
+
+    def test_a_table_is_its_rows_without_the_separator_and_a_fence_tag_is_a_dim_run(self):
+        blocks = orchestrator.markdown_blocks('| A | B |\n|:--|--:|\n| 1 | **2** |\n\n```python\nx\n```')
+        self.assertEqual(blocks[0], ('tbl', '', [['A', 'B'], ['1', '**2**']]))
+        self.assertEqual(blocks[1:], [('tag', '', [('python', 'd')]), ('code', '', [('x', 'c')])])
+
+    def test_nested_list_levels_are_indented_two_spaces_each_with_a_small_bullet_below_the_first(self):
+        blocks = orchestrator.markdown_blocks('- a\n  - b\n    - c\n1. d\n   1. e')
+        self.assertEqual([m for _, m, _ in blocks], ['\u2022', '  \u2219', '    \u2219', '1.', '  1.'])
+
+    def plain(self, markdown, width=600):
+        """The visual lines of `markdown` with the style marks taken out."""
+        return [re.sub(orchestrator.STYLE_MARK + '[a-z]', '', text) for text, _ in orchestrator.markdown_lines(markdown, width)]
+
+    def test_a_table_is_drawn_in_box_characters_with_its_header_bold_and_its_rules_dim(self):
+        lines = orchestrator.markdown_lines('| Part | N |\n|---|---|\n| Feed | 12 |\n| Pane | 3 |', 600)
+        mark = orchestrator.STYLE_MARK
+        self.assertEqual(self.plain('| Part | N |\n|---|---|\n| Feed | 12 |\n| Pane | 3 |'), [
+            '  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2510',
+            '  \u2502 Part \u2502 N  \u2502',
+            '  \u251c\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2524',
+            '  \u2502 Feed \u2502 12 \u2502',
+            '  \u2502 Pane \u2502 3  \u2502',
+            '  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2518'])
+        self.assertIn(mark + 'b Part', lines[1][0])                                  # the header row is bold
+        self.assertIn(mark + 'd\u2502', lines[1][0])                                # and the rules dim
+
+    def test_a_table_wider_than_the_pane_cuts_its_widest_cells_with_an_ellipsis(self):
+        table = '| Name | Note |\n|---|---|\n| a | ' + 'long ' * 30 + '|'
+        lines = orchestrator.markdown_lines(table, 300)
+        self.assertEqual(len(lines), 5)                                             # none wraps into another row
+        for line, width in lines:
+            self.assertLessEqual(width, 300)
+        self.assertIn('\u2026', lines[3][0])
+        self.assertIn('Name', lines[1][0])                                          # the narrow column keeps its text
+
+    def test_nested_list_lines_hang_under_their_first_word(self):
+        lines = self.plain('- a\n  - b ' + 'word ' * 20, 200)
+        self.assertEqual(lines[0], '  \u2022 a')
+        self.assertTrue(lines[1].startswith('    \u2219 b word') and lines[2].startswith('      word'))
+
+    def test_a_block_quote_is_behind_a_dim_bar_on_every_line(self):
+        lines = orchestrator.markdown_lines('> ' + 'word ' * 30, 200)
+        self.assertGreater(len(lines), 1)
+        for line, width in lines:
+            self.assertIn(orchestrator.STYLE_MARK + 'd\u2502 ', line)
+            self.assertLessEqual(width, 200)
+
+    def test_a_horizontal_rule_is_a_dim_line_across_the_pane(self):
+        text, width = orchestrator.markdown_lines('a\n\n---\n\nb', 400)[2]
+        self.assertRegex(text, '^' + orchestrator.STYLE_MARK + 'n  ' + orchestrator.STYLE_MARK + 'd\u2500+$')
+        self.assertGreater(width, 300)
+        self.assertLessEqual(width, 400 * orchestrator.BLOCK_SLACK)    # as far as the text lines run
+        self.assertGreater(width, 400 - 2 * orchestrator.text_width(' ', orchestrator.TERM_FONT))
+
+    def test_a_code_block_is_banded_with_its_language_tag_dim_above_and_long_lines_cut(self):
+        band, mark = orchestrator.BAND_MARK, orchestrator.STYLE_MARK
+        lines = [t for t, _ in orchestrator.markdown_lines('```python\nx = 1\n\n' + 'y' * 200 + '\n```', 300)]
+        self.assertEqual(lines[0], f'{band}{mark}n    {mark}dpython')
+        self.assertEqual(lines[1], f'{band}{mark}n    {mark}cx = 1')
+        self.assertEqual(lines[2], band + '    ')                              # a blank code line keeps the band
+        self.assertGreater(len(lines), 5)                                            # a long line wraps and loses nothing
+        self.assertEqual(sum(l.count('y') for l in lines[3:]), 200)
+        self.assertTrue(all(l.startswith(band) for l in lines))
+        self.assertTrue(all(mark + 'cy' in l for l in lines[3:]))
+        untagged = [t for t, _ in orchestrator.markdown_lines('```\nx\n```', 300)]
+        self.assertEqual(untagged, [f'{band}{mark}n    {mark}cx'])
+
+    def test_text_straight_after_a_table_comes_after_it(self):
+        blocks = orchestrator.markdown_blocks('| A |\n|---|\n| 1 |\nafter')
+        self.assertEqual([k for k, _, _ in blocks], ['tbl', 'p'])
+
+    def test_quote_lines_join_into_one_block_and_a_lone_marker_ends_it(self):
+        blocks = orchestrator.markdown_blocks('> one\n> two\n>\n> three\n\ntext')
+        self.assertEqual([(k, r) for k, _, r in blocks],
+                         [('q', [('one two', '')]), ('q', [('three', '')]), ('p', [('text', '')])])
+        self.assertEqual(len(orchestrator.markdown_lines('> one\n> two\n> three', 600)), 1)
+
+    def test_a_code_block_that_opens_a_reply_has_the_bullet_and_the_band_both(self):
+        self.three()
+        self.f.feed(ME, NOW - 2, 'flat', markdown='```\nx\n```', name='Feed widget')
+        with mock.patch.object(orchestrator.size_file, 'load', return_value=(1400, 128, 1.0)):
+            orchestrator.render(self.state())
+        with open(orchestrator.DRAW) as f:
+            lines = [l[5:] for l in f.read().split('\n') if l.startswith('line ')]
+        self.assertTrue(lines[2].startswith(orchestrator.BULLET_MARK + orchestrator.BAND_MARK))
 
     def test_inline_marks_nest_and_a_link_is_its_label(self):
         self.assertEqual(orchestrator.inline_runs('a **b *c* d** [e](http://f) `g*h*`'),
