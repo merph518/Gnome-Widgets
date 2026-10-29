@@ -497,16 +497,18 @@ class TitleAndFooter(Fixture):
         self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
         self.assertLess(float(cy), regions['list'][1])                # above the list
 
-    def test_the_terminal_pane_is_a_column_right_of_the_list_as_tall_as_it_and_over_the_controls(self):
+    def test_the_terminal_pane_is_a_column_right_of_the_list_as_tall_as_it_and_the_controls_under_it(self):
         lines, regions, _ = self.draw(text=self.LONG)
         x0, y0, x1, y1, pad = (float(v) for v in lines['terminal'].split()[:5])
         controls_y = float(lines['footer'].split()[1])
         list_x0, list_y0, list_x1, list_y1 = regions['list']
-        self.assertEqual((y0, y1), (list_y0, list_y1))                    # the same height
+        self.assertEqual(y0, list_y0)
+        self.assertEqual(y1, list_y1 + speechqueue.FOOTER_GAP + speechqueue.FOOTER_H)   # the sessions column, controls too
         self.assertLess(list_x1, x0)                                      # right of the sessions
         self.assertEqual(x0 - list_x1, speechqueue.COLUMN_GAP)
         self.assertEqual(x1, speechqueue.MARGIN + speechqueue.widget_width)
-        self.assertLess(y1, controls_y)
+        self.assertGreater(controls_y, list_y1)                           # the controls sit in the column's foot, left of the pane
+        self.assertLess(controls_y, y1)
         self.assertEqual(pad, speechqueue.TERM_PAD)
         self.assertEqual(regions['terminal'], [x0, y0, x1, y1])
 
@@ -516,8 +518,11 @@ class TitleAndFooter(Fixture):
         gap0, gap1 = regions['list'][2], float(lines['terminal'].split()[0])
         self.assertEqual(x, (gap0 + gap1) / 2)
         self.assertLess(y0, regions['list'][1])                           # the divider runs between the header's rule
-        self.assertGreater(y1, regions['list'][3])                        # and the footer's, as long as the columns
-        self.assertEqual(lines['rules'].split(), [f'{y0:.2f}', f'{y1:.2f}'])
+        self.assertGreater(y1, regions['list'][3])                        # to the card's bottom, past the controls
+        rule_top, rule_controls = (float(v) for v in lines['rules'].split())
+        self.assertEqual(rule_top, y0)
+        self.assertGreater(rule_controls, regions['list'][3])             # the controls' rule, under the list
+        self.assertLess(rule_controls, float(lines['footer'].split()[1]))
         grab = regions['divider']
         self.assertTrue(gap0 <= grab[0] < x < grab[2] <= gap1)
         self.assertEqual((grab[1], grab[3]), (y0, y1))

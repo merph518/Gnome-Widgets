@@ -68,11 +68,11 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 itself.
 
 The card is laid out as an application: a header across the top with the title,
-**CLAUDE CODE SESSION MANAGEMENT**, and minimize and close at its right; a footer
-across the bottom with the controls (pause / resume, skip and next), the volume beside them and
-the settings gear alone at the right; and between a rule under
-the one and a rule over the other, two columns of the same height, the sessions at the left and
-the terminal at the right, the right a shade darker. A thin line divides them, as Claude's app
+**CLAUDE CODE SESSION MANAGEMENT**, and minimize and close at its right, a rule under it, and
+under that two columns that run to the card's bottom, the sessions at the left and the terminal
+at the right, the right a shade darker. The controls sit in a row at the very bottom of the
+sessions column, under a rule: pause / resume, skip and next, the volume beside them and the
+settings gear at the column's right. A thin line divides the columns, as Claude's app
 draws its sidebar's; the pointer turns to the resize cursor over it, and dragging it moves it
 left and right (the sessions column's share of the width is kept in
 `~/.config/conky-widgets/speech/split`; each column keeps a least width).
@@ -145,13 +145,13 @@ follows the Spotify widget's background.
 
 ### Controls
 
-The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
-left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
+The controls run `speechctl`, the same one the tray menu uses. At the foot of the
+sessions column, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
 nothing, while no line plays, and grow a little under the pointer, as the pause button does. The
 gear at the right opens the settings menu, an issue or pull request number in a message's
 header opens it, and a session's name asks to close it. The
-volume slider, in the footer after the buttons, drawn and sized like the Spotify widget's
+volume slider, in that row after the buttons, drawn and sized like the Spotify widget's
 (it shortens, down to 32 px, as the card narrows), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made

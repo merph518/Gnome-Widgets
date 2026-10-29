@@ -1114,7 +1114,7 @@ def render(state, now=None):
     # draw.lua draws it from these lines.
     line_h = line_height(TERM_FONT)
     box_top = list_top
-    bottom = list_top + list_height
+    bottom = list_top + list_height + FOOTER_GAP + FOOTER_H        # the terminal runs beside the controls too
     banner_h = (TERM_BANNER_LINES + 1) * line_h                    # the welcome banner and a blank line
     term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h - TERM_STATUS_GAP - line_h) // line_h), 1)
     inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
@@ -1142,12 +1142,13 @@ def render(state, now=None):
     regions['terminal_scroll'] = max(len(said) - term_lines, 0)       # lines past what it shows
     out.gap(list_height)
 
-    # The footer: the controls under the sessions: pause or resume, skip and next. Skip and next
-    # are drawn dimmed, and are not click areas, while no clip plays.
+    # The controls, in a row at the very bottom of the sessions column: pause or resume, skip and
+    # next, the volume and the gear. Skip and next are drawn dimmed, and are not click areas,
+    # while no clip plays.
     out.gap(FOOTER_GAP)
     footer_h = FOOTER_H
     fy = out.y + footer_h / 2
-    pause_cx = MARGIN + PAUSE_SIZE / 2
+    pause_cx = MARGIN + GROUP_PAD + PAUSE_SIZE / 2
     skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
     next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
     # The clip's clock, which draw.lua prints in the pane's status line: the current line's
@@ -1168,7 +1169,7 @@ def render(state, now=None):
     # The volume, as the Spotify widget has it, beside the buttons: the speaker and its slider,
     # the track giving up room, down to VOLUME_MIN, to the gear at the far right.
     gear_size = GEAR_SIZE * text_scale
-    gear_x1 = right - 2
+    gear_x1 = list_right - GROUP_PAD
     gear_x0 = gear_x1 - gear_size - 2 * GEAR_PAD
     vol_icon = next_cx + PAUSE_SIZE / 2 + VOLUME_AFTER_BUTTONS
     vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
@@ -1181,17 +1182,18 @@ def render(state, now=None):
         'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
         'volume_bar': [vol_x0, vol_x1],
     })
-    # The gear at the right, which opens the settings menu
+    # The gear at the column's right, which opens the settings menu
     draw.append(f'gear {(gear_x0 + gear_x1) / 2:.2f} {fy:.2f} {gear_size:.2f}')
     regions['gear'] = [round(gear_x0, 2), round(fy - footer_h / 2, 2), round(gear_x1, 2), round(fy + footer_h / 2, 2)]
     out.gap(footer_h)
     card_h = out.y + MARGIN - 4
-    # The application's chrome: the header and the footer run the card's width, a rule under the
-    # one and over the other, and the columns and their divider sit between the rules.
-    rule_top, rule_bottom = list_top - LINE_GAP / 2, list_top + list_height + FOOTER_GAP / 2
-    draw.append(f'divider {divider_x:.2f} {rule_top:.2f} {rule_bottom:.2f}')
-    draw.append(f'rules {rule_top:.2f} {rule_bottom:.2f}')
-    regions['divider'] = [list_right + 2, round(rule_top, 2), term_left - 2, round(rule_bottom, 2)]
+    # The application's chrome: the header runs the card's width with a rule under it, the divider
+    # runs from that rule to the card's bottom, and a rule over the controls runs from the card's
+    # left edge to the divider.
+    rule_top, rule_controls = list_top - LINE_GAP / 2, list_top + list_height + FOOTER_GAP / 2
+    draw.append(f'divider {divider_x:.2f} {rule_top:.2f} {card_h:.2f}')
+    draw.append(f'rules {rule_top:.2f} {rule_controls:.2f}')
+    regions['divider'] = [list_right + 2, round(rule_top, 2), term_left - 2, round(card_h, 2)]
     menu_line, regions['menu'] = settings_menu(rule_top, card_h, right + MARGIN, state.get('voices') or [])
     draw.append(menu_line)
     write_atomic(DRAW, '\n'.join(draw) + '\n')

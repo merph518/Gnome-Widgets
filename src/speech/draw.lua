@@ -538,17 +538,18 @@ end
 
 local function draw_divider(cr, v, rules, s, w)
     -- the lines of the application's frame, as Claude's app draws its own: one thin line a little
-    -- lighter than the card under the header and another over the footer, across the card, and the
-    -- divider between the columns from one to the other, brighter while it is being dragged
-    -- (mouse.py's divider-drag file)
+    -- lighter than the card under the header across the card, another over the controls at the
+    -- foot of the sessions column, and the divider between the columns from the first to the
+    -- card's bottom, brighter while it is being dragged (mouse.py's divider-drag file)
     local x, y0, y1 = v[1] * s, v[2] * s, v[3] * s
     local held = read('divider-drag') ~= nil
     cairo_set_line_width(cr, math.max(1, math.floor(s + 0.5)))
     set(cr, fg, 0.14)
-    for _, y in ipairs({y0, y1}) do
+    for _, line in ipairs({{rules[1], w}, {rules[2], x}}) do
+        local y = math.floor(line[1] * s) + 0.5
         cairo_new_path(cr)
-        cairo_move_to(cr, 0, math.floor(y) + 0.5)
-        cairo_line_to(cr, w, math.floor(y) + 0.5)
+        cairo_move_to(cr, 0, y)
+        cairo_line_to(cr, line[2], y)
         cairo_stroke(cr)
     end
     set(cr, fg, held and 0.4 or 0.14)
