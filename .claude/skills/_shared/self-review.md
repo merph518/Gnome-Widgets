@@ -52,8 +52,9 @@ commit alone does not show.
      rather than settled here.
 3. Check every finding before acting on it. On every pass but the first, read
    the [Settled decisions](#settled-decisions) section first. Read the code the
-   finding names; when running the program can settle it (the `run` skill, or
-   the installed smoke test in `/release` step 4), the run settles it. A
+   finding names; when running the program can settle it (an isolated copy, as
+   in `/implement` Section 6, or the installed smoke test in `/release` step 4),
+   the run settles it. A
    finding sorts into one of three kinds:
 
    - A real bug: it names a concrete way the change goes wrong that a real

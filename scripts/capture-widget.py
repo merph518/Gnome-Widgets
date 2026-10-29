@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Save the running widget's window as a PNG.
 
-usage: scripts/capture-widget.py <out.png> [spotify|speech]
+usage: scripts/capture-widget.py <out.png> [spotify|speech] [--window XID]
+
+An isolated copy's windows have a class of their own: scripts/isolated-widgets.py capture
+captures one, or CSN_CLASS_SUFFIX in the environment names the copy's class here; --window
+names a window outright.
 
 The widget is an X window (Conky runs under XWayland), so its pixels can be read
 straight from the X server through libX11 without a screenshot portal or any tool
@@ -15,6 +19,7 @@ un-premultiplied, where GDK's own capture wraps it round to a dark value and sho
 colour (a white sky speckled yellow, orange turned green).
 """
 import ctypes
+import os
 import re
 import subprocess
 import sys
@@ -23,8 +28,10 @@ import gi
 gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import GdkPixbuf, GLib  # noqa: E402
 
-WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying',   # own_window_class in src/<widget>/conky.conf
-            'speech': 'ConkySpeechQueue'}
+# own_window_class in src/<widget>/conky.conf, with the suffix of an isolated copy's windows
+SUFFIX = os.environ.get('CSN_CLASS_SUFFIX', '')
+WM_CLASS = {'spotify': 'ConkySpotifyNowPlaying' + SUFFIX,
+            'speech': 'ConkySpeechQueue' + SUFFIX}
 
 
 def find_window(wm_class):
@@ -87,10 +94,19 @@ def read_window(xid):
 
 
 def main(argv):
+    argv = list(argv)
+    xid = None
+    if '--window' in argv:
+        at = argv.index('--window')
+        try:
+            xid = int(argv[at + 1], 0)
+        except (IndexError, ValueError):
+            sys.exit(__doc__.strip().splitlines()[2])
+        del argv[at:at + 2]
     if len(argv) not in (2, 3) or argv[2:] and argv[2] not in WM_CLASS:
         sys.exit(__doc__.strip().splitlines()[2])
     wm_class = WM_CLASS[argv[2] if argv[2:] else 'spotify']
-    xid = find_window(wm_class)
+    xid = xid or find_window(wm_class)
     if xid is None:
         sys.exit(f'no {wm_class} window; is the widget running?')
     width, height, pixels = read_window(xid)
