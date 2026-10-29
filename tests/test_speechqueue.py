@@ -317,6 +317,12 @@ class Links(Labels):
     """What a click on a session's name opens: its issue, from its branch, or its ready pull
     requests, from its ledger."""
 
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(speechqueue, '_git', {})
+        p.start()
+        self.addCleanup(p.stop)
+
     def worktree(self, head, url='git@github.com:someone/Gnome-Widgets.git'):
         top = self.repo('Gnome-Widgets', url)
         gitdir = os.path.join(top, '.git', 'worktrees', 'wt')
@@ -352,9 +358,20 @@ class Links(Labels):
                           ('ref: refs/heads/feat/tissue-5', None)):
             with self.subTest(head=head):
                 shutil.rmtree(os.path.join(self.root, 'code'), ignore_errors=True)
+                speechqueue._git.clear()
                 self.assertEqual(speechqueue.session_issue(self.worktree(head, url or
                                  'git@github.com:someone/Gnome-Widgets.git')), '')
         self.assertEqual(speechqueue.session_issue(os.path.join(self.root, 'nowhere')), '')
+
+    def test_the_origin_is_the_url_and_not_a_pushurl_before_it(self):
+        top = self.repo('fork')
+        with open(os.path.join(top, '.git', 'config'), 'a') as f:
+            f.write('[remote "origin"]\n\tpushurl = git@github.com:me/fork.git\n'
+                    '\turl = https://github.com/org/repo.git\n')
+        with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
+            f.write('ref: refs/heads/feat/issue-9-x\n')
+        self.assertEqual(speechqueue.session_issue(top), 'https://github.com/org/repo/issues/9')
+        self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
     def test_the_pill_names_the_ready_pull_requests_else_the_issue(self):
         issue = 'https://github.com/o/r/issues/123'

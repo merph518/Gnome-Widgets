@@ -351,23 +351,25 @@ class LinksTest(StubSpeechctl):
     def setUp(self):
         super().setUp()
         rows = [dict(r) for r in REGIONS['rows']]
-        rows[0].update(link=[73.0, 260.0], issue=ISSUE, prs=[PR + '151', PR + '152'])
+        rows[0].update(link=[73.0, 260.0], issue=ISSUE, branch='feat/issue-123-x',
+                       prs=[PR + '151', PR + '152'])
         rows[1].update(link=[73.0, 150.0], issue='', prs=[])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
-        speech_mouse.opening.clear()
+        speech_mouse.opened.clear()
 
     def gh(self, states):
         """A gh that answers `gh pr view <link>` with states[link]: (state, labels)."""
         def run(args, **kwargs):
-            state, labels = states.get(args[3], ('MERGED', []))
-            out = json.dumps({'state': state, 'labels': [{'name': n} for n in labels]})
+            state, labels, *head = states.get(args[3], ('MERGED', []))
+            out = json.dumps({'state': state, 'labels': [{'name': n} for n in labels],
+                              'headRefName': head[0] if head else 'feat/issue-123-x'})
             return subprocess.CompletedProcess(args, 0, out, '')
         return run
 
     def open(self, row, states):
         speech_mouse.open_links(row, run=self.gh(states),
-                                popen=lambda args, **kw: self.opened.append(args[1:]))
+                                popen=lambda args, **kw: self.opened.append(args[1:]) or mock.Mock())
         return self.opened.pop() if self.opened else None
 
     def test_ready_pull_requests_open_and_the_rest_do_not(self):
@@ -375,6 +377,13 @@ class LinksTest(StubSpeechctl):
         ready = ('OPEN', ['Manual Review Needed'])
         self.assertEqual(self.open(row, {PR + '151': ready, PR + '152': ready}), [PR + '151', PR + '152'])
         self.assertEqual(self.open(row, {PR + '151': ready, PR + '152': ('OPEN', [])}), [PR + '151'])
+
+    def test_another_sessions_pull_request_in_the_ledger_is_not_opened(self):
+        ready = ('OPEN', ['Manual Review Needed'])
+        blocker = ('OPEN', ['Manual Review Needed'], 'fix/issue-140-other')
+        self.assertEqual(self.open(self.regions['rows'][0], {PR + '151': blocker, PR + '152': ready}),
+                         [PR + '152'])
+        self.assertEqual(self.open(self.regions['rows'][0], {PR + '151': blocker}), [ISSUE])
 
     def test_with_none_ready_the_issue_opens(self):
         self.assertEqual(self.open(self.regions['rows'][0], {}), [ISSUE])
@@ -404,19 +413,21 @@ class LinksTest(StubSpeechctl):
         self.assertEqual([r['id'] for r in opened], ['aaaa'])
         self.assertEqual(self.ran(), ['speech aaaa on'])
 
-    def test_a_second_click_while_it_opens_does_nothing(self):
-        started = []
+    def test_a_second_click_soon_after_does_nothing(self):
+        started, clock = [], mock.Mock()
         with mock.patch.object(speech_mouse.threading, 'Thread',
                                side_effect=lambda **kw: mock.Mock(start=lambda: started.append(kw))):
-            speech_mouse.open_once(self.regions['rows'][0])
-            speech_mouse.open_once(self.regions['rows'][0])
-        self.assertEqual(len(started), 1)
+            for t in (100.0, 100.3, 103.5):
+                clock.return_value = t
+                speech_mouse.open_once(self.regions['rows'][0], now=clock)
+        self.assertEqual(len(started), 2)
 
     def test_a_pull_request_gh_cannot_read_is_opened_and_each_opens_once(self):
         def fails(args, **kwargs):
             raise FileNotFoundError('gh')
         row = dict(self.regions['rows'][0], prs=[PR + '151', PR + '151'])
-        speech_mouse.open_links(row, run=fails, popen=lambda args, **kw: self.opened.append(args[1:]))
+        speech_mouse.open_links(row, run=fails,
+                                popen=lambda args, **kw: self.opened.append(args[1:]) or mock.Mock())
         self.assertEqual(self.opened, [[PR + '151']])
         self.assertIn('gh could not read it', support.read(conky_mouse.LOG))
 
@@ -425,6 +436,7 @@ class LinksTest(StubSpeechctl):
             if args[0] == speech_mouse.BROWSER:
                 raise FileNotFoundError(args[0])
             self.opened.append(args)
+            return mock.Mock()
         speech_mouse.open_links(self.regions['rows'][0], run=self.gh({}), popen=popen)
         self.assertEqual(self.opened, [['xdg-open', ISSUE]])
 

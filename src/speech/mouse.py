@@ -36,6 +36,7 @@ HEIGHT_REGION = 'list'                         # the region the second size sett
 SETTINGS = ('on', 'alerts', 'off')             # a session's segments, left to right
 READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
 BROWSER = 'google-chrome'                      # what a session's name opens its links in
+OPEN_AGAIN = 3.0                               # s before a session's name opens its links again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
@@ -107,14 +108,15 @@ def link_at(regions, s, x, y):
     return row if first_line and row['link'][0] * s <= x <= row['link'][1] * s else None
 
 
-def ready_prs(links, run=subprocess.run):
-    """The pull requests of `links` still open and carrying READY_LABEL, read from GitHub. One
-    gh cannot read (not installed, logged out, offline) is kept, since the ledger still waits
-    on it, and the failed read is logged."""
+def ready_prs(links, branch='', run=subprocess.run):
+    """The pull requests of `links` still open and carrying READY_LABEL, read from GitHub, and
+    from `branch` when it is given: a session's ledger also waits on other sessions' pull
+    requests that block it. One gh cannot read (not installed, logged out, offline) is kept,
+    since the ledger still waits on it, and the failed read is logged."""
     ready = []
     for link in dict.fromkeys(links):
         try:
-            out = run(['gh', 'pr', 'view', link, '--json', 'state,labels'], capture_output=True,
+            out = run(['gh', 'pr', 'view', link, '--json', 'state,labels,headRefName'], capture_output=True,
                       text=True, timeout=15)
             pr = json.loads(out.stdout) if out.returncode == 0 else None
         except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -122,10 +124,11 @@ def ready_prs(links, run=subprocess.run):
         if pr is None:
             core.log(f'{link}: gh could not read it, opened as the ledger has it')
             ready.append(link)
-        elif pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]:
+        elif (pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]
+              and (not branch or pr.get('headRefName') == branch)):
             ready.append(link)
         else:
-            core.log(f'{link}: not ready ({pr.get("state")})')
+            core.log(f'{link}: not ready ({pr.get("state")}, from {pr.get("headRefName")})')
     return ready
 
 
@@ -133,32 +136,32 @@ def open_links(row, run=subprocess.run, popen=subprocess.Popen):
     """Opens what a click on a session's name opens, each in a new browser tab: its ready pull
     requests, else its issue. Chrome takes them all at once; without it, xdg-open takes each."""
     try:
-        links = ready_prs(row.get('prs') or [], run) or ([row['issue']] if row.get('issue') else [])
+        links = ready_prs(row.get('prs') or [], row.get('branch') or '', run) or ([row['issue']] if row.get('issue') else [])
         if not links:
             core.log(f'session {row["id"]}: no issue or ready pull request to open')
             return
         core.log('open: ' + ' '.join(links))
         quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
-            popen([BROWSER, *links], **quiet)
+            launched = [popen([BROWSER, *links], **quiet)]
         except OSError:
-            for link in links:
-                popen(['xdg-open', link], **quiet)
+            launched = [popen(['xdg-open', link], **quiet) for link in links]
+        for p in launched:
+            p.wait()                           # the launchers hand over and exit; reaped here
     except OSError as e:
         core.log(f'open: {e}')
-    finally:
-        opening.discard(row['id'])
 
 
-opening = set()                                # the sessions whose links a click is opening
+opened = {}                                    # session id: when a click last opened its links
 
 
-def open_once(row):
+def open_once(row, now=time.monotonic):
     """Opens a session's links on a thread, as gh reads each pull request, which takes a
-    moment; a second click while they are still opening does nothing."""
-    if row['id'] in opening:
+    moment; a second click on the same session within OPEN_AGAIN s, a double click or one
+    while they are still opening, does nothing."""
+    if now() - opened.get(row['id'], -OPEN_AGAIN) < OPEN_AGAIN:
         return
-    opening.add(row['id'])
+    opened[row['id']] = now()
     threading.Thread(target=open_links, args=(row,), daemon=True).start()
 
 

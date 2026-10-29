@@ -430,7 +430,7 @@ def git_paths(cwd):
 
 
 def origin_url(config):
-    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', _read(config) or '')
+    m = re.search(r'\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', _read(config) or '', re.M)
     return m.group(1).rstrip('/') if m else ''
 
 
@@ -445,15 +445,27 @@ def repo_name(cwd):
     return name or os.path.basename(paths[0])
 
 
+_git = {}
+
+
+def session_branch(cwd):
+    """(branch, GitHub owner/repo) of the session in cwd, each '' when it has none. Where its
+    repository is, and its origin, are found once; HEAD is read each time, as it switches."""
+    if cwd not in _git:
+        paths = git_paths(cwd)
+        repo = paths and re.search(r'github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$', origin_url(paths[2]))
+        _git[cwd] = (paths[1] if paths else '', repo.group(1) if repo else '')
+    gitdir, repo = _git[cwd]
+    m = re.match(r'ref:\s*refs/heads/(\S+)', _read(os.path.join(gitdir, 'HEAD')) or '') if gitdir else None
+    return (m.group(1) if m else ''), repo
+
+
 def session_issue(cwd):
     """The link of the issue the session in cwd works: the N of its branch's issue-<N>, as
     /implement names branches, on its origin's GitHub repository; '' without one."""
-    paths = git_paths(cwd)
-    if not paths:
-        return ''
-    m = re.match(r'ref:\s*refs/heads/\S*?\bissue-(\d+)\b', _read(os.path.join(paths[1], 'HEAD')) or '')
-    repo = re.search(r'github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$', origin_url(paths[2]))
-    return f'https://github.com/{repo.group(1)}/issues/{m.group(1)}' if m and repo else ''
+    branch, repo = session_branch(cwd)
+    m = re.search(r'\bissue-(\d+)\b', branch)
+    return f'https://github.com/{repo}/issues/{m.group(1)}' if m and repo else ''
 
 
 def short_label(name):
@@ -596,7 +608,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
                            question=question,
                            waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
-                           issue=session_issue(s['cwd']), prs=ledger_prs(ledger),
+                           issue=session_issue(s['cwd']), branch=session_branch(s['cwd'])[0],
+                           prs=ledger_prs(ledger),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
@@ -800,7 +813,8 @@ def render(state, now=None):
                  'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
-        entry.update(link=link_span(s, queued_right), issue=s.get('issue') or '', prs=s.get('prs') or [])
+        entry.update(link=link_span(s, queued_right), issue=s.get('issue') or '',
+                     branch=s.get('branch') or '', prs=s.get('prs') or [])
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
