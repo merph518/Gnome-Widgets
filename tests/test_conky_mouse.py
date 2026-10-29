@@ -694,6 +694,26 @@ class ConfigureTest(unittest.TestCase):
         self.assertEqual(conky_mouse.region_at(regions, 1, 50, 50), 'seek')
 
 
+class HasAboveTest(unittest.TestCase):
+
+    def has_above(self, xprop_out):
+        with mock.patch('subprocess.run', return_value=mock.Mock(stdout=xprop_out)) as run:
+            result = conky_mouse.has_above(0x2e00002)
+        self.assertEqual(run.call_args[0][0], ['xprop', '-id', '0x2e00002', '_NET_WM_STATE'])
+        return result
+
+    def test_above_in_the_state_list(self):
+        self.assertTrue(self.has_above('_NET_WM_STATE(ATOM) = _NET_WM_STATE_SKIP_PAGER, '
+                                       '_NET_WM_STATE_ABOVE, _NET_WM_STATE_STICKY\n'))
+
+    def test_state_without_it(self):
+        self.assertFalse(self.has_above('_NET_WM_STATE(ATOM) = _NET_WM_STATE_STICKY\n'))
+
+    def test_no_state_or_no_window(self):
+        self.assertFalse(self.has_above('_NET_WM_STATE:  not found.\n'))
+        self.assertFalse(self.has_above(''))
+
+
 class LogTest(support.TempDirTest):
 
     def test_a_line_starts_with_the_date_and_the_time(self):

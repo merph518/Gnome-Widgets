@@ -648,6 +648,12 @@ def hint_position(d, win, x, y):
     x11.XSetWMNormalHints(d, win, ctypes.byref(hints))
 
 
+def has_above(win):
+    """Whether the window manager has the window above others now (_NET_WM_STATE)."""
+    out = subprocess.run(['xprop', '-id', hex(win), '_NET_WM_STATE'], capture_output=True, text=True).stdout
+    return '_NET_WM_STATE_ABOVE' in out
+
+
 def set_above(d, root, win, above):
     """Ask the window manager to keep the window above others, or not (EWMH _NET_WM_STATE)."""
     ev = XClientMessageEvent(type=CLIENT_MESSAGE, window=win, format=32,
@@ -825,7 +831,8 @@ def main(widget):
                 if current != win:
                     log(f'attached to 0x{current:x}')
                 win = current
-                above = None                           # sent again below; a no-op if it held
+                above = has_above(win)                 # sent below only if it differs: mutter restacks
+                                                       # the window on every request, even a no-op
                 x11.XSelectInput(d, win, BUTTON_PRESS_MASK | BUTTON_RELEASE_MASK | POINTER_MOTION_MASK)
                 if opcode:
                     select_touch(d, win)
