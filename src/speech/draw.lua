@@ -280,7 +280,7 @@ local function round_button(cr, cx, cy, size, active)
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
     cairo_fill(cr)
-    if active then set(cr, fg_back) else set(cr, fg, 0.6) end
+    if active then cairo_set_source_rgb(cr, bg[1], bg[2], bg[3]) else set(cr, fg, 0.6) end
 end
 
 local function draw_skip_buttons(cr, b, s)
@@ -512,14 +512,14 @@ end
 
 local function draw_footer(cr, f, s)
     -- pause (two bars) while speech plays, resume (a triangle) while it is paused: the
-    -- foreground's circle with the icon in fg_back, a little bigger under the pointer
+    -- foreground's circle with the icon in the card's colour, a little bigger under the pointer
     local cx, cy, size, paused = f[1] * s, f[2] * s, f[3] * s, f[4] == 1
     local on = hovered(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
     set(cr, fg)
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
     cairo_fill(cr)
-    set(cr, fg_back)
+    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
     if paused then
         triangle(cr, cx + size * 0.03, cy, size * 0.17, 1)
     else
