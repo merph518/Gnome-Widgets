@@ -683,11 +683,12 @@ def box(cx, cy, half_w, half_h):
 
 def session_line(s, span=1, header=''):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
-    repository's name, how many rows it takes, and its section's title when this session is
-    the first listed under it, which draw.lua prints on a row above it."""
+    repository's name, how many rows it takes, its section's title when this session is the
+    first listed under it, which draw.lua prints on a row above it, and the "In review" label
+    of a session with a pull request open, which draw.lua prints in place of the repository."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('repo', ''),
-                      str(span), header))
+                      str(span), header, review_label(s)))
 
 
 def row_flags(s):
@@ -896,11 +897,27 @@ def encode_runs(runs):
 STATUS_GROUPS = ('Needs input', 'Working', 'Completed')   # the sessions column's sections, in order, as the CLI names its session states
 
 
+def in_review(s):
+    """Whether a session that is not working has a pull request open, which waits on the user."""
+    return bool(s.get('prs')) and row_flags(s) not in ('question', 'busy')
+
+
+def review_label(s):
+    """"In review · Repo #151, #152" for a session in review, else ''."""
+    if not in_review(s):
+        return ''
+    numbers = ', '.join('#' + url.rstrip('/').rsplit('/', 1)[-1] for url in s['prs'])
+    return f"In review \u00b7 {s['repo']} {numbers}" if s.get('repo') else f'In review {numbers}'
+
+
 def status_group(s):
-    """The section a session is listed under: Needs input while a question waits to be read,
-    Completed while it is idle, else Working, which holds busy and waiting ones."""
+    """The section a session is listed under: Needs input while a question waits to be read or
+    the CLI waits on input, or a pull request is open for the user to review; Completed while it
+    is idle with none; else Working, which holds busy and waiting ones."""
     tag = row_flags(s)
-    return 'Needs input' if tag == 'question' else 'Completed' if tag == 'idle' else 'Working'
+    if tag == 'question' or in_review(s):
+        return 'Needs input'
+    return 'Completed' if tag == 'idle' else 'Working'
 
 
 def grouped(listed):

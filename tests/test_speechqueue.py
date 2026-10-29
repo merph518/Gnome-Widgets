@@ -406,6 +406,22 @@ class Links(Repos):
         self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
                          [('Needs input', 'c'), ('Working', 'b'), ('Working', 'e'), ('Completed', 'a')])
 
+    def test_an_idle_session_with_a_pull_request_open_is_in_review_under_needs_input(self):
+        self.f.session(100, ME, 'One')
+        self.f.session(200, OTHER, 'Two', status='busy')
+        self.f.session(300, QUIET, 'Three')
+        self.pr_ledger(ME, (151, 'open'), (152, 'open'), (150, 'done'))
+        self.pr_ledger(OTHER, (160, 'open'))
+        by_id = {x['id']: x for x in self.state()['sessions']}
+        for s in by_id.values():
+            s['repo'] = 'Gnome-Widgets'
+        one, two, three = by_id[ME], by_id[OTHER], by_id[QUIET]
+        self.assertEqual(speechqueue.review_label(one), 'In review \u00b7 Gnome-Widgets #151, #152')
+        self.assertEqual(speechqueue.status_group(one), 'Needs input')
+        self.assertEqual(speechqueue.session_line(one).split('\t')[9], speechqueue.review_label(one))
+        self.assertEqual((speechqueue.status_group(two), speechqueue.review_label(two)), ('Working', ''))   # busy: still working
+        self.assertEqual((speechqueue.status_group(three), speechqueue.review_label(three)), ('Completed', ''))
+
     def test_a_session_is_one_row_and_a_section_adds_its_title_and_a_blank_row_after_the_first(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')

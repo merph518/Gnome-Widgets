@@ -78,7 +78,7 @@ local function load_sessions(version)
         rows[#rows + 1] = {id = f[1] or '', speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', repo = f[7] or '',
-                           span = tonumber(f[8]) or 1, header = f[9] or ''}
+                           span = tonumber(f[8]) or 1, header = f[9] or '', review = f[10] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -655,7 +655,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
 
     font(cr, 11, text, s, false, false, true)
     set(cr, secondary(), 0.7)
-    local detail = r.repo                            -- the section it is under says its state
+    local detail = r.review ~= '' and r.review or r.repo   -- the section says its state; a pull request open says so
     local dx = after + 12 * s
     if detail ~= '' and right - dx > 40 * s then show(cr, fit(cr, detail, right - dx), dx, cy, 'left') end
     if queued ~= '' then show(cr, queued, c[2] * s, cy, 'right') end
