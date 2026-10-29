@@ -162,51 +162,47 @@ Section 5 is `<static-checks>`, including the build it asks for when packaging
 could break. Section 6 is replaced by this:
 
 A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
-[static-checks.md](../_shared/static-checks.md#then-a-run), from the checkout,
-whose launcher uses the `src/` next to it.
-
-One supervisor runs both widgets per desktop, and every copy shares one pid file,
-so `stop` stops whichever copy is running. A widget's own `stop` leaves the
-supervisor up while the other widget is wanted, and its `start` then goes to
-that supervisor's copy, so the run stops everything and starts each widget that
-was running, from the checkout. Look first: a widget running from another
-worktree's `src/` is another session's test, and this one waits for it rather
-than stopping it. For a visual change, take the before capture now, while the
-copy that was running is still up.
+[static-checks.md](../_shared/static-checks.md#then-a-run), as an isolated copy of
+the widgets that belongs to this session, started from the checkout. The copy has its
+own home, so its cache, config, pid file and window position are its own; its speech
+widget reads fixture Claude sessions and plays no sound; it has no tray icon, no
+Spotify login and so sends no Web API request; and its windows have a class and a
+position of their own. Any number of them run beside the user's copy and each
+other, so a session never waits for another session's widget, and never stops,
+replaces, restarts or captures one: the user's copy (installed, or from another
+worktree) and every other session's copy are not this session's to touch, and
+there is nothing to stop first. The script
+(`scripts/isolated-widgets.py`) names the copy after the checkout folder, so each
+worktree has one.
 
 ```bash
-pgrep -af 'nowplaying.py|speechqueue.py'   # which copies run, if any: note them
-scripts/capture-widget.py <scratchpad>/widget-before.png <widget>   # visual changes only
-bin/conky-widgets stop
-: > ~/.cache/conky-widgets/run.log
-bin/conky-widgets spotify start          # each widget that was running, and <widget>
-bin/conky-widgets speech start
-pgrep -af 'conky-widgets|nowplaying.py|speechqueue.py|conky-mouse.py|^conky '
-grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
+scripts/isolated-widgets.py start          # both widgets, from this checkout's src/
+scripts/isolated-widgets.py status
+scripts/isolated-widgets.py capture <scratchpad>/widget-after.png spotify   # or speech
+RUN=$(scripts/isolated-widgets.py path)/home/.cache
+grep -iE 'error|critical|traceback|lua' "$RUN/conky-widgets/run.log"
+grep 'api:' "$RUN/conky-spotify-nowplaying/nowplaying.log"      # must print nothing
+scripts/isolated-widgets.py stop           # removes the copy and its files
 ```
 
-The processes should run from this worktree's `src/`, and the log should hold
-nothing but the harmless `libayatana-appindicator is deprecated` warning.
-`<widget>` is `speech` or `spotify`, the one the change draws; the script
-falls back to `spotify` without it. Anything that changes how the widget looks
-gets a capture after the change
-(`scripts/capture-widget.py <scratchpad>/widget-after.png <widget>`), read with the
-`Read` tool next to the before capture and, when the layout was put to the
-user per [ui-options.md](../_shared/ui-options.md), the mockup of the option
-picked. When nothing is playing, say so and say
-what could not be looked at. A change to how the program finds its files or
-starts is also checked installed, as in `/release` step 4, because a path bug
-can exist only under `/usr`; afterwards the stop and start above run from the
-checkout again, so the checkout copy is the one left running.
+`start` takes `spotify` or `speech` to start one widget, `--at X,Y` for the position and
+`--installed` to run the installed launcher instead of the checkout's (refused while the
+installed widgets predate the window class suffix), which is how a change to how the program
+finds its files is checked installed, as in `/release` step 4, without touching the user's copy. A visual change takes its before capture from an isolated copy of
+`origin/main` (a second copy named for it, from a checkout of `origin/main`, with
+`--name`), not from the copy on the desk, and its after capture from this session's copy, read with
+the `Read` tool side by side.
 
-Afterwards, leave the checkout copy running. Never stop it to start the
-installed copy again; the report says the checkout copy was left running.
+The log should hold nothing but conky's startup chatter. The speech widget shows three
+fixture sessions (On, Alerts, Off); the Spotify widget shows whatever the Spotify app plays
+now, read through `playerctl`, without a heart (no login). When nothing is playing, say so
+and say what could not be looked at. Stop the copy when the run is done, and say in the
+report that the copy was stopped and the user's was not touched.
 
-The widget's Spotify Web API traffic is the user's, and a lockout takes the
-heart away for up to a day. So a run starts the checkout copy once, not in a
-loop, and nothing in a session sends a Web API request of its own to test or
-debug: no `spotify_api.py status` or `toggle`, no `curl`. What the widget sent
-is read from the `api:` lines in `nowplaying.log` instead.
+A session never sends a Web API request of its own to test or debug: no `spotify_api.py
+status` or `toggle`, no `curl`. The isolated copy has no token, so it sends none either; a
+run that needs the heart or the library index to be seen is not run by a session, and the
+report says what was left to the user.
 
 ### Section 7: Open the pull request
 
@@ -240,7 +236,7 @@ ends, per [self-review.md](../_shared/self-review.md#when-it-ends).
 Void the paragraphs on skips, the skip ledger and deviations. Report instead
 what was run and what it showed, anything not verified, the judgment calls
 one line each, and, after a run from
-the checkout, that the checkout copy was left running. End with the ready
+the checkout, that the isolated copy was stopped. End with the ready
 signal from `<ready-signal>`, which also puts the `Manual Review Needed` label
 on the pull request. Then record the pull request with
 `scripts/catchup.py add-pr` and leave the one `wait` running in the background,

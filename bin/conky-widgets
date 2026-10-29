@@ -13,7 +13,8 @@ usage: conky-widgets <widget> [command]
   autostart off    don't
 
 With no widget, show and hide act on every widget that is running, and stop, restart
-and status on every widget. While any widget runs, one tray icon serves them all.
+and status on every widget. While any widget runs, one tray icon serves them all, unless
+CSN_NO_TRAY is set (scripts/isolated-widgets.py sets it for a working session's copy).
 """
 import fcntl, os, re, shutil, signal, subprocess, sys, time
 
@@ -266,7 +267,7 @@ def supervise():
     signal.signal(signal.SIGINT, shutdown)
     while not stopping:
         want = wanted()
-        want += [BUNDLE] if want else []        # the tray goes with the last widget
+        want += [BUNDLE] if want and not os.environ.get('CSN_NO_TRAY') else []   # the tray goes with the last widget
         for widget in list(children):
             if widget not in want:
                 release(widget)

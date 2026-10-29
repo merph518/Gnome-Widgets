@@ -33,7 +33,8 @@ sys.path.insert(0, os.path.join(HERE, '..'))
 import tray_model  # noqa: E402
 
 NAME = 'conky-widgets/speech'                  # the config and cache folders under ~/.config, ~/.cache
-WM_CLASS = 'ConkySpeechQueue'                  # conky.conf's own_window_class
+# conky.conf's own_window_class, with the suffix a copy beside the user's adds
+WM_CLASS = 'ConkySpeechQueue' + os.environ.get('CSN_CLASS_SUFFIX', '')
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 # The buttons speechqueue.py writes the regions of, and what each runs.
 COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',)}

@@ -8,28 +8,35 @@ page is up. This is done before any drawing or layout code is written.
 
 ## First, look at what is there
 
-Look at which copies run, as `/implement` Section 6 does:
-`pgrep -af 'nowplaying.py|speechqueue.py'`. A capture is taken as the widget
-today only when the widget the change draws runs from the installed package
-(`/usr/share`) or from a checkout whose `HEAD` is `origin/main`; a copy from any
-other branch may show an unmerged change. Then capture it:
+The widget as it is today comes from an isolated copy of `origin/main`, never from
+the copy on the desk: that copy may be the user's, or another session's unmerged
+branch, and a session does not capture either. Start one from a checkout of
+`origin/main` (a worktree or a temporary `git worktree add --detach` of it, removed
+afterwards) under a name of its own, capture it, and stop it:
 
 ```bash
-scripts/capture-widget.py <scratchpad>/mockup-source.png <widget>   # speech or spotify
+MAIN="main-$(basename "$PWD")"     # a name of this session's own
+git fetch origin main
+git worktree add --detach <scratchpad>/main-checkout origin/main
+<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" start <widget>
+<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" \
+  capture <scratchpad>/mockup-source.png <widget>   # speech or spotify
+<scratchpad>/main-checkout/scripts/isolated-widgets.py --name "$MAIN" stop
+git worktree remove --force <scratchpad>/main-checkout
 ```
 
 and read it with the `Read` tool, so the mockups start from the widget as it is
 drawn today: its colours, its fonts, its spacing and the rows around the part
-that changes. This capture is only for the mockups; Section 6 still takes its
-own before capture at the run. Read the drawing code for that part,
+that changes. The speech copy shows fixture sessions, so a mockup of it starts from
+those rows. This capture is only for the mockups; Section 6 still takes its
+own after capture at the run. Read the drawing code for that part,
 `src/<widget>/draw.lua`, and the colours and fonts in `src/common/theme.lua`, so
-a mockup shows what the code can draw. Capturing only reads the window; it never
-starts or stops a widget.
+a mockup shows what the code can draw. Capturing only reads the copy's own window;
+it never touches the user's copy or another session's.
 
-When there is no such copy, or the capture fails (the widget is hidden, or
-only the other widget runs), do not start, stop or show one. Draw the mockups
-from the code and the theme alone, and say on the page that no capture was
-used.
+When the isolated copy cannot be started or the capture fails (nothing is
+playing, so the Spotify widget shows no card), draw the mockups from the code
+and the theme alone, and say on the page that no capture was used.
 
 ## The page
 
@@ -85,5 +92,5 @@ question a decision on the page (the tool takes up to four):
 
 The answer is the layout. The pull request body names the page and the
 options picked (1A, 2B) under its own `UI choices` heading, apart from
-`Judgment calls`, since the user made them. Section 6's after capture is read
+`Judgment calls`, since the user made them. Section 6's after capture, from the session's own isolated copy, is read
 next to the mockups of those options as well as its own before capture.
