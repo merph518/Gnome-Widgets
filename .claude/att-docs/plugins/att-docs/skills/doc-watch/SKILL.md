@@ -53,7 +53,9 @@ none, ask the user rather than guessing.
 ```
 
 The scheduled task runs the scan and the tracking-issue step only. Downloading
-needs the user's approval each time, and a schedule cannot give it.
+needs the user's approval each time, and a schedule cannot give it. The one
+standing approval is for the documents `build-test-pack` relies on; see "What
+this skill never does".
 
 Every question goes to the user through `<ask-tool>`. Commit messages, the pull
 request body, and the issue body are written to a scratch file and passed by
@@ -457,9 +459,46 @@ file with no library row, such as a held name. Commit the changed files, run
 `<branch-age-gate>`, push the branch when the gate did not, and open a pull
 request listing the counts.
 
+## Looking up named documents, for a test pack
+
+`build-test-pack` asks whether the documents a pack relies on are current. The
+day-level scan cannot answer that for a document edited on the day it was
+converted, so a lookup compares to the minute. Open the library as in step 1,
+then run the page for the named files:
+
+```bash
+python3 <scan-script> --config <extension> payload --mode lookup --name "<library file name>" [--name ...]
+```
+
+The page reports a `LOOKUP` row, with the Modified time, for every current copy of
+each name, indexed or not. Save the report and classify it:
+
+```bash
+python3 <scan-script> --config <extension> lookup <report> --name "<library file name>" [--name ...]
+```
+
+Each `--name` is the library file name, which is the name on the converted copy's
+`Source` line, never the hyphenated converted name. The result lists `changed` (a
+converted copy modified at or after its `Converted` minute; a copy stamped with a
+date alone is changed when the library copy was modified that day or later), `new`
+(no converted copy), `current`, `not_found`, `held` (a name in two folders holding
+different files that `<sources-table>` does not settle), `no_suite` (a new document
+in a folder that names no suite, which needs one chosen), and `ignored` (passed
+over by `<ignored-table>`). `readable` is false, with the cause in `session`,
+`errors`, or `index`, when the walk did not finish: that is an unreachable library,
+never documents not found. `changed` and `new` are in the shape `place` reads, so
+the download, `place --keep-resaved`, and conversion steps of step 6 apply
+unchanged.
+
 ## What this skill never does
 
 - Sign in, or type into any form on the site.
 - Edit, upload, check out, or delete anything on SharePoint.
-- Download without the user's approval for that batch.
-- Run `convert-docs`. Conversion stays a separate step the user starts.
+- Download without the user's approval for that batch. The one exception is
+  `build-test-pack`: a document it relies on that is missing or stale is
+  downloaded and converted without asking, so the pack is built from the
+  current text. It goes on a `<download-branch>` branch with its
+  `library.tsv` row, and a pull request opens for the usual review. Every
+  other download still asks first.
+- Run `convert-docs`. Conversion stays a separate step the user starts, except
+  for the `build-test-pack` documents above.

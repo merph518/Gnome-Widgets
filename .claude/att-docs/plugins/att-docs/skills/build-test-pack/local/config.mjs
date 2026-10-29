@@ -10,6 +10,24 @@ import { localEndpoint } from './model.mjs';
 
 const REQUIRED_REFERENCES = ['procedure', 'workbookStandard', 'implementationGuide'];
 
+// The shape of a rule export's rows. A consumer whose rule master differs
+// overrides any of these under `ruleShape` in its config.
+export const RULE_SHAPE = {
+  matrixColumns: ['path', 'requirement_type', 'rule_category', 'name', 'description',
+    'source_document', 'source_page', 'rule_summary', 'risk_level'],
+  categories: ['Validation', 'Workflow', 'State Transition', 'Security', 'Batch', 'Reporting',
+    'Event Generation', 'Conditional Display', 'Navigation', 'Integration', 'Data Integrity',
+    'Calculation', 'Notification', 'Role Restriction', 'Timing/Temporal'],
+  riskLevels: ['High', 'Medium', 'Low'],
+  statuses: ['active', 'retired', 'superseded'],
+  requirementType: 'Business Rule',
+  prefixPattern: '^BR-',
+  ruleIdPattern: '\\d{3}',
+};
+
+/** How many times a job is tried before it is flagged and dropped from the queue. */
+export const MAX_TRIES = 2;
+
 const fill = (template, values) => String(template).replace(/\{(\w+)\}/g, (whole, key) =>
   (values[key] === undefined ? whole : String(values[key])));
 export { fill };
@@ -49,7 +67,41 @@ export function loadConfig(configPath) {
   if (!Number.isFinite(pause.pollSeconds) || pause.pollSeconds <= 0) {
     throw new Error('config pause.pollSeconds must be a positive number');
   }
+  if (raw.cardRulesPerCall !== undefined) {
+    throw new Error('config cardRulesPerCall is replaced by cardScenariosPerCall');
+  }
+  if (!Number.isInteger(raw.cardScenariosPerCall ?? 4) || (raw.cardScenariosPerCall ?? 4) < 1) {
+    throw new Error('config cardScenariosPerCall must be a positive whole number');
+  }
+  if (raw.exclusiveSets !== undefined && typeof raw.exclusiveSets !== 'boolean') {
+    throw new Error('config exclusiveSets must be true or false');
+  }
   const output = raw.output ?? path.join(os.homedir(), '.local/share/build-pack');
+  const outputDir = path.resolve(root, output.replace(/^~(?=\/)/, os.homedir()));
+  // Where new jobs are listed; each source is read before the nightly run takes a job.
+  const queue = { file: '.build-pack-queue.json', start: '22:00', cutoff: '07:00', sources: [],
+    ...raw.queue };
+  if (!Array.isArray(queue.sources)) throw new Error('config queue.sources must be a list');
+  for (const source of queue.sources) {
+    if (source?.type === 'folder' && source.path) continue;
+    if (source?.type === 'records' && source.glob) continue;
+    if (source?.type === 'command' && Array.isArray(source.command) && source.command.length) continue;
+    throw new Error('config queue.sources takes folder (path), records (glob) or command (command list)');
+  }
+  const report = { weeklyDay: 1, sample: 2, maxPriority: 6, ...raw.report };
+  if (!Number.isInteger(report.weeklyDay) || report.weeklyDay < 0 || report.weeklyDay > 6) {
+    throw new Error('config report.weeklyDay must be a day number from 0 (Sunday) to 6');
+  }
+  for (const key of ['sample', 'maxPriority']) {
+    if (!Number.isInteger(report[key]) || report[key] < 0) {
+      throw new Error(`config report.${key} must be a whole number`);
+    }
+  }
+  if (report.seed !== undefined && !/^-?\d+$/.test(String(report.seed))) {
+    throw new Error('config report.seed must be a whole number');
+  }
+  report.dir = path.resolve(root, (report.dir ?? path.join(outputDir, 'reports'))
+    .replace(/^~(?=\/)/, os.homedir()));
   return {
     file,
     root,
@@ -64,11 +116,24 @@ export function loadConfig(configPath) {
     packFile: raw.packFile ?? '{issue}_pack.json',
     suitePackFile: raw.suitePackFile ?? '{suite}_pack.json',
     inputs: raw.inputs ?? {},
+    // Off unless the config or a job opts in: a document with no extracted rules
+    // stops intake instead of having rules derived from its text.
+    allowDerivedRules: raw.allowDerivedRules === true,
+    ruleShape: { ...RULE_SHAPE, ...raw.ruleShape },
     builder: { retries: 3, ...raw.builder },
     suiteMerge: raw.suiteMerge,
-    output: path.resolve(root, output.replace(/^~(?=\/)/, os.homedir())),
+    // Scenarios written per card call.
+    cardScenariosPerCall: raw.cardScenariosPerCall ?? 4,
+    // The sets an issue pack's cards are assigned to; null finds the objective
+    // by its usual name in the builder's list, if it has one.
+    fullCoverageObjective: raw.fullCoverageObjective ?? null,
+    breakItObjective: raw.breakItObjective ?? null,
+    // false: a card may sit in several sets. true: a BREAK IT card sits only in the BREAK IT set.
+    exclusiveSets: raw.exclusiveSets === true,
+    output: outputDir,
     pause,
-    queue: { file: '.build-pack-queue.json', start: '22:00', cutoff: '07:00', ...raw.queue },
+    queue,
+    report,
   };
 }
 

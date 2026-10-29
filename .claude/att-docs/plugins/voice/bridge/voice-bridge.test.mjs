@@ -56,6 +56,7 @@ function fakeMachine(entries, root = tempDir()) {
     sessionsDir: path.join(root, 'sessions'), procDir: path.join(root, 'proc'),
     bridgeDir: path.join(root, 'bridge'), projectsDir: path.join(root, 'projects'),
     startedFile: path.join(root, 'state', 'started.json'),
+    managedDir: path.join(root, 'speak-attention'),
   };
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
   for (const entry of entries) startFake(paths, entry);
@@ -2330,7 +2331,8 @@ test('start_session launches claude in the start folder and follows the new sess
   // Stands in for claude --bg: records the call and registers the session it would start.
   const startClaude = async launch => {
     launches.push(launch);
-    fakeMachine([{ pid: 42, cwd: '/repo', name: launch.name, kind: 'bg' }], root);
+    fakeMachine([{ pid: 42, cwd: '/repo', name: launch.name, kind: 'bg', sessionId: 'new-42' }],
+      root);
   };
   const context = {
     paths, config: { roots: ['/repo'], startDir: '/repo' }, startClaude, followWaitMs: 0,
@@ -2338,6 +2340,9 @@ test('start_session launches claude in the start folder and follows the new sess
   const result = await callTool('start_session',
     { name: '  Phone   Test ', request: '-v check the sweep' }, context);
   assert.match(result, /^Started Phone Test on Opus 5.5 and following it/);
+  assert.ok(fs.existsSync(path.join(paths.managedDir, 'new-42.managed')),
+    'the started session is a managed session');
+  assert.deepEqual(fs.readdirSync(paths.managedDir), ['new-42.managed']);
   assert.equal(launches[0].model, START_MODEL);
   assert.equal(launches.length, 1);
   assert.equal(launches[0].cwd, '/repo');
@@ -3157,8 +3162,11 @@ test('a start that shows up after start_session returns is still recorded', asyn
   const started = await callTool('start_session', { name: 'Slow' },
     { ...context, startWaitMs: 0 });
   assert.match(started, /has not shown up yet/);
+  const marker = path.join(paths.managedDir, 's87.managed');
+  assert.ok(!fs.existsSync(marker), 'a pending start names no session to mark');
   fakeMachine([{ pid: 87, cwd: '/repo', name: 'Slow', kind: 'bg', sessionId: 's87' }], root);
   assert.match(await callTool('list_sessions', {}, context), /^Slow, idle/);
+  assert.ok(fs.existsSync(marker), 'the start is a managed session once it shows up');
   fs.rmSync(path.join(paths.procDir, '87'), { recursive: true });
   const bridge = await restartedBridge(paths, config);
   assert.match(await bridge.callTool('list_sessions', {}, context), goneLine('Slow'));

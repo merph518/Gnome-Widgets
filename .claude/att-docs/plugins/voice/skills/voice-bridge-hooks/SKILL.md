@@ -32,12 +32,12 @@ All of them ship in this folder.
 
 | Script | What it does | `--config` |
 | --- | --- | --- |
-| `speak-attention.sh` | Speaks on Stop, on an `AskUserQuestion` call, and when a Bash call adds `<review-label>`; reads replies aloud in speech mode; pushes a followed session's text to the bridge's feed | yes |
+| `speak-attention.sh` | Speaks on Stop, on an `AskUserQuestion` call, and when a Bash call adds `<review-label>`; reads replies aloud in speech mode; pushes a followed session's text to the bridge's feed; marks a session that runs the implement skill managed | yes |
 | `stop_attention.py` | Says what a stopped session needs from the user, or exits 3 to stay quiet | yes |
 | `voice_bridge_reply.py` | Writes a stopped session's reply, its attention marks, its feed entries and its ready records for `<bridge>`, and answers a permission prompt with the answer the bridge relays | yes |
 | `transcript.py` | Reads a session transcript; `blocked` prints the ledgers, issues and pull requests a session waits on | yes, for `blocked` |
 | `ready_line.py` | Reads `<ready-line>` and a `<review-label>` add out of a reply and a command, imported by the three above | through its importer |
-| `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions` and `speech <session> on\|alerts\|off\|cycle`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
+| `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle` and `managed <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
 | `sessions.py` | Lists the open Claude sessions the way the bridge's `list_sessions` does; imported by `speechctl` | no |
 | `speak_pending.py` | Picks the text blocks a turn has not had read aloud yet | no |
 | `background_pending.py` | Names the background work still due to wake a session, so a stop stays quiet | no |
@@ -60,7 +60,9 @@ through `speechctl`.
 | `<session>.replies` | Speech **On**: the session's replies are read aloud as they land |
 | `<session>.muted` | Speech **Off**: the session says nothing, announcements included. Its voice-bridge feed is unaffected |
 | neither | **Alerts only** (the default): just the short announcements |
+| `<session>.managed` | A **managed session**: one the session management widget shows. `speechctl sessions` reports it as `managed`. It says nothing about speech, which the two markers above set on their own |
 | `<session>.queue`, `.cursor`, `.name` | The lines waiting to be read, how far the turn was read, the name the voice gives the session. Edits to the first two take `<session>.cursor.lock`. A queue line is the spoken text, then a tab and the block as the assistant wrote it, as a JSON string; a line with no tab (queued before `markdown` existed) has no source |
+| `<session>.feed` | A managed session's replies (while its `<session>.managed` marker exists), for the session management widget: one JSON object per line per block, `session`, `name`, `text` (the spoken form, no name ahead of it), `markdown` (the block as written, trimmed and capped as `now.json`'s; a block that is only space is not fed) and `at` (epoch seconds). Written ahead of each tool call and at Stop whatever the speech setting, On, Alerts only or Off, under `<session>.cursor.lock`, and never played. It reads the turn through `<session>.feed-cursor`, its own, so speech turning on (which marks `.cursor` read) never drops a block from it. Keeps the last 200 blocks (`FEED_KEEP` in `speak-attention.sh`) |
 | `now.json` | The clip playing: `session` and `name` of the session whose line it is (not always the hook's own, since a hook reads other sessions' queues after its own), `text`, `markdown`, `started`, `clip`, `hook_pid`, `player_pid` (null while Piper renders), `engine` (`piper` or `spd-say`). Written atomically, removed when the clip ends or its hook is killed |
 | `paused` | Present while speech is held. A Piper clip is paused by stopping its player; a Speech Dispatcher clip is cancelled and its line put back at the head of the queue (`requeue` names the clip). A held line stays queued, and a hook gives up the hold after about 1100 s |
 | `skip` | Left by `speechctl skip` while Piper is still rendering; the hook drops the clip when the render ends |
@@ -83,8 +85,12 @@ The hook that holds the voice reads its own session's queue first, then every ot
 session's with lines left, oldest first. `speechctl next` drops what is queued for the
 speaking session, so the next session's reply plays; lines queued afterwards still play.
 
-`/implement-with-speech` sets a session to On and clears Off. A typed `/implement` takes On
-to Alerts only and leaves Off alone.
+Every implementation is a managed session. The implement skill, typed as `/implement` or
+`/<plugin>:implement`, or called through the Skill tool, writes `<session>.managed`, and a
+session the voice bridge's `start_session` launches gets the marker from the bridge as soon
+as it shows up. Neither touches the speech setting: speech is On, Alerts only or Off only as
+`speechctl speech` or the widget sets it. `speechctl managed <session> on|off` sets the
+marker by hand.
 
 ## The config
 
@@ -112,8 +118,9 @@ toplevel of the folder the file sits in.
 - Speech comes from Piper with a voice model when one is installed, else from
   Speech Dispatcher. A machine without `jq` and `python3`, or with neither
   speaker, stays quiet.
-- Speech mode is turned on by the `implement-with-speech` skill and off by a
-  typed `/implement`.
+- Speech mode is turned on and off by `speechctl` and the speech widget, never
+  by a command the session runs. The implement skill makes a session managed and
+  leaves its speech alone.
 
 ## Wiring
 

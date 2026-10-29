@@ -35,7 +35,6 @@ This repository is private and for my own use.
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
-| `general` | `implement-with-speech` | Run implement with every reply read aloud |
 | `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and the voice bridge relayed |

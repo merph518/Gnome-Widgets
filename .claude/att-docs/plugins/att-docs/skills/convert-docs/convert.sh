@@ -11,7 +11,7 @@
 #
 # Usage:
 #   convert.sh --config FILE [--in DIR] [--out DIR] [--suite NAME] [--limit N]
-#              [--dry-run] [--keep-sources] [--converted YYYY-MM-DD]
+#              [--dry-run] [--keep-sources] [--converted 'YYYY-MM-DD HH:MMZ']
 #
 # FILE is the skill's extension.json (see convert_config.py). --in and --out
 # default to its todoRoot and appsRoot, and a relative path is read from the
@@ -28,7 +28,7 @@ SUITE=""
 LIMIT=0
 DRY_RUN=0
 KEEP_SOURCES=0
-CONVERTED="$(date +%F)"
+CONVERTED="$(date -u +'%F %H:%MZ')"
 
 # The share of a secondary source's vocabulary that may be missing from the
 # primary before the group is held back for a merge by hand. Across the thirteen

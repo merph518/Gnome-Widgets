@@ -129,11 +129,12 @@ Every file opens with its title as the only H1, then this:
 - Version: not stated
 - Screen: 5.0, from the file name
 - Pages: 9, as LibreOffice lays the document out
-- Converted: 2026-08-20
+- Converted: 2026-08-20 14:05Z
 ```
 
-`Converted` is the run date and is the only value here that is originated
-rather than found. Everything else is quoted from somewhere, and says where.
+`Converted` is the run date and time to the minute, in Zulu time (a trailing `Z`), and is the only
+value here that is originated rather than found. A file converted before the
+time was stamped holds the date alone. Everything else is quoted from somewhere, and says where.
 
 ### The SharePoint line
 
@@ -369,7 +370,7 @@ missing. The stub names them.
 | `--dry-run` | report the grouping and the routes, write nothing |
 | `--keep-sources` | leave the sources in place instead of moving them to `_done` |
 | `--origin TEXT` | `<stamp-script>` only: name where a transported document was written |
-| `--converted DATE` | override the run date in the block |
+| `--converted STAMP` | override the run date and time in the block, `YYYY-MM-DD HH:MMZ` or a date alone |
 | `--in DIR` `--out DIR` | move either end of the batch from `<todo-root>` and `<apps-root>` |
 
 `--dry-run` first is worth the second it takes: it prints how the files grouped

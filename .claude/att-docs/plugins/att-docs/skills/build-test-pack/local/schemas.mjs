@@ -86,10 +86,32 @@ export const objectivesSchema = (objectives) => obj({
   objectives: keyed('objective', objectives, { applicable: { type: 'boolean' }, reason: str }),
 });
 
-export function cardSchema({ ids, objectives, derivations }) {
+/** The kinds of scenario the source can support. The first four are asked for in every inventory. */
+export const REQUIRED_SCENARIO_KINDS = ['control', 'isolation', 'combined', 'persistence'];
+// A break scenario tries to break the change; it is asked for when a BREAK IT set is in play.
+export const SCENARIO_KINDS = [...REQUIRED_SCENARIO_KINDS, 'break', 'decision'];
+
+// Each scenario is a population, an action and an expected outcome. `kindChecks`
+// makes the reply answer for every required kind: what its scenario tests, or
+// why the source supports none.
+export const scenarioInventorySchema = ({ ids, kinds = SCENARIO_KINDS,
+  required = REQUIRED_SCENARIO_KINDS, maxItems }) => obj({
+  scenarios: listOf(obj({
+    rules: listOf(oneOf(ids), { minItems: 1 }),
+    kind: oneOf(kinds),
+    population: str,
+    action: str,
+    outcome: str,
+  }), { minItems: 1, ...(maxItems ? { maxItems } : {}) }),
+  ...(required.length ? { kindChecks: keyed('kind', required, { note: str }) } : {}),
+});
+
+// `scenarios` names the scenario ids a card may cover.
+export function cardSchema({ ids, objectives, derivations, scenarios }) {
   const ruleList = listOf(oneOf(ids));
   return obj({
     title: str,
+    ...(scenarios ? { scenario: oneOf(scenarios) } : {}),
     mission: str,
     focus: listOf(str, { minItems: 1 }),
     expected: str,
@@ -100,14 +122,22 @@ export function cardSchema({ ids, objectives, derivations }) {
   });
 }
 
-export const cardsSchema = ({ ids, objectives, derivations, uncoveredStatuses }) => obj({
-  cards: listOf(cardSchema({ ids, objectives, derivations })),
+// A scenario no card is written for is skipped: an existing test covers it, or no card can.
+export const SKIP_REASONS = ['reused', 'gap'];
+
+export const cardsSchema = ({ ids, objectives, derivations, uncoveredStatuses, scenarios }) => obj({
+  cards: listOf(cardSchema({ ids, objectives, derivations, scenarios })),
   uncovered: listOf(obj({
     ruleId: oneOf(ids), status: oneOf(uncoveredStatuses), gap: str, recommendation: str,
   })),
+  ...(scenarios ? { skipped: listOf(obj({
+    scenario: oneOf(scenarios), how: oneOf(SKIP_REASONS), reason: str })) } : {}),
   reuse: strs,
   assumptions: listOf(assumptionSchema),
 });
+
+/** The existing cards that serve an objective, by reference. */
+export const objectiveCardsSchema = (refs) => obj({ cards: listOf(oneOf(refs)) });
 
 export const setScopesSchema = (objectives) => obj({
   sets: keyed('objective', objectives, { scope: str }),

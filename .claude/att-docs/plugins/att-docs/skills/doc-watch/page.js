@@ -19,6 +19,8 @@
   // One entry per indexed document: 8 hex hash of the file stem, suite code, index into
   // the date list. Null when the page is expected to hold this version already.
   const PACKED = __INDEX__;
+  // Lookup mode only: 8 hex hashes of the stems to report, whether indexed or not.
+  const NAMES = new Set(__NAMES__);
   // sources.tsv as [stem hash, library folders its converted files came from]. A stem
   // with an entry is compared only against its copies under those folders.
   const SOURCES = new Map(__SOURCES__);
@@ -242,6 +244,12 @@
           }
           const rule = ruleOf(folder);
           if (rule === 'skip') continue;
+          // A lookup reports the exact Modified time of the named documents' current
+          // copies, indexed or not, and nothing else.
+          if (MODE === 'lookup') {
+            if (NAMES.has(hash)) emit('LOOKUP', folder, name, modified, size, rule || '', side ? 'side' : '');
+            continue;
+          }
           if (hit) {
             if (!found.has(hash)) found.set(hash, []);
             found.get(hash).push({ row: [folder, name, modified, size], home, side });
@@ -256,7 +264,7 @@
         }
       }
       for (const [key, count] of [...survey].sort()) emit('SURVEY', ...JSON.parse(key), count);
-      if (MODE !== 'survey') {
+      if (MODE !== 'survey' && MODE !== 'lookup') {
         // One name in the home folders of two or more documents is either one document
         // copied, when each home holds the same files at the same sizes, or different
         // documents. Different documents are held back until sources.tsv says which folder

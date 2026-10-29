@@ -204,7 +204,8 @@
 //                  on START_MODEL or the model the user names, one of START_MODELS by its
 //                  family name, with or without its version; any other name is refused
 //                  before anything launches, and the reply says the model. It then
-//                  follows the new session. With a milestone in place
+//                  follows the new session and marks it a managed session, for the session
+//                  management widget, in speak-attention.sh's folder. With a milestone in place
 //                  of a request it takes the milestone's oldest open issue that is not In
 //                  Progress and that no open pull request closes or carries in its branch
 //                  name, has the session implement it with the implement skill, and names
@@ -624,6 +625,7 @@ export function defaultPaths(env = process.env) {
     appSessionsDir: path.join(config, 'Claude', 'claude-code-sessions'),
     settingsFile: path.join(claude, 'settings.json'),
     bridgeDir: path.join(runtime, 'voice-bridge'),
+    managedDir: path.join(runtime, 'speak-attention'),
     configFile: path.join(config, 'voice-bridge', 'config.json'),
     stateFile: path.join(state, 'voice-bridge', 'state.json'),
     numbersFile: path.join(state, 'voice-bridge', 'numbers.json'),
@@ -1308,10 +1310,31 @@ const readStarted = paths => {
   return Array.isArray(entries) ? entries : [];
 };
 
-// Rewrites the record when it changed. A record that cannot be written is left as it is, and
-// a later call tries again.
+// Every session start_session launched is a managed session: speak-attention.sh's
+// <sessionId>.managed marker puts it in the session management widget. Each entry the
+// record names a session for gets one, whether or not it ever runs the implement skill,
+// which sets the same marker.
+function markManaged(paths, entries) {
+  if (!paths.managedDir) return;
+  for (const { sessionId, gone } of entries) {
+    if (gone || !/^[\w-]+$/.test(sessionId ?? '')) continue;
+    const marker = path.join(paths.managedDir, `${sessionId}.managed`);
+    try {
+      if (!fs.existsSync(marker)) {
+        fs.mkdirSync(paths.managedDir, { recursive: true });
+        fs.writeFileSync(marker, '');
+      }
+    } catch {
+      // the hook's folder cannot be written; the session runs unmanaged
+    }
+  }
+}
+
+// Rewrites the record when it changed, and marks each session it names managed. A record
+// that cannot be written is left as it is, and a later call tries again.
 function writeStarted(paths, before, after) {
   if (JSON.stringify(before) === JSON.stringify(after)) return true;
+  markManaged(paths, after);
   try {
     writePrivateJson(paths.startedFile, after);
     return true;

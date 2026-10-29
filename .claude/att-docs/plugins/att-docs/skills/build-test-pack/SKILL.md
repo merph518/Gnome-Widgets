@@ -79,6 +79,7 @@ none, ask the user rather than guessing.
 | `<intake-sheet>` | The sheet that carries job intake |
 | `<core-objective>` | The objective that tests the change itself |
 | `<break-objective>` | The objective that tries to break the change, run last |
+| `<full-coverage-objective>` | The objective whose set runs every card that comes from a requirement |
 | `<suite-merge>` | The command that merges a suite pack's card files and narrative |
 | `<pack-builder>` | The command that builds the workbook from a pack file |
 | `<testpack-command>` | The command that loads a suite pack into `<test-tool>`, dry run by default |
@@ -136,11 +137,87 @@ documents and the methodology chapters each phase reads, the input commands
 (`<rule-export>`, `<folder-export>`, the description and the document index),
 and `<pack-builder>` and `<suite-merge>`, which it runs unchanged.
 
-A `<rule-export>` that fails stops intake with `rule-export-failed`, unless its
-error output matches the config's `noRules` pattern, the export's own way of
-saying the document has no rules in the master yet. Only then are the rules
-derived from the document in Phase 2, so an export outage never passes for a
-document with no rules.
+Each document's rules are checked in two places. Intake checks every document
+it resolves, and stops with a code and the document's number when:
+
+| Code | Meaning |
+| --- | --- |
+| `rule-export-failed` | `<rule-export>` failed for a reason other than the next row, so an outage never passes for a document with no rules |
+| `rules-malformed` | the export is not the shape the rule master writes: the top level, `doc`, the prefix, the rule IDs and their uniqueness, the statuses, or an empty rule list; what is wrong goes to `detail.log` only |
+
+Phase 2 reads the export again for each Included document whose rules intake
+did not just export, so a job resumed after the rules were extracted sees them.
+It writes a `stop-doc` status line per failing document, then stops with a
+count and the document numbers under the first code that applies:
+`rule-export-failed`, `rules-malformed` (both as above), then:
+
+| Code | Meaning |
+| --- | --- |
+| `rules-not-extracted` | the export's error output matches the config's `noRules` pattern, its own way of saying the document has no rules in the master yet |
+
+An export outage in Phase 2 for a document whose rules intake read keeps those
+rules and leaves a `warn` status line.
+
+A document that is only supporting context needs no rules: Phase 2 does not
+read it again, and a missing or stale rule set on it never stops the job.
+
+Values the master holds that the current procedure would not write (an older
+category, a requirement type that names a category, a blank column, a page the
+document cannot place) are warnings in `detail.log`, not a stop. So is `rules-stale`: the document's provenance revision date is later than
+the day its rules were last confirmed (the export's `reviewed` or
+`last_reviewed` day when it has one, else the newest `created` date on its
+rules). A stale export leaves a `warn` status line with the document's number;
+the session offers `<update-skill>` for it and does not stop the job. A document
+that states no revision date is not checked.
+
+The rules are derived from the document in Phase 2 only when the job or the
+config opts in, with `--allow-derived-rules` or `allowDerivedRules` in the
+config, off by default. Use it only when the user chooses to go ahead without
+extracted rules; Job Intake then records the limitation. A retired rule stays in
+the pack with a summary that starts "Retired:", and Phase 3 classifies it like
+any other rule: Direct Change only when the change description concerns that
+removal, Not Impacted otherwise.
+
+### Before a job is run or queued
+
+Before `run` or `queue add`, the session refreshes the source documents, as
+"Refreshing the source documents" under "Inputs, and where they come from"
+sets out, and then runs the input gates, which make no
+model call and print content-free lines only:
+
+```bash
+<pipeline> check --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+```
+
+Each line reads `<input>  present|missing  <code>`: the issue number, the
+description, and each document by number with the reason code for its rules
+(`rules-ok`, `rules-derived`, `rules-stale`, `rules-not-extracted`,
+`rules-malformed`, `rule-export-failed`, or `document-file` for a document that
+is not in the repository). The exit code is 0 when every input is present, 1
+when a required input is missing, and 3 when no `--doc` was given: the model
+chooses the documents at intake, so only the candidates are counted and the
+line `rules  unchecked  name-documents-with-doc` is printed. Pass the documents
+the request names so their rules are checked before the job waits for the
+night; a job with unchecked rules is queued only when the user chooses to.
+What `check` found wrong with an export is in `<job-id>.check/detail.log` in
+the pipeline's output folder, which a later run does not clear.
+
+For every missing input, the session asks the user through `<ask-user>`:
+
+- for each document without usable rules, offer `<extract-skill>`; for
+  `rules-stale`, offer `<update-skill>`; for `rules-malformed`, offer
+  `<update-skill>` and say the cause is in the check's `detail.log`, for the
+  user to read;
+- list the `<attached-only>` items, which `check` cannot see, and any rule
+  extract to attach, and ask which the user has;
+- offer to go ahead with limitations (`--allow-derived-rules` for a document
+  with no extracted rules).
+
+The job is run or queued only when the gates pass, or when the user explicitly
+chooses to go ahead with limitations. The session never reads a document or a
+rule to answer any of this. `queue add` for a job already queued merges
+`--allow-derived-rules`, `--doc`, `--now` and `--resume` into its row and says
+what it updated.
 
 The session never reads the documents, the rules, the description, the pack
 file, the workbook, or the job's `detail.log` and `work` folder. It runs or
@@ -148,12 +225,16 @@ queues the job and reports the content-free status lines: phase names, pass or
 fail, reason codes, counts and timings.
 
 ```bash
-<pipeline> run --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--resume]
+<pipeline> check --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+<pipeline> run --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 <pipeline> run --config <pipeline-config> --suite <code> [--resume]
-<pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] [--resume]
+<pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 <pipeline> queue start --config <pipeline-config> --job <job-id> [--cutoff HH:MM]
 <pipeline> queue status --config <pipeline-config> --job <job-id>
 <pipeline> queue summary --config <pipeline-config>
+<pipeline> queue remove --config <pipeline-config> --job <job-id>
+<pipeline> queue fill --config <pipeline-config>
+<pipeline> report --config <pipeline-config> [--period day|week|auto] [--seed <n>]
 ```
 
 After each phase passes, the job saves its state in its `work` folder. A job run
@@ -177,9 +258,11 @@ that fails while thinking is retried once with thinking off.
 
 A job takes an hour or more, so a request made during the day is queued.
 `local/systemd/` holds a user timer that starts `queue run` at 22:00; the queue
-runs one job at a time, marks a failed job failed and moves on, takes no new job
-past the cutoff (07:00 by default), takes none at all when the timer only fires
-after the cutoff, and leaves a morning summary with one line per job.
+runs one job at a time, puts a failed job back for a later run and moves on,
+takes no new job past the cutoff (07:00 by default), takes none at all when the
+timer only fires after the cutoff, and leaves a morning summary with one line
+per job. "Running unattended" below covers how the queue fills, what a failure
+does, and the daily report.
 `queue run` given `--cutoff` runs whenever it is started. A stopped job's
 status line names the phase and the gate; what the gate found is in the job's
 own folder, for the user to read.
@@ -220,10 +303,13 @@ second start of the same instance merges into it at any point while it runs. A
 job already running under the nightly service is not refused by systemd, but
 `queue start` finds the queue held and the row `running`, says `<job-id> is
 already running`, and takes nothing. `queue add` prints `queued`, `marked to
-start now` for a row it set to start now, `already running`, or `already
-queued`. A row
-marked `running` whose process is gone is marked failed as `interrupted` by the
-next run that takes the queue; the lock and the duplicate-ID check in
+start now` for a row it set to start now, `<job-id> is already queued; updated
+<fields>` when it merged options into a waiting row, `already running`, or
+`already queued`. A row
+marked `running` whose process is gone counts as a failed try, `interrupted`,
+for the next run that takes the queue. A run that works every queued row takes
+the job again at once; a `queue start` run works only rows marked `--now`, so it
+leaves the job for the night. The lock and the duplicate-ID check in
 `queue add` are what stop a job from starting twice. The lock records the
 holder's PID and start time, so a lock file left by a crash, or one whose PID
 another process has since taken, is not a holder.
@@ -231,9 +317,12 @@ another process has since taken, is not a holder.
 If another `queue run` or `queue start` already holds the queue, `queue start`
 waits a couple of seconds, tries once more, and then takes nothing, says so, and
 exits. The job stays `queued`. A `queue run` that holds the queue works every
-queued row, oldest first, and a `queue start` works every `--now` row, until the
-cutoff, so either takes this one in its turn. That is a good start, not a failed
-one; do not start it again.
+queued row, oldest first, and takes this one when it is due and has not failed in
+that run. A `queue start` works only rows marked `--now`, so it takes this one
+only if it was queued with `--now`. Either way the row stays `queued`: that is
+not a failed start. If the holder was a nightly run, wait for it; if it was a
+start-now run and the row is not marked, start it again when the run ends or let
+tonight's run take it.
 
 The session reads the outcome with one command, which prints only the row's
 status, whether a live process holds the queue, and the last status line the
@@ -313,6 +402,146 @@ A `*` in a sudoers argument also matches spaces, so a pattern there can allow
 more than the unit it was meant for. Listing the units is safer. With scope
 `user`, no sudo is involved.
 
+### Running unattended
+
+A week of nightly runs needs no one at the keyboard. The queue fills itself,
+a failed job tries once more, and a report tells the maintainer what to look at.
+The session does not read the report's sources any more than it reads a job's
+folder; it passes on the report's lines.
+
+**The queue fills itself.** The config's `queue.sources` lists where new jobs
+are named. Each night, after `queue run` takes the queue and before it takes a
+job, every source is read and each job it names that the queue has not seen is
+queued. A source is one of:
+
+```json
+"queue": {
+  "sources": [
+    { "type": "folder", "path": "<folder>" },
+    { "type": "records", "glob": "<records-glob>", "pattern": "<file-name-regex>" },
+    { "type": "command", "command": ["<program>", "<argument>"] }
+  ]
+}
+```
+
+- `folder`: every file in the folder is a list of jobs, one per line. The
+  maintainer drops a list there.
+- `records`: one job per record file, such as the SIR records in the
+  repository's documents folder. The first group of `pattern` (case-insensitive,
+  matched against the file name) is the issue number and an optional second
+  group is the change number. A file name the pattern does not read is counted
+  as an unreadable line and skipped. Without a `pattern`, a name that starts
+  with `SIR` or `ISSUE`, an optional `-`, `_` or space, and the issue number is
+  read; a change is read only when `change` or `CR` follows, then a number that
+  starts with a digit, as in `SIR-9415-change-7001.md` or `ISSUE_9415_CR7001.md`.
+  `SIR-9415-credit-limit.md` is issue 9415 with no change. A name where `change`
+  or `CR` stands alone after the issue number but no valid change number follows,
+  such as `SIR-9415-CR-CHG7001.md` or `SIR-9415-CR-7001,7002.md`, is counted as an
+  unreadable line and not queued, so the issue is never queued without the change
+  it names. So is a title that begins with one of those words, such as
+  `SIR-9415-change-password.md` or `SIR-9415-CR-screen.md`; the pattern cannot
+  tell it from a bad change number. Rename the file or add the job by hand.
+- `command`: a program that prints job lines, such as one that lists the build's
+  SIR/CR from the requirements tool. It runs in the repository root, and a
+  non-zero exit reads as an unreadable source.
+
+A job line is `<issue>`, `<issue> <change>`, `suite <code>`, or the full
+`queue add` form, such as `--issue 9415 --doc <path>`. Blank lines and lines
+that start with `#` are skipped, and a line that is not a job is counted and
+skipped. Jobs queued this way skip the `check` gates, so a job whose
+documents have no usable rules fails at intake, retries once, and is dropped with
+a gate reason code (for example `gate:rules-not-extracted`);
+the report shows it. A job already in the queue file in any state (waiting, passed, failed
+or removed) is never queued again, so a list can stay in the folder after its
+jobs have run. `queue fill` does the same read by hand and prints which jobs it
+queued, how many it already knew, and which sources it could not read. A source
+that lists every record in the repository queues every one of them the first
+time, so point a `records` source at the open ones.
+
+**A failed job tries once more.** The first time a job fails, its row goes back
+to waiting with the failure kept (phase and reason code). A job that failed
+during the night is not retaken that night; the next nightly run takes it and
+resumes from the phase that stopped it. A job that failed in the daytime, such as
+one started on request, is taken by that evening's run. A job that fails a
+second time stays `failed`, is never taken again, and is flagged in the report
+with both reasons. A run that died mid-job counts as a failed try with the
+reason `interrupted` and no wait. A run that works every queued row takes it at
+once; a `queue start` run works only rows marked `--now`, so it leaves the row
+for the night. `queue start --job <job-id>` on a job waiting for its retry runs
+it without waiting, and so does a `--now` row under a `queue start`. `queue add
+--now` only marks the row; the start comes from `queue start`. `queue add` on a
+dropped job is how a person puts it back.
+
+**The report.** `report` reads the queue file and each job's `status.log`, and
+writes `daily-<date>.md`; on the configured weekday (`report.weeklyDay`, 1 for
+Monday) it writes `weekly-<date>.md`, the same layout over seven days with a
+count for each day. The files go in the output folder's `reports/` folder, or in
+`report.dir`. Like the status lines, they hold job IDs, reason codes, counts,
+confidence ratings and run times, and nothing a document or the model said, so
+a file can be opened or sent anywhere. Each has:
+
+- a summary: jobs passed, jobs waiting to retry, jobs dropped, and the queue's
+  depth;
+- a table with each job's result (PASS, PASS WITH LIMITATIONS, RETRY or
+  DROPPED), the phase and reason code of the gate that stopped it, the sheet
+  counts (pass, limited, fail), the confidence rating and the run time;
+- the jobs that keep failing, with every reason code and whether each retries or
+  has been dropped;
+- a spot-check list: packs rated Low confidence first, then PASS WITH
+  LIMITATIONS, up to `report.maxPriority` (6), then `report.sample` (2) more
+  chosen at random from the other passed packs. `--seed <n>` or `report.seed`
+  makes the random choice repeatable.
+
+`local/systemd/build-pack-report.timer` writes the report at 07:30 each morning,
+half an hour after the queue's default cutoff.
+
+**Maintainer runbook.** Every command below is `<pipeline> <command> --config
+<pipeline-config>`, run on the host that holds the timer.
+
+- Add a job. Put its number on a line in a file in the source folder, or run
+  `queue add --issue <n> [--change <m>]`. To run a dropped job again, run
+  `queue add` for it. Anyone who can write to the source folder can name the
+  documents the model will read (`--doc` on a line), so keep that folder
+  writable only by people trusted with the repository's documents.
+- Remove a job. Run `queue remove --job <job-id>`, and take its line out of the
+  source so it is not a surprise later; the job stays out of the queue either
+  way. A job that is running cannot be removed; remove it after it finishes.
+  `queue remove` and `queue fill` take the queue's lock, so while a run holds the
+  queue they say so and exit; run them again when it ends.
+- Read the report. Open the newest file in the reports folder. Start with
+  "Jobs that keep failing": a DROPPED job needs a person, and its reason code and
+  phase say where to look. A RETRY job needs nothing yet. Then open the
+  workbooks in the spot-check list and judge them. Packs with Low confidence or
+  limitations come first because they are where the model was least sure. A
+  queue depth that grows night over night means the jobs take longer than the
+  night allows.
+- Restart the model server. Find its unit name: the port in the config's
+  `model.endpoint` says which service listens, and `systemctl --user list-units
+  --type=service` (or `systemctl list-units --type=service` for a system unit)
+  shows it. Check that it is up with `systemctl --user status <model-server-unit>`,
+  then restart it with `systemctl --user restart <model-server-unit>`. Do it
+  while no job is running (`queue status --job <job-id>` shows `held` while one
+  is). A restart during a job makes the call in flight fail, and the job takes
+  an ordinary failed try (`model:network`, `model:http` or `model:no-reply`),
+  so it is retried like any other failure; only a pipeline process that died
+  itself leaves an `interrupted` row. After a restart, the server's context size
+  and request time-out must still be at least `model.context` and
+  `model.timeoutMinutes`.
+- Move the timer to another host. On the new host install the repository, the
+  model server, the pipeline config and the env file at
+  `~/.config/build-pack/env`, then copy `build-pack.service`, `build-pack.timer`,
+  `build-pack-report.service` and `build-pack-report.timer` to
+  `~/.config/systemd/user/` and run `systemctl --user daemon-reload` and
+  `systemctl --user enable --now build-pack.timer build-pack-report.timer`. Run
+  `loginctl enable-linger <user>` on the new host as well, or user timers stop
+  when that user logs out and the night's run never starts. Copy the queue file
+  (`queue.file`) and the pipeline's output folder (the jobs' status logs and the
+  reports) from the old host so the queue and its history carry over, and run
+  `queue status` for a waiting job to check it is read. Then
+  `systemctl --user disable --now build-pack.timer build-pack-report.timer` on
+  the old host. Two hosts with the timer on would build the same jobs twice,
+  since the queue lock is per host.
+
 ## Where the reference material may go
 
 Nothing from `<reference-dir>` leaves that folder, and nothing under
@@ -333,12 +562,61 @@ new pack.
 | --- | --- |
 | `<issue-term>` number, `<change-term>` number | the request |
 | `<change-term>` or `<issue-term>` description | `<description-source>` |
-| Business rule matrix | the business rule master, through `<rule-export>`, one call per process description |
+| Business rule matrix | the business rule master, through `<rule-export>`, one call per process description; `check` reports whether each document's rules are usable before a job runs |
 | Process description | `<process-docs>` |
 | Design or module specification | `<design-docs>` |
 | `<attached-only>` | attached by the user; there is no copy in the repository |
 | Existing `<test-tool>` test plan and test lab assets | `<existing-tests>` |
 | Existing automation | `<existing-automation>` |
+
+### Refreshing the source documents
+
+Before a job is checked, run, or queued, the session makes sure every document
+the pack relies on is current. A candidate document that intake picks later
+is checked the same way before Phase 1 passes, in a session build. A pack built from a stale converted copy gets its
+rules, its conflicts, and its scope from text the change has already replaced.
+
+1. **Find the documents.** In a session build, every document the
+   `<issue-term>`, the `<change-term>`, or their thread comments name or point
+   to, plus the candidate documents intake picks. For a job on the local
+   pipeline the session reads none of those, so the documents are the ones the
+   request names with `--doc`; a document the model picks at intake is not
+   covered, and the user is told so.
+2. **Check each against the library** with `doc-watch`'s lookup
+   (`payload --mode lookup --name <file>`, then `lookup`), which reports each
+   named document's Modified time to the minute. Each `<file>` is the library
+   file name from the converted copy's `Source` line; a document with no
+   converted copy is named as the request or the description gives it. A result
+   with `readable` false is the unreachable case in step 5. A document that comes
+   back `held`, `no_suite`, or `not_found` goes to the user through `<ask-user>`
+   rather than being guessed at; one that comes back `ignored` is left as it is. A document is **missing** when
+   no converted copy exists. It is **stale** when the library copy was modified
+   at or after the converted copy's `Converted` minute, compared to the minute and
+   not by day. A converted copy whose `Converted` line holds only a date has no
+   time to compare, so a library copy modified on that day or later is stale. In
+   a session build a document is also stale when the `<change-term>` says it was
+   updated after the converted copy's `Revised` date.
+3. **Download, convert, and use the new copy, without asking.** For each missing
+   or stale document, download it through `doc-watch`'s download handler, place
+   it with `place --keep-resaved` so a same-day edit is not dropped as a re-save,
+   convert it with `convert-docs`, and run the job on the new conversion. This
+   is a standing approval for this case only; `doc-watch`'s other downloads
+   still ask first. A conversion that needs a hand merge stops for the user.
+4. **Keep a record.** Put each refreshed document on a `<download-branch>`
+   branch with its `library.tsv` row, and open a pull request for it, so the
+   repository copy catches up through the usual review. Name every refreshed
+   document in the pack's intake notes.
+5. **When the library cannot be reached**, such as on an overnight run with no
+   signed-in browser, the job does not build from a copy that might be stale
+   without saying so. This skill stops: the session does not run or queue the
+   job, and reports which documents need refreshing. In an attended session
+   the user may choose to go ahead anyway; Job Intake then lists each document
+   under `<intake-sheet>` limitations as built without a check against the
+   library. The local pipeline has no such flag, so a job on it waits until the
+   documents are refreshed.
+
+The session reads the library's listing and each copy's provenance block for
+the check, never a document's content.
 
 ### A suite pack
 
@@ -374,8 +652,9 @@ full coverage sets, builds one set per objective in run order, and decides
 applicability from those sets, so none of it can disagree with the cards.
 
 A process description with no rules in the master has none to export: run
-`<extract-skill>` for it first, or derive the rules in Phase 2 from the document
-itself and record that in Job Intake as a limitation. Never invent a rule ID: a
+`<extract-skill>` for it first, or, when the user chooses to go ahead without,
+derive the rules in Phase 2 from the document itself and record that in Job
+Intake as a limitation. Never invent a rule ID: a
 rule the master does not hold is named by its source and statement, and that
 name goes in the rule's `id`, which is how the cards refer to it, for example
 `<derived-rule-example>`. A source with no page numbers, such as a sign-off
@@ -422,7 +701,9 @@ phase as passed in the running summary, and only then start the next.
 run; in a session working on its own, run the phases in order in one pass, but
 never merge two phases' work, and stop at the first gate that fails.
 
-**Job Intake.** Classify the request (`<job-type>`), inventory every input
+**Job Intake.** In a session build, the source documents were refreshed first,
+as "Refreshing the source documents" above sets out; name each refreshed
+document in the intake notes. Classify the request (`<job-type>`), inventory every input
 against the table above, and set `intake.readiness`. The four required inputs
 are the `<issue-term>` number, the `<change-term>` number when the change has
 one, the description, and either rules in the master or a source document to
@@ -464,10 +745,63 @@ behavior. Mark quality-derived cards. A card an existing `<test-tool>` asset or
 manual test already covers is reused by name in `<notes-sheet>` rather than
 written again.
 
+Design scenarios first, then cards. For each Included document, list the
+distinct scenarios its impacted rules call for before any card is written. A
+scenario is one population, one action and its expected outcome, and names the
+rules it checks. The list has to include, wherever the document supports them:
+
+- a control, a population the change must not affect, such as the plain save;
+- isolation, where another record's state must not leak into this one;
+- a combined scenario, where conditions overlap;
+- persistence, closing and reopening the record;
+- in an issue pack with a `<break-objective>` set, a break scenario, which tries
+  to break the change with bad input, a wrong order, a boundary or a repeated
+  action.
+
+Every other scenario is a plain decision. A kind the document does not support
+is recorded as an assumption with the reason. Rules too many for one call are
+taken in batches, each shown the scenarios listed so far, and a reply holds at
+most one scenario per 150 tokens of the output limit; an assumption says when
+the limit was reached. Two scenarios with the same kind, rules, population and
+action are one; the second is dropped and counted.
+
+Write the cards in batches of scenarios (`cardScenariosPerCall` in the config,
+four by default). Each call is shown the scenarios still open, meaning those
+with no card, reuse entry or skip yet, the rules they name, and the cards
+written so far. Each card names the one open scenario it covers. A scenario is
+settled only by a card, or by a `skipped` entry that says an existing test
+covers it (`reused`, naming the test) or that no card can (`gap`, with the
+reason); a rule gap reported for one scenario never settles another. A card
+whose scenario repeats an earlier card's kind, rules, population and action is
+dropped and counted. A scenario still open after its batch is asked for once
+more; if it is still open, an assumption names it, and any of its rules with no
+card get a `Missing` coverage row. A rule only an existing test covers gets a
+`Missing` row whose gap names that test and says to confirm and reuse it.
+
+An applicable objective that no card serves gets one targeted pass. For an
+ordinary objective, the model is shown the cards written and names those that
+serve it; the objective is added to them, no card is written, and the objective
+is marked not applicable if none is named. For `<break-objective>`, a break-only
+inventory adds new break scenarios, each with one card; the objective is marked
+not applicable if there are none. `<full-coverage-objective>` needs no pass,
+since it holds every requirement card; Phase 6 marks it not applicable when no
+requirement-derived card exists.
+
 **Phase 7, Test Lab / Execution Design.** Group cards into test sets, one
 objective per set, in the order they should run: `<core-objective>` first,
-`<break-objective>` last. A Build name the user has not supplied stays the
-literal `<Build Name>` and is recorded as a limitation.
+`<break-objective>` last. In an issue pack, the `<full-coverage-objective>` set
+holds every card that comes from a requirement, and the pack marks that
+objective applicable whenever one exists and a card lands in the set, even if
+Phase 5 did not. The
+`<break-objective>` set holds only cards written for break scenarios (`breakIt`,
+set by the pipeline from the scenario's kind, never by the model). A card can
+sit in more than one set. The config key `exclusiveSets` set to `true` keeps a
+BREAK IT card in the `<break-objective>` set alone. A card left with no set,
+because none of its objectives is applicable, is left out and an assumption
+names it. The config keys `fullCoverageObjective` and `breakItObjective` name
+the two sets; without them the pipeline uses the builder's objectives named
+`Full Coverage Required Run` and `BREAK IT`. A Build name the user has not
+supplied stays the literal `<Build Name>` and is recorded as a limitation.
 
 **Phase 8, Workbook generation.** Run the builder:
 

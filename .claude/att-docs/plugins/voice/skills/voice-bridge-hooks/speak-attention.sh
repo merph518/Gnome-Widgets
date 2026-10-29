@@ -16,12 +16,16 @@
 # tool reads what was written ahead of that call, and the Stop reads the rest. An
 # AskUserQuestion call's question and options are read with the text ahead of it, and
 # a wrap-up question with its buttons after the closing reply.
-# /implement-with-speech turns it on for the session, typed (UserPromptSubmit) or
-# called through the Skill tool (PostToolUse Skill), and a typed /implement turns
-# it off. A Skill call to implement leaves it alone, since /implement-with-speech
-# hands its work to that skill.
+# speechctl and the speech widget turn it on and off; no command a session runs does.
+# Every implementation is a managed session: its .managed marker puts it in the session
+# management widget, which reads it through speechctl sessions. The implement skill sets
+# the marker, typed (UserPromptSubmit) or called through the Skill tool (PostToolUse
+# Skill), and leaves speech mode as it was.
 # Outside speech mode, a session a phone follows through the voice bridge still sends its
 # text to the voice feed ahead of each tool call, and reads none of it aloud.
+# A managed session (its .managed marker) also writes every block to <id>.feed, whatever
+# its speech setting, so the session management widget can list its replies without
+# anything being read aloud.
 # Each session's speech is On (its .replies marker), Alerts only (the default: neither
 # marker) or Off (its .muted marker, which silences the announcements too). speechctl sets
 # it, and reads and drives playback through the files this script keeps in the speak-attention
@@ -51,8 +55,8 @@ done
 
 input=$(cat)
 # Every tool call runs this hook, and outside speech mode only a question says anything,
-# and a followed session's text goes to the voice feed, so a call leaves before the payload
-# is parsed when no session has speech mode on and no phone follows one.
+# and a followed or managed session's text goes to a feed, so a call leaves before the
+# payload is parsed when no session has speech mode on or is managed, and no phone follows one.
 # The bridge touches voice-bridge/follow/<socket name> as the phone polls; a marker idle
 # longer than FOLLOW_IDLE_SECONDS in voice_bridge_reply.py no longer counts.
 follow_dir=${XDG_RUNTIME_DIR:-/tmp}/voice-bridge/follow
@@ -67,6 +71,7 @@ followed() {
 if [[ $input == *'"hook_event_name":"PreToolUse"'* &&
   $input != *'"tool_name":"AskUserQuestion"'* ]] &&
   ! compgen -G "${XDG_RUNTIME_DIR:-/tmp}/speak-attention/*.replies" >/dev/null &&
+  ! compgen -G "${XDG_RUNTIME_DIR:-/tmp}/speak-attention/*.managed" >/dev/null &&
   ! followed; then
   exit 0
 fi
@@ -90,18 +95,19 @@ session=$(field .session_id)
 owed=${XDG_RUNTIME_DIR:-/tmp}/speak-attention/${session:-none}.owed
 # The marker that holds speech mode on for this session.
 replies=${owed%.owed}.replies
+# The marker that makes this a managed session, which the session management widget lists.
+managed=${owed%.owed}.managed
 
-# usage: speech_mode <command>; sets the mode for the slash command a prompt opens with.
-speech_mode() {
+# usage: is_implement <skill or command>; succeeds for the implement skill, by its own name
+# or with its plugin's, as a skill name or a slash command.
+is_implement() {
+  [[ ${1#/} =~ ^([A-Za-z0-9_-]+:)?implement$ ]]
+}
+
+# usage: manage; marks this session a managed session.
+manage() {
   [[ -n "$session" ]] || return 0
-  case $1 in
-    /implement-with-speech)
-      mkdir -p "${replies%/*}" && rm -f "${replies%.replies}.muted" && : > "$replies" &&
-        { flock -w 30 8 &&
-          python3 "$here/speak_pending.py" "$transcript" "$cursor" seen 2>/dev/null; } 8>"$cursor.lock"
-      ;;
-    /implement) rm -f "$replies" "$cursor" "$queue" ;;
-  esac
+  mkdir -p "${managed%/*}" && : > "$managed"
 }
 
 # usage: command_of <prompt>; prints the slash command the prompt opens with, from
@@ -401,6 +407,14 @@ hold_voice() {
 # line with no tab, such as one queued before this field existed, has none.
 queue=${replies%.replies}.queue
 cursor=${replies%.replies}.cursor
+# A managed session's blocks also go to its feed, one JSON object per line: session, name,
+# text (the spoken form, with no name ahead of it), markdown (as markdown_source makes it)
+# and at (epoch seconds). It is written whatever the speech setting, plays nothing, and keeps
+# the last FEED_KEEP blocks, far more than a widget that lists each session's latest lines
+# draws, so a long-running session's file stays small.
+feed=${replies%.replies}.feed
+feed_cursor=${replies%.replies}.feed-cursor
+FEED_KEEP=200
 
 # The most characters of a block's Markdown the queue keeps for now.json; a widget draws a
 # few lines, and a longer source is cut at a line boundary and ends with an ellipsis.
@@ -435,9 +449,24 @@ await_text_row() {
   fi
 }
 
+# usage: feed_block <block>; appends the block to a managed session's feed, under the
+# cursor lock the caller holds, and drops what is past the last FEED_KEEP blocks.
+feed_block() {
+  local md
+  md=$(markdown_source <<<"$1")
+  [[ $md != '""' ]] || return 0
+  jq -nc --arg session "$session" --arg name "$(cat "$dir/$session.name" 2>/dev/null)" \
+    --arg text "$(speakable <<<"$1")" --argjson markdown "$md" \
+    '{session:$session, name:$name, text:$text, markdown:$markdown, at:(now|floor)}' \
+    >> "$feed" 2>/dev/null || return 0
+  (($(wc -l < "$feed") > FEED_KEEP)) &&
+    tail -n "$FEED_KEEP" "$feed" > "$feed.tmp.$$" && mv -f "$feed.tmp.$$" "$feed"
+  return 0
+}
+
 # usage: read_aloud; queues the turn's unread text and reads the queue. Outside speech mode
-# only the voice feed gets the text, while a phone follows the session, and nothing is
-# queued or spoken.
+# nothing is queued or spoken: a managed session's feed gets the text, and so does the voice
+# feed ahead of a tool call while a phone follows the session.
 read_aloud() {
   local fields name='' chunk text line
   local args=("$here/speak_pending.py" "$transcript" "$cursor")
@@ -452,6 +481,17 @@ read_aloud() {
       printf '%s' "${name% says: }" > "$dir/$session.name.tmp.$$" &&
         mv -f "$dir/$session.name.tmp.$$" "$dir/$session.name"
     fi
+    # The feed reads the turn through a cursor of its own, so speech turning on, which marks
+    # the speech cursor read, never drops a block the feed has not had. Stop has already
+    # waited on the reply row above, so this read does not wait again.
+    if [[ -e "$managed" ]]; then
+      [[ -s "$dir/$session.name" ]] || { session_name > "$dir/$session.name.tmp.$$" &&
+        mv -f "$dir/$session.name.tmp.$$" "$dir/$session.name"; }
+      local fed
+      mapfile -d '' fed < <(STOP_WAIT=0 python3 "$here/speak_pending.py" "$transcript" \
+        "$feed_cursor" "${args[@]:3}" 2>/dev/null)
+      for chunk in "${fed[@]:1}"; do feed_block "$chunk"; done
+    fi
     local pushed=$name
     for chunk in "${fields[@]:1}"; do
       pushed+=$chunk$'\n\n'
@@ -461,7 +501,10 @@ read_aloud() {
       printf '%s\t%s\n' "$name$text" "$(markdown_source <<<"$chunk")" >> "$queue"
       name=
     done
+    # outside speech mode the bridge's own Stop hook feeds the final reply, and a session
+    # no phone follows feeds the voice bridge nothing
     [[ ${#fields[@]} -gt 1 ]] &&
+      { [[ -e "$replies" ]] || { [[ $event != Stop ]] && followed; }; } &&
       python3 "$here/voice_bridge_reply.py" --config "$config" push <<<"$pushed" 2>/dev/null
   } 8>"$cursor.lock"
   [[ -e "$replies" ]] || return 0
@@ -507,26 +550,22 @@ fi
 
 # Outside speech mode a followed session still sends its mid-turn text to the voice feed,
 # ahead of each tool call. The bridge's Stop hook feeds the final reply, so the Stop only
-# marks the turn's text as sent. A question is announced aloud after its text goes.
-if [[ -n "$session" && ($event == PreToolUse || $event == Stop) ]] && followed; then
-  if [[ $event == Stop ]]; then
-    mkdir -p "$dir"
-    { flock -w 30 8 && python3 "$here/speak_pending.py" "$transcript" "$cursor" stop \
-      "$(field .last_assistant_message)" >/dev/null 2>&1; } 8>"$cursor.lock"
-  else
-    read_aloud
-    [[ $tool != AskUserQuestion ]] && exit 0
-  fi
+# marks the turn's text as sent. A managed session writes every block to its own feed,
+# the final reply included. A question is announced aloud after its text goes, and a Stop
+# goes on to its announcement.
+if [[ -n "$session" && ($event == PreToolUse || $event == Stop) ]] &&
+  { [[ -e "$managed" ]] || followed; }; then
+  read_aloud
+  [[ $event == PreToolUse && $tool != AskUserQuestion ]] && exit 0
 fi
 
 case "$event:$tool" in
   UserPromptSubmit:)
-    speech_mode "$(command_of "$(field .prompt)")"
+    is_implement "$(command_of "$(field .prompt)")" && manage
     exit 0
     ;;
   PostToolUse:Skill)
-    [[ $(field .tool_input.skill) == implement-with-speech ]] &&
-      speech_mode /implement-with-speech
+    is_implement "$(field .tool_input.skill)" && manage
     exit 0
     ;;
   Stop:)
