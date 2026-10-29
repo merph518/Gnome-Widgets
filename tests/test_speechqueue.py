@@ -233,8 +233,6 @@ class ReadState(Fixture):
         self.f.file('settings.json', json.dumps({'voice': 'en_GB-alan-low', 'volume': 0.75}))
         state = self.state()
         self.assertEqual((state['voice'], state['volume']), ('en_GB-alan-low', 0.8))
-        self.assertEqual(speechqueue.voice_label(state['voice']), 'alan')
-        self.assertEqual(speechqueue.voice_label('my-voice'), 'my-voice')
 
 
 class Repos(Fixture):
@@ -405,7 +403,7 @@ class Links(Repos):
         self.assertEqual((one['head'], two['head']), (row, 2 * row))     # the title; a blank row and the title
         self.assertEqual((one['bottom'] - one['top'], two['bottom'] - two['top']), (2 * row, 3 * row))
         self.assertLess(two['name'][0], two['name'][1])                  # every name is there to click
-        self.assertLess(two['name'][1], two['gear'][0])
+        self.assertLess(two['name'][1], regions['list'][2])
         self.assertEqual([(r['pid'], r['title']) for r in (one, two)], [(100, 'One'), (200, 'Two')])
 
     def test_the_numbers_of_a_sessions_issues_and_pull_requests_head_its_messages(self):
@@ -538,17 +536,21 @@ class TitleAndFooter(Fixture):
         self.assertEqual((elapsed, duration, running), ('2.000', '6.000', '1'))
         self.assertEqual(float(lines['footer'].split()[1]), float(lines['buttons'].split()[2]))   # one row of buttons
 
-    def test_the_volume_is_on_the_top_row_left_of_minimize_and_level_with_the_title(self):
+    def test_the_volume_sits_in_the_footer_after_the_buttons_and_the_gear_at_its_right(self):
         lines, regions, _ = self.draw()
         track0, track1, y, _, icon, size = (float(v) for v in lines['volume'].split())
-        self.assertEqual(y, float(lines['title'].split()[1]))
+        self.assertEqual(y, float(lines['footer'].split()[1]))         # level with the buttons
+        self.assertGreater(icon, float(lines['buttons'].split()[1]))    # after the last of them
         self.assertLess(icon + size, track0)                           # the speaker, then its track
-        self.assertLess(track1, regions['minimize'][0])
         self.assertEqual(regions['volume_bar'], [track0, track1])
         for key in ('volume', 'volume_icon', 'volume_wheel'):
             self.assertLess(regions[key][1], y)
             self.assertGreater(regions[key][3], y)
-            self.assertLess(regions[key][2], regions['minimize'][0])
+        gear_x, gear_y, gear_size = (float(v) for v in lines['gear'].split())
+        self.assertGreater(regions['gear'][0], track1)                 # the gear stands apart, at the right
+        self.assertLess(regions['gear'][0], gear_x - gear_size / 2)
+        self.assertEqual(gear_y, y)
+        self.assertFalse(regions['volume'][0] < regions['minimize'][2] and regions['volume'][1] < regions['minimize'][3])   # none in the header
 
     def test_the_pane_prints_the_whole_text_behind_a_left_margin_for_the_bullet_and_names_the_speaker(self):
         lines, _, _ = self.draw(text=self.LONG)
@@ -745,106 +747,51 @@ class TitleAndFooter(Fixture):
         self.assertLess(speechqueue.MARGIN + spaced, regions['minimize'][0])
 
 
-class SettingsPopup(Fixture):
-    def render(self, voices, voice='en_GB-jenny_dioco-medium'):
+class SettingsMenu(Fixture):
+    def render(self, voices, size=None):
         self.three()
-        self.f.file('settings.json', json.dumps({'voice': voice}))
-        speechqueue.render(dict(self.state(), voices=voices), now=1000.0)
+        with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
+            speechqueue.render(dict(self.state(), voices=voices), now=1000.0)
         with open(speechqueue.DRAW) as f:
             draw = f.read().splitlines()
         with open(speechqueue.REGIONS) as f:
             return draw, json.load(f)
 
-    def test_the_popup_offers_the_global_voice_first_and_then_every_installed_one(self):
+    def test_the_menu_covers_the_card_under_its_header_and_lists_the_installed_voices(self):
         draw, regions = self.render(VOICES)
-        self.assertEqual([l.split(None, 5)[5] for l in draw if l.startswith('item ')],
-                         ['Default (jenny_dioco)', 'alan', 'jenny_dioco', 'amy', 'hfc_female', 'joe', 'lessac',
-                          'libritts', 'ryan'])
-        self.assertEqual(regions['settings']['names'], [''] + VOICES)
+        menu = regions['menu']
+        self.assertEqual(menu['voices'], VOICES)
+        line = next(l for l in draw if l.startswith('menu ')).split()[1:]
+        x0, y0, x1, y1, title_cy, first, row, visible, hint_cy, value_x, pad = (float(v) for v in line)
+        self.assertEqual(menu['box'], [x0, y0, x1, y1])
+        self.assertLess(y0, title_cy)
+        self.assertLess(title_cy, first)
+        self.assertLess(first + visible * row, hint_cy + row / 2)         # the rows end above the hint line
+        self.assertEqual((menu['first'], menu['row'], menu['visible']), (first, row, int(visible)))
+        self.assertGreaterEqual(menu['visible'], 3)
+        self.assertEqual(menu['title'], [round(title_cy - row / 2, 2), round(title_cy + row / 2, 2)])
+        self.assertGreater(value_x, x0)
+        self.assertLess(value_x, x1)
 
-    def test_the_footer_has_no_voice_drop_down_or_list(self):
+    def test_the_header_holds_no_volume_and_no_session_has_a_gear(self):
         draw, regions = self.render(VOICES)
-        self.assertFalse({'voice', 'menu'} & set(regions))
-        self.assertFalse([l for l in draw if l.startswith(('voice ', 'menu '))])
+        for row in regions['rows']:
+            self.assertNotIn('gear', row)
+        self.assertEqual(next(l for l in draw if l.startswith('control ')).count(' '), 2)
 
-    def test_the_popup_is_a_panel_over_the_list_holding_its_buttons_voices_and_done(self):
-        draw, regions = self.render(VOICES)
-        popup, (_, top, _, bottom) = regions['settings'], regions['list']
-        x0, x1 = speechqueue.MARGIN, speechqueue.MARGIN + speechqueue.widget_width
-        box = popup['box']
-        self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
-        buttons = [popup['speech'][key] for key in ('on', 'alerts', 'off')]
-        self.assertEqual(list(popup['speech']), ['on', 'alerts', 'off'])
-        for b in buttons + popup['voices'] + [popup['done']]:
-            self.assertTrue(box[0] <= b[0] < b[2] <= box[2] and box[1] <= b[1] < b[3] <= box[3], b)
-        self.assertTrue(buttons[0][2] < buttons[1][0] and buttons[1][2] < buttons[2][0])    # side by side
-        self.assertLess(buttons[0][3], popup['voices'][0][1])             # buttons, then the voices
-        self.assertLess(max(b[3] for b in popup['voices']), popup['done'][1])    # then Done, at the right
-        self.assertEqual(popup['done'][2], buttons[2][2])
-        line = next(l for l in draw if l.startswith('settings '))
-        self.assertEqual([float(v) for v in line.split()[1:5]], box)
-
-    def test_every_voice_has_a_button_the_size_of_a_speech_one_and_none_scrolls(self):
-        draw, regions = self.render(VOICES)
-        popup = regions['settings']
-        on = popup['speech']['on']
-        first, rest = popup['voices'][0], popup['voices'][1:]
-        self.assertEqual(len(popup['voices']), len(popup['names']))
-        self.assertEqual((first[0], first[2]), (on[0], popup['speech']['off'][2]))    # the global voice, across
-        self.assertEqual({round(b[3] - b[1], 2) for b in popup['voices']}, {round(on[3] - on[1], 2)})
-        for b in rest:
-            self.assertAlmostEqual(b[2] - b[0], on[2] - on[0], delta=0.02)          # the rest, as wide
-        self.assertEqual([b[0] for b in rest[:3]], [popup['speech'][k][0] for k in ('on', 'alerts', 'off')])
-        self.assertEqual(rest[3][0], on[0])                                         # the fourth starts a new row
-        self.assertGreater(rest[3][1], rest[0][3])
-        for upper, lower in zip(popup['voices'], popup['voices'][1:]):
-            self.assertTrue(lower[1] >= upper[3] or lower[0] >= upper[2])         # none overlaps the one before
-        self.assertFalse({'list', 'rows', 'item_h', 'pad'} & set(popup))
-        for line in (l for l in draw if l.startswith('item ')):
-            self.assertEqual(len(line.split(None, 5)), 6)                          # its box, then its label
-
-    def test_the_speech_buttons_sit_as_far_below_their_label_as_the_voice_buttons_below_theirs(self):
-        draw, regions = self.render(VOICES)
-        popup = regions['settings']
-        line = draw[next(i for i, l in enumerate(draw) if l.startswith('settings '))].split()
-        speech_cy, voice_cy = float(line[6]), float(line[7])
-        label_h = speechqueue.line_height(speechqueue.TAG_FONT)
-        self.assertEqual(round(popup['speech']['on'][1] - (speech_cy + label_h / 2), 2), speechqueue.SETTINGS_LABEL_GAP)
-        self.assertEqual(round(popup['voices'][0][1] - (voice_cy + label_h / 2), 2), speechqueue.SETTINGS_LABEL_GAP)
-
-    def test_the_popup_has_a_row_for_the_global_voice_and_a_row_for_each_three_others(self):
-        for voices, rows in (([], 1), (VOICES[:1], 2), (VOICES[:3], 2), (VOICES[:4], 3), (VOICES, 4)):
-            with self.subTest(voices=len(voices)):
-                popup = self.render(voices)[1]['settings']
-                self.assertEqual(len({b[1] for b in popup['voices']}), rows)
-
-    def test_without_installed_voices_the_global_one_is_the_only_button(self):
-        draw, regions = self.render([])
-        self.assertEqual((regions['settings']['names'], len(regions['settings']['voices'])), ([''], 1))
-        self.assertEqual([l.split(None, 5)[5] for l in draw if l.startswith('item ')], ['Default (jenny_dioco)'])
-
-    def test_the_popup_grows_with_the_text(self):
-        heights = {}
-        for scale in (1.0, 2.0):
-            with mock.patch.object(speechqueue.size_file, 'load', return_value=(660, 128, scale)):
-                _, regions = self.render(VOICES)
-            box, popup = regions['settings']['box'], regions['settings']
-            heights[scale] = (box[3] - box[1], popup['speech']['on'][3] - popup['speech']['on'][1])
-        self.assertGreater(heights[2.0][0], heights[1.0][0])
-        self.assertGreater(heights[2.0][1], heights[1.0][1])
-
-    def test_each_row_has_a_gear_at_its_right_and_carries_its_own_voice(self):
+    def test_each_row_carries_its_own_voice_for_the_menu(self):
         self.f.file(ME + '.voice', 'en_US-joe-medium\n')
         _, regions = self.render(VOICES)
         rows = {r['id']: r for r in regions['rows']}
         self.assertEqual([rows[i]['voice'] for i in (ME, OTHER, QUIET)], ['en_US-joe-medium', '', ''])
         for row in rows.values():
-            self.assertEqual(row['gear'][1], regions['list'][2])           # at the list's right edge
-            self.assertLess(row['name'][1], row['gear'][0])
+            self.assertLess(row['name'][0], row['name'][1])
             self.assertFalse({'on', 'alerts', 'off'} & set(row))
-        with open(speechqueue.DRAW) as f:
-            control = next(l for l in f.read().splitlines() if l.startswith('control ')).split()[1:]
-        self.assertEqual([float(v) for v in control[:2]], rows[ME]['gear'])
+
+    def test_the_menu_grows_with_the_card(self):
+        small = self.render(VOICES)[1]['menu']['visible']
+        tall = self.render(VOICES, (660, 400, 1.0))[1]['menu']['visible']
+        self.assertGreater(tall, small)
 
 
 class InstalledVoices(unittest.TestCase):
@@ -992,10 +939,10 @@ class Golden(Fixture):
             self.f.queue(f'{i:08d}-eeee', f'Line {i}')
         self.check('scroll', self.state())
 
-    def test_the_settings_popup_and_its_voices(self):
+    def test_the_settings_menu_and_its_voices(self):
         self.three()
         self.f.file('settings.json', json.dumps({'voice': 'en_GB-jenny_dioco-medium'}))
-        self.check('voices', dict(self.state(), voices=VOICES))
+        self.check('menu', dict(self.state(), voices=VOICES))
 
     def test_collapse_when_idle(self):
         self.three()

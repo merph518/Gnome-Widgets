@@ -101,20 +101,16 @@ CONFIRM_W = 320                               # the close prompt's width, at mos
 CONFIRM_PAD = 14                              # round its contents
 CONFIRM_GAP = 8                               # between its lines, and its two buttons
 CONFIRM_BUTTON_PAD = 14                       # either side of a button's label
-SETTINGS_W = 400                              # the settings popup's width, at most, at text scale 1: three voice names across
-SETTINGS_LABEL_GAP = 6                        # under its Speech label, so the buttons sit as far from it as the first voice
-SETTINGS_COLUMNS = 3                          # buttons to a row in it, as many as it has speech settings
-GEAR_SIZE = 14                                # a row's gear icon, right of the row
-GEAR_PAD = 12                                 # click room round the icon, and its gap to the table's edge, as wide as the text's at the left
-DEFAULT_VOICE_LABEL = 'Default'               # the popup's first voice: the global one, as the tray sets it
+GEAR_SIZE = 14                                # the footer's gear icon
+GEAR_PAD = 12                                 # click room round the footer's gear icon
+MENU_VALUE_AT = 0.5                           # where the settings menu's values start, as a share of the card's width
+VOLUME_AFTER_BUTTONS = 24                     # from the footer's last button to the volume's speaker
 VOICES_EVERY = 10.0                           # s between asking speechctl for the voices
 VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
 VOLUME_ICON = 16                              # the speaker and its waves, left of the track
 VOLUME_GAP = 8                                # speaker to track
 VOLUME_MIN = 32                               # its shortest track, as the Spotify widget's
-TITLE_ROOM = 150                              # what the title keeps while the volume's track shortens
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
-SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 GROUP_PAD = 10                                # the list's edge to a repository's name
 SESSION_INDENT = 32                           # a repository's name's left to the names of the sessions under it, after their bullets, which are not indented
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
@@ -521,12 +517,6 @@ def repo_issues(listed):
     for s in listed:
         s['issues'] = [(f'#{n}', f"https://github.com/{s['github']}/issues/{n}")
                        for n in sorted(found.get(s['github'], ()))]
-
-
-def voice_label(voice):
-    """A Piper model's speaker: 'en_US-amy-medium' -> 'amy'; another name as it is."""
-    m = re.fullmatch(r'[a-z]{2,3}_[A-Za-z]{2,3}-(.+)-(x_low|low|medium|high)', voice)
-    return m.group(1) if m else voice
 
 
 _voices = {'names': [], 'asked': None, 'busy': False}
@@ -1041,30 +1031,19 @@ def render(state, now=None):
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
-    # The volume, as the Spotify widget has it: the speaker and its slider left of minimize. The
-    # track gives up room, down to VOLUME_MIN, so the title keeps TITLE_ROOM.
-    vol_x1 = min_cx - WINDOW_BUTTON_PITCH / 2 - VOLUME_GAP
-    vol_x0 = vol_x1 - min(VOLUME_WIDTH, max(VOLUME_MIN, vol_x1 - VOLUME_ICON - VOLUME_GAP - MARGIN - TITLE_ROOM))
-    vol_icon = vol_x0 - VOLUME_GAP - VOLUME_ICON
-    text_right = vol_icon - VOLUME_GAP
+    text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - VOLUME_GAP
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
     spoken = spoken_log(n, re.sub(r' session$', '', state['name'] or '', flags=re.I), state['duration'])
     half = WINDOW_BUTTON_PITCH / 2
-    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     regions = {
         'minimize': box(min_cx, cy, half, half),
         'close': [close_cx - half, cy - half, close_cx + half + 12, cy + half],
-        'volume_icon': [vol_icon - 4, cy - 10, vol_x0 - 6, cy + 10],   # a click mutes; the wheel reaches it too
-        'volume': [vol_x0 - 6, cy - 10, vol_x1 + 6, cy + 10],
-        'volume_wheel': [vol_icon - 4, cy - 10, vol_x1 + 6, cy + 10],
-        'volume_bar': [vol_x0, vol_x1],
     }
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
-            f'title {MARGIN} {cy} {TITLE_TRACK} {title}',
-            f'volume {vol_x0} {vol_x1} {cy} {level:.4f} {vol_icon} {VOLUME_ICON}']
+            f'title {MARGIN} {cy} {TITLE_TRACK} {title}']
     out = Markup(MARGIN)
     out.gap(header_h)
 
@@ -1086,10 +1065,7 @@ def render(state, now=None):
     # One column, set as the CLI sets its session list: a section for each state it names (needs
     # input, working, completed) with its sessions under it, one line each.
     listed = grouped(listed)
-    # The gear at the right of each row, which opens that session's settings: its icon, and
-    # the click area round it that runs the row's name line
-    gear_x0 = list_right - GEAR_SIZE * text_scale - 2 * GEAR_PAD
-    queued_right = gear_x0 - 4
+    queued_right = list_right - GROUP_PAD                      # where the lines a session has queued end
     out.gap(LINE_GAP)
     list_top = out.y
     row = line_height(LIST_FONT) + ROW_SPACING * text_scale
@@ -1107,16 +1083,14 @@ def render(state, now=None):
         heads.append(head_rows * row)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed, layout)
-    seg_h = line_height(LIST_HEAD_FONT) + 4 * text_scale
     draw.append(f'list {MARGIN} {list_right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
-    draw.append(f'control {gear_x0:.2f} {list_right} {GEAR_SIZE * text_scale:.2f} {seg_h:.2f} {queued_right:.2f}')
+    draw.append(f'control {list_right} {queued_right:.2f}')
     draw.append(f'block {GROUP_PAD} {SESSION_INDENT}')
     rows, top = [], 0.0
     for s, (span, _), head in zip(listed, layout, heads):
         entry = {'id': s['id'], 'speech': s['speech'], 'voice': s['own_voice'], 'top': round(top, 2),
-                 'bottom': round(top + row * span, 2), 'head': round(head, 2),
-                 'gear': [round(gear_x0, 2), round(list_right, 2)]}
+                 'bottom': round(top + row * span, 2), 'head': round(head, 2)}
         # The name closes the session, once confirmed
         entry.update(name=name_span(s, queued_right), title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
         rows.append(entry)
@@ -1131,9 +1105,6 @@ def render(state, now=None):
     regions['list_scroll'] = [last, round(row, 2)]
     prompt_line, regions['confirm'] = close_prompt(right, list_top, list_height)
     draw.append(prompt_line)
-    names = [''] + (state.get('voices') or [])
-    settings_lines, regions['settings'] = settings_popup(names, state['voice'], right, list_top, list_height)
-    draw.extend(settings_lines)
     # The terminal pane, as Claude's CLI prints a reply: a bordered box with a static title on its
     # border, the line being read aloud inside it behind a bullet (its markdown formatted, in
     # monospace; as many lines show as the column holds and draw.lua scrolls the rest with the
@@ -1192,6 +1163,25 @@ def render(state, now=None):
     if n:
         regions['skip'] = box(skip_cx, fy, half, half)
         regions['next'] = box(next_cx, fy, half, half)
+    # The volume, as the Spotify widget has it, beside the buttons: the speaker and its slider,
+    # the track giving up room, down to VOLUME_MIN, to the gear at the far right.
+    gear_size = GEAR_SIZE * text_scale
+    gear_x1 = right - 2
+    gear_x0 = gear_x1 - gear_size - 2 * GEAR_PAD
+    vol_icon = next_cx + PAUSE_SIZE / 2 + VOLUME_AFTER_BUTTONS
+    vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
+    vol_x1 = vol_x0 + min(VOLUME_WIDTH, max(VOLUME_MIN, gear_x0 - GEAR_PAD - vol_x0))
+    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
+    draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
+    regions.update({
+        'volume_icon': [vol_icon - 4, fy - 10, vol_x0 - 6, fy + 10],   # a click mutes; the wheel reaches it too
+        'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
+        'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
+        'volume_bar': [vol_x0, vol_x1],
+    })
+    # The gear at the right, which opens the settings menu
+    draw.append(f'gear {(gear_x0 + gear_x1) / 2:.2f} {fy:.2f} {gear_size:.2f}')
+    regions['gear'] = [round(gear_x0, 2), round(fy - footer_h / 2, 2), round(gear_x1, 2), round(fy + footer_h / 2, 2)]
     out.gap(footer_h)
     card_h = out.y + MARGIN - 4
     # The application's chrome: the header and the footer run the card's width, a rule under the
@@ -1200,6 +1190,8 @@ def render(state, now=None):
     draw.append(f'divider {divider_x:.2f} {rule_top:.2f} {rule_bottom:.2f}')
     draw.append(f'rules {rule_top:.2f} {rule_bottom:.2f}')
     regions['divider'] = [list_right + 2, round(rule_top, 2), term_left - 2, round(rule_bottom, 2)]
+    menu_line, regions['menu'] = settings_menu(rule_top, card_h, right + MARGIN, state.get('voices') or [])
+    draw.append(menu_line)
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
     return out.end(card_h)
@@ -1235,62 +1227,25 @@ def close_prompt(right, list_top, list_height):
     return line, entry
 
 
-def settings_popup(names, current, right, list_top, list_height):
-    """(draw.txt's lines, regions.json's entry) for the settings popup a click on a row's gear
-    opens: a panel over the list, as the close prompt is, with the session's name, the three
-    speech buttons, a button for every voice (`names`, the first '' for the global voice, which
-    is `current`: its own row, then the rest SETTINGS_COLUMNS to a row) and Done at its right.
-    conky-mouse.py's session-menu file says which session it is for and what is chosen;
-    draw.lua draws it only while that exists."""
-    title_h, label_h = line_height(LABEL_FONT), line_height(TAG_FONT)
-    button_h = title_h + 8 * text_scale
-    voice_rows = 1 + -(-(len(names) - 1) // SETTINGS_COLUMNS)
-    grid_h = voice_rows * button_h + (voice_rows - 1) * CONFIRM_GAP
-    height = (2 * CONFIRM_PAD + title_h + 3 * CONFIRM_GAP + 2 * (label_h + SETTINGS_LABEL_GAP) + 2 * button_h
-              + grid_h)
-    width = min(right - MARGIN, SETTINGS_W * text_scale)
-    x0 = (MARGIN + right - width) / 2
-    x1 = x0 + width
-    top = max(MARGIN, list_top + list_height / 2 - height / 2)
-    inner0, inner1 = x0 + CONFIRM_PAD, x1 - CONFIRM_PAD
-    column_w = (inner1 - inner0 - (SETTINGS_COLUMNS - 1) * CONFIRM_GAP) / SETTINGS_COLUMNS
-
-    def row_of(y, count=SETTINGS_COLUMNS, first=0, span=1):
-        """The boxes of `count` buttons on the row from y, from column `first`, each `span` wide."""
-        w = span * column_w + (span - 1) * CONFIRM_GAP
-        return [[inner0 + (first + i * span) * (column_w + CONFIRM_GAP), y,
-                 inner0 + (first + i * span) * (column_w + CONFIRM_GAP) + w, y + button_h] for i in range(count)]
-
-    y = top + CONFIRM_PAD
-    title_cy = y + title_h / 2
-    y += title_h + CONFIRM_GAP
-    speech_cy = y + label_h / 2
-    y += label_h + SETTINGS_LABEL_GAP
-    buttons_cy = y + button_h / 2
-    buttons = dict(zip((key for key, _ in SEGMENTS), row_of(y)))
-    y += button_h + CONFIRM_GAP
-    voice_cy = y + label_h / 2
-    y += label_h + SETTINGS_LABEL_GAP
-    boxes = row_of(y, 1, span=SETTINGS_COLUMNS)                    # the global voice, across the panel
-    rest = len(names) - 1
-    for i in range(rest):
-        if i % SETTINGS_COLUMNS == 0:
-            y += button_h + CONFIRM_GAP
-        boxes.append(row_of(y)[i % SETTINGS_COLUMNS])
-    y += button_h + CONFIRM_GAP
-    done_x0 = inner1 - text_width('Done', LABEL_FONT) - 2 * CONFIRM_BUTTON_PAD
-    done = [done_x0, y, inner1, y + button_h]
-    bottom = y + button_h + CONFIRM_PAD
-    flat = [v for key, _ in SEGMENTS for v in (buttons[key][0], buttons[key][2])]
-    lines = [f'settings {x0:.2f} {top:.2f} {x1:.2f} {bottom:.2f} {title_cy:.2f} {speech_cy:.2f} {voice_cy:.2f} '
-             f'{buttons_cy:.2f} {button_h:.2f} ' + ' '.join(f'{v:.2f}' for v in flat) +
-             f' {done[0]:.2f} {done[1]:.2f} {done[2]:.2f} {done[3]:.2f}']
-    labels = [f'{DEFAULT_VOICE_LABEL} ({voice_label(current)})'] + [voice_label(n) for n in names[1:]]
-    lines += [f'item {b[0]:.2f} {b[1]:.2f} {b[2]:.2f} {b[3]:.2f} {label}' for b, label in zip(boxes, labels)]
-    r = lambda box: [round(v, 2) for v in box]
-    entry = {'box': r([x0, top, x1, bottom]), 'speech': {key: r(box) for key, box in buttons.items()},
-             'voices': [r(b) for b in boxes], 'names': names, 'done': r(done)}
-    return lines, entry
+def settings_menu(top, bottom, right, voices):
+    """(draw.txt's line, regions.json's entry) for the settings menu a click on the footer's gear
+    opens: the card from `top` to `bottom` and `right`, a title line, rows of the CLI's list
+    font from the line under it down, and the hint line at the foot. The pages and what is
+    selected come from mouse.py's settings-menu file; draw.lua draws it only while that exists.
+    `voices` are the installed voices, which the voice pages list."""
+    row = line_height(LIST_FONT) + ROW_SPACING * text_scale
+    pad = GROUP_PAD * text_scale
+    title_cy = top + pad + row / 2
+    first = top + pad + row * 1.5
+    hint_cy = bottom - pad - row / 2
+    visible = max(int((hint_cy - row / 2 - first) // row), 1)
+    value_x = MARGIN + (right - MARGIN) * MENU_VALUE_AT
+    line = (f'menu {MARGIN} {top:.2f} {right} {bottom:.2f} {title_cy:.2f} {first:.2f} {row:.2f} {visible} '
+            f'{hint_cy:.2f} {value_x:.2f} {pad:.2f}')
+    entry = {'box': [MARGIN, round(top, 2), right, round(bottom, 2)],
+             'title': [round(title_cy - row / 2, 2), round(title_cy + row / 2, 2)],
+             'first': round(first, 2), 'row': round(row, 2), 'visible': visible, 'voices': list(voices)}
+    return line, entry
 
 
 def message(text):

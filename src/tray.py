@@ -30,7 +30,7 @@ import tray_model
 import widget_size
 
 NAME = 'conky-spotify-nowplaying'                         # the icon, and the indicator's id
-SCALES = (0.7, 0.85, 1.0, 1.25, 1.5, 1.75, 2.0)          # the Text scaling menu's presets
+SCALES = tray_model.SCALES                                # the Text scaling menu's presets
 VOICES_EVERY = 10                                         # refreshes between asking for the voices
 
 

@@ -2,4 +2,3 @@ scale 1 1
 shadow 16
 window 649.0 671.0 27.0 10
 title 16 27.0 0.09 CLAUDE CODE SESSION MANAGEMENT
-volume 550.0 630.0 27.0 0.6000 526.0 16

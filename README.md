@@ -68,8 +68,9 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 itself.
 
 The card is laid out as an application: a header across the top with the title,
-**CLAUDE CODE SESSION MANAGEMENT**, and the volume, minimize and close at its right; a footer
-across the bottom with the controls (pause / resume, skip and next); and between a rule under
+**CLAUDE CODE SESSION MANAGEMENT**, and minimize and close at its right; a footer
+across the bottom with the controls (pause / resume, skip and next), the volume beside them and
+the settings gear alone at the right; and between a rule under
 the one and a rule over the other, two columns of the same height, the sessions at the left and
 the terminal at the right, the right a shade darker. A thin line divides them, as Claude's app
 draws its sidebar's; the pointer turns to the resize cursor over it, and dragging it moves it
@@ -82,8 +83,7 @@ left and right (the sessions column's share of the width is kept in
   sessions, **Completed** for idle ones), and under each its sessions behind a green dot, or a
   turning spinner and a bold name while busy, a finished one's name dim, the one being read
   aloud white. A session is one line: its name, then its repository and tag dimmer
-  (nothing for an idle one), the lines it has queued, and its gear at the right (the gear opens
-  the session's settings). A section after the first has a blank line above its title. A click
+  (nothing for an idle one) and the lines it has queued. A section after the first has a blank line above its title. A click
   or tap on the name asks to close the session. The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
@@ -133,7 +133,7 @@ closing it stops the turn it is in. Only a click or tap on **OK** closes the ses
 a click anywhere else and Escape close the prompt and leave the session running, as does
 leaving it for twenty seconds. A press in the half second after the prompt opens is ignored,
 so the second click of a double click cannot answer it. While the prompt is open the widget
-holds the pointer and the keyboard, as it does for a session's settings. Closing sends the session's
+holds the pointer and the keyboard, as it does for the settings menu. Closing sends the session's
 process SIGTERM, after checking that its file in `~/.claude/sessions` still names that
 session, so it also ends a session the Claude app does not show. It is written to `mouse.log`.
 
@@ -148,11 +148,11 @@ follows the Spotify widget's background.
 The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
 left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
-nothing, while no line plays, and grow a little under the pointer, as the pause button does. A
-session's gear opens its settings, an issue or pull request number in a message's header opens
-it, and a session's name asks to close it. The
-volume slider, at the top right left of minimize as in the Spotify widget, drawn and sized like
-it (it shortens, down to 32 px, as the card narrows), sets the speech volume where you click, tap
+nothing, while no line plays, and grow a little under the pointer, as the pause button does. The
+gear at the right opens the settings menu, an issue or pull request number in a message's
+header opens it, and a session's name asks to close it. The
+volume slider, in the footer after the buttons, drawn and sized like the Spotify widget's
+(it shortens, down to 32 px, as the card narrows), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
 from the tray or the keyboard. A click or tap on the speaker mutes, and the next one brings back
@@ -161,21 +161,26 @@ while muted still restores it; 1.2 if none was kept). The mouse wheel turns the 
 slider or its speaker, and scrolls the list anywhere else on it; a finger swiped up or down on
 the list scrolls it too.
 
-A click or tap on a session's gear dims the card under a black veil and opens that session's settings over it, in
-the same panel as the close prompt: its name, its speech setting as three buttons (**On**,
-**Alerts**, **Off**, the current one filled) and the voice it is read in, as a grid of buttons, three to a row, one for each
-installed voice with the session's own filled, **Default** across the first row. All of them show at once, so nothing scrolls. A choice applies at once and
-the popup stays open, so a setting and a voice can be changed in one visit; **Done**, a click
-anywhere outside the panel and Escape close it, and it closes by itself after 20 seconds. While
-it is open the widget holds the pointer and the keyboard, as it does for the close prompt, and a
-press in the half second after it opens is ignored. A touch outside the widget is not seen, so it closes on the
-timeout instead. The list follows voices installed meanwhile within ten seconds. The gear is
-drawn at full strength while the session is On, dimmer on Alerts and dimmest when Off.
-Taps, dragging, resizing, − and × work as they do on the Spotify widget.
+A click or tap on the footer's gear opens the settings menu over the card under its header, laid
+out as the CLI's settings list: a title line (the page, as `Settings › Sessions › Name`), a row
+for each setting with its value at the right, the selected row behind a blue cursor, and the
+keys at the foot. The first page holds the **Default voice** (a page of the installed voices),
+**Pace**, **Text scaling**, **Collapse when idle**, **Always on top**, **Reset widget size** and
+**Sessions**, the same settings as the tray's Speech menu. A setting with a few values turns to
+the next on Enter, Space or a click (`true` and `false` for a switch); a row ending in › opens
+a page. **Sessions** lists the open ones with their speech setting, and a session's page holds
+its **Speech** (On, Alerts, Off) and its **Voice** (**Default**, or one of the installed
+voices, the one in use marked). Up and Down, the wheel or the pointer move the cursor, Left and
+Backspace or a click on the title go back a page, and Escape closes the menu, as does twenty
+seconds without an event. A choice applies at once. While it is open the widget holds the
+pointer and the keyboard, as it does for the close prompt, and a press in the half second after
+it opens is ignored. A touch outside the widget is not seen, so a menu opened by touch closes on
+the timeout. There is no search box. Taps, dragging, resizing, − and × work as they do on the
+Spotify widget.
 
 ### Speech setting
 
-Each session's **On**, **Alerts** and **Off**, set in its gear's popup, say what is read from it:
+Each session's **On**, **Alerts** and **Off**, set on its page in the settings menu, say what is read from it:
 
 - **On**: its replies are read aloud from then on
 - **Alerts** (a new session's default): only its announcements
@@ -187,8 +192,8 @@ and `/implement` change it too.
 ### Voice per session (experiment)
 
 A session can be read in a voice of its own, to tell sessions apart by ear. **Default** is the
-global voice from the tray's **Voice** menu, or `speechctl voice`; picking another voice in a
-session's popup writes its name to `<session id>.voice` in the speaking hook's folder
+global voice from the tray's **Voice** menu, or `speechctl voice`; picking another voice on a
+session's page in the settings menu writes its name to `<session id>.voice` in the speaking hook's folder
 (`$XDG_RUNTIME_DIR/speak-attention/`), beside the session's `.replies` and `.muted` files, and
 picking **Default** removes that file. The widget only keeps the choice and shows it: playing a
 session's lines in its own voice is up to the speaking hook, which has to read that file (the
@@ -213,7 +218,7 @@ press is logged in `~/.cache/conky-widgets/speech/mouse.log`).
 
 ### Voices and pace
 
-The Speech submenu's **Voice** and each session's voice list in its settings list the Piper voices in
+The Speech submenu's **Voice** and the settings menu's voice pages list the Piper voices in
 `~/.local/share/piper/` (or `SPEAK_PIPER_DIR`), a voice being its `.onnx` model and its
 `.onnx.json` file. `conky-widgets-voices` lists the voices Piper publishes and fetches the ones
 you pick from its [voice repository](https://huggingface.co/rhasspy/piper-voices); it downloads
@@ -447,6 +452,7 @@ registered on Launchpad), followed until Launchpad publishes it.
 | `src/speech/speechqueue.py` | Reads the open Claude sessions and the speaking hook's state (read only), lays the speech widget out, and writes its text, geometry for its `draw.lua`, click areas and the sessions list |
 | `src/speech/sessions.py` | Lists the open Claude sessions from `~/.claude/sessions`, as `speechctl` finds them |
 | `src/speech/draw.lua`, `src/speech/mouse.py` | The speech widget's Cairo drawing, and what its controls, the volume's mute speaker, the close prompt, the wheel and swipes over its list do for `conky-mouse.py`, through `speechctl` |
+| `src/speech/menu.py` | The speech widget's settings menu: its pages, rows and what a change does, read and written through the tray's own settings |
 | `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, the volume slider, and the foreground that follows a fading background |
 | `src/common/widget_size.py` | Reads and writes a widget's size settings: width, lyrics (Spotify) or sessions list (speech) height, text scale |
 | `src/spotify/mouse.py` | What the Spotify widget's controls do for `conky-mouse.py`: the buttons, the seek bar, the volume slider and its mute speaker (Spotify's own volume, through MPRIS), the album art's colour pick, and the wheel over the volume and the wheel and swipes over static lyrics |
