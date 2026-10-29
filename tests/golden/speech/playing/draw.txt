@@ -6,13 +6,13 @@ list 16 676 74.0 24.00 128 3ad65bc038 3 0
 control 564.00 594.00 643.00 676.00 20.00 554.00
 block 2 7 90 21.00 21.00 18.00
 confirm 186.00 86.00 506.00 190.00 109.00 126.00 163.00 26.00 361.00 434.00 442.00 492.00 16 74.0 676 202.0
-avatar 34.0 280.0 36
-bubble 64 228.0 676 298.0 12 244.00 263.00 18.00 280.00 2
+avatar 34.0 338.0 36
+bubble 64 282.0 643 356.0 10 300.00 319.00 18.00 338.00 2
 speaker Claude Voice Widget
 line The data layer is in: speechqueue.py writes the widget, draw and regions files four
 line times a second.
-progress 16 676 311.0 1000.000 2.000 6.000 1
-footer 30.0 341.0 28 0
-buttons 66.0 102.0 341.0 28 1
-volume 156.0 236.0 341.0 0.6000 132.0 16
-voice 568 676 341.0 24 10 10 Voice: amy
+progress 16 676 369.0 1000.000 2.000 6.000 1
+footer 30.0 399.0 28 0
+buttons 66.0 102.0 399.0 28 1
+volume 156.0 236.0 399.0 0.6000 132.0 16
+voice 568 676 399.0 24 10 10 Voice: amy

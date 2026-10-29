@@ -73,10 +73,9 @@ AVATAR_D = 36                                 # the speaker's avatar, left of th
 # else the one shipped beside this file. Without either, draw.lua draws a spark.
 AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), os.path.join(HERE, 'avatar.png'))
 AVATAR_GAP = 12                               # the avatar to the bubble, which its tail points across
-BUBBLE_PAD_X = 12                             # the bubble's edge to its text
-BUBBLE_PAD_Y = 8
+BUBBLE_PAD = 10                               # the bubble's edge to its text, on every side
 BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
-BUBBLE_LINES = 3                              # most lines of the text read aloud the bubble shows at once
+BUBBLE_LINES = 6                              # most lines of the text read aloud the bubble shows at once
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
 HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
@@ -933,23 +932,26 @@ def render(state, now=None):
     # tall as the tallest bubble, so the card's size does not change as lines play. draw.lua
     # draws it from these lines.
     name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
-    full_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
+    full_h = 2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
     bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
-    inner = (right - bubble_x0 - 2 * BUBBLE_PAD_X) / BLOCK_SLACK    # draw.lua's text runs wider
+    inner = (right - bubble_x0 - 2 * BUBBLE_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
     bottom = out.y + full_h
     avatar_at(bottom - AVATAR_D)                              # level with the bubble's bottom
     if n:
         speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A session'   # the hook's "<name> session"
         said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
         shown = min(max(len(said), 1), BUBBLE_LINES)
-        top = bottom - (2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + shown * line_h)
-        draw.append(f'bubble {bubble_x0} {top} {right} {bottom} {BUBBLE_PAD_X} '
-                    f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
-                    f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
+        top = bottom - (2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + shown * line_h)
+        name = fit(speaker, SEGMENT_FONT, inner)
+        wide = max([text_width(name, SEGMENT_FONT)] + [text_width(l, ROW_FONT) for l in said]) * BLOCK_SLACK
+        bubble_right = min(bubble_x0 + 2 * BUBBLE_PAD + math.ceil(wide), right)   # as wide as its text needs
+        draw.append(f'bubble {bubble_x0} {top} {bubble_right} {bottom} {BUBBLE_PAD} '
+                    f'{top + BUBBLE_PAD + name_h / 2:.2f} '
+                    f'{top + BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
                     f'{bottom - AVATAR_D / 2:.2f} {shown}')
-        draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
+        draw.append(f'speaker {name}')
         draw.extend(f'line {line}' for line in said)
-        regions['bubble'] = [bubble_x0, top, right, bottom]
+        regions['bubble'] = [bubble_x0, top, bubble_right, bottom]
         regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
     out.gap(max(full_h, AVATAR_D))
     out.gap(HEADER_GAP)

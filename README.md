@@ -84,7 +84,8 @@ itself.
   `~/.config/conky-widgets/speech/avatar.png` when it is there, else the Claude icon the
   package ships, else a spark drawn on an orange circle) at the bottom left, and, while a clip
   plays, a speech bubble pointing at it that holds the speaker's name and the whole line being
-  read aloud: one line high for a short one, growing upward to three lines. A longer one
+  read aloud, as wide as its text needs (up to the card's width) with the same padding on every
+  side: one line high for a short one, growing upward to six lines. A longer one
   scrolls with the clip's elapsed time, fading at the top and bottom, with no scroll bar, and
   the mouse wheel moves it while the pointer is over the bubble (it follows the clip again
   after five seconds). The bubble opens when a clip starts and fades away two seconds after the

@@ -754,8 +754,7 @@ class TitleAndFooter(Fixture):
         self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
         self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
         self.assertEqual(lines['speaker'], 'Claude Voice Widget')
-        self.assertEqual(int(lines['bubble'].split()[9]), speechqueue.BUBBLE_LINES)     # lines shown at once
-        self.assertGreater(len(lines['line']), speechqueue.BUBBLE_LINES)
+        self.assertEqual(int(lines['bubble'].split()[9]), len(lines['line']))           # lines shown at once
         self.assertEqual(' '.join(lines['line']), self.LONG)            # every word, none cut
         self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
         for line in lines['line']:
@@ -773,7 +772,7 @@ class TitleAndFooter(Fixture):
         lines, regions, _ = self.draw(text=self.LONG)
         x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
         self.assertEqual(regions['bubble'], [x0, y0, x1, y1])
-        self.assertEqual(regions['bubble_scroll'], len(lines['line']) - speechqueue.BUBBLE_LINES)
+        self.assertEqual(regions['bubble_scroll'], len(lines['line']) - int(lines['bubble'].split()[9]))
         lines, regions, _ = self.draw(text='Done.')
         self.assertEqual(regions['bubble_scroll'], 0)                   # nothing to scroll
         os.remove(os.path.join(self.f.speak, 'now.json'))
@@ -801,19 +800,38 @@ class TitleAndFooter(Fixture):
         with open(speechqueue.DRAW) as f:
             self.assertIn('speaker Table Headers', f.read().splitlines())
 
-    def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_three(self):
+    def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_six(self):
         def box(text):
-            lines, _, widget = self.draw(text=text)
+            lines, regions, widget = self.draw(text=text)
             _, y0, _, y1 = (float(v) for v in lines['bubble'].split()[:4])
-            return y0, y1, int(lines['bubble'].split()[9]), widget
+            return y0, y1, int(lines['bubble'].split()[9]), widget, regions['bubble_scroll']
         line_h = speechqueue.line_height(speechqueue.ROW_FONT)
-        one, two, three = box('Done.'), box(self.LONG[:150]), box(self.LONG)
-        self.assertEqual((one[2], three[2]), (1, speechqueue.BUBBLE_LINES))
-        self.assertEqual(one[1], three[1])                              # the bottom stays level with the avatar
-        self.assertAlmostEqual(three[1] - three[0] - (one[1] - one[0]), 2 * line_h)
-        self.assertLess(three[0], two[0])
-        self.assertLess(two[0], one[0])
-        self.assertEqual(one[3], three[3])                              # conky's window does not resize
+        one, some, most = box('Done.'), box(self.LONG), box(self.LONG * 3)
+        self.assertEqual((one[2], some[2], most[2]), (1, 4, speechqueue.BUBBLE_LINES))
+        self.assertEqual(speechqueue.BUBBLE_LINES, 6)
+        self.assertEqual(one[1], most[1])                               # the bottom stays level with the avatar
+        self.assertAlmostEqual(some[1] - some[0] - (one[1] - one[0]), 3 * line_h)
+        self.assertAlmostEqual(most[1] - most[0] - (one[1] - one[0]), 5 * line_h)
+        self.assertEqual((one[4], some[4]), (0, 0))
+        self.assertGreater(most[4], 0)                                  # more than six lines scroll
+        self.assertEqual(one[3], most[3])                               # conky's window does not resize
+
+    def test_the_bubble_is_as_wide_as_its_text_needs_up_to_the_card_with_one_padding_all_round(self):
+        def box(text):
+            lines, _, _ = self.draw(text=text)
+            x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
+            return x0, y0, x1, y1, pad, lines
+        short, long = box('Done.'), box(self.LONG)
+        widest = max([speechqueue.text_width(short[5]['speaker'], speechqueue.SEGMENT_FONT)] +
+                     [speechqueue.text_width(l, speechqueue.ROW_FONT) for l in short[5]['line']])
+        self.assertEqual(short[4], speechqueue.BUBBLE_PAD)
+        self.assertAlmostEqual(short[2] - short[0], 2 * short[4] + widest * speechqueue.BLOCK_SLACK, delta=1)
+        self.assertLess(short[2], long[2])
+        _, regions, _ = self.draw(text=self.LONG)
+        self.assertLessEqual(long[2], regions['list'][2])                 # never past the card's contents
+        self.assertGreater(long[2] - long[0], 0.9 * (regions['list'][2] - long[0]))   # a long line nearly fills it
+        name_h, line_h = (speechqueue.line_height(f) for f in (speechqueue.SEGMENT_FONT, speechqueue.ROW_FONT))
+        self.assertAlmostEqual(short[3] - short[1], 2 * short[4] + name_h + speechqueue.BUBBLE_NAME_GAP + line_h)
 
     def test_while_nothing_plays_there_is_the_avatar_and_no_bubble_and_the_card_keeps_its_size(self):
         playing_lines, _, playing = self.draw(text=self.LONG)
