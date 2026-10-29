@@ -161,7 +161,7 @@ while muted still restores it; 1.2 if none was kept). The mouse wheel turns the 
 slider or its speaker, and scrolls the list anywhere else on it; a finger swiped up or down on
 the list scrolls it too.
 
-A click or tap on the footer's gear opens the settings menu over the card under its header, laid
+A click or tap on the gear opens the settings menu over the card under its header, laid
 out as the CLI's settings list: a title line (the page, as `Settings › Sessions › Name`), a row
 for each setting with its value at the right, the selected row behind a blue cursor, and the
 keys at the foot. The first page holds the **Default voice** (a page of the installed voices),
