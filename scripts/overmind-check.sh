@@ -32,7 +32,8 @@ git diff --quiet -- "$PREFIX" \
   || fail "$PREFIX has files that are not in the index"
 
 if [ "${1:-}" = "--remote" ]; then
-  git fetch --quiet --no-tags "https://github.com/$(lock repo).git" "refs/tags/$(lock tag)"
+  git fetch --quiet --no-tags "https://github.com/$(lock repo).git" "refs/tags/$(lock tag)" \
+    || fail "could not fetch tag $(lock tag) from $(lock repo)"
   [ "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$(lock commit)" ] \
     || fail "tag $(lock tag) no longer points at the locked commit"
   [ "$(git rev-parse 'FETCH_HEAD^{tree}')" = "$(lock tree)" ] \

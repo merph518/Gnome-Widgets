@@ -35,8 +35,9 @@ Every command must exit 0 and print nothing, apart from the test summaries
   Moving the pin is `scripts/overmind-sync.sh <tag>`, followed by
   `claude plugin update voice@att-docs`. The tree is read from the index, which
   `overmind-sync.sh` fills, so the check passes before the sync is committed;
-  an edit, a deletion or a file added under the copy fails it. Run it from the
-  repository root.
+  an edit, a deletion or a file added under the copy fails it. The list runs it
+  without `--remote`, so a lock edited to match a hand edit passes locally;
+  run it with `--remote` after moving the pin.
 - `desktop-file-validate` hints count as failures to fix. It once caught a
   duplicate main category that every other check passed.
 - `luac5.3 -p` only parses; it catches syntax errors, not a bad call or a
