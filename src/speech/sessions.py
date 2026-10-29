@@ -7,8 +7,10 @@ opened. Interactive sessions are the ones the sidebar shows; background sessions
 start_session makes, are listed too and marked as such. Two sessions with one name are told
 apart by a number, in process id order.
 
-This follows Overmind's voice-bridge-hooks/sessions.py rule for rule, so the widget lists
-exactly the sessions `speechctl speech <id> ...` can find, without importing from Overmind.
+This follows Overmind's voice-bridge-hooks/sessions.py rule for which sessions it lists, so the
+widget finds the sessions `speechctl speech <id> ...` can, without importing from Overmind; the
+widget decides itself which of them it shows (not the spares, `spare` in the file) and reads
+whether each waits on input (`status: waiting`).
 """
 import json
 import os
@@ -28,7 +30,7 @@ def _read_json(path):
 
 
 def list_sessions(sessions_dir=None, proc_dir=None):
-    """[{id, name, busy, background, pid, cwd}] for every live session, in pid order."""
+    """[{id, name, busy, background, needs_input, spare, pid, cwd}] for every live session, in pid order."""
     sessions_dir = sessions_dir or SESSIONS_DIR
     proc_dir = proc_dir or PROC_DIR
     try:
@@ -58,6 +60,8 @@ def list_sessions(sessions_dir=None, proc_dir=None):
             'name': str(entry.get('name') or '').strip() or os.path.basename(cwd),
             'busy': entry.get('status') == 'busy',
             'background': entry.get('kind') == 'bg',
+            'needs_input': entry.get('status') == 'waiting',     # blocked on a question or a permission prompt in the CLI
+            'spare': bool(entry.get('spare')),                   # a background job kept ready, with no work yet
             'pid': pid,
             'cwd': cwd,
         })

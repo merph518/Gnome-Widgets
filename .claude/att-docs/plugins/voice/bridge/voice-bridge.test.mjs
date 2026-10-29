@@ -7,31 +7,45 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
+
 import {
   announceMerges, announcePrompts, callTool, checkBridgeStarts, claudeBackgroundArgs,
   closingIssues, contextWindow, createHandler, MORE_TEXT, relayFailures, replySummary,
   updateBridge, releaseHeld, commandRefusal, guardRefusal, runShell,
-  checkoutOf, findSession, readJson, repoOf, scanReady, sendNotices, takeNotices,
+  checkoutOf, findSession, setNickname, readJson, repoOf, scanReady, sendNotices, takeNotices,
   waitingNotices,
   writePrivateJson,
   FOLLOW_IDLE_MS,
   hashPassphrase, QUIET_MS,
-  headerText, listSessions, markHeard, notifyFiles, NUMBER_GRACE_MS, numberedSessions,
+  headerText, listSessions, sessionRoots, markHeard, notifyFiles, NUMBER_GRACE_MS, numberedSessions,
   openState, pushedUpdates,
   MARKER_STALE_MS, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
   runBackgroundPending, lastTurnEnd, cursorSeqs, nextUpdates,
-  sessionBranch, sessionWork, sharedFiles,
-  START_MODEL, START_MODELS, startModel,
-  startOfYesterday, startSession, useExtension, resetExtension,
+  appArchived, sessionBranch, sessionWork, sharedFiles,
+  START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
+  startOfYesterday, startSession, codeCheckouts, repoCheckout, useExtension, resetExtension,
 } from './voice-bridge.mjs';
+
+// What every read-back ends with, for the voice chat to say aloud.
+const ASK_YES = ' End your read-back with the plain words "I need a yes for that." Say it even when '
+  + 'the user already asked for this, since the bridge needs a fresh yes after the read-back.';
 
 const PASSPHRASE = 'correct horse battery';
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
 
+// Every scratch folder the tests make, removed once the file's tests finish. A run makes
+// hundreds, and /tmp is a tmpfs whose inodes run out long before its space does.
+const tempDirs = [];
+after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'voice-bridge-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-bridge-'));
+  tempDirs.push(dir);
+  return dir;
 }
 
 // A fake sessions folder and /proc. Each entry is a session file's fields; alive: false
@@ -297,7 +311,7 @@ test('findSession matches a session number unless the words are a whole name', (
   assert.equal(findSession(sessions, 'voice bridge 2').key, '2');
   assert.equal(findSession(sessions, 'the MR one').key, '3');
   // A bare two is session 2's number and also in Voice Bridge 2's title.
-  assert.throws(() => findSession(sessions, 'two'), /two matches Voice Bridge, Voice Bridge 2/);
+  assert.throws(() => findSession(sessions, 'two'), /two matches Session 2, Voice Bridge, Session 1, Voice Bridge 2/);
   assert.throws(() => findSession(sessions, 'session 9'), /names and numbers/);
 });
 
@@ -328,7 +342,7 @@ test('send posts one user line; read_reply gives the reply, then repeats it', as
   });
   await new Promise(resolve => server.listen(socket, resolve));
   const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], root);
-  const context = { paths, config: { roots: ['/repo'] } };
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
 
   try {
     const sent = await callTool('send', { session: 'wt', text: 'status?' }, context);
@@ -398,6 +412,53 @@ test('stop_turn says the turn stopped once the transcript shows it', async () =>
   await callTool('stop_turn', { session: 'runner' }, context);
   assert.match(await callTool('stop_turn', { session: 'runner', confirm: true }, context),
     /^Runner's turn was stopped and the session is still open\./);
+});
+
+test('read_reply waits for a reply that lands within the wait, and reports working after it', async () => {
+  const root = tempDir();
+  const socket = path.join(root, '78.sock');
+  const server = net.createServer(conn => { conn.resume(); });
+  await new Promise(resolve => server.listen(socket, resolve));
+  const paths = fakeMachine([{ pid: 78, cwd: '/repo/wt', name: 'Wt' }], root);
+  const replies = path.join(paths.bridgeDir, 'replies');
+
+  try {
+    await callTool('send', { session: 'wt', text: 'quick one' }, { paths, config: { roots: ['/repo'] } });
+    fs.mkdirSync(replies, { recursive: true });
+    setTimeout(() => fs.writeFileSync(path.join(replies, '78.json'),
+      JSON.stringify({ text: 'Done fast.' })), 400);
+    const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 2000 };
+    assert.equal(await callTool('read_reply', { session: 'wt' }, context), 'Done fast.');
+
+    await callTool('send', { session: 'wt', text: 'slow one' }, context);
+    const started = Date.now();
+    const late = await callTool('read_reply', { session: 'wt' },
+      { paths, config: { roots: ['/repo'] }, replyWaitMs: 600 });
+    assert.match(late, /still working/);
+    assert.ok(Date.now() - started >= 550, 'waited out the wait before saying so');
+  } finally {
+    server.close();
+  }
+});
+
+test('read_reply does not wait on a session that is waiting on a prompt', async () => {
+  const root = tempDir();
+  const socket = path.join(root, '79.sock');
+  const server = net.createServer(conn => { conn.resume(); });
+  await new Promise(resolve => server.listen(socket, resolve));
+  const paths = fakeMachine([{ pid: 79, cwd: '/repo/wt', name: 'Wt', status: 'busy' }], root);
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 3000 };
+  try {
+    await callTool('send', { session: 'wt', text: 'run it' }, context);
+    const marker = path.join(paths.bridgeDir, 'attention', '79.json');
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify({ at: Date.now() / 1000, reason: 'a permission prompt' }));
+    const started = Date.now();
+    assert.match(await callTool('read_reply', { session: 'wt' }, context), /waiting on a permission prompt/);
+    assert.ok(Date.now() - started < 1000, 'returned without waiting');
+  } finally {
+    server.close();
+  }
 });
 
 test('stop_turn carries a follow-up in the stop line and has read_reply answer it', async () => {
@@ -724,7 +785,7 @@ test('the voice-request skill description names the marker a request carries', (
 
 test('read_reply reads the turn\'s feed so far, then the final reply', async () => {
   const paths = fakeMachine([{ pid: 78, cwd: '/repo/wt', name: 'Wt', status: 'busy' }]);
-  const context = { paths, config: { roots: ['/repo'] } };
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
   const sentAt = Date.now() - 5000;
   for (const [folder, name, body] of [
     ['pending', '78', String(sentAt)],
@@ -804,9 +865,10 @@ function fakeCheckout(root, name, branch, repo = 'o/r') {
 // heads gives a checkout's HEAD commit, and a merge-base against a ref in missing fails, as
 // for a branch never fetched.
 // A fetch of a branch in fetchable brings its ref in. ancestors holds 'a>b' for each commit a
-// that is an ancestor of b, and ahead gives what rev-list counts for a checkout.
+// that is an ancestor of b, and ahead gives what rev-list counts for a checkout. A checkout in
+// dirty has uncommitted changes, and one in noUpstream has no upstream branch.
 function fakeGit(changes, { heads = {}, missing = [], fetchable = [], ancestors = [],
-  ahead = {} } = {}) {
+  ahead = {}, dirty = [], noUpstream = [] } = {}) {
   const calls = [];
   const absent = new Set(missing);
   const git = async ({ cwd, args }) => {
@@ -817,7 +879,13 @@ function fakeGit(changes, { heads = {}, missing = [], fetchable = [], ancestors 
       if (fetchable.includes(args[3])) absent.delete(`origin/${args[3]}`);
       return '';
     }
-    if (args[0] === 'rev-list') return `${ahead[cwd] ?? 0}\n`;
+    if (args[0] === 'status') return dirty.includes(cwd) ? ' M scripts/voice-bridge.mjs\n' : '';
+    if (args[0] === 'rev-list') {
+      if (args[2].startsWith('@{upstream}') && noUpstream.includes(cwd)) {
+        throw new Error('fatal: no upstream configured');
+      }
+      return `${ahead[cwd] ?? 0}\n`;
+    }
     if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
       if (!ancestors.includes(`${args[2]}>${args[3]}`)) throw new Error('not an ancestor');
       return '';
@@ -877,11 +945,11 @@ test('list_sessions names the issue and pull request each session owns', async (
   const context = { paths, config: { roots: [path.join(root, 'repo')] },
     gh: workGh(pulls, [5190], calls), git: fakeGit({}).git };
   const listed = [
-    'Issue only, idle, working issue 5190',
-    'Both, idle, working issues 5190 and 5191, pull request 5200',
-    'Neither, idle',
-    'On main, idle',
-    'Merged, idle',
+    'Issue only, idle, in r, working issue 5190',
+    'Both, idle, in r, working issues 5190 and 5191, pull request 5200',
+    'Neither, idle, in r',
+    'On main, idle, in r',
+    'Merged, idle, in r',
   ].join('\n');
   assert.equal(await callTool('list_sessions', {}, context), listed);
   // Each branch is asked about on its own, and a second listing within a minute asks gh
@@ -917,7 +985,7 @@ test('sessionWork calls gh only for a session on a branch, and a failed read say
     const working = { key: '3', cwd: fakeCheckout(root, 'w', 'i5269') };
     assert.deepEqual(await sessionWork([working], { cwd: root, gh }),
       new Map([['3', { branch: 'i5269', pull: null, merged: false, mergedHead: null,
-        issues: [] }]]));
+        issues: [], lookupFailed: true }]]));
     assert.equal(calls.length, 2);
     // A read that failed is not kept, so the next call asks again.
     await sessionWork([working], { cwd: root, gh });
@@ -2280,6 +2348,202 @@ test('start_session launches claude in the start folder and follows the new sess
   assert.match(await callTool('next_update', { session: 'phone test' }, context), /Nothing new/);
 });
 
+// A machine with the launcher open in the Claude app, where a post to the launcher's socket
+// registers the app session it would start unless starts is false. posts holds each socket
+// and message posted, launches each claude --bg launch.
+function launcherMachine({ launcher = { pid: 50, cwd: os.homedir(), name: LAUNCHER_NAME,
+  entrypoint: 'claude-desktop' }, starts = true } = {}) {
+  const root = tempDir();
+  const paths = fakeMachine([launcher], root);
+  const posts = [];
+  const launches = [];
+  const post = async (socket, message) => {
+    posts.push({ socket, message });
+    const { content } = message.message;
+    const input = JSON.parse(content.slice(content.indexOf('{')));
+    if (starts) {
+      fakeMachine([{ pid: 51, cwd: input.cwd, name: input.title, entrypoint: 'claude-desktop' }],
+        root);
+    }
+  };
+  const context = {
+    paths, config: { roots: ['/repo'], startDir: '/repo' }, post, followWaitMs: 0,
+    startClaude: async launch => launches.push(launch), startWaitMs: 0,
+  };
+  return { paths, posts, launches, context };
+}
+
+test('start_session asks the launcher in the Claude app to start the session', async () => {
+  const { posts, launches, context } = launcherMachine();
+  const result = await callTool('start_session',
+    { name: 'Phone Test', request: 'say "hi" -v', model: 'sonnet' }, context);
+  assert.match(result, /^Started Phone Test in the Claude app on Sonnet 5.5 and following it/);
+  assert.deepEqual(launches, []);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].socket, /50\.sock$/);
+  assert.equal(posts[0].message.type, 'user');
+  const { content } = posts[0].message.message;
+  assert.match(content, /mcp__ccd_session__start_session/);
+  const { prompt, ...input } = JSON.parse(content.slice(content.indexOf('{')));
+  assert.deepEqual(input, {
+    initiation: 'user_asked', title: 'Phone Test', name: 'Phone Test', cwd: '/repo',
+    model: START_MODELS.sonnet.id, use_worktree: false, wake_when_done: false,
+  });
+  assert.match(prompt, /^Started from a voice chat.*First request: say "hi" -v/s);
+  assert.match(await callTool('list_sessions', {}, context), /Phone Test, idle/);
+});
+
+test('start_session says to approve the start when the app session has not shown up', async () => {
+  const { posts, context } = launcherMachine({ starts: false });
+  const result = await callTool('start_session', { name: 'Phone Test' }, context);
+  assert.equal(posts.length, 1);
+  assert.ok(result.startsWith(`Asked ${LAUNCHER_NAME} to start Phone Test in the Claude app `
+    + `on Opus 5.5, but it has not shown up yet. If ${LAUNCHER_NAME} asks to start it, `
+    + 'approve that.'), result);
+});
+
+test('start_session runs claude --bg when no app session is the launcher', async () => {
+  for (const launcher of [
+    // A command-line session with the launcher's title has no app start tool.
+    { pid: 50, cwd: '/home/me', name: LAUNCHER_NAME },
+    { pid: 50, cwd: '/home/me', name: 'Other', entrypoint: 'claude-desktop' },
+  ]) {
+    const { posts, launches, context } = launcherMachine({ launcher });
+    await callTool('start_session', { name: 'Phone Test' }, context);
+    assert.deepEqual(posts, []);
+    assert.equal(launches.length, 1);
+  }
+});
+
+test('findLauncher takes the title the config names, in a root or under home', () => {
+  const paths = fakeMachine([
+    { pid: 50, cwd: '/home/me/notes', name: 'Starter', entrypoint: 'claude-desktop' },
+    { pid: 52, cwd: '/elsewhere', name: LAUNCHER_NAME, entrypoint: 'claude-desktop' },
+  ]);
+  assert.equal(findLauncher(paths, { roots: ['/repo'] }, '/home/me'), null);
+  assert.equal(findLauncher(paths, { roots: ['/elsewhere'] }, '/home/me')?.pid, 52);
+  assert.equal(findLauncher(paths, { roots: ['/repo'], launcher: 'starter' }, '/home/me')?.pid,
+    50);
+  assert.equal(findLauncher(paths, { roots: ['/repo'], launcher: ' ' }, '/home/me'), null);
+});
+
+test('launcherMessage carries the request as JSON the tool reads back unchanged', () => {
+  const prompt = 'line one\nquote " and {braces}';
+  const message = launcherMessage({ cwd: '/repo', name: 'N', prompt, model: START_MODEL });
+  assert.equal(JSON.parse(message.slice(message.indexOf('{'))).prompt, prompt);
+});
+
+// A folder under codeDir that is a main checkout of repo, or of none when repo is null.
+function codeCheckout(codeDir, folder, repo) {
+  const dir = path.join(codeDir, folder);
+  fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  fs.writeFileSync(path.join(dir, '.git', 'config'), '[core]\n\tbare = false\n'
+    + (repo ? `[remote "origin"]\n\turl = https://github.com/${repo}.git\n` : ''));
+  return dir;
+}
+
+// A code folder with Overmind, LaundryBot under a folder that differs from its repository,
+// a checkout with no origin, a plain folder, and a worktree.
+function codeFolder() {
+  const codeDir = path.join(tempDir(), 'Code');
+  const overmind = codeCheckout(codeDir, 'Overmind', 'merph518/Overmind');
+  const laundry = codeCheckout(codeDir, 'laundry-checkout', 'mfagerstrom/LaundryBot');
+  codeCheckout(codeDir, 'Scratch', null);
+  fs.mkdirSync(path.join(codeDir, 'Notes'));
+  fs.mkdirSync(path.join(codeDir, 'Wt'));
+  fs.writeFileSync(path.join(codeDir, 'Wt', '.git'), `gitdir: ${overmind}/.git/worktrees/wt\n`);
+  return { codeDir, overmind, laundry };
+}
+
+test('repoCheckout maps a spoken repo to its checkout by origin, not folder name', () => {
+  const { codeDir, overmind, laundry } = codeFolder();
+  assert.deepEqual(codeCheckouts(codeDir).map(c => c.repo),
+    ['merph518/overmind', 'mfagerstrom/laundrybot']);
+  assert.equal(repoCheckout('Overmind', codeDir).dir, overmind);
+  assert.equal(repoCheckout('overmind', codeDir).dir, overmind);
+  assert.equal(repoCheckout('Laundry-Bot', codeDir).dir, laundry);
+  assert.equal(repoCheckout('laundry bot', codeDir).dir, laundry);
+  assert.equal(repoCheckout('mfagerstrom/LaundryBot', codeDir).dir, laundry);
+  assert.equal(repoCheckout('laundry-checkout', codeDir).dir, laundry);
+});
+
+test('repoCheckout names the repos it can start in when it finds none', () => {
+  const { codeDir } = codeFolder();
+  assert.throws(() => repoCheckout('Playwright', codeDir),
+    /No checkout of Playwright was found\. A session can start in overmind and laundrybot\./);
+  // The owner is part of an owner/name match.
+  assert.throws(() => repoCheckout('someone/Overmind', codeDir),
+    /No checkout of someone\/Overmind/);
+  assert.throws(() => repoCheckout('Scratch', codeDir), /No checkout of Scratch/);
+  assert.throws(() => repoCheckout('Wt', codeDir), /No checkout of Wt/);
+  assert.throws(() => repoCheckout('Overmind', path.join(tempDir(), 'missing')),
+    /the code folder holds no repositories/);
+});
+
+test('repoCheckout refuses a name two checkouts share', () => {
+  const { codeDir } = codeFolder();
+  codeCheckout(codeDir, 'Overmind-2', 'other/Overmind');
+  assert.throws(() => repoCheckout('Overmind', codeDir),
+    /More than one checkout is called Overmind: Overmind and Overmind-2/);
+  assert.equal(repoCheckout('other/Overmind', codeDir).folder, 'Overmind-2');
+});
+
+test('start_session with a repo opens the session in that repo\'s checkout', async () => {
+  const { codeDir, overmind, laundry } = codeFolder();
+  const root = tempDir();
+  const paths = fakeMachine([], root);
+  const launches = [];
+  const startClaude = async launch => {
+    launches.push(launch);
+    fakeMachine([{ pid: 60 + launches.length, cwd: launch.cwd, name: launch.name, kind: 'bg' }],
+      root);
+  };
+  const context = {
+    paths, config: { roots: ['/repo'], startDir: '/repo', codeDir }, startClaude,
+    followWaitMs: 0,
+  };
+  const first = await callTool('start_session',
+    { name: 'Issue 100', request: '/implement 100', repo: 'Overmind' }, context);
+  assert.match(first, /^Started Issue 100 in overmind on Opus 5\.5 and following it/);
+  assert.equal(launches[0].cwd, overmind);
+  // The new session is found although its checkout is outside the configured roots.
+  assert.match(await callTool('start_session',
+    { name: 'Wash', request: 'check', repo: 'Laundry-Bot' }, context),
+  /^Started Wash in laundrybot on /);
+  assert.equal(launches[1].cwd, laundry);
+  // With no repo the default checkout stays.
+  await callTool('start_session', { name: 'Plain' }, context);
+  assert.equal(launches[2].cwd, '/repo');
+});
+
+test('start_session with an unknown repo says where it can start and launches nothing',
+  async () => {
+    const { codeDir } = codeFolder();
+    const root = tempDir();
+    const launches = [];
+    const context = {
+      paths: fakeMachine([], root), config: { roots: ['/repo'], startDir: '/repo', codeDir },
+      startClaude: async launch => launches.push(launch), followWaitMs: 0,
+    };
+    await assert.rejects(callTool('start_session', { name: 'Lost', repo: 'Nowhere' }, context),
+      /No checkout of Nowhere was found\. A session can start in overmind and laundrybot\./);
+    assert.deepEqual(launches, []);
+  });
+
+test('start_session reads a milestone from the repo it opens in', async () => {
+  const { codeDir, overmind } = codeFolder();
+  const { context, launches, calls } = milestoneStartMachine({
+    issues: [aged(issueRow(7, 'Only', []), '2026-10-01T00:00:00Z')], pulls: [],
+  });
+  context.config.codeDir = codeDir;
+  const reply = await callTool('start_session',
+    { milestone: 'sweep round 2', repo: 'overmind' }, context);
+  assert.match(reply, /^Started Issue 7 in overmind on Opus 5\.5 for issue 7/);
+  assert.equal(launches[0].cwd, overmind);
+  assert.ok(calls.every(c => c.cwd === overmind));
+});
+
 test('a session that starts is followed without a follow call', async () => {
   const root = tempDir();
   const paths = fakeMachine([{ pid: 92, cwd: '/repo/a', name: 'Running' }], root);
@@ -2421,6 +2685,177 @@ function renameMachine() {
   const socket = path.join(root, '92.sock');
   return { paths, fix, socket, context: { paths, config: { roots: ['/repo'] } } };
 }
+
+function nicknameMachine() {
+  const root = tempDir();
+  const paths = {
+    ...fakeMachine([
+      { pid: 61, cwd: '/repo/a', name: 'Voice Bridge', startedAt: 1 },
+      { pid: 62, cwd: '/repo/b', name: 'MR phase fix', startedAt: 2 },
+      { pid: 63, cwd: '/repo/c', name: 'Docs sweep', startedAt: 3 },
+    ], root),
+    numbersFile: numbersAt(root),
+  };
+  return { paths, context: { paths, config: { roots: ['/repo'] } } };
+}
+
+test('a nickname reaches its session through the session tools and shows in list_sessions',
+  async () => {
+    const { context } = nicknameMachine();
+    await callTool('list_sessions', {}, context);
+    assert.equal(await callTool('nickname_session',
+      { session: 'session two', nickname: '  Question   session ' }, context),
+    'MR phase fix is nicknamed Question session. Say Question session to reach it.');
+    assert.equal(await callTool('list_sessions', {}, context),
+      'Session 1, Voice Bridge, idle\n'
+      + 'Session 2, MR phase fix, nicknamed Question session, idle\nSession 3, Docs sweep, idle');
+    assert.match(await callTool('follow', { session: 'question session' }, context),
+      /^Following MR phase fix\./);
+    assert.match(await callTool('catch_up', { session: 'the question one' }, context),
+      /MR phase fix/);
+    assert.match(await callTool('read_reply', { session: 'question' }, context),
+      /MR phase fix/);
+    assert.match(await callTool('stop_following', { session: 'session two' }, context),
+      /^Stopped following MR phase fix\./);
+  });
+
+test('a nickname is kept across a restart and cleared by an empty one', async () => {
+  const { paths, context } = nicknameMachine();
+  await callTool('list_sessions', {}, context);
+  await callTool('nickname_session', { session: 'docs', nickname: 'writing' }, context);
+  const restarted = await import(`./voice-bridge.mjs?nick=${Date.now()}`);
+  const sessions = restarted.numberedSessions(paths, { roots: ['/repo'] });
+  assert.equal(restarted.findSession(sessions, 'writing').name, 'Docs sweep');
+  assert.equal(await callTool('nickname_session', { session: 'writing', nickname: '' }, context),
+    'Docs sweep has no nickname now.');
+  assert.throws(() => findSession(numberedSessions(paths, { roots: ['/repo'] }), 'writing'),
+    /No session matches writing/);
+});
+
+test('findSession answers an ambiguous nickname with the sessions it fits', () => {
+  const sessions = [
+    { key: '1', name: 'Alpha', number: 1, nickname: 'question one' },
+    { key: '2', name: 'Bravo', number: 2, nickname: 'question two' },
+    { key: '3', name: 'Charlie', number: 3 },
+  ];
+  assert.throws(() => findSession(sessions, 'question'),
+    /question matches Session 1, Alpha, nicknamed question one, Session 2, Bravo, nicknamed question two\. Say which one\./);
+  assert.equal(findSession(sessions, 'question two').key, '2');
+  // A whole nickname wins over a longer nickname that holds its words.
+  sessions.push({ key: '4', name: 'Delta', number: 4, nickname: 'question' });
+  assert.equal(findSession(sessions, 'question').key, '4');
+});
+
+test('findSession lists a session whose title is another session\'s nickname', () => {
+  const sessions = [
+    { key: '1', name: 'Question session', number: 1 },
+    { key: '2', name: 'Bravo', number: 2, nickname: 'question session' },
+  ];
+  assert.throws(() => findSession(sessions, 'question session'),
+    /matches Session 1, Question session, Session 2, Bravo, nicknamed question session\. Say which one\./);
+  // A session whose title and nickname are one name is not a tie with itself.
+  assert.equal(findSession([{ key: '1', name: 'Same', number: 1, nickname: 'same' }], 'same').key,
+    '1');
+});
+
+test('nickname_session needs a nickname, and only an empty one clears it', async () => {
+  const { context } = nicknameMachine();
+  await callTool('list_sessions', {}, context);
+  await callTool('nickname_session', { session: 'docs', nickname: 'writing' }, context);
+  await assert.rejects(callTool('nickname_session', { session: 'docs' }, context),
+    /Say a nickname, or an empty one to clear it\./);
+  assert.match(await callTool('list_sessions', {}, context), /nicknamed writing/);
+});
+
+test('send reaches a session by its nickname', async () => {
+  const { paths, socket, context } = renameMachine();
+  const inbox = await sessionInbox(socket);
+  try {
+    await callTool('list_sessions', {}, context);
+    await callTool('nickname_session', { session: 'session 2', nickname: 'question' }, context);
+    assert.match(await callTool('send', { session: 'the question one', text: 'status?' }, context),
+      /^Sent to MR phase fix\./);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(inbox.lines.length, 1);
+    assert.equal(inbox.lines[0].message.content, 'Voice request: status?');
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('rename_session refuses a name that is another session\'s nickname', async () => {
+  const { socket, context } = renameMachine();
+  const inbox = await sessionInbox(socket);
+  try {
+    await callTool('list_sessions', {}, context);
+    await callTool('nickname_session', { session: 'session 1', nickname: 'first' }, context);
+    await assert.rejects(
+      callTool('rename_session', { session: 'session 2', name: 'First' }, context),
+      /Session 1 already answers to First\. Pick another name for MR phase fix\./);
+    assert.deepEqual(inbox.lines, []);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('a nickname survives one missed listing and returns within the grace period', () => {
+  const { paths } = nicknameMachine();
+  const config = { roots: ['/repo'] };
+  numberedSessions(paths, config, { now: 0 });
+  const two = findSession(numberedSessions(paths, config, { now: 0 }), 'session 2');
+  setNickname(two, { nickname: 'question' }, { sessions: [two], numbersFile: paths.numbersFile });
+  const entry = { pid: 62, cwd: '/repo/b', name: 'MR phase fix', startedAt: 2 };
+  endFake(paths, 62);
+  numberedSessions(paths, config, { now: 1000 });
+  startFake(paths, entry);
+  const back = numberedSessions(paths, config, { now: 2000 });
+  assert.equal(findSession(back, 'question').number, 2);
+});
+
+test('an unknown nickname is answered with the sessions to pick from', () => {
+  const sessions = [
+    { key: '1', name: 'Alpha', number: 1, nickname: 'login' },
+    { key: '2', name: 'Bravo', number: 2 },
+  ];
+  assert.throws(() => findSession(sessions, 'quiz'),
+    /No session matches quiz\. The sessions are Session 1, Alpha, nicknamed login; Session 2, Bravo\./);
+});
+
+test('nickname_session refuses a taken nickname or a number alone', async () => {
+  const { context } = nicknameMachine();
+  await callTool('list_sessions', {}, context);
+  await callTool('nickname_session', { session: 'session 1', nickname: 'first' }, context);
+  const give = (session, nickname) => callTool('nickname_session', { session, nickname },
+    context);
+  await assert.rejects(give('session 2', 'First'), /Session 1 already answers to First/);
+  await assert.rejects(give('session 2', 'docs sweep'), /Session 3 already answers/);
+  await assert.rejects(give('session 2', 'number two'), /reads as a session number/);
+  await assert.rejects(give('session 2', '3'), /reads as a session number/);
+  // Its own nickname again is not a collision.
+  assert.match(await give('session 1', 'first'), /^Voice Bridge is nicknamed first\./);
+});
+
+test('a nickname for a session that has ended stops answering and goes with its number',
+  () => {
+    const { paths } = nicknameMachine();
+    const config = { roots: ['/repo'] };
+    numberedSessions(paths, config, { now: 0 });
+    const two = findSession(numberedSessions(paths, config, { now: 0 }), 'session 2');
+    setNickname(two, { nickname: 'question' }, { sessions: [two], numbersFile: paths.numbersFile });
+    assert.equal(findSession(numberedSessions(paths, config, { now: 0 }), 'question').key, '62');
+    endFake(paths, 62);
+    // Through the grace period the nickname is held, but the session is no longer listed.
+    const gone = numberedSessions(paths, config, { now: 1000 });
+    assert.throws(() => findSession(gone, 'question'),
+      /No session matches question\. The sessions are Session 1, Voice Bridge; Session 3, Docs sweep\./);
+    assert.equal(stored(paths)['62'].nickname, 'question');
+    // A new session on the same process id does not inherit it, and after the grace
+    // period the nickname is gone from the file.
+    startFake(paths, { pid: 62, cwd: '/repo/n', name: 'New', startedAt: 9 });
+    const after = numberedSessions(paths, config, { now: NUMBER_GRACE_MS + 1000 });
+    assert.throws(() => findSession(after, 'question'), /No session matches question/);
+    assert.equal(stored(paths)['62'].nickname, undefined);
+  });
 
 test('rename_session renames through the inbox and reads the title back', async () => {
   const { paths, fix, socket, context } = renameMachine();
@@ -2986,6 +3421,497 @@ test('list_issues puts In Progress first and filters by milestone and labels', a
     ['--milestone', '31', '--label', 'Tooling']);
 });
 
+// Wraps a fake gh with the GitHub side of the repository lookup: the signed-in user, its
+// organizations, each owner's repositories, and the redirect from each old name in renamed.
+// Every other call goes to gh, recorded in calls with the repository it was pointed at.
+function ownersGh(gh, { user = 'merph518', orgs = [], repos = [], renamed = {} } = {}) {
+  const calls = [];
+  const lookups = [];
+  const wrapped = async call => {
+    const { args } = call;
+    const ask = () => lookups.push(args) && '';
+    if (args[0] === 'api' && args[1] === 'user') return ask() + user;
+    if (args[0] === 'api' && args[1] === 'user/orgs') return ask() + orgs.join('\n');
+    if (args[0] === 'repo' && args[1] === 'list') {
+      return ask() + repos.filter(repo => repo.startsWith(`${args[2]}/`))
+        .map(repo => `${repo} false`).join('\n');
+    }
+    if (args[0] === 'repo' && args[1] === 'view' && args.includes('nameWithOwner')) {
+      return ask() + (renamed[args[2].toLowerCase()] ?? args[2]);
+    }
+    calls.push({ cwd: call.cwd, repo: call.repo, args });
+    return gh(call);
+  };
+  return { gh: wrapped, calls, lookups };
+}
+
+test('a tracker tool with repo points gh at that repository, from its checkout', async () => {
+  const { codeDir, laundry, overmind } = codeFolder();
+  const { gh, calls } = ownersGh(fakeGh({ issues: [issueRow(5, 'Dry the towels', [])] }).gh,
+    { orgs: ['mfagerstrom'], repos: ['merph518/Overmind', 'mfagerstrom/LaundryBot'] });
+  const context = { ...trackerContext(gh), config: { roots: ['/repo'], startDir: '/repo', codeDir } };
+  const text = await callTool('list_issues', { repo: 'LaundryBot' }, context);
+  assert.match(text, /5: Dry the towels/);
+  assert.ok(calls.length > 0
+    && calls.every(call => call.cwd === laundry && call.repo === 'mfagerstrom/LaundryBot'));
+  await callTool('list_pull_requests', { repo: 'merph518/Overmind' }, context);
+  assert.deepEqual([calls.at(-1).cwd, calls.at(-1).repo], [overmind, 'merph518/Overmind']);
+  // Left out, with a start folder configured, the tool reads the start folder's repository.
+  await callTool('list_issues', {}, context);
+  assert.deepEqual([calls.at(-1).cwd, calls.at(-1).repo], ['/repo', undefined]);
+});
+
+test('a tracker tool reaches a repository with no checkout in the code folder', async () => {
+  const { codeDir } = codeFolder();
+  const { gh, calls } = ownersGh(fakeGh({ issue: { ...issueRow(3, 'New landing page', []), state: 'OPEN' } }).gh,
+    { orgs: ['TheRPGClub'], repos: ['merph518/Overmind', 'TheRPGClub/TheRPGClub-www',
+      'TheRPGClub/TheRPGClub-api'] });
+  const context = { ...trackerContext(gh), config: { roots: ['/repo'], startDir: '/repo', codeDir } };
+  assert.match(await callTool('read_issue', { number: 3, repo: 'TheRPGClub-www' }, context),
+    /New landing page/);
+  assert.deepEqual([calls.at(-1).cwd, calls.at(-1).repo], ['/repo', 'TheRPGClub/TheRPGClub-www']);
+  // A name said without its leading "the" still finds it.
+  await callTool('read_issue', { number: 3, repo: 'RPG Club API' }, context);
+  assert.equal(calls.at(-1).repo, 'TheRPGClub/TheRPGClub-api');
+});
+
+test('a tracker tool finds a renamed repository by its new name and by its old checkout',
+  async () => {
+    const { codeDir } = codeFolder();
+    const calendar = codeCheckout(codeDir, 'CalendarBot', 'mfagerstrom/CalendarBot');
+    const { gh, calls, lookups } = ownersGh(fakeGh().gh, {
+      repos: ['merph518/Overmind', 'merph518/Family-Bot'],
+      renamed: { 'mfagerstrom/calendarbot': 'merph518/Family-Bot' },
+    });
+    const context = { ...trackerContext(gh), config: { roots: ['/repo'], startDir: '/repo', codeDir } };
+    await callTool('list_issues', { repo: 'Family-Bot' }, context);
+    assert.equal(calls.at(-1).repo, 'merph518/Family-Bot');
+    // The old folder name goes through the checkout's remote to the repository's new name.
+    await callTool('list_issues', { repo: 'CalendarBot' }, context);
+    assert.deepEqual([calls.at(-1).cwd, calls.at(-1).repo], [calendar, 'merph518/Family-Bot']);
+    // The owners' listing is read once and kept.
+    assert.equal(lookups.filter(args => args[1] === 'list').length, 1);
+  });
+
+test('a tracker tool asks for the owner when two owners have the repository', async () => {
+  const { gh, calls } = ownersGh(fakeGh().gh,
+    { orgs: ['TheRPGClub'], repos: ['merph518/bot', 'TheRPGClub/bot'] });
+  const context = { ...trackerContext(gh), config: { roots: ['/repo'], startDir: '/repo',
+    codeDir: path.join(tempDir(), 'Code') } };
+  assert.equal(await callTool('list_issues', { repo: 'bot' }, context),
+    'More than one repository is called bot: merph518/bot and TheRPGClub/bot. Say the owner '
+    + 'and the repository name.');
+  assert.deepEqual(calls, []);
+  await callTool('list_issues', { repo: 'TheRPGClub/bot' }, context);
+  assert.equal(calls.at(-1).repo, 'TheRPGClub/bot');
+});
+
+test('a tracker tool with no repo works in the followed sessions\' repository, or asks',
+  async () => {
+    const root = tempDir();
+    const codeDir = path.join(root, 'Code');
+    const laundry = codeCheckout(codeDir, 'laundry-checkout', 'mfagerstrom/LaundryBot');
+    const health = codeCheckout(codeDir, 'fagerteam-health-coach', 'merph518/AI-Health-Coach');
+    const paths = fakeMachine([{ pid: 81, cwd: laundry, name: 'Laundry', startedAt: 1 }], root);
+    const { gh, calls } = ownersGh(fakeGh().gh, { orgs: ['mfagerstrom'],
+      repos: ['mfagerstrom/LaundryBot', 'merph518/AI-Health-Coach'] });
+    const context = { paths, gh, config: { roots: ['/repo'], codeDir } };
+    await callTool('list_issues', {}, context);
+    assert.deepEqual([calls.at(-1).cwd, calls.at(-1).repo], [laundry, 'mfagerstrom/LaundryBot']);
+    startFake(paths, { pid: 82, cwd: health, name: 'Health', startedAt: 2 });
+    const count = calls.length;
+    assert.equal(await callTool('list_issues', {}, context),
+      'Which repository? The followed sessions work in laundrybot and ai-health-coach.');
+    assert.equal(calls.length, count);
+  });
+
+test('sessions in every checkout in the code folder are listed, beside the configured roots',
+  () => {
+    const root = tempDir();
+    const codeDir = path.join(root, 'Code');
+    const packs = codeCheckout(codeDir, 'ATT-Test-Pack-Gen', 'merph518/ATT-Test-Pack-Gen');
+    assert.deepEqual(sessionRoots({ roots: ['/repo'], codeDir }), ['/repo', packs]);
+    const paths = fakeMachine([{ pid: 91, cwd: packs, name: 'Packs', startedAt: 1 }], root);
+    assert.deepEqual(listSessions({ ...paths, roots: sessionRoots({ roots: ['/repo'], codeDir }) })
+      .map(s => s.name), ['Packs']);
+  });
+
+test('a later page is read again when it is asked for another repository', async () => {
+  const { codeDir, laundry } = codeFolder();
+  const rows = Array.from({ length: 7 }, (_, i) => issueRow(i + 1, `Issue ${i + 1}`, []));
+  const { gh, calls } = fakeGh({ issues: rows });
+  const context = { ...trackerContext(gh), pages: new Map(),
+    config: { roots: ['/repo'], startDir: '/repo', codeDir } };
+  await callTool('list_issues', { repo: 'LaundryBot' }, context);
+  const fetched = calls.length;
+  await callTool('list_issues', { offset: 5 }, context);
+  assert.ok(calls.length > fetched);
+  assert.equal(calls.at(-1).cwd, '/repo');
+  // The same repository reads the kept list.
+  await callTool('list_issues', { repo: 'LaundryBot' }, context);
+  const again = calls.length;
+  await callTool('list_issues', { repo: 'LaundryBot', offset: 5 }, context);
+  assert.equal(calls.length, again);
+  assert.ok(calls.some(call => call.cwd === laundry));
+});
+
+test('set_issue_fields edits the issue in the named repository', async () => {
+  const { codeDir, laundry } = codeFolder();
+  const issue = { ...issueRow(5, 'Dry the towels', ['Tooling']), state: 'OPEN' };
+  const { gh, calls } = ownersGh(fakeGh({ issue, afterEdit: issue }).gh);
+  const context = { ...trackerContext(gh), pages: new Map(),
+    config: { roots: ['/repo'], startDir: '/repo', codeDir } };
+  await callTool('set_issue_fields', { number: 5, repo: 'LaundryBot', add_labels: ['Tooling'] },
+    context);
+  assert.ok(calls.some(call => call.args[0] === 'issue' && call.args[1] === 'edit'));
+  assert.ok(calls.every(call => call.cwd === laundry));
+});
+
+test('a tracker tool refuses a repository neither GitHub nor the code folder has', async () => {
+  const { codeDir } = codeFolder();
+  const { gh, calls } = ownersGh(fakeGh().gh,
+    { orgs: ['TheRPGClub'], repos: ['merph518/Overmind', 'TheRPGClub/TheRPGClub-www'] });
+  const context = { ...trackerContext(gh), config: { roots: ['/repo'], codeDir } };
+  for (const name of ['list_milestones', 'read_issue', 'read_pull_request', 'list_runs']) {
+    assert.equal(await callTool(name, { number: 1, repo: 'Nowhere' }, context),
+      'No repository called Nowhere was found in merph518 and TheRPGClub.');
+  }
+  assert.deepEqual(calls, []);
+});
+
+// A gh that answers the issue, milestone, and label writes, recording each call.
+function writeGh({
+  state = 'OPEN', url = 'https://github.com/o/r/issues/9', labels = ['bug'], pullState = 'OPEN',
+  draft = false, author = 'someone', userFails = false, body = 'Existing', noBody = false,
+  lands = true,
+} = {}) {
+  const calls = [];
+  const held = { title: 'Dry the `towels`', body };
+  const gh = async ({ cwd, args }) => {
+    calls.push({ cwd, args });
+    if (args[0] === 'issue' && args[1] === 'edit' && lands) {
+      for (const flag of ['title', 'body']) {
+        const at = args.indexOf(`--${flag}`);
+        if (at > -1) held[flag] = args[at + 1];
+      }
+    }
+    if (args[0] === 'issue' && args[1] === 'view') {
+      const issue = { number: 9, title: held.title, state, url };
+      if (!noBody) issue.body = held.body;
+      return JSON.stringify(issue);
+    }
+    if (args[0] === 'issue' && args[1] === 'create') return 'https://github.com/o/r/issues/12\n';
+    if (args[0] === 'label' && args[1] === 'list') {
+      return JSON.stringify(labels.map(name => ({ name })));
+    }
+    if (args[0] === 'pr' && args[1] === 'view') {
+      return JSON.stringify({ number: 9, title: 'Dry the `towels`', state: pullState,
+        isDraft: draft, author: { login: author }, url: 'https://github.com/o/r/pull/9' });
+    }
+    if (args[0] === 'api' && args[1] === 'user') {
+      if (userFails) throw new Error('HTTP 403');
+      return 'Michael\n';
+    }
+    if (args[0] === 'api' && args.includes('--method')) return JSON.stringify({ number: 4 });
+    if (args[0] === 'api') return milestonesReply(MILESTONES, false);
+    return '';
+  };
+  const mutating = () => calls.filter(c => (c.args[0] === 'issue' && c.args[1] !== 'view')
+    || (c.args[0] === 'label' && c.args[1] === 'create')
+    || (c.args[0] === 'pr' && c.args[1] !== 'view')
+    || (c.args[0] === 'api' && c.args.includes('--method')));
+  return { gh, calls, mutating };
+}
+
+// A context whose clock moves ten seconds a call, so a confirm is never too soon.
+function writeContext(gh) {
+  let clock = 0;
+  return { ...trackerContext(gh), pages: new Map(), now: () => (clock += 10 * 1000) };
+}
+
+test('create_issue says what it would create, then creates it on a confirm', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  const args = { title: 'Dry the towels', body: 'Soon', labels: ['Bug'] };
+  const summary = await callTool('create_issue', args, context);
+  assert.match(summary, /^Create an issue titled "Dry the towels", labels bug, with a body of 1 word\./);
+  assert.match(summary, /confirm true\. End your read-back with the plain words "I need a yes for that\."/);
+  assert.equal(mutating().length, 0);
+  assert.equal(await callTool('create_issue', { ...args, confirm: true }, context),
+    'Created issue 12: Dry the towels.');
+  const made = mutating()[0].args;
+  assert.deepEqual(made.slice(0, 6), ['issue', 'create', '--title', 'Dry the towels', '--body',
+    'Soon']);
+  assert.deepEqual(made.slice(6), ['--label', 'bug']);
+  // The summary is spent: a second confirm needs a new one.
+  assert.match(await callTool('create_issue', { ...args, confirm: true }, context),
+    /^Nothing was done\. create_issue has no summary/);
+  assert.equal(mutating().length, 1);
+});
+
+test('a write refuses a confirm with no summary, other arguments, or too soon', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  assert.match(await callTool('close_issue', { number: 9, confirm: true }, context),
+    /^Nothing was done\. close_issue has no summary/);
+  await callTool('close_issue', { number: 9 }, context);
+  assert.match(await callTool('close_issue', { number: 9, reason: 'not planned', confirm: true },
+    context), /has no summary for these arguments/);
+  let clock = 0;
+  const fast = { ...trackerContext(gh), pages: new Map(), now: () => (clock += 1000) };
+  await callTool('close_issue', { number: 9 }, fast);
+  assert.match(await callTool('close_issue', { number: 9, confirm: true }, fast),
+    /came too soon after the summary/);
+  await assert.rejects(callTool('close_issue', { number: 9, confirm: 'maybe' }, context),
+    /Confirm is true or false/);
+  assert.equal(mutating().length, 0);
+});
+
+test('a write runs only the arguments its summary named, and a refused confirm is spent',
+  async () => {
+    const { gh, mutating } = writeGh();
+    const context = writeContext(gh);
+    const args = { title: 'One', body: 'First text', labels: ['bug'] };
+    await callTool('create_issue', args, context);
+    for (const other of [{ ...args, body: 'Other text' }, { ...args, labels: [] },
+      { ...args, title: 'Two' }]) {
+      assert.match(await callTool('create_issue', { ...other, confirm: true }, context),
+        /^Nothing was done\./);
+    }
+    assert.equal(mutating().length, 0);
+    // A confirm too soon spends the summary, so the same confirm sent again is refused.
+    let clock = 0;
+    const fast = { ...trackerContext(gh), pages: new Map(), now: () => (clock += 1000) };
+    await callTool('close_issue', { number: 9 }, fast);
+    assert.match(await callTool('close_issue', { number: 9, confirm: true }, fast),
+      /came too soon/);
+    clock += 60 * 1000;
+    assert.match(await callTool('close_issue', { number: 9, confirm: true }, fast),
+      /has no summary/);
+    // An old summary is refused too.
+    await callTool('close_issue', { number: 9 }, context);
+    context.now = (() => { let t = 10 * 60 * 1000; return () => (t += 1000); })();
+    assert.match(await callTool('close_issue', { number: 9, confirm: true }, context),
+      /more than 3 minutes old/);
+    assert.equal(mutating().length, 0);
+  });
+
+test('a failed write spends its summary, and a missing issue is named', async () => {
+  const failing = writeGh();
+  const real = failing.gh;
+  const gh = async call => {
+    if (call.args[0] === 'issue' && call.args[1] === 'close') throw new Error('gh broke');
+    if (call.args[0] === 'issue' && call.args[1] === 'view' && call.args[2] === '404') {
+      throw new Error('GraphQL: Could not resolve to an issue or pull request with the number of 404.');
+    }
+    return real(call);
+  };
+  const context = writeContext(gh);
+  await callTool('close_issue', { number: 9 }, context);
+  await assert.rejects(callTool('close_issue', { number: 9, confirm: true }, context), /gh broke/);
+  assert.match(await callTool('close_issue', { number: 9, confirm: true }, context),
+    /has no summary/);
+  assert.equal(await callTool('close_issue', { number: 404 }, context), 'There is no issue 404.');
+});
+
+test('a label that starts with a dash and a date that is not one are refused or guarded',
+  async () => {
+    const { gh, mutating } = writeGh();
+    const context = writeContext(gh);
+    const label = { name: '--help' };
+    await callTool('create_label', label, context);
+    await callTool('create_label', { ...label, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args, ['label', 'create', '--', '--help']);
+    await assert.rejects(callTool('create_milestone',
+      { title: 'Feb', due_date: '2026-02-30' }, context), /is not a date/);
+  });
+
+test('close_issue and reopen_issue name the reason and refuse the wrong state', async () => {
+  const open = writeGh();
+  const context = writeContext(open.gh);
+  await callTool('close_issue', { number: 9, reason: 'not planned' }, context);
+  assert.equal(await callTool('close_issue',
+    { number: 9, reason: 'not planned', confirm: true }, context),
+  'Closed issue 9 as not planned.');
+  assert.deepEqual(open.mutating()[0].args, ['issue', 'close', '9', '--reason', 'not planned']);
+  await assert.rejects(callTool('close_issue', { number: 9, reason: 'because' }, context),
+    /completed or not planned/);
+  assert.equal(await callTool('reopen_issue', { number: 9 }, context),
+    'Issue 9 is already open.');
+  const closed = writeGh({ state: 'CLOSED' });
+  const again = writeContext(closed.gh);
+  assert.equal(await callTool('close_issue', { number: 9 }, again), 'Issue 9 is already closed.');
+  await callTool('reopen_issue', { number: 9 }, again);
+  assert.equal(await callTool('reopen_issue', { number: 9, confirm: true }, again),
+    'Reopened issue 9.');
+  const pull = writeGh({ url: 'https://github.com/o/r/pull/9' });
+  assert.match(await callTool('edit_issue', { number: 9, title: 'x' }, writeContext(pull.gh)),
+    /^9 is a pull request, not an issue/);
+});
+
+test('edit_issue changes the title or body, create_milestone and create_label create',
+  async () => {
+    const { gh, mutating } = writeGh();
+    const context = writeContext(gh);
+    await assert.rejects(callTool('edit_issue', { number: 9 }, context), /new title, a new body/);
+    const edit = { number: 9, title: 'Dry the socks' };
+    assert.match(await callTool('edit_issue', edit, context),
+      /^Change the title to "Dry the socks" on issue 9, now titled "Dry the towels"\./);
+    await callTool('edit_issue', { ...edit, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args, ['issue', 'edit', '9', '--title', 'Dry the socks']);
+
+    await assert.rejects(callTool('create_milestone', { title: 'Q1', due_date: 'soon' }, context),
+      /year-month-day/);
+    const milestone = { title: 'Fresh Round', due_date: '2026-12-31' };
+    assert.match(await callTool('create_milestone', milestone, context),
+      /^Create a milestone titled "Fresh Round", due December 31, 2026\./);
+    assert.equal(await callTool('create_milestone', { ...milestone, confirm: true }, context),
+      'Created milestone 4: Fresh Round.');
+    assert.deepEqual(mutating().at(-1).args, ['api', '--method', 'POST',
+      'repos/{owner}/{repo}/milestones', '-f', 'title=Fresh Round', '-f',
+      'due_on=2026-12-31T12:00:00Z']);
+    assert.match(await callTool('create_milestone', { title: 'the docs milestone' }, context),
+      /^Create a milestone/);
+
+    assert.equal(await callTool('create_label', { name: 'BUG' }, context),
+      'The repository already has a label named bug.');
+    await assert.rejects(callTool('create_label', { name: 'new', color: 'red' }, context),
+      /six hex digits/);
+    const label = { name: 'Voice', color: '#1D76DB', description: 'Speech' };
+    assert.match(await callTool('create_label', label, context),
+      /^Create a label named "Voice", color 1d76db\./);
+    await callTool('create_label', { ...label, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args,
+      ['label', 'create', '--color', '1d76db', '--description', 'Speech', '--', 'Voice']);
+  });
+
+test('comment_pull_request, approve_pull_request and set_pull_request_draft confirm first',
+  async () => {
+    const { gh, mutating } = writeGh({ draft: true });
+    const context = writeContext(gh);
+    const comment = { number: 9, body: 'Looks good to me' };
+    assert.match(await callTool('comment_pull_request', comment, context),
+      /^Comment on pull request 9, Dry the towels, with a text of 4 words: Looks good to me/);
+    assert.equal(mutating().length, 0);
+    assert.equal(await callTool('comment_pull_request', { ...comment, confirm: true }, context),
+      'Commented on pull request 9.');
+    assert.deepEqual(mutating().at(-1).args,
+      ['pr', 'comment', '9', '--body', 'Looks good to me']);
+
+    assert.match(await callTool('approve_pull_request', { number: 9 }, context),
+      /^Approve pull request 9, Dry the towels, by someone\./);
+    await callTool('approve_pull_request', { number: 9, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args, ['pr', 'review', '9', '--approve']);
+
+    assert.match(await callTool('set_pull_request_draft', { number: 9, draft: false }, context),
+      /^Mark pull request 9, Dry the towels, ready for review\./);
+    await callTool('set_pull_request_draft', { number: 9, draft: false, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args, ['pr', 'ready', '9']);
+    assert.equal(await callTool('set_pull_request_draft', { number: 9, draft: true }, context),
+      'Pull request 9 is already a draft.');
+    await assert.rejects(callTool('set_pull_request_draft', { number: 9 }, context),
+      /Draft is true/);
+  });
+
+test('approve_pull_request refuses the user\'s own, and pull request writes need an open one',
+  async () => {
+    const own = writeGh({ author: 'michael' });
+    assert.match(await callTool('approve_pull_request', { number: 9 }, writeContext(own.gh)),
+      /is the user's own/);
+    const merged = writeGh({ pullState: 'MERGED' });
+    assert.equal(await callTool('comment_pull_request', { number: 9, body: 'x' },
+      writeContext(merged.gh)), 'Pull request 9 is merged, so nothing was changed.');
+    assert.equal(own.mutating().length + merged.mutating().length, 0);
+    await assert.rejects(callTool('comment_pull_request', { number: 9 }, writeContext(own.gh)),
+      /what the comment says/);
+  });
+
+test('approve_pull_request still summarizes when the user lookup fails, and reads a bot author',
+  async () => {
+    const failing = writeGh({ userFails: true, author: 'app/dependabot' });
+    const context = writeContext(failing.gh);
+    assert.match(await callTool('approve_pull_request', { number: 9 }, context),
+      /^Approve pull request 9, Dry the towels, by dependabot\./);
+    await callTool('approve_pull_request', { number: 9, confirm: true }, context);
+    assert.deepEqual(failing.mutating().at(-1).args, ['pr', 'review', '9', '--approve']);
+  });
+
+test('a comment body that starts with dashes reaches gh unchanged after --body', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  const comment = { number: 9, body: '--approve this' };
+  await callTool('comment_pull_request', comment, context);
+  await callTool('comment_pull_request', { ...comment, confirm: true }, context);
+  assert.deepEqual(mutating().at(-1).args, ['pr', 'comment', '9', '--body', '--approve this']);
+});
+
+test('pull request write tools with repo route to that checkout and name the repository',
+  async () => {
+    const { codeDir, laundry } = codeFolder();
+    const { gh, calls } = ownersGh(writeGh().gh);
+    const context = { ...writeContext(gh), config: { roots: ['/repo'], codeDir } };
+    const comment = { number: 9, body: 'Fine', repo: 'LaundryBot' };
+    assert.match(await callTool('comment_pull_request', comment, context),
+      /^Comment on pull request 9 in mfagerstrom\/laundrybot, /);
+    await callTool('comment_pull_request', { ...comment, confirm: true }, context);
+    assert.ok(calls.some(c => c.args[0] === 'pr' && c.args[1] === 'comment'));
+    assert.ok(calls.every(call => call.cwd === laundry && call.repo === 'mfagerstrom/laundrybot'));
+  });
+
+test('a pull request write refuses a confirm with no summary or too soon', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  assert.match(await callTool('approve_pull_request', { number: 9, confirm: true }, context),
+    /^Nothing was done\. approve_pull_request has no summary/);
+  let clock = 0;
+  const fast = { ...trackerContext(gh), pages: new Map(), now: () => (clock += 1000) };
+  await callTool('approve_pull_request', { number: 9 }, fast);
+  assert.match(await callTool('approve_pull_request', { number: 9, confirm: true }, fast),
+    /came too soon after the summary/);
+  assert.equal(mutating().length, 0);
+});
+
+test('a long comment is cut at a word break and says how many words are not read', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  const body = Array.from({ length: 80 }, (_, i) => `word${i}`).join(' ');
+  const summary = await callTool('comment_pull_request', { number: 9, body }, context);
+  assert.match(summary, /text of 80 words: word0 word1 /);
+  assert.match(summary, / and \d+ more words/);
+  assert.doesNotMatch(summary, /\.\.\./);
+  await callTool('comment_pull_request', { number: 9, body, confirm: true }, context);
+  assert.equal(mutating().at(-1).args.at(-1), body);
+});
+
+test('approve_pull_request with a body sends --body, and a draft true on a ready one sends --undo',
+  async () => {
+    const { gh, mutating } = writeGh();
+    const context = writeContext(gh);
+    const approval = { number: 9, body: 'Ship it' };
+    assert.match(await callTool('approve_pull_request', approval, context),
+      /by someone, with a comment: Ship it\.$/m);
+    await callTool('approve_pull_request', { ...approval, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args,
+      ['pr', 'review', '9', '--approve', '--body', 'Ship it']);
+
+    const draft = { number: 9, draft: true };
+    assert.match(await callTool('set_pull_request_draft', draft, context),
+      /^Turn pull request 9, Dry the towels, back into a draft\./);
+    await callTool('set_pull_request_draft', { ...draft, confirm: true }, context);
+    assert.deepEqual(mutating().at(-1).args, ['pr', 'ready', '9', '--undo']);
+  });
+
+test('a write tool with repo writes in that repository\'s checkout', async () => {
+  const { codeDir, laundry } = codeFolder();
+  const { gh, calls } = ownersGh(writeGh().gh);
+  const context = { ...writeContext(gh), config: { roots: ['/repo'], codeDir } };
+  assert.match(await callTool('create_issue', { title: 'Away', repo: 'LaundryBot' }, context),
+    /^Create an issue in mfagerstrom\/laundrybot titled "Away"/);
+  await callTool('create_issue', { title: 'Away', repo: 'LaundryBot', confirm: true }, context);
+  assert.ok(calls.some(c => c.args[1] === 'create'));
+  assert.ok(calls.every(call => call.cwd === laundry && call.repo === 'mfagerstrom/laundrybot'));
+});
+
 test('list_issues reads out five issues, then a count of the rest', async () => {
   const issues = Array.from({ length: 8 }, (_, i) =>
     issueRow(100 + i, `issue ${i}`, ['CCA'], 'ALM Automation Project'));
@@ -3504,6 +4430,24 @@ test('pull_request_merged tells the owner once, or says no running session owns 
     assert.deepEqual(await m.scan(), []);
   });
 
+test('pull_request_merged with repo tells the session working in that repository',
+  async () => {
+    const m = mergeMachine();
+    const cwd = fakeCheckout(m.root, 'laundry', 'feat/dry', 'm/LaundryBot');
+    startFake(m.paths, { pid: 72, cwd, name: 'Laundry', startedAt: 2 });
+    m.lists.views = { 44: { number: 44, title: 'Pull 44', state: 'MERGED',
+      headRefName: 'feat/dry', headRefOid: 'abc', url: pullUrl(44, 'm/LaundryBot') } };
+    const merged = args => callTool('pull_request_merged', args, m.context);
+    // The number alone is read in the bridge's own repository, where no pull request has it.
+    assert.equal(await merged({ number: 44, repo: 'Nowhere' }),
+      'No running session works in a repository named Nowhere, so the bridge cannot reach it.');
+    assert.equal(await merged({ number: 44, repo: 'LaundryBot' }),
+      'Told Laundry that pull request 44 merged, so it runs its post-merge steps.');
+    assert.equal(await merged({ number: 44, repo: 'LaundryBot' }),
+      'Laundry already heard that pull request 44 merged.');
+    assert.equal(m.posted.length, 1);
+  });
+
 // A machine with a followed session, Watched, and one the user stopped following, Unwatched,
 // a ready record, a notices folder, a gh whose pull request views can change, and a scan of
 // the ready lines on a clock the test moves.
@@ -3638,9 +4582,44 @@ test('merge_pull_request tells the session that owns the pull request', async ()
   const context = { ...m.context, gh, pages: new Map(), now: () => (clock += 10 * 1000) };
   await callTool('merge_pull_request', { number: 7 }, context);
   assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
-    'Merged pull request 7 into main as commit 41bead5. Told Owner that pull request 7 merged, '
-    + 'so it runs its post-merge steps.');
+    'Merged pull request 7 in o/r into main as commit 41bead5. Told Owner that pull request 7 '
+    + 'merged, so it runs its post-merge steps.');
   assert.equal(m.posted.length, 1);
+});
+
+test('merge_pull_request merges in another repository a running session works in',
+  async () => {
+    const m = mergeMachine();
+    const cwd = fakeCheckout(m.root, 'laundry', 'feat/dry', 'm/LaundryBot');
+    startFake(m.paths, { pid: 72, cwd, name: 'Laundry', startedAt: 2 });
+    const { gh, calls } = fakeGh({ pull: { ...READY, number: 44, headRefName: 'feat/dry' },
+      threads: RESOLVED, afterMerge: { ...MERGED, number: 44, title: 'Pull 44',
+        headRefName: 'feat/dry', url: pullUrl(44, 'm/LaundryBot') } });
+    let clock = 0;
+    const context = { ...m.context, gh, pages: new Map(), now: () => (clock += 10 * 1000) };
+    const away = { number: 44, repo: 'LaundryBot' };
+    assert.match(await callTool('merge_pull_request', away, context),
+      /^Pull request 44: .*\nIn m\/laundrybot\.\n/);
+    // With sessions in two repositories, a confirm that names none is asked which one.
+    assert.equal(await callTool('merge_pull_request', { number: 44, confirm: true }, context),
+      'Which repository? The followed sessions work in r and laundrybot.');
+    await callTool('merge_pull_request', away, context);
+    assert.equal(await callTool('merge_pull_request', { ...away, confirm: true }, context),
+      'Merged pull request 44 in m/laundrybot into main as commit 41bead5. Told Laundry that '
+      + 'pull request 44 merged, so it runs its post-merge steps.');
+    const laundry = path.join(m.root, 'gits', 'm');
+    assert.deepEqual(mergeCalls(calls).map(call => call.cwd), [laundry]);
+    assert.ok(calls.every(call => call.cwd === laundry));
+    assert.equal(m.posted.length, 1);
+  });
+
+test('merge_pull_request refuses a repository no running session works in', async () => {
+  const m = mergeMachine();
+  const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED });
+  const context = { ...m.context, gh, pages: new Map(), now: () => 0 };
+  assert.equal(await callTool('merge_pull_request', { number: 44, repo: 'LaundryBot' }, context),
+    'No running session works in a repository named LaundryBot, so the bridge cannot reach it.');
+  assert.deepEqual(calls, []);
 });
 
 test('merge_pull_request summarizes, then merges the read commit after a yes', async () => {
@@ -3651,7 +4630,7 @@ test('merge_pull_request summarizes, then merges the read commit after a yes', a
     + 'Branch feat/issue-5203-voice-read-pr into main.\n2 checks: 2 passed.\nApproved.\n'
     + 'No unresolved review threads.\nIt merges cleanly, as a squash merge.\n'
     + 'Ask the user whether to merge it, and only after a yes call merge_pull_request again '
-    + 'with confirm true.');
+    + 'with confirm true.' + ASK_YES);
   assert.equal(mergeCalls(calls).length, 0);
   assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
     'Merged pull request 7 into main as commit 41bead5.');
@@ -3689,7 +4668,7 @@ test('merge_pull_request refuses a confirm with no summary, a spent one, or a la
     clock = 3 * 60 * 1000 + 1;
     assert.equal(await confirm(), 'Pull request 7 was not merged. The merge summary is more '
       + 'than 3 minutes old. Give the user a new merge summary, and confirm only after they '
-      + 'say yes.');
+      + 'say yes.' + ASK_YES);
     await callTool('merge_pull_request', { number: 7 }, context);
     clock += 4 * 1000;
     assert.match(await confirm(),
@@ -3719,7 +4698,7 @@ test('merge_pull_request spends the summary on a confirm that came too soon', as
   clock += 1000;
   assert.equal(await confirm(), 'Pull request 7 was not merged. The confirm came too soon after '
     + 'the merge summary for the user to have heard it. Give the user a new merge summary, and '
-    + 'confirm only after they say yes.');
+    + 'confirm only after they say yes.' + ASK_YES);
   clock += 10 * 1000;
   assert.match(await confirm(), /without confirm for a merge summary first/);
   assert.equal(mergeCalls(calls).length, 0);
@@ -3734,7 +4713,7 @@ test('merge_pull_request says a confirm on a pull request that stopped being rea
     pull.isDraft = true;
     assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
       'Pull request 7 was not merged. It cannot merge: it is a draft. Give the user a new merge '
-      + 'summary, and confirm only after they say yes.');
+      + 'summary, and confirm only after they say yes.' + ASK_YES);
     assert.equal(mergeCalls(calls).length, 0);
   });
 
@@ -3747,7 +4726,7 @@ test('merge_pull_request refuses a pull request with new commits since the merge
     pull.headRefOid = 'fff9999';
     assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
       'Pull request 7 was not merged. It has new commits since the merge summary. Give the '
-      + 'user a new merge summary, and confirm only after they say yes.');
+      + 'user a new merge summary, and confirm only after they say yes.' + ASK_YES);
     assert.equal(mergeCalls(calls).length, 0);
   });
 
@@ -3806,7 +4785,7 @@ test('merge_pull_request merges the way the merge summary said, and needs a kept
     repo.squashMergeAllowed = false;
     assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
       'Pull request 7 was not merged. The repository no longer allows a squash merge. Give '
-      + 'the user a new merge summary, and confirm only after they say yes.');
+      + 'the user a new merge summary, and confirm only after they say yes.' + ASK_YES);
     assert.equal(mergeCalls(calls).length, 0);
     await assert.rejects(callTool('merge_pull_request', { number: 7 }, trackerContext(gh)),
       /somewhere to keep its merge summary/);
@@ -3832,7 +4811,7 @@ test('merge_pull_request refuses a pull request with no checks, or one retargete
     pull.baseRefName = 'release';
     assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
       'Pull request 7 was not merged. It now targets release, not main. Give the user a new '
-      + 'merge summary, and confirm only after they say yes.');
+      + 'merge summary, and confirm only after they say yes.' + ASK_YES);
     assert.equal(mergeCalls(calls).length, 0);
   });
 
@@ -3899,7 +4878,7 @@ test('merge_pull_request says a confirm that could not read the pull request mer
     down = true;
     assert.equal(await callTool('merge_pull_request', { number: 7, confirm: true }, context),
       'Pull request 7 was not merged. Reading it failed: gh took too long to answer. Give the '
-      + 'user a new merge summary, and confirm only after they say yes.');
+      + 'user a new merge summary, and confirm only after they say yes.' + ASK_YES);
     await assert.rejects(callTool('merge_pull_request', { number: 7 }, context), /too long/);
   });
 
@@ -3954,7 +4933,8 @@ test('read_issue gives state, labels, milestone, and the unchecked items', async
   const { gh, calls } = fakeGh({ issue });
   const text = await callTool('read_issue', { number: 5116 }, trackerContext(gh));
   assert.equal(text, 'Issue 5116, open: voice-bridge: checks milestones.\n'
-    + 'Labels: Tooling.\nMilestone: Sweep Round 2 Cleanup.\n4 items left:\n'
+    + 'Labels: Tooling.\nMilestone: Sweep Round 2 Cleanup.\nAcceptance criteria.\ndone already.\n'
+    + '4 items left:\n'
     + 'A tool lists milestones\nCovered by the tests\nPlus bullet\nNumbered item');
   assert.deepEqual(calls[0].args.slice(0, 3), ['issue', 'view', '5116']);
   await assert.rejects(callTool('read_issue', { number: 'x' }, trackerContext(gh)),
@@ -4400,6 +5380,68 @@ test('read_issue names a pull request and skips boxes inside fenced blocks', asy
     trackerContext(fakeGh({ issue }).gh)), /2 items left:\nreal\nlast$/);
 });
 
+test('read_issue reads the body as plain speech, with no checklist needed', async () => {
+  const issue = { ...issueRow(41, 'Read it all', []), state: 'OPEN', url: 'https://x/issues/41',
+    body: '## Context\n\nSee [the docs](https://x/docs) and `read_issue`, **now**.\n\n'
+      + '> Quoted line\n\n```js\nconst a = 1;\n```\n\n- first point\n- [x] done point\n' };
+  assert.equal(await callTool('read_issue', { number: 41 }, trackerContext(fakeGh({ issue }).gh)),
+    'Issue 41, open: Read it all.\nNo labels.\nNo milestone.\nContext.\n'
+    + 'See the docs and read_issue, now.\nQuoted line\nA code block.\nfirst point. done point.\n'
+    + 'No unchecked checklist items.');
+});
+
+test('read_issue pages a long body by paragraph, and the items follow the last page',
+  async () => {
+    const body = `${Array.from({ length: 7 }, (_, i) => `Paragraph ${i + 1}.`).join('\n\n')}\n\n`
+      + '- [ ] one\n- [ ] two';
+    const issue = { ...issueRow(41, 'Long', []), state: 'OPEN', url: 'https://x/issues/41', body };
+    const context = trackerContext(fakeGh({ issue }).gh);
+    const first = await callTool('read_issue', { number: 41 }, context);
+    assert.match(first, /Paragraph 5\.\nAnd 2 paragraphs more; ask with offset 5 for the next\.$/);
+    assert.doesNotMatch(first, /items? left/);
+    const second = await callTool('read_issue', { number: 41, offset: 5 }, context);
+    assert.match(second, /Paragraph 6\.\nParagraph 7\.\n2 items left:\none\ntwo$/);
+    // Past the body, the offset pages the items.
+    assert.match(await callTool('read_issue', { number: 41, offset: 7 }, context),
+      /2 items left:\none\ntwo$/);
+  });
+
+test('read_issue continues its offsets from the body into the items', async () => {
+  const body = `${Array.from({ length: 7 }, (_, i) => `Paragraph ${i + 1}.`).join('\n\n')}\n\n`
+    + Array.from({ length: 8 }, (_, i) => `- [ ] item ${i + 1}`).join('\n');
+  const issue = { ...issueRow(41, 'Long', []), state: 'OPEN', url: 'https://x/issues/41', body };
+  const context = trackerContext(fakeGh({ issue }).gh);
+  const page = await callTool('read_issue', { number: 41, offset: 5 }, context);
+  assert.match(page, /Paragraph 7\.\n8 items left:\nitem 1\n.*item 5\nAnd 3 items more; ask with offset 12 for the next.$/s);
+  assert.match(await callTool('read_issue', { number: 41, offset: 12 }, context),
+    /8 items left:\nitem 6\nitem 7\nitem 8$/);
+  // Past the body and the items, and past an empty body, one sentence says so.
+  assert.match(await callTool('read_issue', { number: 41, offset: 30 }, context),
+    /No labels\.\nNo milestone\.\nNothing more past 30\.$/);
+  const empty = { ...issue, body: '' };
+  assert.match(await callTool('read_issue', { number: 41, offset: 3 },
+    trackerContext(fakeGh({ issue: empty }).gh)), /Nothing more past 3\.$/);
+});
+
+test('read_issue keeps what is nested under an unchecked item, and drops markup', async () => {
+  const body = '- [ ] parent\n    - plain child\n    - [x] done child\n\n## Title ##\n\n---\n\n'
+    + '| a | b |\n|---|---|\n| 1 | 2 |\n\nTitle\n=====';
+  const issue = { ...issueRow(41, 't', []), state: 'OPEN', url: 'https://x/issues/41', body };
+  assert.equal(await callTool('read_issue', { number: 41 }, trackerContext(fakeGh({ issue }).gh)),
+    'Issue 41, open: t.\nNo labels.\nNo milestone.\nplain child. done child.\nTitle.\n'
+    + 'a, b. 1, 2.\nTitle\n1 item left:\nparent');
+});
+
+test('read_issue cuts a long paragraph where a sentence ends', async () => {
+  const sentence = `${'word '.repeat(30)}end.`;
+  const body = Array.from({ length: 12 }, () => sentence).join(' ');
+  const issue = { ...issueRow(41, 't', []), state: 'OPEN', url: 'https://x/issues/41', body };
+  const text = await callTool('read_issue', { number: 41 }, trackerContext(fakeGh({ issue }).gh));
+  const parts = text.split('\n').slice(3);
+  assert.ok(parts.length > 2);
+  assert.ok(parts.slice(0, 3).every(part => part.endsWith('end.') && part.length <= 600));
+});
+
 test('read_issue reads fences and comments as they render', async () => {
   const bodies = [
     ['```\n```js\n- [ ] inside\n```\n- [ ] tail', /1 item left:\ntail$/],
@@ -4456,7 +5498,7 @@ test('read_issue closes a quoted fence where the quote ends and keeps placeholde
   const issue = { ...issueRow(7, 'Read docs/<APP>/notes', []), state: 'OPEN',
     url: 'https://x/issues/7', body: '> ```\n> sample\n\n- [ ] real <br>criterion' };
   assert.equal(await callTool('read_issue', { number: 7 }, trackerContext(fakeGh({ issue }).gh)),
-    'Issue 7, open: Read docs/<APP>/notes.\nNo labels.\nNo milestone.\n'
+    'Issue 7, open: Read docs/<APP>/notes.\nNo labels.\nNo milestone.\nA code block.\n'
     + '1 item left:\nreal criterion');
 });
 
@@ -4755,30 +5797,60 @@ test('the full code flow issues a token that opens /mcp', async () => {
     [
       'list_sessions', 'needs_attention', 'answer_prompt', 'send', 'run_command',
       'queued_requests',
-      'drop_request', 'stop_turn', 'close_session', 'read_reply',
+      'drop_request', 'stop_turn', 'close_session', 'archive_sessions', 'read_reply',
       'read_full_reply', 'reply_length', 'context_usage', 'catch_up',
       'follow', 'next_update',
-      'start_session', 'rename_session',
+      'start_session', 'rename_session', 'nickname_session',
       'stop_following', 'list_milestones', 'list_issues', 'read_issue', 'list_pull_requests',
       'read_pull_request', 'merge_pull_request', 'pull_request_merged', 'set_issue_fields',
+      'create_issue', 'close_issue', 'reopen_issue', 'edit_issue', 'create_milestone',
+      'create_label', 'comment_pull_request', 'approve_pull_request', 'set_pull_request_draft',
       'list_runs', 'update_bridge', 'summary',
     ]);
+  const waiting = JSON.parse(list.body).result.tools.filter(t => t.inputSchema.properties?.confirm);
+  assert.equal(waiting.length, 16);
+  for (const tool of waiting) assert.match(tool.description, /"I need a yes for that\."/, tool.name);
+  for (const tool of JSON.parse(list.body).result.tools.filter(t => !t.inputSchema.properties?.confirm)) {
+    assert.doesNotMatch(tool.description, /I need a yes for that/, tool.name);
+  }
+  for (const tool of JSON.parse(list.body).result.tools) {
+    assert.match(tool.description, /Never announce this call before making it/, tool.name);
+  }
+  const sessions = await call('POST', '/mcp', {
+    headers: auth, body: JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_sessions', arguments: {} },
+    }),
+  });
+  assert.match(JSON.parse(sessions.body).result.content[0].text,
+    /\n\nNever announce this call before making it.*not to be told before tool calls.*slow lookups\.$/);
+  const again = await call('POST', '/mcp', {
+    headers: auth, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }),
+  });
+  assert.equal(JSON.parse(again.body).result.tools[0].description.split('Never announce').length, 2);
   const send = JSON.parse(list.body).result.tools.find(t => t.name === 'send').inputSchema;
   assert.equal(send.properties.amend.type, 'boolean');
   assert.deepEqual(send.required, ['session', 'text']);
   const writes = { readOnlyHint: false, destructiveHint: true, idempotentHint: false };
   const edits = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
+  const creates = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
   assert.deepEqual(JSON.parse(list.body).result.tools.filter(t => t.annotations)
     .map(t => [t.name, t.annotations]),
   [['answer_prompt', writes], ['run_command', writes],
     ['drop_request', writes],
     ['stop_turn', writes],
     ['close_session', writes],
+    ['archive_sessions', writes],
     ['reply_length', edits],
     ['rename_session', edits],
+    ['nickname_session', edits],
     ['merge_pull_request', writes],
     ['pull_request_merged', edits],
-    ['set_issue_fields', edits], ['update_bridge', edits]]);
+    ['set_issue_fields', edits],
+    ['create_issue', creates], ['close_issue', edits], ['reopen_issue', edits],
+    ['edit_issue', { readOnlyHint: false, destructiveHint: true, idempotentHint: false }],
+    ['create_milestone', creates], ['create_label', creates],
+    ['comment_pull_request', creates], ['approve_pull_request', creates],
+    ['set_pull_request_draft', edits], ['update_bridge', edits]]);
   const note = await call('POST', '/mcp', {
     headers: auth, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
   });
@@ -5056,7 +6128,7 @@ test('answer_prompt reads a permission prompt back in full, then sends an allow 
     assert.equal(await answer(), 'Asker asks to use Bash.\n'
       + 'command: git push origin feat/x\ndescription: Push the branch\n'
       + 'Read all of it to the user and ask whether to allow or deny it. Only after a yes to '
-      + 'one of them call answer_prompt again with that decision and confirm true.');
+      + 'one of them call answer_prompt again with that decision and confirm true.' + ASK_YES);
     clock.at += 20 * 1000;
     assert.equal(await answer({ decision: 'allow', confirm: true }),
       'Sent an allow to Asker, and it took it.');
@@ -5124,7 +6196,7 @@ test('answer_prompt reads a question\'s options and sends answers by number or l
       + 'Question 2: Retry it? Pick one of: 1, Yes; 2, No.\n'
       + 'Read all of it to the user and ask for their answers. Read the answers back, and only '
       + 'after a yes call answer_prompt again with answers, one for each question in order, '
-      + 'and confirm true.');
+      + 'and confirm true.' + ASK_YES);
     clock.at += 20 * 1000;
     assert.match(await answer({ answers: ['windows'], confirm: true }),
       /takes one answer for each, in order/);
@@ -5774,7 +6846,7 @@ test('send with amend posts a plain line the busy session folds into its turn', 
   const sent = await callTool('send',
     { session: 'runner', text: 'use the implement skill', amend: true }, context);
   assert.equal(sent, 'Sent to Runner as a correction. It took it in mid-turn, before its next '
-    + 'step. Call read_reply in a little while for the answer.');
+    + 'step. Call read_reply for the answer; it waits about three seconds for it.');
   assert.deepEqual(posted.map(line => line.message.content), [AMEND_TEXT]);
   assert.equal('priority' in posted[0], false);
   assert.ok(fs.existsSync(path.join(paths.bridgeDir, 'pending', '90')));
@@ -6543,3 +7615,897 @@ test('runShell leaves nothing the command started running once it settles', asyn
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
 
+
+// --- please and thank you ---------------------------------------------------------------------
+
+const NO_STANDING_IN = /^Please and thank you does not stand in for the yes here, since /;
+
+test('merge_pull_request preapproved merges in one call and says what it merged', async () => {
+  const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED, afterMerge: MERGED });
+  const text = await callTool('merge_pull_request', { number: 7, preapproved: true },
+    mergeContext(gh));
+  assert.match(text, /^Merged pull request 7 into main as commit 41bead5\.\nWhat it merged: /);
+  assert.match(text, /Pull request 7: feat: read a pull request aloud/);
+  assert.match(text, /Branch feat\/issue-5203-voice-read-pr into main\./);
+  assert.match(text, /2 checks: 2 passed\.\nApproved\./);
+  assert.match(text, /as a squash merge\.$/);
+  assert.doesNotMatch(text, /Ask the user/);
+  assert.deepEqual(mergeCalls(calls).map(({ args }) => args),
+    [['pr', 'merge', '7', '--squash', '--match-head-commit', 'abc1234def']]);
+});
+
+test('merge_pull_request preapproved merges nothing when the pull request cannot merge',
+  async () => {
+    const { gh, calls } = fakeGh({ pull: { ...READY, isDraft: true }, afterMerge: MERGED });
+    assert.equal(await callTool('merge_pull_request', { number: 7, preapproved: 'true' },
+      mergeContext(gh)), 'Pull request 7 cannot merge: it is a draft.');
+    assert.equal(mergeCalls(calls).length, 0);
+  });
+
+test('answer_prompt preapproved answers a question at once and says what it answered',
+  async () => {
+    const { answer, taken } = promptMachine([{
+      id: ID_A, at: 10, pid: 9001, tool: 'AskUserQuestion',
+      input: {
+        questions: [{ question: 'Retry it?', options: [{ label: 'Yes' }, { label: 'No' }] }],
+      },
+    }]);
+    const text = await answer({ answers: ['no'], preapproved: true });
+    assert.match(text, /^Sent the answers to Asker, and it took it\.\nWhat it answered: /);
+    assert.match(text, /Question 1: Retry it\?/);
+    assert.deepEqual(taken, [{ id: ID_A, behavior: 'allow', answers: { 'Retry it?': 'No' } }]);
+  });
+
+test('answer_prompt preapproved sends a deny at once', async () => {
+  const { answer, taken } = promptMachine([BASH_PROMPT]);
+  const text = await answer({ decision: 'deny', preapproved: true });
+  assert.match(text, /^Sent a deny to Asker, and it took it\.\nWhat it answered: /);
+  assert.deepEqual(taken, [{ id: ID_A, behavior: 'deny' }]);
+});
+
+test('answer_prompt preapproved holds an allow for its read-back and yes', async () => {
+  const { clock, answer, taken } = promptMachine([BASH_PROMPT]);
+  const held = await answer({ decision: 'allow', preapproved: true });
+  assert.match(held, NO_STANDING_IN);
+  assert.match(held, /Asker asks to use Bash\.\ncommand: git push origin feat\/x/);
+  assert.deepEqual(taken, []);
+  clock.at += 20 * 1000;
+  assert.equal(await answer({ decision: 'allow', confirm: true }),
+    'Sent an allow to Asker, and it took it.');
+  assert.deepEqual(taken, [{ id: ID_A, behavior: 'allow' }]);
+});
+
+test('close_session preapproved closes an idle session in one call', async () => {
+  const { paths, calls, context } = closeContext();
+  writeTranscript(paths, '-repo-wt', 'sess-91', [said('Done.')]);
+  const closed = await callTool('close_session', closeArgs({ preapproved: true }), context);
+  assert.match(closed, /^Closer is closed and no longer listed\. Its conversation is kept/);
+  assert.deepEqual(calls.kill, [[91, 'SIGINT']]);
+});
+
+test('close_session preapproved still reads a busy session back and signals nothing',
+  async () => {
+    const { calls, context } = closeContext({ status: 'busy' });
+    const text = await callTool('close_session',
+      closeArgs({ preapproved: true, stop: true }), context);
+    assert.match(text, NO_STANDING_IN);
+    assert.match(text, /Closer is busy\. .*confirm true and stop true/);
+    assert.deepEqual(calls.kill, []);
+    assert.deepEqual(calls.stop, []);
+  });
+
+test('stop_turn preapproved reads back with the refusal and stops nothing', async () => {
+  const { posted, context } = stopContext();
+  const text = await callTool('stop_turn', { session: 'runner', preapproved: true }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /Runner is busy\. Stopping cancels/);
+  assert.deepEqual(posted, []);
+});
+
+test('drop_request preapproved reads back with the refusal and drops nothing', async () => {
+  const { context } = stopContext();
+  await callTool('send', queueArgs('keep me'), context);
+  const text = await callTool('drop_request',
+    { session: 'runner', number: 1, preapproved: true }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /Number 1, sent .*: keep me\./);
+  assert.match(await callTool('queued_requests', { session: 'runner' }, context), /keep me/);
+});
+
+test('run_command preapproved reads back with the refusal and runs nothing', async () => {
+  const { context, ran } = runContext();
+  const text = await callTool('run_command',
+    { session: 'asker', index: 1, preapproved: true }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /Asker asks you to run this command in proj: git status\n/);
+  assert.equal(ran.length, 0);
+});
+
+// --- pre-approval is the yes, not the hearing -------------------------------------------------
+
+test('preapproved with confirm true and no read-back still acts on nothing', async () => {
+  const stopped = stopContext();
+  assert.match(await callTool('stop_turn',
+    { session: 'runner', confirm: true, preapproved: true }, stopped.context), /read-back/i);
+  assert.deepEqual(stopped.posted, []);
+
+  const held = stopContext();
+  await callTool('send', queueArgs('keep me'), held.context);
+  assert.match(await callTool('drop_request',
+    { session: 'runner', number: 1, confirm: true, preapproved: true }, held.context),
+  /^Nothing was dropped/);
+  assert.match(await callTool('queued_requests', { session: 'runner' }, held.context),
+    /keep me/);
+
+  const run = runContext();
+  assert.match(await callTool('run_command',
+    { session: 'asker', index: 1, confirm: true, preapproved: true }, run.context),
+  /not|read back/i);
+  assert.equal(run.ran.length, 0);
+
+  const prompt = promptMachine([BASH_PROMPT]);
+  assert.match(await prompt.answer({ decision: 'allow', confirm: true, preapproved: true }),
+    /^Nothing was sent to Asker\..*not been read back/);
+  assert.deepEqual(prompt.taken, []);
+});
+
+test('preapproved sent as the text true is held on a destructive tool', async () => {
+  const { posted, context } = stopContext();
+  const text = await callTool('stop_turn', { session: 'runner', preapproved: 'true' }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.deepEqual(posted, []);
+});
+
+test('merge_pull_request preapproved says it only asked when gh fails', async () => {
+  const { gh, calls } = fakeGh({ pull: READY,
+    mergeError: new Error('Head branch was modified. Review and try the merge again.') });
+  const text = await callTool('merge_pull_request', { number: 7, preapproved: true },
+    mergeContext(gh));
+  assert.match(text, /^Pull request 7 was not merged\. GitHub said: Head branch was modified/);
+  assert.match(text, /\nWhat it asked to merge: Pull request 7: /);
+  assert.match(text, /Merge method: squash\.$/);
+  assert.doesNotMatch(text, /Ask the user|It merged/);
+  assert.equal(mergeCalls(calls).length, 1);
+});
+
+const QUESTION = (id, at, question) => ({
+  id, at, pid: 9001, tool: 'AskUserQuestion',
+  input: { questions: [{ question, options: [{ label: 'Yes' }, { label: 'No' }] }] },
+});
+
+test('answer_prompt preapproved answers the oldest of two prompts and counts the rest',
+  async () => {
+    const { answer, taken } = promptMachine([
+      QUESTION(ID_B, 20, 'Second?'), QUESTION(ID_A, 10, 'First?')]);
+    const text = await answer({ answers: ['yes'], preapproved: true });
+    assert.match(text, /^Sent the answers to Asker, and it took it\.\nWhat it answered: /);
+    assert.match(text, /Question 1: First\?/);
+    assert.match(text, /\nIt has 1 more prompt after this one\.$/);
+    assert.deepEqual(taken, [{ id: ID_A, behavior: 'allow', answers: { 'First?': 'Yes' } }]);
+  });
+
+test('answer_prompt preapproved with no open prompt sends nothing', async () => {
+  const { answer, taken } = promptMachine([]);
+  assert.equal(await answer({ decision: 'deny', preapproved: true }),
+    'Asker is not waiting on a prompt.');
+  assert.deepEqual(taken, []);
+});
+
+test('answer_prompt preapproved follows a fresh read-back, even for free text', async () => {
+  const { clock, answer, taken } = promptMachine([QUESTION(ID_A, 10, 'Which name?')]);
+  await answer();
+  clock.at += 10 * 1000;
+  const text = await answer({ answers: ['call it Pearl'], preapproved: true });
+  assert.match(text, /^Sent the answers to Asker, and it took it\.\nWhat it answered: /);
+  assert.deepEqual(taken, [{
+    id: ID_A, behavior: 'allow', answers: { 'Which name?': 'call it Pearl' },
+  }]);
+});
+
+test('answer_prompt preapproved refuses a read-back whose prompt is gone', async () => {
+  const { clock, answer, taken, folder } = promptMachine([
+    QUESTION(ID_A, 10, 'First?'), QUESTION(ID_B, 20, 'Second?')]);
+  await answer();
+  clock.at += 10 * 1000;
+  fs.rmSync(path.join(folder, `${ID_A}.json`));
+  assert.match(await answer({ answers: ['yes'], preapproved: true }),
+    /^Nothing was sent to Asker\. The prompt that was read back is no longer waiting/);
+  assert.deepEqual(taken, []);
+});
+
+test('answer_prompt preapproved reads a question back when the answer is free text',
+  async () => {
+    const { answer, taken } = promptMachine([QUESTION(ID_A, 10, 'Which name?')]);
+    const text = await answer({ answers: ['call it Pearl'], preapproved: true });
+    assert.match(text, NO_STANDING_IN);
+    assert.match(text, /not been read back and the answer is not one of its options/);
+    assert.match(text, /Question 1: Which name\?/);
+    assert.deepEqual(taken, []);
+  });
+
+test('close_session preapproved signals nothing when the process is not the one read',
+  async () => {
+    const stat = start => `91 (cl aude) S ${Array(18).fill('0').join(' ')} ${start} 0`;
+    const { paths, calls, context } = closeContext({ procStart: '111' });
+    fs.mkdirSync(path.join(paths.procDir, '91'), { recursive: true });
+    fs.writeFileSync(path.join(paths.procDir, '91', 'stat'), stat('222'));
+    writeTranscript(paths, '-repo-wt', 'sess-91', [said('Done.')]);
+    assert.match(await callTool('close_session', closeArgs({ preapproved: true }), context),
+      /It is not the process that was read back/);
+    assert.deepEqual(calls.kill, []);
+    assert.deepEqual(calls.stop, []);
+  });
+
+test('close_session preapproved reads back a session waiting on a prompt', async () => {
+  const { paths, calls, context } = closeContext();
+  const folder = path.join(paths.bridgeDir, 'prompts', '91');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, `${ID_A}.json`),
+    JSON.stringify({ ...BASH_PROMPT, pid: 91 }));
+  const text = await callTool('close_session', closeArgs({ preapproved: true }), context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /waiting on the user, so it is mid-turn/);
+  assert.match(text, /Closer is idle\. .*confirm true/);
+  assert.deepEqual(calls.kill, []);
+});
+
+test('answer_prompt preapproved repeated at once is held again and sends nothing', async () => {
+  const { clock, answer, taken } = promptMachine([QUESTION(ID_A, 10, 'Which name?')]);
+  const args = { answers: ['call it Pearl'], preapproved: true };
+  assert.match(await answer(args), NO_STANDING_IN);
+  clock.at += 10 * 1000;
+  assert.match(await answer(args), NO_STANDING_IN);
+  assert.deepEqual(taken, []);
+});
+
+test('answer_prompt preapproved within seconds of a plain read-back is held', async () => {
+  const { clock, answer, taken } = promptMachine([QUESTION(ID_A, 10, 'Which name?')]);
+  await answer();
+  clock.at += 1000;
+  assert.match(await answer({ answers: ['call it Pearl'], preapproved: true }),
+    NO_STANDING_IN);
+  assert.deepEqual(taken, []);
+});
+
+test('close_session preapproved reads back when background work would end with it',
+  async () => {
+    const { paths, calls, context } = closeContext();
+    writeTranscript(paths, '-repo-wt', 'sess-91', [said('Working.')]);
+    const text = await callTool('close_session', closeArgs({ preapproved: true }),
+      { ...context, background: async () => true });
+    assert.match(text, NO_STANDING_IN);
+    assert.match(text, /background work it started would end with it/);
+    assert.deepEqual(calls.kill, []);
+  });
+
+test('close_session preapproved reads back when background work is unknown', async () => {
+  const { paths, calls, context } = closeContext();
+  writeTranscript(paths, '-repo-wt', 'sess-91', [said('Done.')]);
+  const text = await callTool('close_session', closeArgs({ preapproved: true }),
+    { ...context, background: async () => null });
+  assert.match(text, NO_STANDING_IN);
+  assert.deepEqual(calls.kill, []);
+  const none = closeContext();
+  assert.match(await callTool('close_session', closeArgs({ preapproved: true }), none.context),
+    NO_STANDING_IN);
+  assert.deepEqual(none.calls.kill, []);
+});
+
+// --- pre-approval for the issue and pull request writes ---------------------------------------
+
+test('create_issue preapproved writes in one call and gives a receipt', async () => {
+  const { gh, mutating } = writeGh();
+  const text = await callTool('create_issue',
+    { title: 'Dry the towels', labels: ['Bug'], preapproved: true }, writeContext(gh));
+  assert.match(text, /^Created issue 12: Dry the towels\.\nWhat it did: Create an issue titled /);
+  assert.match(text, /"Dry the towels", labels bug, with no body\.$/);
+  assert.equal(mutating().length, 1);
+});
+
+test('the other open writes take the flag too', async () => {
+  const comment = writeGh();
+  assert.match(await callTool('comment_pull_request',
+    { number: 9, body: 'Looks good', preapproved: 'true' }, writeContext(comment.gh)),
+  /^Commented on pull request 9\.\nWhat it did: Comment on pull request 9/);
+  assert.equal(comment.mutating().length, 1);
+  const draft = writeGh();
+  assert.match(await callTool('set_pull_request_draft',
+    { number: 9, draft: true, preapproved: true }, writeContext(draft.gh)),
+  /^Pull request 9 is a draft again\.\nWhat it did: /);
+  const reopen = writeGh({ state: 'CLOSED' });
+  assert.match(await callTool('reopen_issue', { number: 9, preapproved: true },
+    writeContext(reopen.gh)), /^Reopened issue 9\.\nWhat it did: /);
+});
+
+test('close_issue preapproved reads back with the refusal and waits for the yes', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  const text = await callTool('close_issue', { number: 9, preapproved: true }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /Close issue 9, Dry the .*towels.*, as completed\./);
+  assert.equal(mutating().length, 0);
+  assert.equal(await callTool('close_issue', { number: 9, confirm: true }, context),
+    'Closed issue 9 as completed.');
+  assert.equal(mutating().length, 1);
+});
+
+test('edit_issue preapproved reads back with the refusal and waits for the yes', async () => {
+  const { gh, mutating } = writeGh();
+  const context = writeContext(gh);
+  const args = { number: 9, body: 'New body' };
+  const text = await callTool('edit_issue', { ...args, preapproved: true }, context);
+  assert.match(text, NO_STANDING_IN);
+  assert.match(text, /Change the body from 1 word to a text of 2 words on issue 9/);
+  assert.equal(mutating().length, 0);
+  assert.match(await callTool('edit_issue', { ...args, confirm: true }, context),
+    /^Changed the body from 1 word to a text of 2 words on issue 9\./);
+  assert.equal(mutating().length, 1);
+});
+
+const SECTIONED = [
+  '# Plan', 'Intro text.', '', '## Background', 'Old background here.', '### Detail',
+  'Nested detail.', '', '## Acceptance criteria', '- one', '- two', '', '## Notes', 'Last words.',
+].join('\n');
+
+// Says an edit, hears the summary, confirms it, and returns both answers and the write.
+async function editTwice(options, args) {
+  const { gh, mutating } = writeGh(options);
+  const context = writeContext(gh);
+  const summary = await callTool('edit_issue', args, context);
+  const done = await callTool('edit_issue', { ...args, confirm: true }, context);
+  return { summary, done, writes: mutating() };
+}
+
+test('edit_issue reads a title edit back and says it landed', async () => {
+  const { done, writes } = await editTwice({}, { number: 9, title: 'Dry the socks' });
+  assert.deepEqual(writes.at(-1).args, ['issue', 'edit', '9', '--title', 'Dry the socks']);
+  assert.match(done, /^Changed the title to "Dry the socks" on issue 9\. It landed\./);
+  assert.match(done, /Issue 9 now reads "Dry the socks"/);
+});
+
+test('edit_issue appends a paragraph without restating the body', async () => {
+  const { summary, done, writes } = await editTwice({ body: 'First.\n\nSecond.\n' },
+    { number: 9, append: 'Also mind the socks.' });
+  assert.match(summary, /a paragraph of 4 words added at the end of the body/);
+  assert.deepEqual(writes.at(-1).args,
+    ['issue', 'edit', '9', '--body', 'First.\n\nSecond.\n\nAlso mind the socks.']);
+  assert.match(done, /It landed\./);
+});
+
+test('edit_issue replaces one section and leaves the rest alone', async () => {
+  const { summary, done, writes } = await editTwice({ body: SECTIONED },
+    { number: 9, section: 'the background section', section_text: 'New background.' });
+  assert.match(summary, /text under the section "Background" from 7 words to 2 words, replacing everything up to the heading "Acceptance criteria", including the heading "Detail" on issue 9/);
+  const written = writes.at(-1).args[4];
+  assert.equal(written, [
+    '# Plan', 'Intro text.', '', '## Background', '', 'New background.', '',
+    '## Acceptance criteria', '- one', '- two', '', '## Notes', 'Last words.',
+  ].join('\n'));
+  assert.match(done, /It landed\./);
+  const last = await editTwice({ body: SECTIONED },
+    { number: 9, section: 'notes', section_text: 'Fresh notes.' });
+  assert.ok(last.writes.at(-1).args[4].endsWith('## Notes\n\nFresh notes.'));
+});
+
+test('edit_issue refuses an unknown section, listing the ones that exist', async () => {
+  const { gh, mutating } = writeGh({ body: SECTIONED });
+  await assert.rejects(callTool('edit_issue',
+    { number: 9, section: 'risks', section_text: 'x' }, writeContext(gh)),
+  /No section is named risks\. The sections are Plan, Background, Detail, Acceptance criteria, Notes\. Nothing was changed\./);
+  const bare = writeGh({ body: 'No headings here.' });
+  await assert.rejects(callTool('edit_issue',
+    { number: 9, section: 'risks', section_text: 'x' }, writeContext(bare.gh)), /has no headings/);
+  assert.equal(mutating().length, 0);
+});
+
+test('edit_issue refuses an ambiguous section, naming the candidates', async () => {
+  const body = '## Test plan\nA\n\n## Test results\nB\n\n## Test plan\nC';
+  const { gh } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue',
+    { number: 9, section: 'test', section_text: 'x' }, writeContext(gh)),
+  /test matches Test plan \(line 1\), Test results \(line 4\), Test plan \(line 7\)\. Say which one\./);
+  await assert.rejects(callTool('edit_issue',
+    { number: 9, section: 'test plan', section_text: 'x' }, writeContext(gh)),
+  /matches Test plan \(line 1\), Test plan \(line 7\)/);
+});
+
+test('edit_issue ignores headings inside code fences', async () => {
+  const body = ['## Steps', '```sh', '# not a heading', '## Also not', '```', 'After.', '',
+    '## Done', 'Fin.'].join('\n');
+  const { writes } = (await editTwice({ body },
+    { number: 9, section: 'steps', section_text: 'Run it.' }));
+  assert.equal(writes.at(-1).args[4], '## Steps\n\nRun it.\n\n## Done\nFin.');
+  const { gh } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue',
+    { number: 9, section: 'not a heading', section_text: 'x' }, writeContext(gh)),
+  /The sections are Steps, Done\./);
+});
+
+test('edit_issue refuses a pull request, an empty title, and conflicting arguments', async () => {
+  const pull = writeGh({ url: 'https://github.com/o/r/pull/9' });
+  assert.match(await callTool('edit_issue', { number: 9, append: 'x' }, writeContext(pull.gh)),
+    /^9 is a pull request, not an issue/);
+  assert.equal(pull.mutating().length, 0);
+  const { gh } = writeGh();
+  const context = writeContext(gh);
+  await assert.rejects(callTool('edit_issue', { number: 9, title: '  ' }, context),
+    /Say the new title/);
+  await assert.rejects(callTool('edit_issue', { number: 9, body: 'a', append: 'b' }, context),
+    /cannot come with/);
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'a' }, context),
+    /new text for the section a/);
+});
+
+test('edit_issue refuses when the body cannot be read, and never writes a blank one',
+  async () => {
+    const missing = writeGh({ noBody: true });
+    await assert.rejects(callTool('edit_issue', { number: 9, append: 'x' },
+      writeContext(missing.gh)), /gh returned no body\. Nothing was changed\./);
+    const broken = writeGh();
+    const gh = async call => {
+      if (call.args.includes('number,title,body,url')) return '';
+      return broken.gh(call);
+    };
+    await assert.rejects(callTool('edit_issue', { number: 9, append: 'x' }, writeContext(gh)),
+      /Could not read the body of issue 9/);
+    assert.equal(missing.mutating().length + broken.mutating().length, 0);
+  });
+
+test('edit_issue says so when the read-back shows the edit did not land', async () => {
+  const { done } = await editTwice({ lands: false }, { number: 9, append: 'More.' });
+  assert.match(done, /^The change did not land: the body of issue 9 is not as asked\./);
+  const title = await editTwice({ lands: false }, { number: 9, title: 'Other' });
+  assert.match(title.done, /did not land: the title of issue 9/);
+});
+
+test('edit_issue confirm is refused when the body changed after the summary', async () => {
+  const first = writeGh({ body: 'One.' });
+  const second = writeGh({ body: 'Two.' });
+  let current = first.gh;
+  const context = writeContext(call => current(call));
+  const args = { number: 9, append: 'More.' };
+  await callTool('edit_issue', args, context);
+  current = second.gh;
+  assert.match(await callTool('edit_issue', { ...args, confirm: true }, context),
+    /^Nothing was done\. The issue changed since the summary\./);
+  assert.equal(second.mutating().length, 0);
+  // Other arguments are still a confirm with no summary.
+  assert.match(await callTool('edit_issue', { number: 9, append: 'Other.', confirm: true },
+    context), /edit_issue has no summary for these arguments/);
+});
+
+// The body of a section edit as written, from the edit's first body argument.
+const writtenBody = writes => writes.at(-1).args[writes.at(-1).args.indexOf('--body') + 1];
+
+test('edit_issue treats a setext heading as the end of the section above it', async () => {
+  const body = ['Alpha', '-----', 'Old alpha.', '', '### Sub', 'Nested.', '', 'Beta', '====',
+    'Beta text.', '', 'Text', '', '---', 'After the rule.'].join('\n');
+  const alpha = await editTwice({ body }, { number: 9, section: 'alpha', section_text: 'New.' });
+  assert.equal(writtenBody(alpha.writes), ['Alpha', '-----', '', 'New.', '', 'Beta', '====',
+    'Beta text.', '', 'Text', '', '---', 'After the rule.'].join('\n'));
+  assert.match(alpha.summary, /replacing everything up to the heading "Beta", including the heading "Sub"/);
+  // A setext section is replaced under its underline, and a rule after a blank is no heading.
+  const beta = await editTwice({ body }, { number: 9, section: 'beta', section_text: 'Fresh.' });
+  assert.ok(writtenBody(beta.writes).endsWith('Beta\n====\n\nFresh.'));
+  assert.match(beta.summary, /to the end of the body/);
+  const { gh } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'text', section_text: 'x' },
+    writeContext(gh)), /The sections are Alpha, Sub, Beta\./);
+});
+
+test('edit_issue refuses a section that holds a heading inside a quote', async () => {
+  const body = '## A\nx\n> ## Quoted\n> y\n\n## B\nz';
+  const { gh, mutating } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'a', section_text: 'n' },
+    writeContext(gh)),
+  /The section "A" holds a heading inside a quote on line 3, which replacing it would delete without a trace\. Edit that section by hand\. Nothing was changed\./);
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'quoted', section_text: 'n' },
+    writeContext(gh)), /The sections are A, B\./);
+  assert.equal(mutating().length, 0);
+  assert.equal((await editTwice({ body }, { number: 9, section: 'b', section_text: 'n' }))
+    .writes.length, 1);
+});
+
+test('edit_issue does not count a heading inside a list item as a section', async () => {
+  const body = '## A\n- # Not a section\n- item\n  # Nor this\n  more\n\n## B\nz';
+  const { gh } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'nor', section_text: 'n' },
+    writeContext(gh)), /The sections are A, B\./);
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'not', section_text: 'n' },
+    writeContext(gh)), /The sections are A, B\./);
+  const { writes } = await editTwice({ body }, { number: 9, section: 'a', section_text: 'n' });
+  assert.equal(writtenBody(writes), '## A\n\nn\n\n## B\nz');
+  // A heading back at the margin leaves the list and is a section again.
+  const after = writeGh({ body: '- item\n  # Inside\n# Outside\ntext' });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'inside', section_text: 'n' },
+    writeContext(after.gh)), /The sections are Outside\./);
+});
+
+test('edit_issue refuses to delete an HTML comment, even after the last section', async () => {
+  const body = '## A\nx\n\n## B\ny\n\n<!-- keep me -->';
+  const { gh, mutating } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'b', section_text: 'n' },
+    writeContext(gh)), /The section "B" holds an HTML comment on line 7.*Edit that section by hand/);
+  assert.equal(mutating().length, 0);
+  const inline = writeGh({ body: '## A\nsome text <!-- note --> more\n\n## B\ny' });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'a', section_text: 'n' },
+    writeContext(inline.gh)), /holds an HTML comment on line 2/);
+  const html = writeGh({ body: '## A\n<details>\nhidden\n</details>\n\n## B\ny' });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'a', section_text: 'n' },
+    writeContext(html.gh)), /holds raw HTML on line 2/);
+  // The comment is in the last section's span only; the one above is replaced and it stays.
+  const { writes } = await editTwice({ body }, { number: 9, section: 'a', section_text: 'n' });
+  assert.equal(writtenBody(writes), '## A\n\nn\n\n## B\ny\n\n<!-- keep me -->');
+});
+
+test('edit_issue reads headings with closing hashes and keeps CRLF line endings', async () => {
+  const closed = await editTwice({ body: '## A ##\nx\n## B ###\ny' },
+    { number: 9, section: 'a', section_text: 'N.' });
+  assert.equal(writtenBody(closed.writes), '## A ##\n\nN.\n\n## B ###\ny');
+  assert.match(closed.summary, /the section "A" from/);
+  const crlf = await editTwice({ body: '## A\r\nx\r\n## B\r\ny' },
+    { number: 9, section: 'a', section_text: 'N1.\nN2.' });
+  assert.equal(writtenBody(crlf.writes), '## A\r\n\r\nN1.\r\nN2.\r\n\r\n## B\r\ny');
+});
+
+test('edit_issue keeps a trailing newline when the section is not the last', async () => {
+  const { writes } = await editTwice({ body: '## A\nx\n## B\ny\n' },
+    { number: 9, section: 'a', section_text: 'N.' });
+  assert.equal(writtenBody(writes), '## A\n\nN.\n\n## B\ny\n');
+});
+
+test('edit_issue picks among identical headings by place or number', async () => {
+  const body = '## Notes\nA\n\n## Other\nB\n\n## Notes\nC';
+  const { gh } = writeGh({ body });
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'notes', section_text: 'n' },
+    writeContext(gh)),
+  /Say which one\. Name it by place, such as "second notes", or pass section_number from 1 to 2\./);
+  const second = await editTwice({ body }, { number: 9, section: 'Second Notes', section_text: 'n' });
+  assert.equal(writtenBody(second.writes), '## Notes\nA\n\n## Other\nB\n\n## Notes\n\nn');
+  const last = await editTwice({ body }, { number: 9, section: 'last notes', section_text: 'n' });
+  assert.equal(writtenBody(last.writes), writtenBody(second.writes));
+  const first = await editTwice({ body },
+    { number: 9, section: 'notes', section_number: 1, section_text: 'n' });
+  assert.equal(writtenBody(first.writes), '## Notes\n\nn\n\n## Other\nB\n\n## Notes\nC');
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'third notes',
+    section_text: 'n' }, writeContext(gh)), /Only 2 sections match notes, so there is no third one/);
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'notes', section_number: 3,
+    section_text: 'n' }, writeContext(gh)), /Only 2 sections match notes, so there is no number 3/);
+  await assert.rejects(callTool('edit_issue', { number: 9, section: 'notes', section_number: 0,
+    section_text: 'n' }, writeContext(gh)), /whole number from 1/);
+});
+
+test('edit_issue says when a partial name matched a longer heading', async () => {
+  const body = '## Goals\nA\n\n## Out of scope\nB';
+  const partial = await editTwice({ body }, { number: 9, section: 'scope', section_text: 'n' });
+  assert.match(partial.summary,
+    /the section "Out of scope", the heading that "scope" matched, from 1 word to 1 word/);
+  const whole = await editTwice({ body }, { number: 9, section: 'out of scope', section_text: 'n' });
+  assert.doesNotMatch(whole.summary, /matched/);
+});
+
+test('edit_issue changes the title, a section and the end of the body in one call', async () => {
+  const { summary, done, writes } = await editTwice({ body: SECTIONED },
+    { number: 9, title: 'New title', section: 'notes', section_text: 'Fresh.', append: 'Tail.' });
+  assert.match(summary, /the title to "New title" and the text under the section "Notes" from 2 words to 1 word, replacing everything to the end of the body and a paragraph of 1 word added at the end/);
+  const args = writes.at(-1).args;
+  assert.deepEqual(args.slice(0, 5), ['issue', 'edit', '9', '--title', 'New title']);
+  assert.ok(args[6].endsWith('## Notes\n\nFresh.\n\nTail.'));
+  assert.match(done, /It landed\./);
+});
+
+test('edit_issue refuses a whole body together with a section', async () => {
+  const { gh, mutating } = writeGh({ body: SECTIONED });
+  await assert.rejects(callTool('edit_issue', { number: 9, body: 'x', section: 'notes',
+    section_text: 'n' }, writeContext(gh)), /cannot come with text to add or a section/);
+  assert.equal(mutating().length, 0);
+});
+
+test('edit_issue still says it landed when gh reads the body back with CRLF', async () => {
+  const { gh } = writeGh({ body: 'First.' });
+  const crlf = async call => {
+    const out = await gh(call);
+    if (!call.args.includes('title,body')) return out;
+    const issue = JSON.parse(out);
+    return JSON.stringify({ ...issue, body: issue.body.replace(/\n/g, '\r\n') });
+  };
+  const context = writeContext(crlf);
+  const args = { number: 9, append: 'Second line.\nThird line.' };
+  await callTool('edit_issue', args, context);
+  assert.match(await callTool('edit_issue', { ...args, confirm: true }, context), /It landed\./);
+});
+
+test('edit_issue says the change may still land after gh times out', async () => {
+  const { gh } = writeGh({ body: 'First.', lands: false });
+  const slow = async call => {
+    if (call.args[1] === 'edit') throw Object.assign(new Error('timed out'), { killed: true });
+    return gh(call);
+  };
+  const context = writeContext(slow);
+  const args = { number: 9, append: 'More.' };
+  await callTool('edit_issue', args, context);
+  const text = await callTool('edit_issue', { ...args, confirm: true }, context);
+  assert.match(text, /^gh took too long editing issue 9, so the change may still land\./);
+  assert.doesNotMatch(text, /did not land/);
+});
+
+test('edit_issue answers when the read-back fails or is not JSON, after a write that worked',
+  async () => {
+    for (const reply of [() => { throw new Error('network down'); }, () => 'not json at all']) {
+      const { gh, mutating } = writeGh({ body: 'First.' });
+      const flaky = async call => (call.args.includes('title,body') ? reply() : gh(call));
+      const context = writeContext(flaky);
+      const args = { number: 9, append: 'More.' };
+      await callTool('edit_issue', args, context);
+      assert.equal(await callTool('edit_issue', { ...args, confirm: true }, context),
+        'gh edited issue 9, and reading it back failed. Read it to check.');
+      assert.equal(mutating().length, 1);
+    }
+    const { gh } = writeGh({ body: 'First.' });
+    const failing = async call => {
+      if (call.args[1] === 'edit') throw new Error('HTTP 502');
+      return call.args.includes('title,body') ? 'oops' : gh(call);
+    };
+    const context = writeContext(failing);
+    const args = { number: 9, title: 'Other' };
+    await callTool('edit_issue', args, context);
+    assert.match(await callTool('edit_issue', { ...args, confirm: true }, context),
+      /^gh failed editing issue 9: HTTP 502, and reading it back failed\. Read it to check\.$/);
+  });
+
+test('edit_issue says how many words a whole new body replaces', async () => {
+  const { summary } = await editTwice({ body: 'One two three.' }, { number: 9, body: 'Four.' });
+  assert.match(summary, /the body from 3 words to a text of 1 word on issue 9/);
+  const empty = await editTwice({ body: 'One two three.' }, { number: 9, body: '' });
+  assert.match(empty.summary, /the body from 3 words to empty/);
+  const unreadable = await editTwice({ noBody: true }, { number: 9, body: 'Four.' });
+  assert.match(unreadable.summary, /Change the body to a text of 1 word on issue 9/);
+});
+
+test('a write with preapproved and confirm true but no summary is refused', async () => {
+  const { gh, mutating } = writeGh();
+  assert.match(await callTool('create_issue',
+    { title: 'Dry the towels', confirm: true, preapproved: true }, writeContext(gh)),
+  /^Nothing was done\. create_issue has no summary/);
+  assert.match(await callTool('close_issue',
+    { number: 9, confirm: true, preapproved: true }, writeContext(gh)),
+  /^Nothing was done\. close_issue has no summary/);
+  assert.equal(mutating().length, 0);
+});
+
+test('a preapproved write the tool refuses anyway writes nothing', async () => {
+  assert.equal(await callTool('reopen_issue', { number: 9, preapproved: true },
+    writeContext(writeGh().gh)), 'Issue 9 is already open.');
+  assert.match(await callTool('comment_pull_request',
+    { number: 9, body: 'x', preapproved: true }, writeContext(writeGh({ pullState: 'MERGED' }).gh)),
+  /^Pull request 9 is merged, so nothing was changed\./);
+  assert.match(await callTool('approve_pull_request', { number: 9, preapproved: true },
+    writeContext(writeGh({ author: 'Michael' }).gh)), /GitHub does not let an account approve/);
+});
+
+// Sessions the Claude app runs: Done (idle, on a branch whose pull request merged), Working
+// (busy) and Open (idle, on a branch with an open pull request), each with the app's record in
+// appSessionsDir. post stands in for the session: it records the request and can archive the
+// session in the app's record or write a reply.
+// extra.git names the checkouts, by session name, that are dirty or have no upstream, and gives
+// the commits ahead; extra.app adds fields to a session's file in the app; extra.gh replaces gh.
+function archiveContext(post = async () => {}, extra = {}) {
+  const root = tempDir();
+  const names = ['Done', 'Working', 'Open'];
+  const branches = ['feat/done-1', 'feat/working-2', 'feat/open-3'];
+  const paths = fakeMachine(names.map((name, i) => ({
+    pid: 71 + i, name, cwd: fakeCheckout(root, name.toLowerCase(), branches[i]),
+    entrypoint: 'claude-desktop', hostSessionId: `local_${name.toLowerCase()}`,
+    sessionId: `sess-${71 + i}`, status: name === 'Working' ? 'busy' : 'idle',
+  })), root);
+  paths.appSessionsDir = path.join(root, 'app');
+  const folder = path.join(paths.appSessionsDir, 'account', 'org');
+  fs.mkdirSync(folder, { recursive: true });
+  for (const name of names) {
+    fs.writeFileSync(path.join(folder, `local_${name.toLowerCase()}.json`),
+      JSON.stringify({ sessionId: `local_${name.toLowerCase()}`, isArchived: false,
+        ...extra.app?.[name.toLowerCase()] }));
+  }
+  const archive = id => fs.writeFileSync(path.join(folder, `local_${id}.json`),
+    JSON.stringify({ sessionId: `local_${id}`, isArchived: true }));
+  const posted = [];
+  const clock = { at: BEGAN };
+  const pulls = [
+    { number: 1, state: 'MERGED', headRefName: 'feat/done-1', body: '' },
+    { number: 3, state: 'OPEN', headRefName: 'feat/open-3', url: 'https://github.com/o/r/pull/3',
+      body: '' },
+  ];
+  const where = name => path.join(root, 'repo', name);
+  const gitOptions = {
+    dirty: (extra.git?.dirty ?? []).map(where),
+    noUpstream: (extra.git?.noUpstream ?? []).map(where),
+    ahead: Object.fromEntries(Object.entries(extra.git?.ahead ?? {})
+      .map(([name, count]) => [where(name), count])),
+  };
+  const context = {
+    paths, config: { roots: [path.join(root, 'repo')] }, pages: new Map(),
+    archiveWaitMs: extra.waitMs ?? 0,
+    now: () => (clock.at += 10 * 1000), gh: extra.gh ?? workGh(pulls, []),
+    git: fakeGit({}, gitOptions).git,
+    background: async () => false,
+    post: async (socket, message) => {
+      posted.push({ socket, content: message.message.content });
+      await post({ paths, archive, socket });
+    },
+  };
+  return { paths, posted, archive, context };
+}
+
+test('archive_sessions reads back the finished sessions, then asks them to archive', async () => {
+  const { posted, context } = archiveContext(async ({ socket, archive }) => {
+    if (socket.endsWith('71.sock')) archive('done');
+  });
+  const readBack = await callTool('archive_sessions', {}, context);
+  assert.match(readBack, /^Ready to archive: Done\./);
+  assert.match(readBack,
+    /Left alone: Working, because it is busy and Open, because its pull request 3 is still open/);
+  assert.equal(posted.length, 0);
+  const archived = await callTool('archive_sessions', { confirm: true }, context);
+  assert.match(archived, /^Archived 1 of 1 sessions\.\nDone: archived$/);
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].content, /^Voice request: This session's work is finished\./);
+  assert.match(posted[0].content,
+    /mcp__ccd_pr__unbind_pr.*mcp__ccd_session_mgmt__archive_session/);
+});
+
+test('archive_sessions refuses an unfinished session unless anyway is said', async () => {
+  const { posted, context } = archiveContext(async ({ socket, archive }) => {
+    if (socket.endsWith('73.sock')) archive('open');
+  });
+  assert.match(await callTool('archive_sessions', { session: 'open' }, context),
+    /^No session is ready to archive\. Left alone: Open, because its pull request 3 is still/);
+  assert.match(await callTool('archive_sessions', { session: 'open', confirm: true }, context),
+    /^Nothing was archived\. The archive has not been read back yet/);
+  assert.match(await callTool('archive_sessions', { anyway: true }, context),
+    /anyway needs one session named/);
+  assert.match(await callTool('archive_sessions', { session: 'open', anyway: true }, context),
+    /^Ready to archive: Open\. It is not finished/);
+  assert.equal(posted.length, 0);
+  assert.match(await callTool('archive_sessions', { session: 'open', anyway: true,
+    confirm: true }, context), /^Archived 1 of 1 sessions\.\nOpen: archived$/);
+  assert.match(posted[0].content, /^Voice request: The user said to archive this session even/);
+});
+
+test('archive_sessions reports what the app refused and a session that has not answered',
+  async () => {
+    const refusing = archiveContext(async ({ paths, socket }) => {
+      const file = path.join(paths.bridgeDir, 'replies', `${path.basename(socket, '.sock')}.json`);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ text: 'The app refused: the session is pinned.',
+        at: BEGAN / 1000 }));
+    });
+    await callTool('archive_sessions', { session: 'done' }, refusing.context);
+    assert.equal(await callTool('archive_sessions', { session: 'done', confirm: true },
+      refusing.context),
+    'Archived 0 of 1 sessions.\nDone: not archived, it answered "The app refused: the session '
+      + 'is pinned."');
+    const quiet = archiveContext();
+    await callTool('archive_sessions', { session: 'done' }, quiet.context);
+    assert.match(await callTool('archive_sessions', { session: 'done', confirm: true },
+      quiet.context), /Done: asked, with no answer and no archive seen yet/);
+  });
+
+test('archive_sessions refuses a session that went busy after the read-back', async () => {
+  const { paths, posted, context } = archiveContext();
+  await callTool('archive_sessions', { session: 'done' }, context);
+  const entry = JSON.parse(fs.readFileSync(path.join(paths.sessionsDir, '71.json'), 'utf8'));
+  fs.writeFileSync(path.join(paths.sessionsDir, '71.json'),
+    JSON.stringify({ ...entry, status: 'busy' }));
+  assert.match(await callTool('archive_sessions', { session: 'done', confirm: true }, context),
+    /Done: it is busy now; not asked/);
+  assert.equal(posted.length, 0);
+});
+
+test('list_sessions and summary leave out a session the app archived', async () => {
+  const { archive, context } = archiveContext();
+  assert.match(await callTool('list_sessions', {}, context), /Done[\s\S]*Working[\s\S]*Open/);
+  archive('done');
+  const listed = await callTool('list_sessions', {}, context);
+  assert.doesNotMatch(listed, /Done/);
+  assert.match(listed, /Working[\s\S]*Open/);
+  assert.doesNotMatch(await callTool('summary', {}, context), /Done/);
+  assert.equal(appArchived('local_done', context.paths.appSessionsDir), true);
+  assert.equal(appArchived('local_done', undefined), false);
+  assert.equal(appArchived('', context.paths.appSessionsDir), false);
+});
+
+test('archive_sessions sees an archive that lands after the first look', async () => {
+  const { context } = archiveContext(async ({ socket, archive }) => {
+    if (socket.endsWith('71.sock')) setTimeout(() => archive('done'), 200);
+  }, { waitMs: 60 * 1000 });
+  await callTool('archive_sessions', { session: 'done' }, context);
+  assert.equal(await callTool('archive_sessions', { session: 'done', confirm: true }, context),
+    'Archived 1 of 1 sessions.\nDone: archived');
+});
+
+test('archive_sessions says when a request could not be sent', async () => {
+  const { context } = archiveContext(async () => {
+    throw new Error('socket closed');
+  });
+  await callTool('archive_sessions', { session: 'done' }, context);
+  assert.match(await callTool('archive_sessions', { session: 'done', confirm: true }, context),
+    /^Archived 0 of 1 sessions\.\nDone: the request could not be sent, .*socket closed/);
+});
+
+test('archive_sessions leaves out a session that is not an app session or has no app id',
+  async () => {
+    const { paths, context } = archiveContext();
+    const root = path.dirname(paths.sessionsDir);
+    startFake(paths, { pid: 74, name: 'Terminal', cwd: fakeCheckout(root, 'terminal', 'main'),
+      entrypoint: 'cli', hostSessionId: '', sessionId: 'sess-74', status: 'idle' });
+    startFake(paths, { pid: 75, name: 'Bare', cwd: fakeCheckout(root, 'bare', 'main'),
+      entrypoint: 'claude-desktop', hostSessionId: '', sessionId: 'sess-75', status: 'idle' });
+    const readBack = await callTool('archive_sessions', {}, context);
+    assert.match(readBack, /Terminal, because it is not a Claude app session/);
+    assert.match(readBack, /Bare, because it has no app session id/);
+    assert.match(readBack, /^Ready to archive: Done\./);
+  });
+
+test('archive_sessions refuses a confirm whose arguments differ from the read-back', async () => {
+  const { posted, context } = archiveContext();
+  await callTool('archive_sessions', { session: 'done' }, context);
+  assert.match(await callTool('archive_sessions', { confirm: true }, context),
+    /^Nothing was archived\. The confirm does not match the read-back: no session is named, but the read-back covered one\. Call archive_sessions without confirm for a new read-back/);
+  await callTool('archive_sessions', { session: 'done' }, context);
+  assert.match(await callTool('archive_sessions', { session: 'open', confirm: true }, context),
+    /does not match the read-back: the session is not the one that was read back/);
+  await callTool('archive_sessions', { session: 'done' }, context);
+  assert.match(await callTool('archive_sessions', { session: 'done', anyway: true,
+    confirm: true }, context), /anyway is true, but the read-back had it false\. Call archive_sessions without confirm for a new read-back/);
+  assert.equal(posted.length, 0);
+});
+
+test('archive_sessions leaves a session with an open pull request in the app alone', async () => {
+  const open = { prNumber: 9, repo: 'o/other', state: 'OPEN', dismissed: false };
+  const { context } = archiveContext(undefined, { app: { done: {
+    prs: [open, { ...open, prNumber: 8, dismissed: true },
+      { ...open, prNumber: 7, state: 'MERGED' }] } } });
+  assert.match(await callTool('archive_sessions', { session: 'done' }, context),
+    /Left alone: Done, because the app lists 1 pull request bound to it that is still open/);
+  const dismissed = archiveContext(undefined, { app: { done: {
+    prs: [{ ...open, dismissed: true }] } } });
+  assert.match(await callTool('archive_sessions', { session: 'done' }, dismissed.context),
+    /^Ready to archive: Done\./);
+});
+
+test('archive_sessions leaves a session alone when gh cannot be asked about its branch',
+  async () => {
+    const { context } = archiveContext(undefined, { gh: async () => {
+      throw new Error('gh is down');
+    } });
+    assert.match(await callTool('archive_sessions', { session: 'done' }, context),
+      /^No session is ready to archive\. Left alone: Done, because its pull request could not be looked up/);
+  });
+
+test('archive_sessions leaves a session alone when its checkout has unsaved work', async () => {
+  const dirty = archiveContext(undefined, { git: { dirty: ['done'] } });
+  assert.match(await callTool('archive_sessions', { session: 'done' }, dirty.context),
+    /Left alone: Done, because its checkout has uncommitted changes/);
+  const unpushed = archiveContext(undefined, { git: { ahead: { done: 2 } } });
+  assert.match(await callTool('archive_sessions', { session: 'done' }, unpushed.context),
+    /Left alone: Done, because its checkout has 2 commits not pushed/);
+  const noUpstream = archiveContext(undefined, { git: { ahead: { done: 1 }, noUpstream: ['done'] } });
+  assert.match(await callTool('archive_sessions', { session: 'done' }, noUpstream.context),
+    /Left alone: Done, because its checkout has 1 commit not pushed/);
+});
+
+test('list_sessions keeps an archived session that is busy', async () => {
+  const { archive, context } = archiveContext();
+  archive('working');
+  assert.match(await callTool('list_sessions', {}, context), /Working/);
+  archive('done');
+  assert.doesNotMatch(await callTool('list_sessions', {}, context), /Done/);
+});
+
+test('appArchived ignores a file that names another Claude Code session', () => {
+  const { paths } = archiveContext().context;
+  const file = path.join(paths.appSessionsDir, 'account', 'org', 'local_done.json');
+  fs.writeFileSync(file, JSON.stringify({ isArchived: true, cliSessionId: 'sess-71' }));
+  assert.equal(appArchived('local_done', paths.appSessionsDir, 'sess-71'), true);
+  assert.equal(appArchived('local_done', paths.appSessionsDir, 'sess-99'), false);
+});

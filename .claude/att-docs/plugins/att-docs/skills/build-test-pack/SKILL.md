@@ -9,6 +9,10 @@ Takes a `<issue-term>` number, a `<change-term>` number when the change has
 one, and the source documents. `<invocation>` names both; the documents can be
 named in the request, attached, or found in the repository.
 
+When the repository names `<pipeline-config>`, the pack is built by the local
+pipeline, not by the session: see "Running on the local model" below. The
+session then reads none of the inputs and none of what the pipeline writes.
+
 The procedure and the standard are the reference material's, and they live only
 in `<reference-dir>`. This skill is how they run in a repository: which of the
 procedure's inputs come from where, what each phase writes into the pack file,
@@ -95,6 +99,8 @@ none, ask the user rather than guessing.
 | `<extract-skill>` | The skill that extracts a document's rules for the first time |
 | `<update-skill>` | The skill that updates a document's rules in the master |
 | `<scratchpad>` | A scratch directory outside the repository |
+| `<pipeline-config>` | The local pipeline's config file, when packs are built on the local model |
+| `<pipeline>` | The local pipeline's command, `node <this skill's folder>/local/build-pack.mjs` |
 
 | Reference | What it governs |
 | --- | --- |
@@ -117,6 +123,195 @@ with a line range.
 `<manifest>` is the reference archive's own list of SHA-256 fingerprints, and
 `<manifest-check>` checks every reference document against it. A failing check
 means the copy in the repository is no longer the one that was verified.
+
+## Running on the local model
+
+With `<pipeline-config>` set, the whole pack is built by `<pipeline>` against the
+local model the config names, and no part of it passes through the session. The
+pipeline runs intake and every phase below as fixed prompts that answer against
+a JSON schema, checks each gate in code, and ends with `<pack-builder>`, feeding
+any FAIL back to the model a bounded number of times. Its config names the
+endpoint, which must be on the loopback interface, the model, the reference
+documents and the methodology chapters each phase reads, the input commands
+(`<rule-export>`, `<folder-export>`, the description and the document index),
+and `<pack-builder>` and `<suite-merge>`, which it runs unchanged.
+
+A `<rule-export>` that fails stops intake with `rule-export-failed`, unless its
+error output matches the config's `noRules` pattern, the export's own way of
+saying the document has no rules in the master yet. Only then are the rules
+derived from the document in Phase 2, so an export outage never passes for a
+document with no rules.
+
+The session never reads the documents, the rules, the description, the pack
+file, the workbook, or the job's `detail.log` and `work` folder. It runs or
+queues the job and reports the content-free status lines: phase names, pass or
+fail, reason codes, counts and timings.
+
+```bash
+<pipeline> run --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--resume]
+<pipeline> run --config <pipeline-config> --suite <code> [--resume]
+<pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] [--resume]
+<pipeline> queue start --config <pipeline-config> --job <job-id> [--cutoff HH:MM]
+<pipeline> queue status --config <pipeline-config> --job <job-id>
+<pipeline> queue summary --config <pipeline-config>
+```
+
+After each phase passes, the job saves its state in its `work` folder. A job run
+again with `--resume` starts at the phase that stopped it, with the phases
+before it kept as they passed, so a fix made after a failure costs only the
+phases left. Without `--resume` a job starts over from intake.
+
+Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
+(issues, coverage rows, assumptions), `phase9-senior` (the senior review and
+tester notes), `phase9-confidence`, and `phase9-revalidate` (the rebuild and
+the revalidation). Each call thinks through one part of the review, and a job
+resumed in Phase 9 keeps the steps that passed.
+
+A reasoning call can think for up to `model.reasoningOutput` tokens (40,960 by
+default), which takes well over an hour at local generation speeds, inside a
+`model.context` of 153,600 tokens, so a call waits up to `model.timeoutMinutes`
+(150 by default). The model server's context has to be at least
+`model.context`, and its own request time-out at least `model.timeoutMinutes`,
+or the server ends the reply early and the call fails with `no-reply`. A call
+that fails while thinking is retried once with thinking off.
+
+A job takes an hour or more, so a request made during the day is queued.
+`local/systemd/` holds a user timer that starts `queue run` at 22:00; the queue
+runs one job at a time, marks a failed job failed and moves on, takes no new job
+past the cutoff (07:00 by default), takes none at all when the timer only fires
+after the cutoff, and leaves a morning summary with one line per job.
+`queue run` given `--cutoff` runs whenever it is started. A stopped job's
+status line names the phase and the gate; what the gate found is in the job's
+own folder, for the user to read.
+
+### Starting a job now, without reading it
+
+When the user asks for a job to start now rather than at 22:00, the session
+queues it and starts a unit for that one job, detached, and never sees what the
+job reads or writes:
+
+```bash
+<pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] --now
+systemctl --user start --no-block build-pack-now@<job-id>.service
+```
+
+`build-pack-now@.service` in `local/systemd/` is installed beside
+`build-pack.service` and mirrors it: the same `EnvironmentFile`, and the same
+`Nice=10`, so a daytime job does not take the machine at full priority. The unit
+runs `/usr/bin/node`. The script and config paths come from
+`~/.config/build-pack/env`, and so does everything else the job needs from its
+environment: the unit gets the user manager's `PATH`, not the session's, so the
+env file has to carry a full `PATH=` line (systemd does not expand `$PATH`
+there) for a `<rule-export>` command that lives outside the system folders, and
+any token that command reads, one `NAME=value` per line. Its instance name is
+the job ID, and it runs `queue start --job <job-id>`, which runs that job's row
+first and then any other row added with `--now`, until the configured
+`queue.cutoff`. A row queued without `--now` is waiting for the nightly run and
+stays queued; `queue add --now` for a job already waiting for tonight marks that
+row to start now. `--no-block` returns at once; without it `systemctl` waits for
+the whole run. The unit's output goes to the user's journal and the
+job's own folder, never to the session.
+
+The nightly timer is left as it is. The queue is held by one process at a time:
+while it is held, a 22:00 `queue run` waits, polling every 30 seconds, and
+works the night's queue as soon as the holder finishes; it gives up only when
+the cutoff passes. A oneshot unit stays activating for its whole run, so a
+second start of the same instance merges into it at any point while it runs. A
+job already running under the nightly service is not refused by systemd, but
+`queue start` finds the queue held and the row `running`, says `<job-id> is
+already running`, and takes nothing. `queue add` prints `queued`, `marked to
+start now` for a row it set to start now, `already running`, or `already
+queued`. A row
+marked `running` whose process is gone is marked failed as `interrupted` by the
+next run that takes the queue; the lock and the duplicate-ID check in
+`queue add` are what stop a job from starting twice. The lock records the
+holder's PID and start time, so a lock file left by a crash, or one whose PID
+another process has since taken, is not a holder.
+
+If another `queue run` or `queue start` already holds the queue, `queue start`
+waits a couple of seconds, tries once more, and then takes nothing, says so, and
+exits. The job stays `queued`. A `queue run` that holds the queue works every
+queued row, oldest first, and a `queue start` works every `--now` row, until the
+cutoff, so either takes this one in its turn. That is a good start, not a failed
+one; do not start it again.
+
+The session reads the outcome with one command, which prints only the row's
+status, whether a live process holds the queue, and the last status line the
+job wrote (phase, event, reason code, counts, timings):
+
+```bash
+<pipeline> queue status --config <pipeline-config> --job <job-id>
+```
+
+A unit needs a moment to take the queue and mark the row `running`, so the
+session repeats the command every few seconds for up to a minute before it
+decides anything. `running` with the queue `held` is a start. `queued` with the
+queue `held` is the case above. `queued` with the queue `free` after the minute
+means the unit did not start; `systemctl --user is-active
+build-pack-now@<job-id>.service` and the exit code in `systemctl --user show -p
+Result build-pack-now@<job-id>.service` say why, and the session reports that
+without opening the journal. `running` with the queue `free` is a row left by a
+dead process: report it, and the next run marks it `interrupted`. `failed`
+with the queue `free` is a job that stopped in its first phase and has already
+released the queue; the status line names the phase and the reason code, and
+the session reports them. `failed` or `passed` is final, whether the queue
+shows `held` or `free`; the queue may be held by another job's run. `not queued`
+means no row has that job ID, so the `--job` value or the `queue add` is wrong.
+A lock file is not evidence of a live process; `queue status` checks the
+process. The status line shown is the current attempt's; a resumed job shows
+nothing until it writes its first line.
+
+Later checks use the same command, and only it. They never read the journal,
+`status.log` or anything else in the job's folder directly. Resume a stopped job
+the same way, with `--resume` on the `queue add`.
+
+### Freeing the machine for a job
+
+A job needs the machine's memory and GPU for the model server. The optional
+`pause` block in the pipeline config names systemd units to stop while a job
+runs and start again afterward:
+
+```json
+"pause": {
+  "units": ["<unit-pattern>"],
+  "scope": "system",
+  "busyProcess": "<worker process name>",
+  "pollSeconds": 5
+}
+```
+
+`units` takes unit names or patterns, as `systemctl list-units` does. Only
+units that are active when the run begins are stopped, and only those are
+started again. `scope` is `system` (the default) or `user`. With no `units`,
+nothing is stopped and no command runs.
+
+The stop comes when the first job is about to start, so a run with an empty
+queue leaves the units alone. If `busyProcess` is set, a unit with a process of
+that name inside its cgroup is busy: the run polls every `pollSeconds` and
+stops it once the worker has finished, and never stops it while it works. The
+first job waits until every unit is stopped, so it never shares the machine
+with a busy one. The
+units stopped are listed in a `.paused` file beside the queue file as each one
+stops. The units start again when the run ends, however it ends, and also when
+the process gets SIGTERM, SIGINT or SIGHUP. If a run dies before it can do
+that, the next run that takes the queue finds the file and starts those units
+at its end, even when it has no job to run. A stop or start that fails is
+logged as `pause: stop failed <unit>` or `pause: start failed <unit>` and the
+run carries on; a unit that would not stop is not started later. A `run`
+outside the queue stops and starts the units the same way, but holds no queue
+lock, so it leaves a dead run's `.paused` file for the next queue run.
+
+With scope `system`, the commands run as `sudo -n /usr/bin/systemctl`, so the
+user running the queue needs a sudoers rule that needs no password. List each
+unit and each verb on its own, for example:
+
+```
+<user> ALL=(root) NOPASSWD: /usr/bin/systemctl stop <unit>, /usr/bin/systemctl start <unit>
+```
+
+A `*` in a sudoers argument also matches spaces, so a pattern there can allow
+more than the unit it was meant for. Listing the units is safer. With scope
+`user`, no sudo is involved.
 
 ## Where the reference material may go
 

@@ -39,9 +39,9 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
-                            ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
-                            ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
-                            ('LEDGERS', self.f.ledgers), ('AVATAR_IMAGES', ()),
+                            ('SPLIT', os.path.join(self.root, 'split')),
+                            ('SCROLLBACK', os.path.join(self.root, 'scrollback.json')), ('_scrollback', None), ('_message_lines', {}),
+                            ('LEDGERS', self.f.ledgers),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -62,7 +62,7 @@ class Fixture(unittest.TestCase):
         """This session with speech on, another on Alerts with a line queued, a third Off."""
         self.f.session(300, ME, 'Claude Voice Widget', status='busy')
         self.f.session(100, OTHER, 'Release 1.2')
-        self.f.session(200, QUIET, 'Docs pass', kind='bg')
+        self.f.session(200, QUIET, 'Docs pass')
         self.f.file(ME + '.replies')
         self.f.file(QUIET + '.muted')
         self.f.queue(OTHER, 'The build is green.')
@@ -76,7 +76,28 @@ class ReadState(Fixture):
         self.assertEqual([x['speech'] for x in s], ['on', 'alerts', 'off'])
         self.assertEqual([x['queued'] for x in s], [0, 1, 0])
         self.assertTrue(s[0]['busy'])
-        self.assertTrue(s[2]['background'])
+
+    def test_a_background_session_is_listed_and_a_spare_one_is_not(self):
+        self.three()
+        self.f.session(400, '99999999-jobs', 'Bridge Update', kind='bg')
+        self.f.session(500, '88888888-jobs', '88888888', kind='bg', spare=True)
+        got = self.state()['sessions']
+        self.assertEqual([x['id'] for x in got], [ME, OTHER, QUIET, '99999999-jobs'])
+        self.assertEqual([x['spare'] for x in got], [False] * 4)
+
+    def test_a_spare_session_that_speaks_keeps_its_name_in_the_terminal(self):
+        self.f.session(400, ME, 'A job', kind='bg', spare=True)
+        self.f.now(ME, 'A job', 'A job says: done.', hook_pid=9001)
+        state = self.state()
+        self.assertEqual((state['sessions'], state['name']), ([], 'A job'))
+
+    def test_a_session_waiting_for_input_in_the_cli_is_under_needs_input(self):
+        self.three()
+        self.f.session(400, '99999999-jobs', 'Relay Authority', kind='bg', status='waiting', waiting_for='input needed')
+        by_id = {x['id']: x for x in self.state()['sessions']}
+        self.assertTrue(by_id['99999999-jobs']['question'])
+        self.assertEqual(speechqueue.status_group(by_id['99999999-jobs']), 'Needs input')
+        self.assertFalse(by_id[ME]['question'])
 
     def test_a_queued_question_is_a_tag_not_a_line(self):
         self.f.session(100, ME, 'One')
@@ -84,21 +105,6 @@ class ReadState(Fixture):
         s = self.state()['sessions'][0]
         self.assertEqual((s['queued'], s['question']), (1, True))
         self.assertIn('question', speechqueue.session_line(s).split('\t')[4].split(','))
-
-    def test_an_on_session_keeps_its_last_line_and_others_have_none(self):
-        self.three()
-        line = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
-                                if x['id'] == sid).split('\t')[7]
-        self.assertEqual(line(ME), speechqueue.NOTHING_SAID)
-        self.assertEqual(line(OTHER), '')
-        self.f.now(ME, 'Claude Voice Widget', 'Pass 1 is pushed.')
-        self.assertEqual(line(ME), 'Pass 1 is pushed.')
-        self.f.now(ME, 'Claude Voice Widget', 'Question: Open it? Options: yes or no.')
-        self.assertEqual(line(ME), 'Pass 1 is pushed.')
-        os.remove(os.path.join(self.f.speak, 'now.json'))
-        self.assertEqual(line(ME), 'Pass 1 is pushed.')
-        speechqueue._last = None                       # a restart reads it back from LAST
-        self.assertEqual(line(ME), 'Pass 1 is pushed.')
 
     def test_waiting_on_ci_or_a_merge_by_the_sessions_ledger(self):
         self.three()
@@ -114,7 +120,7 @@ class ReadState(Fixture):
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), ['busy'])                     # working, not waiting
         self.f.ledger(QUIET, ('pr:5', 'open'))
-        self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over bg
+        self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over idle
 
     def test_waiting_on_tests_while_a_test_run_is_under_the_session(self):
         self.three()
@@ -126,7 +132,7 @@ class ReadState(Fixture):
         self.f.ledger(OTHER, ('pr:111', 'open'))
         self.assertEqual(flags(OTHER), 'waiting: tests')          # over waiting on a merge
         self.f.process(210, 200, 'python3', 'scripts/catchup_test.py')
-        self.assertEqual(flags(QUIET), 'waiting: tests')          # over bg
+        self.assertEqual(flags(QUIET), 'waiting: tests')          # over idle
         self.f.process(310, 300, 'npx', 'playwright', 'test')
         self.assertEqual(flags(ME), 'busy')                       # its own turn runs them
 
@@ -171,23 +177,17 @@ class ReadState(Fixture):
         self.three()
         flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[4]
-        self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'bg'))
+        self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'idle'))
         self.f.queue(ME, 'Question: Merge it? Options: yes or no.')
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), 'question')                   # over busy and waiting
         self.f.queue(QUIET, 'Question: Which one?')
-        self.assertEqual(flags(QUIET), 'question')                # over bg
+        self.assertEqual(flags(QUIET), 'question')                # over idle
 
-    def test_the_second_row_drops_the_hooks_speaker(self):
-        self.three()
-        line = lambda: next(speechqueue.session_line(x) for x in self.state()['sessions']
-                            if x['id'] == ME).split('\t')[7]
-        self.f.now(ME, 'Claude Voice Widget', 'Claude Voice Widget session says: PR 110 merged.')
-        self.assertEqual(line(), 'PR 110 merged.')
-        self.assertEqual(speechqueue.last_lines(None, {ME})[ME],
-                         'Claude Voice Widget session says: PR 110 merged.')   # kept whole
-        self.f.now(ME, 'Claude Voice Widget', 'It says: nothing here, mid-line it stays.')
-        self.assertEqual(line(), 'It says: nothing here, mid-line it stays.')     # not the hook's
+    def test_the_hooks_speaker_is_dropped_only_at_the_start(self):
+        self.assertEqual(speechqueue.without_speaker('Claude Voice Widget session says: PR 110 merged.'), 'PR 110 merged.')
+        self.assertEqual(speechqueue.without_speaker('It says: nothing here, mid-line it stays.'),
+                         'It says: nothing here, mid-line it stays.')              # not the hook's
         self.assertEqual(speechqueue.without_speaker('The log says nothing.'), 'The log says nothing.')
         self.assertEqual(speechqueue.without_speaker('Overmind session says: '), 'Overmind session says: ')
 
@@ -254,8 +254,6 @@ class ReadState(Fixture):
         self.f.file('settings.json', json.dumps({'voice': 'en_GB-alan-low', 'volume': 0.75}))
         state = self.state()
         self.assertEqual((state['voice'], state['volume']), ('en_GB-alan-low', 0.8))
-        self.assertEqual(speechqueue.voice_label(state['voice']), 'alan')
-        self.assertEqual(speechqueue.voice_label('my-voice'), 'my-voice')
 
 
 class Repos(Fixture):
@@ -365,19 +363,12 @@ class Links(Repos):
                          'https://github.com/org/repo/issues/9')
         self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
-    def test_the_pill_names_the_ready_pull_requests(self):
-        pr = 'https://github.com/o/r/pull/'
-        self.assertEqual(speechqueue.link_pill([pr + '151']), 'PR #151')
-        self.assertEqual(speechqueue.link_pill([pr + '151', pr + '152']), '2 PRs')
-        self.assertEqual(speechqueue.link_pill([]), '')
-
     def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
         self.f.session(100, ME, 'One')
         self.pr_ledger(ME, (150, 'done'), (151, 'open'), (152, 'open'))
         s = self.state()['sessions'][0]
         self.assertEqual(s['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151',
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
-        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '', '1'])
 
     def test_the_pill_shows_for_a_ledger_another_repository_keeps(self):
         # ledger.tsv and catchup.tsv, with a branch column after the label
@@ -387,8 +378,7 @@ class Links(Repos):
         self.f.branch_ledger(OTHER, 'catchup.tsv', ('pr:7', 'open'), ('pr:8', 'open'))
         one, two = self.state()['sessions']
         self.assertEqual(one['prs'], ['https://github.com/o/r/pull/152'])
-        self.assertEqual(speechqueue.session_line(one).split('\t')[8], 'PR #152')
-        self.assertEqual(speechqueue.session_line(two).split('\t')[8], '2 PRs')
+        self.assertEqual(two['prs'], ['https://github.com/o/r/pull/7', 'https://github.com/o/r/pull/8'])
         self.assertEqual(one['waiting'], 'merge')
         self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'done'))
         self.assertEqual(self.state()['sessions'][0]['prs'], [])
@@ -400,98 +390,6 @@ class Links(Repos):
         self.assertEqual(self.state()['sessions'][0]['prs'],
                          ['https://github.com/someone/Gnome-Widgets/pull/151', 'https://github.com/o/r/pull/152'])
 
-    def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
-        self.f.session(100, ME, 'One')
-        self.f.session(200, OTHER, 'Two')
-        self.pr_ledger(ME, (151, 'open'))
-        with mock.patch.object(speechqueue, 'session_branch',
-                               side_effect=lambda cwd: ('feat/issue-127-repo-box-links', 'someone/Gnome-Widgets')):
-            state = self.state()
-        state['sessions'][1]['issue'] = 'https://github.com/someone/Gnome-Widgets/issues/131'
-        for s in state['sessions']:
-            s['repo'] = 'Gnome-Widgets'
-        speechqueue.repo_issues(state['sessions'])
-        speechqueue.render(state)
-        with open(speechqueue.REGIONS) as f:
-            one, two = json.load(f)['rows']
-        links = ['https://github.com/someone/Gnome-Widgets/issues/127',
-                 'https://github.com/someone/Gnome-Widgets/issues/131']
-        for row in (one, two):                                      # the repository's issues, on each
-            self.assertEqual([chip[4] for chip in row['issues']], links)
-            self.assertLess(row['issues'][0][2], row['issues'][1][0])   # side by side, a gap between
-        self.assertEqual(one['issues'][0][0], speechqueue.MARGIN + speechqueue.BLOCK_RULE + speechqueue.BLOCK_PAD)
-        with open(speechqueue.SESSIONS) as f:
-            lines = [line.split('\t') for line in f.read().splitlines()]
-        self.assertEqual([l[6] for l in lines], ['Gnome-Widgets', 'Gnome-Widgets'])
-        self.assertEqual([l[8] for l in lines], ['PR #151', ''])
-        self.assertEqual([[t.split(':')[3] for t in l[9].split()] for l in lines], [['#127', '#131']] * 2)
-        self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
-        self.assertLess(one['issues'][1][2], one['name'][0])       # the block, then the name
-        self.assertEqual(one['name'][1], one['link'][0])           # then the pill
-        self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
-        self.assertFalse({'link', 'prs'} & set(two))
-        self.assertEqual([(r['pid'], r['title'], r['busy']) for r in (one, two)],
-                         [(100, 'One', False), (200, 'Two', False)])
-        self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
-        self.assertLess(two['name'][1], two['on'][0])
-
-    def headers(self, state):
-        """[(x, label)] of the column headers widget.txt draws over the list, x from the card's left."""
-        text = speechqueue.render(state)
-        line = next(l for l in text.splitlines() if speechqueue.conky_font(speechqueue.HEADING_FONT) in l)
-        return text, [(int(x) - speechqueue.SHADOW, label)
-                      for x, label in re.findall(r'\$\{goto (\d+)\}([^$]+)', line)]
-
-    def test_three_column_headers_replace_the_sessions_heading_each_over_its_column(self):
-        self.f.session(100, ME, 'One')
-        state = self.state()
-        state['sessions'][0].update(repo='Gnome-Widgets', issues=[('#127', 'https://example.test/127')])
-        text, heads = self.headers(state)
-        with open(speechqueue.REGIONS) as f:
-            row = json.load(f)['rows'][0]
-        self.assertNotIn('Sessions', text)
-        self.assertEqual([label for _, label in heads], ['Identifiers', 'Session Information', 'Speech Setting'])
-        self.assertEqual([x for x, _ in heads],
-                         [row['issues'][0][0], speechqueue.name_left(speechqueue.block_width(state['sessions'])),
-                          row['on'][0]])                             # the left edge of each column
-
-    def test_the_headers_stay_whole_numbers_and_clear_of_each_other_at_any_size(self):
-        self.f.session(100, ME, 'One')
-        for size in ((660, 128, 1.1), (400, 128, 2.0), (9999, 128, 0.7)):
-            with self.subTest(size=size), mock.patch.object(speechqueue.size_file, 'load', return_value=size):
-                state = self.state()
-                state['sessions'][0]['repo'] = 'Gnome-Widgets'
-                text, heads = self.headers(state)
-                self.assertNotRegex(text, r'\$\{goto \d+\.')
-                self.assertIn('Identifiers', [label for _, label in heads])
-                font = speechqueue.HEADING_FONT
-                for (x, label), (nxt, _) in zip(heads, heads[1:]):
-                    self.assertLessEqual(x + speechqueue.text_width(label, font), nxt)   # none runs into the next
-
-    def test_the_headers_leave_the_lists_top_where_it_was_and_are_left_out_without_sessions(self):
-        self.f.session(100, ME, 'One')
-        speechqueue.render(self.state())
-        with open(speechqueue.REGIONS) as f:
-            with_sessions = json.load(f)['list']
-        os.remove(os.path.join(self.f.sessions, '100.json'))
-        text, heads = self.headers(self.state())
-        self.assertEqual((heads, 'Sessions' in text), ([], False))
-        with open(speechqueue.REGIONS) as f:
-            self.assertEqual(json.load(f)['list'], with_sessions)   # the same room, so the card does not jump
-
-
-    def test_a_session_without_issues_has_no_chips_and_one_row(self):
-        self.f.session(100, ME, 'One')
-        state = self.state()
-        state['sessions'][0]['repo'] = 'Gnome-Widgets'
-        speechqueue.render(state)
-        with open(speechqueue.REGIONS) as f:
-            row = json.load(f)['rows'][0]
-        with open(speechqueue.SESSIONS) as f:
-            line = f.read().splitlines()[0].split('\t')
-        self.assertNotIn('issues', row)
-        self.assertEqual(line[9:], ['', '1'])
-
     def test_a_repository_lists_the_issues_of_the_sessions_in_it_in_number_order(self):
         issue = lambda repo, n: f'https://github.com/{repo}/issues/{n}'
         listed = [dict(github='o/a', issue=issue('o/a', 31)), dict(github='o/a', issue=issue('o/a', 7)),
@@ -502,58 +400,66 @@ class Links(Repos):
                          [['#7', '#31']] * 4 + [['#2'], []])
         self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
 
-    def test_the_block_is_as_wide_as_the_longest_name_and_never_below_its_least(self):
-        width = lambda *names: speechqueue.block_width([dict(repo=n) for n in names])
-        chrome = speechqueue.BLOCK_RULE + speechqueue.BLOCK_PAD
-        with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 5 * len(t)):
-            self.assertEqual(width('ab', 'cd'), chrome + speechqueue.BLOCK_MIN)
-            self.assertEqual(width('a' * 30, 'b'), chrome + math.ceil(150 * speechqueue.BLOCK_SLACK))
-            self.assertEqual(width('a' * 100), chrome + math.ceil(500 * speechqueue.BLOCK_SLACK))
-            self.assertEqual(width(), chrome + speechqueue.BLOCK_MIN)
+    def test_the_sessions_are_listed_in_the_sections_the_cli_names_for_their_state(self):
+        listed = [dict(id='a', busy=False), dict(id='b', busy=True), dict(id='c', busy=False, question=True),
+                  dict(id='e', busy=False, waiting='merge')]
+        self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
+                         [('Needs input', 'c'), ('Working', 'b'), ('Working', 'e'), ('Completed', 'a')])
 
-    def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):
-        with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 10 * len(t)):
-            issues = [(f'#{n}', f'link{n}') for n in (127, 131, 133, 5)]
-            chips, lines = speechqueue.block_chips(issues, 110)
-        pad, gap = speechqueue.CHIP_PAD, speechqueue.CHIP_GAP
-        w = 40 + pad
-        self.assertEqual([(c[0], c[1]) for c in chips],
-                         [(0, 0), (1, 0), (2, 0), (2, w + gap)] if w * 2 + gap > 110 else
-                         [(0, 0), (0, w + gap), (1, 0), (1, w + gap)])
-        self.assertEqual(lines, chips[-1][0] + 1)
-        self.assertEqual(speechqueue.block_chips([], 110), ([], 0))
+    def test_an_idle_session_with_a_pull_request_open_is_in_review_under_needs_input(self):
+        self.f.session(100, ME, 'One')
+        self.f.session(200, OTHER, 'Two', status='busy')
+        self.f.session(300, QUIET, 'Three')
+        self.pr_ledger(ME, (151, 'open'), (152, 'open'), (150, 'done'))
+        self.pr_ledger(OTHER, (160, 'open'))
+        by_id = {x['id']: x for x in self.state()['sessions']}
+        for s in by_id.values():
+            s['repo'] = 'Gnome-Widgets'
+        one, two, three = by_id[ME], by_id[OTHER], by_id[QUIET]
+        self.assertEqual(speechqueue.review_label(one), 'In review \u00b7 Gnome-Widgets #151, #152')
+        self.assertEqual(speechqueue.status_group(one), 'Needs input')
+        self.assertEqual(speechqueue.session_line(one).split('\t')[9], speechqueue.review_label(one))
+        self.assertEqual((speechqueue.status_group(two), speechqueue.review_label(two)), ('Working', ''))   # busy: still working
+        self.assertEqual((speechqueue.status_group(three), speechqueue.review_label(three)), ('Completed', ''))
 
-    def test_a_session_takes_the_rows_its_block_needs_or_the_two_speech_on_takes(self):
+    def test_a_session_is_one_row_and_a_section_adds_its_title_and_a_blank_row_after_the_first(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
-        self.f.file(ME + '.replies')
         state = self.state()
-        for s in state['sessions']:
-            s['repo'] = 'Gnome-Widgets'
-        speechqueue.render(state)
-        with open(speechqueue.SESSIONS) as f:
-            spans = [int(line.split('\t')[10]) for line in f.read().splitlines()]
-        self.assertEqual(spans, [2, 1])                             # no issues: speech on takes two
-        for s in state['sessions']:
-            s['issues'] = [(f'#{n}', f'link{n}') for n in range(1, 40)]    # far more than a line holds
+        state['sessions'][0].update(busy=True)
         speechqueue.render(state)
         with open(speechqueue.SESSIONS) as f:
             lines = [line.split('\t') for line in f.read().splitlines()]
         with open(speechqueue.REGIONS) as f:
-            rows = json.load(f)['rows']
-        spans = [int(l[10]) for l in lines]
-        self.assertGreater(min(spans), 2)
-        self.assertEqual([r['bottom'] - r['top'] for r in rows], [sp * 24 for sp in spans])
-        last_line = max(int(t.split(':')[0]) for t in lines[0][9].split())
-        self.assertGreaterEqual(last_line, 1)                       # it wrapped
-        self.assertGreaterEqual(spans[0] * 24, rows[0]['issues'][-1][3])    # the last chip is inside the row
+            regions = json.load(f)
+        self.assertEqual([(l[7], l[8]) for l in lines], [('2', 'Working'), ('3', 'Completed')])
+        row = regions['list_scroll'][1]
+        one, two = regions['rows']
+        self.assertEqual((one['head'], two['head']), (row, 2 * row))     # the title; a blank row and the title
+        self.assertEqual((one['bottom'] - one['top'], two['bottom'] - two['top']), (2 * row, 3 * row))
+        self.assertLess(two['name'][0], two['name'][1])                  # every name is there to click
+        self.assertLess(two['name'][1], regions['list'][2])
+        self.assertEqual([(r['pid'], r['title']) for r in (one, two)], [(100, 'One'), (200, 'Two')])
+
+    def test_the_numbers_of_a_sessions_issues_and_pull_requests_head_its_messages(self):
+        sess = dict(id='aaaa', issues=[('#123', 'https://o/r/issues/123'), ('#125', 'https://o/r/issues/125')],
+                    prs=['https://o/r/pull/124', 'https://o/r/pull/126'])
+        segments = speechqueue.meta_segments(sess)
+        self.assertEqual(''.join(t for t, _ in segments), '[ Issue #123, #125 | PR #124, #126 ]')
+        self.assertEqual([info['issue'] for _, info in segments if info],
+                         ['https://o/r/issues/123', 'https://o/r/issues/125', 'https://o/r/pull/124',
+                          'https://o/r/pull/126'])
+        self.assertEqual(''.join(t for t, _ in speechqueue.meta_segments(dict(sess, issues=[]))), '[ PR #124, #126 ]')
+        self.assertEqual(speechqueue.meta_segments(dict(id='aaaa')), [])
+        self.assertEqual(speechqueue.meta_segments(None), [])
 
     def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
         self.f.session(100, ME, 'One')
         speechqueue.render(self.state())
         with open(speechqueue.REGIONS) as f:
             regions = json.load(f)
-        prompt, (x0, top, x1, bottom) = regions['confirm'], regions['list']
+        prompt, (_, top, _, bottom) = regions['confirm'], regions['list']
+        x0, x1 = speechqueue.MARGIN, speechqueue.MARGIN + speechqueue.widget_width        # over both columns
         box = prompt['box']
         self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
         for key in ('cancel', 'ok'):
@@ -564,125 +470,6 @@ class Links(Repos):
             line = next(l for l in f.read().splitlines() if l.startswith('confirm '))
         self.assertEqual([float(v) for v in line.split()[1:5]], box)
 
-
-
-@unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')
-class SharedColours(unittest.TestCase):
-    """Both widgets' draw.lua, loaded side by side, with the Spotify widget's bg.txt driven
-    through a light colour, a dark one and away again: each frame they give conky the same
-    title and text colours, white on Spotify's #181818 while there is no bg.txt."""
-
-    HARNESS = """
-package.preload['cairo'] = function() return true end
-cairo_text_extents_t = {create = function() return {} end}
-cairo_font_extents_t = cairo_text_extents_t
-conky_info = {update_interval = 0.05}
-local function load(path)
-    dofile(path)
-    return conky_widget, conky_fg
-end
-local spotify_widget, spotify_fg = load(SPOTIFY)
-local speech_widget, speech_fg = load(SPEECH)
-local theme, T = package.loaded.theme, 1000
-theme.now = function() return T end
-theme.BOOT = 'boot-1'
-local function put(path, text)
-    if text then local f = assert(io.open(path, 'w')); f:write(text); f:close()
-    else os.remove(path) end
-end
-for _, step in ipairs(STEPS) do
-    put(step.path, step.text)
-    if step.late then speech_widget, speech_fg = load(SPEECH) end
-    for _ = 1, step.frames do
-        spotify_widget(); speech_widget()
-        T = T + 0.05
-        print(table.concat({spotify_fg('title'), spotify_fg('text'),
-                            speech_fg('title'), speech_fg('text')}, '\\t'))
-    end
-end
-"""
-
-    def setUp(self):
-        self.home = tempfile.mkdtemp(prefix='speech-colours-')
-        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        self.spotify = os.path.join(self.home, '.cache', 'conky-spotify-nowplaying')
-        self.setting = os.path.join(self.home, '.config', 'conky-widgets', 'speech', 'background')
-        os.makedirs(self.spotify)
-        os.makedirs(os.path.dirname(self.setting))
-        self.bg = os.path.join(self.spotify, 'bg.txt')
-
-    def frames(self, steps):
-        """Each frame's colours, as (Spotify's title, its text, speech's title, its text)."""
-        lua = ', '.join('{path = %s, text = %s, frames = %d, late = %s}' % (
-            json.dumps(path), json.dumps(text) if text is not None else 'nil', n,
-            'true' if late else 'false')
-            for path, text, n, *late in steps)
-        script = (self.HARNESS
-                  .replace('SPOTIFY', json.dumps(os.path.join(support.SRC, 'spotify', 'draw.lua')))
-                  .replace('SPEECH', json.dumps(os.path.join(support.SRC, 'speech', 'draw.lua')))
-                  .replace('STEPS', '{' + lua + '}'))
-        out = subprocess.run(['lua5.3', '-'], input=script, capture_output=True, text=True,
-                             check=True, env=dict(os.environ, HOME=self.home)).stdout
-        return [tuple(line.split('\t')) for line in out.splitlines()]
-
-    def test_both_widgets_pick_the_same_colours(self):
-        frames = self.frames([(self.bg, None, 20),               # no bg.txt yet
-                              (self.bg, '0.950 0.900 0.800', 40),  # a light cover
-                              (self.bg, '0.157 0.275 0.549', 40),  # a dark one
-                              (self.bg, None, 40)])              # gone again
-        self.assertEqual(len(frames), 140)
-        for i, f in enumerate(frames):
-            self.assertEqual(f[:2], f[2:], f'frame {i}')
-        self.assertEqual(frames[0][0], '${color ffffff}')       # white on #181818
-        self.assertEqual(frames[59][0], '${color 121212}')      # near-black on the light cover
-        self.assertEqual(frames[99][0], '${color ffffff}')
-        self.assertEqual(frames[-1][0], '${color ffffff}')      # back to the fallback
-        with open(self.bg, 'w') as f:
-            f.write('0.188 0.424 0.463')
-        self.frames([(self.bg, '0.188 0.424 0.463', 5)])
-        with open(self.bg) as f:
-            self.assertEqual(f.read(), '0.188 0.424 0.463')     # read, never written
-
-    def test_a_widget_started_part_way_shows_the_same_colour(self):
-        # bg.txt as art_colours.py writes it: black to white from 1000 s, the harness's first
-        # frame. The speech widget, loaded again half a second in with its own #181818, takes
-        # the near-black text the light grey there needs from its first frame, as the Spotify
-        # widget does, rather than fading from #181818 under white.
-        fade = '1.000 1.000 1.000 0.000 0.000 0.000 1000.000 boot-1'
-        frames = self.frames([(self.bg, fade, 10), (self.bg, fade, 30, True)])
-        for i, f in enumerate(frames):
-            self.assertEqual(f[:2], f[2:], f'frame {i}')
-        self.assertEqual(frames[0][0], '${color ffffff}')
-        self.assertEqual(frames[10][2], '${color 121212}')
-
-    def test_the_fade_takes_wall_clock_time(self):
-        # 20 frames of 0.05 s: one second in, the fade is 95% of the way, so near-black text
-        fade = '0.950 0.900 0.800 0.094 0.094 0.094 1000.000 boot-1'
-        frames = self.frames([(self.bg, fade, 21)])
-        self.assertEqual(frames[0][0], '${color ffffff}')
-        self.assertEqual(frames[20][0], '${color 121212}')
-
-    def test_a_fade_from_another_boot_is_finished(self):
-        # written before a reboot at 999.5 s: the new boot's clock reads 1000 s, half a second
-        # on, but the fade is long done, so the light colour's near-black text from the start
-        fade = '0.950 0.900 0.800 0.094 0.094 0.094 999.500 boot-0'
-        self.assertEqual(self.frames([(self.bg, fade, 1)])[0][0], '${color 121212}')
-
-    def test_falling_back_to_an_earlier_colour_fades_again(self):
-        # #181818 without bg.txt, a timed fade to a light colour, then bg.txt gone: back to
-        # #181818 over a second, not at once
-        fade = '0.950 0.900 0.800 0.094 0.094 0.094 1000.000 boot-1'
-        frames = self.frames([(self.bg, None, 2), (self.bg, fade, 40), (self.bg, None, 25)])
-        self.assertEqual(frames[41][0], '${color 121212}')
-        self.assertEqual(frames[43][0], '${color 121212}')     # still light just after
-        self.assertEqual(frames[-1][0], '${color ffffff}')
-
-    def test_the_setting_names_another_file(self):
-        other = os.path.join(self.home, 'other.txt')
-        frames = self.frames([(self.setting, '~/other.txt\n', 0),
-                              (other, '0.950 0.900 0.800', 40)])
-        self.assertEqual(frames[-1][0], '${color ffffff}')      # Spotify's still on #181818
-        self.assertEqual(frames[-1][2], '${color 121212}')      # speech follows other.txt
 
 
 class ClockTest(unittest.TestCase):
@@ -702,11 +489,10 @@ VOICES = ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
 
 
 class TitleAndFooter(Fixture):
-    """The widget's title along the top, and the speaker's avatar, the bubble and the progress bar
-    above the controls."""
-    LONG = ('Pull request 148 now has the new title and footer layout, and the bubble is nudged 3 px toward '
+    """The widget's title and volume along the top, and the terminal pane above the controls."""
+    LONG = ('Pull request 148 now has the new title and footer layout, and the pane is nudged 3 px toward '
             'the text. The widget at the top of the card is titled in capitals with letter spacing, with '
-            'minimize and close at the right. The says line and the progress bar now sit above the controls.')
+            'minimize and close at the right. The status line and the controls now sit under the pane.')
 
     def draw(self, size=None, text=None, quiet=False):
         self.three()
@@ -720,8 +506,10 @@ class TitleAndFooter(Fixture):
             widget = speechqueue.render(self.state(), now=1000.0)
         with open(speechqueue.DRAW) as f:
             raw = f.read().splitlines()
-        lines = {l.split()[0]: l.split(None, 1)[1] for l in raw if ' ' in l}
-        lines['line'] = [l.split(None, 1)[1] for l in raw if l.startswith('line ')]
+        lines = {l.split()[0]: l.split(None, 1)[1] for l in raw if len(l.split()) > 1 and not l.startswith('line ')}
+        lines['line'] = [l[5:] for l in raw if l.startswith('line ')]
+        lines['text'] = [l.lstrip(speechqueue.BULLET_MARK) for l in lines['line']
+                         if l and not l.startswith((speechqueue.PROMPT_MARK, speechqueue.DONE_MARK))]
         with open(speechqueue.REGIONS) as f:
             return lines, json.load(f), widget
 
@@ -731,130 +519,265 @@ class TitleAndFooter(Fixture):
         self.assertEqual(text, 'CLAUDE CODE SESSION MANAGEMENT')
         self.assertEqual((float(x), float(track)), (speechqueue.MARGIN, speechqueue.TITLE_TRACK))
         self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
-        self.assertLess(float(cy), regions['list'][1])                # above the column headers and the list
+        self.assertLess(float(cy), regions['list'][1])                # above the list
 
-    def test_the_avatar_and_bubble_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
+    def test_the_terminal_pane_is_a_column_right_of_the_list_as_tall_as_it_and_the_controls_under_it(self):
         lines, regions, _ = self.draw(text=self.LONG)
-        avatar_y = float(lines['avatar'].split()[1])
-        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
-        progress_y = float(lines['progress'].split()[2])
+        x0, y0, x1, y1, pad = (float(v) for v in lines['terminal'].split()[:5])
         controls_y = float(lines['footer'].split()[1])
-        self.assertLess(regions['list'][3], y0)
-        self.assertLess(y0, avatar_y)                                  # the avatar is level with the bubble's bottom
-        self.assertLess(avatar_y, y1)
-        self.assertLess(y1, progress_y)
-        self.assertLess(progress_y, controls_y)
+        list_x0, list_y0, list_x1, list_y1 = regions['list']
+        self.assertEqual(y0, list_y0)
+        self.assertEqual(y1, list_y1 + speechqueue.FOOTER_GAP + speechqueue.FOOTER_H)   # the sessions column, controls too
+        self.assertLess(list_x1, x0)                                      # right of the sessions
+        self.assertEqual(x0 - list_x1, speechqueue.COLUMN_GAP)
+        self.assertEqual(x1, speechqueue.MARGIN + speechqueue.widget_width)
+        self.assertGreater(controls_y, list_y1)                           # the controls sit in the column's foot, left of the pane
+        self.assertLess(controls_y, y1)
+        self.assertEqual(pad, speechqueue.TERM_PAD)
+        self.assertEqual(regions['terminal'], [x0, y0, x1, y1])
 
-    def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_the_whole_text(self):
+    def test_the_divider_is_a_line_in_the_gap_between_the_columns_with_a_grab_area_over_it(self):
+        lines, regions, _ = self.draw()
+        x, y0, y1 = (float(v) for v in lines['divider'].split())
+        gap0, gap1 = regions['list'][2], float(lines['terminal'].split()[0])
+        self.assertEqual(x, (gap0 + gap1) / 2)
+        self.assertLess(y0, regions['list'][1])                           # the divider runs between the header's rule
+        self.assertGreater(y1, regions['list'][3])                        # to the card's bottom, past the controls
+        rule_top, rule_controls = (float(v) for v in lines['rules'].split())
+        self.assertEqual(rule_top, y0)
+        self.assertGreater(rule_controls, regions['list'][3])             # the controls' rule, under the list
+        self.assertLess(rule_controls, float(lines['footer'].split()[1]))
+        grab = regions['divider']
+        self.assertTrue(gap0 <= grab[0] < x < grab[2] <= gap1)
+        self.assertEqual((grab[1], grab[3]), (y0, y1))
+        left, avail, gap, low, high = regions['divider_drag']
+        self.assertEqual((left, gap), (speechqueue.MARGIN, speechqueue.COLUMN_GAP))
+        self.assertEqual(left + avail + gap, speechqueue.MARGIN + speechqueue.widget_width)
+        self.assertEqual(speechqueue.COLUMN_GAP, 24)
+        self.assertTrue(0 < low <= 0.5 <= high < 1)
+
+    def test_the_divider_file_sets_the_sessions_share_within_the_least_each_column_keeps(self):
+        with open(speechqueue.SPLIT, 'w') as f:
+            f.write('0.6\n')
+        lines, regions, _ = self.draw()
+        left, avail, gap, low, high = regions['divider_drag']
+        self.assertEqual(regions['list'][2], left + round(avail * 0.6))
+        for share, want in (('0.0', low), ('1.0', high), ('junk', speechqueue.SPLIT_DEFAULT)):
+            with open(speechqueue.SPLIT, 'w') as f:
+                f.write(share)
+            _, regions, _ = self.draw()
+            self.assertEqual(regions['list'][2], left + round(avail * want), share)
+        self.assertGreaterEqual(regions['list'][2] - left, speechqueue.LIST_MIN)
+
+    def test_there_is_no_progress_bar_only_the_clocks_numbers_for_the_status_line(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        self.assertNotIn('progress', lines)
+        stamp, elapsed, duration, running = lines['clock'].split()
+        self.assertEqual((elapsed, duration, running), ('2.000', '6.000', '1'))
+        self.assertEqual(float(lines['footer'].split()[1]), float(lines['buttons'].split()[2]))   # one row of buttons
+
+    def test_the_volume_sits_in_the_footer_after_the_buttons_and_the_gear_at_its_right(self):
+        lines, regions, _ = self.draw()
+        track0, track1, y, _, icon, size = (float(v) for v in lines['volume'].split())
+        self.assertEqual(y, float(lines['footer'].split()[1]))         # level with the buttons
+        self.assertGreater(icon, float(lines['buttons'].split()[1]))    # after the last of them
+        self.assertLess(icon + size, track0)                           # the speaker, then its track
+        self.assertEqual(regions['volume_bar'], [track0, track1])
+        for key in ('volume', 'volume_icon', 'volume_wheel'):
+            self.assertLess(regions[key][1], y)
+            self.assertGreater(regions[key][3], y)
+        gear_x, gear_y, gear_size = (float(v) for v in lines['gear'].split())
+        self.assertGreater(regions['gear'][0], track1)                 # the gear stands apart, at the right
+        self.assertLess(regions['gear'][0], gear_x - gear_size / 2)
+        self.assertEqual(gear_y, y)
+        self.assertFalse(regions['volume'][0] < regions['minimize'][2] and regions['volume'][1] < regions['minimize'][3])   # none in the header
+
+    def test_the_pane_prints_the_whole_text_behind_a_left_margin_for_the_bullet_and_names_the_speaker(self):
         lines, _, _ = self.draw(text=self.LONG)
-        ax, ay, d = (float(v) for v in lines['avatar'].split())
-        x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
-        self.assertEqual(x0 - (ax + d / 2), speechqueue.AVATAR_GAP)
-        self.assertEqual(ay + d / 2, y1)                                # level with the bubble's bottom
-        self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
-        self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
-        self.assertEqual(lines['speaker'], 'Claude Voice Widget Session:')
-        self.assertEqual(int(lines['bubble'].split()[9]), len(lines['line']))           # lines shown at once
-        self.assertEqual(' '.join(lines['line']), self.LONG)            # every word, none cut
-        self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
-        for line in lines['line']:
-            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+        x0, y0, x1, y1, pad = (float(v) for v in lines['terminal'].split()[:5])
+        self.assertEqual(lines['speaker'], speechqueue.TERM_TITLE)                  # static, whoever speaks
+        step = float(lines['terminal'].split()[7])
+        shown = int(lines['terminal'].split()[8])                                  # lines shown at once
+        self.assertEqual(shown, max(int((y1 - y0 - 2 * pad - (speechqueue.TERM_BANNER_LINES + 1) * step
+                                         - speechqueue.TERM_STATUS_GAP - step) // step), 1))
+        self.assertEqual(lines['line'][0], speechqueue.PROMPT_MARK + 'Claude Voice Widget')   # who spoke, as the prompt
+        self.assertEqual(lines['line'][1], '')
+        self.assertTrue(lines['line'][2].startswith(speechqueue.BULLET_MARK))             # then the text behind its bullet
+        self.assertTrue(lines['line'][-1].startswith(speechqueue.DONE_MARK + 'Read aloud for 6s \u00b7 done '))
+        self.assertEqual(' '.join(l.strip() for l in lines['text']), self.LONG)   # every word, none cut
+        self.assertTrue(all(l.startswith(speechqueue.TERM_INDENT) for l in lines['text']))
+        for line in lines['text']:
+            self.assertLess(speechqueue.text_width(line, speechqueue.TERM_FONT) * speechqueue.BLOCK_SLACK,
+                            x1 - x0 - 2 * pad)
 
-    def test_a_word_wider_than_the_bubble_is_broken_across_lines_and_none_is_lost(self):
+    def test_a_word_wider_than_the_pane_is_broken_across_lines_and_none_is_lost(self):
         word = 'x' * 300
         lines, _, _ = self.draw(text=f'See {word} now')
-        x0, _, x1, _, pad = (float(v) for v in lines['bubble'].split()[:5])
-        self.assertEqual(''.join(lines['line']).replace(' ', ''), 'See' + word + 'now')
-        for line in lines['line']:
-            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+        x0, _, x1, _, pad = (float(v) for v in lines['terminal'].split()[:5])
+        self.assertEqual(''.join(lines['text']).replace(' ', ''), 'See' + word + 'now')
+        for line in lines['text']:
+            self.assertLess(speechqueue.text_width(line, speechqueue.TERM_FONT) * speechqueue.BLOCK_SLACK,
+                            x1 - x0 - 2 * pad)
 
-    def test_the_bubble_is_a_wheel_area_and_counts_the_lines_past_what_it_shows(self):
-        lines, regions, _ = self.draw(text=self.LONG)
-        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
-        self.assertEqual(regions['bubble'], [x0, y0, x1, y1])
-        self.assertEqual(regions['bubble_scroll'], len(lines['line']) - int(lines['bubble'].split()[9]))
-        lines, regions, _ = self.draw(text='Done.')
-        self.assertEqual(regions['bubble_scroll'], 0)                   # nothing to scroll
+    def test_the_pane_is_a_wheel_area_and_counts_the_lines_past_what_it_shows(self):
+        lines, regions, _ = self.draw(text=self.LONG * 3)
+        x0, y0, x1, y1 = (float(v) for v in lines['terminal'].split()[:4])
+        self.assertEqual(regions['terminal'], [x0, y0, x1, y1])
+        self.assertEqual(regions['terminal_scroll'], len(lines['line']) - int(lines['terminal'].split()[8]))
+        self.assertGreater(regions['terminal_scroll'], 0)
         os.remove(os.path.join(self.f.speak, 'now.json'))
         lines, regions, _ = self.draw(quiet=True)
-        self.assertNotIn('bubble', regions)                             # no bubble while nothing plays
+        self.assertEqual(regions['terminal_scroll'], len(lines['line']) - int(lines['terminal'].split()[8]))
+        self.assertIn('terminal', regions)                               # the pane stays while nothing plays
 
-    def test_the_avatar_is_the_first_image_there_is_and_without_one_the_line_names_none(self):
-        mine = os.path.join(self.root, 'avatar.png')
-        icon = os.path.join(self.root, 'icon.png')
-        for path in (mine, icon):
-            with open(path, 'wb') as f:
-                f.write(b'\x89PNG')
-        for images, want in (((mine, icon), mine), ((os.path.join(self.root, 'none.png'), icon), icon), ((), None)):
-            with mock.patch.object(speechqueue, 'AVATAR_IMAGES', images):
-                lines, _, _ = self.draw()
-            fields = lines['avatar'].split(None, 3)
-            self.assertEqual(fields[3] if len(fields) > 3 else None, want)
+    MARKDOWN = ('## What changed\n\nBoth changes are **pushed** (`cfd3cda`), and your *speech* widget restarted.\n\n'
+                '- Spacing: **12 px**\n- Avatar: trimmed\n\n```\nsudo apt install lua5.3\n```')
 
-    def test_the_speaker_is_the_name_without_the_hooks_suffix_then_session_and_a_colon(self):
+    def test_the_pane_draws_the_markdown_the_hook_published_with_each_runs_style(self):
+        self.three()
+        self.f.now(ME, 'Claude Voice Widget', 'Claude Voice Widget session says: flat', hook_pid=9001,
+                   markdown=self.MARKDOWN)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        with mock.patch.object(speechqueue.size_file, 'load', return_value=(1400, 128, 1.0)):
+            speechqueue.render(self.state(), now=1000.0)
+        with open(speechqueue.DRAW) as f:
+            lines = [l[5:] for l in f.read().split('\n') if l.startswith('line ')]
+        self.assertEqual(lines[:2], [speechqueue.PROMPT_MARK + 'Claude Voice Widget', ''])
+        lines = lines[2:]
+        lines[0] = lines[0].lstrip(speechqueue.BULLET_MARK)
+        mark = speechqueue.STYLE_MARK
+        self.assertEqual(lines[0], f'{mark}n  {mark}bWhat changed')              # a heading is bold, behind the margin
+        self.assertEqual(lines[1].strip(), '')                                   # and a paragraph follows a blank line
+        self.assertIn(mark + 'bpushed', lines[2])
+        self.assertIn(mark + 'ccfd3cda', lines[2])
+        self.assertIn(mark + 'ispeech', lines[2])
+        self.assertNotIn('*', ''.join(lines))
+        self.assertNotIn('`', ''.join(lines))
+        self.assertTrue(any(l.startswith(mark + 'n  \u2022 Spacing: ') and mark + 'b12 px' in l for l in lines))
+        self.assertIn(mark + 'n    ' + mark + 'csudo apt install lua5.3', lines)  # a code line, in the code style
+
+    def test_without_markdown_the_pane_keeps_the_plain_line(self):
+        lines, _, _ = self.draw(text='Done and dusted.')
+        prompt, blank, bullet, blank2, done = lines['line']
+        self.assertEqual((prompt, blank, bullet, blank2), (speechqueue.PROMPT_MARK + 'Claude Voice Widget', '',
+                                                           speechqueue.BULLET_MARK + '  Done and dusted.', ''))
+        self.assertTrue(done.startswith(speechqueue.DONE_MARK + 'Read aloud for 6s'))
+        self.assertNotIn(speechqueue.STYLE_MARK, ''.join(lines['line']))
+
+    def test_markdown_is_blocks_of_paragraphs_headings_list_items_and_code(self):
+        blocks = speechqueue.markdown_blocks('# Title\nfirst line\nsecond line\n\n- a **b**\n2. c\n> quoted\n---\n```\nx  y\n```')
+        self.assertEqual([(k, m) for k, m, _ in blocks],
+                         [('h', ''), ('p', ''), ('li', '\u2022'), ('li', '2.'), ('p', ''), ('code', '')])
+        self.assertEqual(blocks[1][2], [('first line second line', '')])           # a paragraph's lines join
+        self.assertEqual(blocks[2][2], [('a ', ''), ('b', 'b')])
+        self.assertEqual(blocks[4][2], [('quoted', '')])
+        self.assertEqual(blocks[5][2], [('x  y', 'c')])                            # a code line is kept as written
+
+    def test_inline_marks_nest_and_a_link_is_its_label(self):
+        self.assertEqual(speechqueue.inline_runs('a **b *c* d** [e](http://f) `g*h*`'),
+                         [('a ', ''), ('b ', 'b'), ('c', 'x'), (' d', 'b'), (' ', ''), ('e', ''), (' ', ''),
+                          ('g*h*', 'c')])
+        self.assertEqual(speechqueue.inline_runs('snake_case_name and 2 * 3 * 4'),
+                         [('snake_case_name and 2 * 3 * 4', '')])
+
+    def test_a_list_items_second_line_hangs_under_its_first_word(self):
+        wide = speechqueue.markdown_lines('- ' + 'word ' * 30, 200)
+        self.assertGreater(len(wide), 2)
+        first, second = wide[0][0], wide[1][0]
+        self.assertTrue(first.startswith('  \u2022 ') and second.startswith('    '))
+        for line, width in wide:
+            self.assertLessEqual(width, 200)
+
+    def test_the_markdown_a_line_publishes_is_cleaned_and_capped(self):
+        self.assertEqual(speechqueue.clean_markdown('a\u200b\r\nb  '), 'a\nb')
+        self.assertEqual(speechqueue.clean_markdown(None), '')
+        self.assertEqual(speechqueue.clean_markdown(5), '')
+        self.assertEqual(len(speechqueue.clean_markdown('x' * 99999)), speechqueue.MARKDOWN_MAX)
+
+    def test_the_title_on_the_pane_is_static_whichever_session_speaks(self):
         self.three()
         self.f.now(ME, 'Table Headers session', 'Checks pass.', hook_pid=9001)
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
         self.f.wav(9001, 6.0)
         speechqueue.render(self.state(), now=1000.0)
         with open(speechqueue.DRAW) as f:
-            self.assertIn('speaker Table Headers Session:', f.read().splitlines())
+            self.assertIn('speaker Combined Session Output', f.read().splitlines())
 
-    def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_six(self):
-        def box(text):
-            lines, regions, widget = self.draw(text=text)
-            _, y0, _, y1 = (float(v) for v in lines['bubble'].split()[:4])
-            return y0, y1, int(lines['bubble'].split()[9]), widget, regions['bubble_scroll']
-        line_h = speechqueue.line_height(speechqueue.ROW_FONT)
-        one, some, most = box('Done.'), box(self.LONG), box(self.LONG * 3)
-        self.assertEqual((one[2], some[2], most[2]), (1, 4, speechqueue.BUBBLE_LINES))
-        self.assertEqual(speechqueue.BUBBLE_LINES, 6)
-        self.assertEqual(one[1], most[1])                               # the bottom stays level with the avatar
-        self.assertAlmostEqual(some[1] - some[0] - (one[1] - one[0]), 3 * line_h)
-        self.assertAlmostEqual(most[1] - most[0] - (one[1] - one[0]), 5 * line_h)
-        self.assertEqual((one[4], some[4]), (0, 0))
-        self.assertGreater(most[4], 0)                                  # more than six lines scroll
-        self.assertEqual(one[3], most[3])                               # conky's window does not resize
-
-    def test_the_bubble_is_as_wide_as_its_text_needs_up_to_the_card_with_one_padding_all_round(self):
-        def box(text):
-            lines, _, _ = self.draw(text=text)
-            x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
-            return x0, y0, x1, y1, pad, lines
-        short, long = box('Done.'), box(self.LONG)
-        widest = max([speechqueue.text_width(short[5]['speaker'], speechqueue.SEGMENT_FONT)] +
-                     [speechqueue.text_width(l, speechqueue.ROW_FONT) for l in short[5]['line']])
-        self.assertEqual(short[4], speechqueue.BUBBLE_PAD)
-        self.assertAlmostEqual(short[2] - short[0], 2 * short[4] + widest * speechqueue.BLOCK_SLACK, delta=1)
-        self.assertLess(short[2], long[2])
-        _, regions, _ = self.draw(text=self.LONG)
-        self.assertLessEqual(long[2], regions['list'][2])                 # never past the card's contents
-        self.assertGreater(long[2] - long[0], 0.9 * (regions['list'][2] - long[0]))   # a long line nearly fills it
-        name_h, line_h = (speechqueue.line_height(f) for f in (speechqueue.SEGMENT_FONT, speechqueue.ROW_FONT))
-        self.assertAlmostEqual(short[3] - short[1], 2 * short[4] + name_h + speechqueue.BUBBLE_NAME_GAP + line_h)
-
-    def test_while_nothing_plays_there_is_the_avatar_and_no_bubble_and_the_card_keeps_its_size(self):
-        playing_lines, _, playing = self.draw(text=self.LONG)
+    def test_the_pane_is_as_tall_while_nothing_plays_and_the_card_keeps_its_size(self):
+        playing_lines, playing_regions, playing = self.draw(text=self.LONG)
         os.remove(os.path.join(self.f.speak, 'now.json'))             # the clip ends
-        lines, _, idle = self.draw()
-        self.assertIn('avatar', lines)
-        self.assertEqual([k for k in ('bubble', 'speaker') if k in lines] + lines['line'], [])
-        self.assertEqual(lines['avatar'], playing_lines['avatar'])      # in the same place
+        lines, regions, idle = self.draw()
+        self.assertEqual(lines['terminal'].split()[:4], playing_lines['terminal'].split()[:4])   # the same box
+        self.assertEqual(lines['terminal'].split()[10], '0')            # but not playing
+        self.assertEqual(lines['line'], playing_lines['line'])          # what was printed stays
         self.assertEqual(idle, playing)                                 # conky's window does not resize
 
-    def test_a_collapsed_card_is_the_title_and_the_avatar(self):
+    def test_a_message_is_printed_once_when_it_starts_to_play_and_stays_below_the_older_ones(self):
+        lines, _, _ = self.draw(quiet=False)                           # queued lines, none playing
+        self.assertEqual(lines['line'], [])                            # received is not printed
+        lines, _, _ = self.draw(text='First.')
+        lines, _, _ = self.draw(text='First.')                         # rendered again: not printed twice
+        self.assertEqual(lines['text'], ['  First.'])
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        lines, _, _ = self.draw(text='Second one.')
+        os.utime(os.path.join(self.f.speak, 'now.json'), (999.0, 999.0))
+        lines, _, _ = self.draw(text='Second one.')
+        self.assertEqual(sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line']), 1)   # the same session: no second header
+        self.assertIn('  First.', lines['text'])
+        self.assertEqual(lines['text'][-1], '  Second one.')            # the newest at the end
+
+    def test_the_speakers_header_is_printed_only_when_the_speaker_changes(self):
+        entries = [{'key': k, 'session': sid, 'name': name, 'text': text, 'at': 1.0}
+                   for k, sid, name, text in (('a', 's1', 'One', 'First.'), ('b', 's1', 'One', 'Second.'),
+                                              ('c', 's2', 'Two', 'Third.'), ('d', 's1', 'One', 'Fourth.'))]
+        said, previous = [], None
+        for entry in entries:
+            said.extend(speechqueue.message_lines(entry, 600, (), entry['session'] != previous))
+            previous = entry['session']
+        names = [l[1:] for l in said if l.startswith(speechqueue.PROMPT_MARK)]
+        self.assertEqual(names, ['One', 'Two', 'One'])
+        self.assertEqual(sum(l.startswith(speechqueue.DONE_MARK) for l in said), 4)
+
+    def test_a_clip_published_again_or_the_same_words_said_again_at_once_print_once(self):
+        self.draw(text='Finished.')
+        path = os.path.join(self.f.speak, 'now.json')
+        os.utime(path, (1001.0, 1001.0))                                # the hook wrote now.json again: a new mtime, the same clip
+        lines, _, _ = self.draw(text='Finished.')
+        self.assertEqual(lines['text'], ['  Finished.'])
+        n = {'session': 's1', 'clip': 'a', 'published': 5000.0, 'text': 'Same words'}
+        speechqueue.spoken_log(n, 'Name')
+        speechqueue.spoken_log(dict(n, clip='b', published=5002.0), 'Name')    # another clip, the same words, 2 s on
+        speechqueue.spoken_log(dict(n, clip='c', published=5100.0), 'Name')    # and again a minute on: said again
+        self.assertEqual([e['text'] for e in speechqueue._scrollback].count('Same words'), 2)
+
+    def test_every_message_keeps_its_closing_line(self):
+        self.draw(text='First.')
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        lines, _, _ = self.draw(text='Second one.')
+        os.utime(os.path.join(self.f.speak, 'now.json'), (999.0, 999.0))
+        lines, _, _ = self.draw(text='Second one.')
+        done = [l for l in lines['line'] if l.startswith(speechqueue.DONE_MARK)]
+        prompts = sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line'])
+        self.assertEqual((len(done), prompts), (2, 1))
+        self.assertEqual(lines['line'][-1], done[-1])                    # the last line of the pane
+
+    def test_the_printed_messages_are_kept_across_a_restart_and_capped(self):
+        self.draw(text='Kept across.')
+        speechqueue._scrollback = None                                 # a new process reads the file
+        lines, _, _ = self.draw(quiet=True)
+        self.assertEqual(lines['text'], ['  Kept across.'])
+        for i in range(speechqueue.SCROLLBACK_KEEP + 5):
+            speechqueue.spoken_log({'published': i, 'session': 's', 'text': f'line {i}'}, 'Name')
+        self.assertEqual(len(speechqueue._scrollback), speechqueue.SCROLLBACK_KEEP)
+        self.assertEqual(speechqueue._scrollback[-1]['text'], f'line {speechqueue.SCROLLBACK_KEEP + 4}')
+
+    def test_a_collapsed_card_is_the_title_alone(self):
         with open(speechqueue.COLLAPSE, 'w') as f:
             f.write('on')
         lines, _, _ = self.draw(quiet=True)
-        self.assertEqual(sorted(k for k in lines if k in ('title', 'avatar', 'bubble', 'speaker', 'progress', 'list')),
-                         ['avatar', 'title'])
-
-    def test_the_open_voice_list_stays_below_the_column_headers(self):
-        self.three()
-        speechqueue.render(dict(self.state(), voices=VOICES * 4))
-        with open(speechqueue.REGIONS) as f:
-            regions = json.load(f)
-        self.assertGreaterEqual(regions['menu']['box'][1], regions['list'][1])
+        self.assertEqual(sorted(k for k in lines if k in ('title', 'terminal', 'speaker', 'clock', 'list')),
+                         ['title'])
 
     def test_a_narrow_card_at_a_large_scale_cuts_the_title_to_what_clears_minimize(self):
         lines, regions, _ = self.draw((400, 128, 2.0))
@@ -864,80 +787,51 @@ class TitleAndFooter(Fixture):
         self.assertLess(speechqueue.MARGIN + spaced, regions['minimize'][0])
 
 
-class VoiceDropDown(Fixture):
-    def render(self, voices, voice='en_GB-jenny_dioco-medium'):
+class SettingsMenu(Fixture):
+    def render(self, voices, size=None):
         self.three()
-        self.f.file('settings.json', json.dumps({'voice': voice}))
-        speechqueue.render(dict(self.state(), voices=voices), now=1000.0)
+        with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
+            speechqueue.render(dict(self.state(), voices=voices), now=1000.0)
         with open(speechqueue.DRAW) as f:
             draw = f.read().splitlines()
         with open(speechqueue.REGIONS) as f:
             return draw, json.load(f)
 
-    def test_the_drop_down_names_the_voice_and_the_list_has_every_voice_with_the_current_marked(self):
+    def test_the_menu_covers_the_card_under_its_header_and_lists_the_installed_voices(self):
         draw, regions = self.render(VOICES)
-        self.assertTrue(next(l for l in draw if l.startswith('voice ')).endswith(' Voice: jenny_dioco'))
-        self.assertEqual([l for l in draw if l.startswith('item ')],
-                         ['item 0 alan', 'item 1 jenny_dioco', 'item 0 amy', 'item 0 hfc_female',
-                          'item 0 joe', 'item 0 lessac', 'item 0 libritts', 'item 0 ryan'])
-        self.assertEqual((regions['menu']['names'], regions['menu']['current']), (VOICES, 1))
-
-    def test_the_arrows_are_gone(self):
-        _, regions = self.render(VOICES)
-        self.assertFalse({'voice_prev', 'voice_next'} & set(regions))
-
-    def test_the_list_opens_upward_from_the_drop_downs_right_edge(self):
-        _, regions = self.render(VOICES)
-        drop, (x0, top, x1, bottom) = regions['voice'], regions['menu']['box']
-        self.assertEqual(x1, drop[2])
-        self.assertLess(bottom, drop[1])                      # clear of the drop down, above it
-        self.assertLess(x0, drop[2])
-        self.assertGreater(top, 0)
-        self.assertEqual(round(bottom - top - 2 * regions['menu']['pad'], 2),
-                         round(regions['menu']['rows'] * regions['menu']['item_h'], 2))
-
-    def test_a_list_longer_than_fits_shows_the_rows_that_fit(self):
-        many = [f'en_US-voice{i:02d}-medium' for i in range(40)]
-        draw, regions = self.render(many, voice=many[20])
         menu = regions['menu']
-        self.assertTrue(speechqueue.MENU_MIN_ROWS <= menu['rows'] < len(many))
-        self.assertEqual(len([l for l in draw if l.startswith('item ')]), len(many))
-        self.assertGreater(menu['box'][1], 0)                          # inside the card
-        self.assertEqual(menu['current'], 20)
-        narrow = self.render(VOICES)[1]['menu']['box']
-        self.assertGreater(menu['box'][2] - menu['box'][0], 0)
-        self.assertEqual(menu['box'][2], narrow[2])
+        self.assertEqual(menu['voices'], VOICES)
+        line = next(l for l in draw if l.startswith('menu ')).split()[1:]
+        x0, y0, x1, y1, title_cy, first, row, visible, hint_cy, value_x, pad = (float(v) for v in line)
+        self.assertEqual(menu['box'], [x0, y0, x1, y1])
+        self.assertLess(y0, title_cy)
+        self.assertLess(title_cy, first)
+        self.assertLess(first + visible * row, hint_cy + row / 2)         # the rows end above the hint line
+        self.assertEqual((menu['first'], menu['row'], menu['visible']), (first, row, int(visible)))
+        self.assertGreaterEqual(menu['visible'], 3)
+        self.assertEqual(menu['title'], [round(title_cy - row / 2, 2), round(title_cy + row / 2, 2)])
+        self.assertGreater(value_x, x0)
+        self.assertLess(value_x, x1)
 
-    def test_a_short_list_shows_only_its_voices(self):
-        _, regions = self.render(VOICES[:2])
-        self.assertEqual(regions['menu']['rows'], 2)
+    def test_the_header_holds_no_volume_and_no_session_has_a_gear(self):
+        draw, regions = self.render(VOICES)
+        for row in regions['rows']:
+            self.assertNotIn('gear', row)
+        self.assertEqual(next(l for l in draw if l.startswith('control ')).count(' '), 2)
 
-    def test_without_voices_there_is_no_list_but_the_drop_down_stays(self):
-        draw, regions = self.render([])
-        self.assertNotIn('menu', regions)
-        self.assertFalse([l for l in draw if l.startswith(('menu ', 'item '))])
-        self.assertIn('voice', regions)
+    def test_each_row_carries_its_own_voice_for_the_menu(self):
+        self.f.file(ME + '.voice', 'en_US-joe-medium\n')
+        _, regions = self.render(VOICES)
+        rows = {r['id']: r for r in regions['rows']}
+        self.assertEqual([rows[i]['voice'] for i in (ME, OTHER, QUIET)], ['en_US-joe-medium', '', ''])
+        for row in rows.values():
+            self.assertLess(row['name'][0], row['name'][1])
+            self.assertFalse({'on', 'alerts', 'off'} & set(row))
 
-    def test_the_drop_down_and_the_footer_grow_with_the_text(self):
-        heights = {}
-        for scale in (1.0, 2.0):
-            with mock.patch.object(speechqueue.size_file, 'load', return_value=(660, 128, scale)):
-                _, regions = self.render(VOICES)
-            drop = regions['voice']
-            heights[scale] = (drop[3] - drop[1], regions['pause'][1])
-            line = speechqueue.line_height(speechqueue.FOOTER_FONT)
-            self.assertGreaterEqual(drop[3] - drop[1], line)         # the label fits its pill
-        self.assertEqual(heights[1.0][0], speechqueue.DROPDOWN_H)    # as before at scale 1
-        self.assertGreater(heights[2.0][0], heights[1.0][0])
-
-    def test_a_voice_that_is_not_installed_marks_none(self):
-        _, regions = self.render(VOICES, voice='de_DE-thorsten-medium')
-        self.assertEqual(regions['menu']['current'], -1)
-
-    def test_a_long_name_is_cut_to_the_room_left_of_the_volume(self):
-        draw, regions = self.render(VOICES, voice='en_US-' + 'x' * 120 + '-medium')
-        self.assertIn('…', next(l for l in draw if l.startswith('voice ')))
-        self.assertGreater(regions['voice'][0], regions['volume'][2])
+    def test_the_menu_grows_with_the_card(self):
+        small = self.render(VOICES)[1]['menu']['visible']
+        tall = self.render(VOICES, (660, 400, 1.0))[1]['menu']['visible']
+        self.assertGreater(tall, small)
 
 
 class InstalledVoices(unittest.TestCase):
@@ -1018,23 +912,22 @@ class Golden(Fixture):
         self.assertLess(regions['next'][2], regions['volume'][0])            # clear of the volume slider
         self.assertGreater(regions['skip'][1], regions['close'][3])          # and not in the header
 
-    def test_the_slider_shortens_before_the_voice_label_is_cut(self):
+    def test_the_slider_shortens_as_the_card_narrows(self):
         self.three()
         widths = {}
-        for size in ((660, 128, 1.0), (400, 128, 2.0)):
+        for size in ((660, 128, 1.0), (200, 128, 1.0)):
             with mock.patch.object(speechqueue.size_file, 'load', return_value=size):
                 speechqueue.render(self.state(), now=1000.0)
             lines, regions = self.footer()
             x0, x1 = (float(v) for v in lines['volume'][:2])
             widths[size] = x1 - x0
-            self.assertEqual(' '.join(lines['voice'][6:]), 'Voice: amy')              # never "Voice:..."
             self.assertEqual(regions['volume_bar'], [x0, x1])
             icon = float(lines['volume'][4])
             self.assertEqual(regions['volume_icon'][0], icon - 4)       # the speaker takes a click too
             self.assertEqual(regions['volume_icon'][2], regions['volume'][0])
         self.assertEqual(widths[(660, 128, 1.0)], speechqueue.VOLUME_WIDTH)
-        self.assertLess(widths[(400, 128, 2.0)], speechqueue.VOLUME_WIDTH)
-        self.assertGreaterEqual(widths[(400, 128, 2.0)], speechqueue.VOLUME_MIN)
+        self.assertLess(widths[(200, 128, 1.0)], speechqueue.VOLUME_WIDTH)
+        self.assertGreaterEqual(widths[(200, 128, 1.0)], speechqueue.VOLUME_MIN)
 
     def test_without_a_clip_the_buttons_are_drawn_dimmed_and_are_not_click_areas(self):
         self.three()
@@ -1044,7 +937,7 @@ class Golden(Fixture):
         self.assertFalse({'skip', 'next'} & set(regions))
         self.assertIn('pause', regions)
 
-    def test_after_a_line_the_header_and_full_bar_stay(self):
+    def test_after_a_line_the_pane_keeps_what_was_printed(self):
         self.three()
         self.f.now(ME, 'Claude Voice Widget', 'Done.', hook_pid=9001)
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
@@ -1055,9 +948,9 @@ class Golden(Fixture):
         speechqueue.render(self.state(), now=1010.0)
         with open(speechqueue.DRAW) as f:
             lines = f.read().splitlines()
-        self.assertFalse([l for l in lines if l.startswith(('bubble ', 'speaker ', 'line '))])   # the avatar alone
-        progress = next(l for l in lines if l.startswith('progress ')).split()
-        self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
+        self.assertIn('line ' + speechqueue.BULLET_MARK + '  Done.', lines)  # the message stays printed
+        self.assertIn('speaker Combined Session Output', lines)          # titled the same after the line
+        self.assertEqual(next(l for l in lines if l.startswith('clock ')).split()[2:], ['0.000', '0.000', '0'])
 
     def test_paused(self):
         self.three()
@@ -1067,7 +960,7 @@ class Golden(Fixture):
         self.f.file('paused')
         self.check('paused', self.state())
 
-    def test_repository_names_and_issue_numbers_wrap_inside_the_block(self):
+    def test_issue_numbers_head_the_message_of_their_session(self):
         self.three()
         self.f.now(ME, 'Claude Voice Widget', 'Three issues, then one, then too many for a line.', hook_pid=9001)
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
@@ -1086,10 +979,10 @@ class Golden(Fixture):
             self.f.queue(f'{i:08d}-eeee', f'Line {i}')
         self.check('scroll', self.state())
 
-    def test_the_voice_drop_down_and_its_open_list(self):
+    def test_the_settings_menu_and_its_voices(self):
         self.three()
         self.f.file('settings.json', json.dumps({'voice': 'en_GB-jenny_dioco-medium'}))
-        self.check('voices', dict(self.state(), voices=VOICES))
+        self.check('menu', dict(self.state(), voices=VOICES))
 
     def test_collapse_when_idle(self):
         self.three()

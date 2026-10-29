@@ -4,13 +4,18 @@ speechctl (tray_model.py's, from PATH or the path ~/.config/conky-widgets/speech
 holds).
 
   - skip, next, pause/resume: a click or tap runs `speechctl skip`, `next` and `toggle`
-  - the voice drop down: a click or tap opens the list of voices over the card; picking one
-    runs `speechctl voice <name>`. While it is open this helper holds the pointer and the
-    keyboard, so a click anywhere else and Escape close it, and the wheel or a swipe scrolls it
+  - the gear in the footer: a click or tap opens the settings menu over the card, laid out as the
+    CLI's settings list: the default voice, pace, text scaling, collapse when idle, always on top
+    and reset size, and a page of the sessions, each with its speech On, Alerts or Off
+    (`speechctl speech <id> on|alerts|off`) and the voice it is read in, which is kept in
+    <id>.voice beside the session's other speech files (a voice's name, absent for the global
+    one). Up and Down or the pointer select a row, Enter, Space or a click change it, Left,
+    Backspace or a click on the title go back a page, and Escape closes the menu, as does 20
+    seconds without an event. While it is open this helper holds the pointer and the keyboard and
+    takes the keyboard focus, which conky's window never accepts, giving it back on closing
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
     0) and the next restores the level from before
-  - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
   - an issue number under a session's repository name: a click or tap opens that issue in a
     new Chrome tab
   - the pill after a session's name: a click or tap opens, in new Chrome tabs, its pull
@@ -19,8 +24,7 @@ holds).
     session (SIGTERM to its process). While the prompt is open this helper holds the pointer
     and the keyboard, so a click anywhere but on OK, Cancel and Escape close it without
     ending anything
-  - the wheel: over the volume slider or its speaker it turns it down or up, over the closed
-    drop down it steps through the voices, over a session's setting it moves it a segment along, and over the rest of the
+  - the wheel: over the volume slider or its speaker it turns it down or up, and over the
     list it scrolls the list a row at a time; a finger swiped over the list scrolls it too
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares.
@@ -29,6 +33,7 @@ import ctypes, json, os, signal, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
+import menu  # noqa: E402
 import tray_model  # noqa: E402
 
 NAME = 'conky-widgets/speech'                  # the config and cache folders under ~/.config, ~/.cache
@@ -37,34 +42,37 @@ WM_CLASS = 'ConkySpeechQueue' + os.environ.get('CSN_CLASS_SUFFIX', '')
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 # The buttons speechqueue.py writes the regions of, and what each runs.
 COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',)}
-BUTTONS = tuple(COMMANDS) + ('volume_icon',)  # the controls a click or tap presses
-REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'voice')   # the regions a press looks through, in order
+BUTTONS = tuple(COMMANDS) + ('volume_icon', 'gear')  # the controls a click or tap presses
+REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'divider')   # the regions a press looks through, in order
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
-SETTINGS = ('on', 'alerts', 'off')             # a session's segments, left to right
-READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
 BROWSER = 'google-chrome'                      # what a session's box and name open their links in
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
-BUBBLE_SCROLL = os.path.join(CACHE, 'bubble-scroll')   # wheel steps over the speech bubble, in all, for draw.lua
+TERMINAL_SCROLL = os.path.join(CACHE, 'terminal-scroll')   # wheel steps over the terminal pane, in all, for draw.lua
+SPLIT = os.path.expanduser(f'~/.config/{NAME}/split')   # the sessions column's share of the width, which speechqueue.py lays the columns out by
+DIVIDER_DRAG = os.path.join(CACHE, 'divider-drag')   # exists while the divider is held, so draw.lua brightens it
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
-VOICE_MENU = os.path.join(CACHE, 'voice-menu')   # "<first voice shown> <voice under the pointer>" while the list is open
-MENU_TIMEOUT = 20.0                            # s an open list waits before it closes itself
+SETTINGS_MENU = os.path.join(CACHE, 'settings-menu')   # "<selected> <scrolled>", the page's title, then a row a line (label, value and flag, tab separated), while the settings menu is open
+SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')   # the speaking hook's state
+MENU_TIMEOUT = 20.0                            # s an open popup waits before it closes itself
 CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
 CONFIRM_ARMED = 0.5                            # s after the prompt opens before a press answers it, so the second click of a double click on a name cannot
 SESSIONS_DIR = os.path.expanduser('~/.claude/sessions')   # one <pid>.json a running Claude session
 KEY_PRESS, ESCAPE = 2, 0xff1b                  # X's key press event, and the Escape keysym
+KEYS = {0xff52: 'up', 0xff54: 'down', 0xff51: 'left', 0xff53: 'right', 0xff0d: 'enter', 0xff8d: 'enter',
+        0x20: 'space', 0xff08: 'backspace'}   # the keysyms the settings menu reads
 GRAB_SUCCESS, GRAB_ASYNC = 0, 1
 core = None                                    # conky-mouse.py's module, set when it loads this one
 
 
 def start():
-    """Clears the preview, the open list and the open prompt a previous run left behind if it
-    was killed mid-drag, mid-list or mid-prompt."""
-    for path in (VOLUME_PREVIEW, VOICE_MENU, CLOSE_CONFIRM):
+    """Clears the preview, the open settings and the open prompt a previous run left behind if
+    it was killed mid-drag or mid-popup."""
+    for path in (VOLUME_PREVIEW, SETTINGS_MENU, CLOSE_CONFIRM, DIVIDER_DRAG):
         try:
             os.remove(path)
         except OSError:
@@ -81,6 +89,8 @@ def press(d, win, hit):
     """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
     if hit == 'volume_icon':
         toggle_mute()
+    elif hit == 'gear':
+        open_menu(d, win, core.scale(), core.load_regions())
     else:
         speechctl(*COMMANDS[hit])
 
@@ -132,74 +142,58 @@ def offset(regions):
 
 
 def row_at(regions, s, x, y):
-    """The session row under card-relative (x, y), and whether (x, y) is on its setting's
-    segments (the row's first line, from On's left to Off's right); (None, False) off the list."""
+    """The session row under card-relative (x, y), or None off the list."""
     area, scroll = regions.get('list'), regions.get('list_scroll')
     if not (inside(area, s, x, y) and scroll):
-        return None, False
+        return None
     at = y / s - area[1] + offset(regions) * scroll[1]       # px down the whole list
-    for row in regions.get('rows', ()):
-        if row['top'] <= at < row['bottom']:
-            on_control = (at < row['top'] + scroll[1] and
-                          row['on'][0] * s <= x <= row['off'][1] * s)
-            return row, on_control
-    return None, False
+    return next((row for row in regions.get('rows', ()) if row['top'] <= at < row['bottom']), None)
 
 
-def link_at(regions, s, x, y):
-    """(session row, 'issue') when an issue number of its repository is under card-relative
-    (x, y), with the row's 'issue' set to that issue's link, (row, 'prs') when its pill is,
-    (row, 'close') when its name is, else None. An issue number and the pill are there only
-    with something to open."""
-    row, _ = row_at(regions, s, x, y)
-    if not row:
+TERMINAL_LINKS = os.path.join(CACHE, 'terminal-links')   # "<line> <number> x0 y0 x1 y1" for each issue or pull request number draw.lua drew in the terminal
+
+
+def terminal_link_at(regions, s, x, y):
+    """(a row with the 'issue' to open, 'issue') when an issue or pull request number in a
+    message's header in the terminal is under card-relative (x, y), else None. draw.lua writes
+    where it drew each; regions.json's `terminal_links` says what each opens."""
+    if not inside(regions.get('terminal'), s, x, y):
         return None
-    at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
-    for x0, y0, x1, y1, link in row.get('issues', ()):        # on any line of the row's block
-        if x0 * s <= x <= x1 * s and (row['top'] + y0) <= at <= (row['top'] + y1):
-            return dict(row, issue=link), 'issue'
-    if at >= row['top'] + regions['list_scroll'][1]:          # its second line
+    try:
+        with open(TERMINAL_LINKS) as f:
+            rows = [line.split() for line in f.read().splitlines()]
+    except OSError:
         return None
-    for key, kind in (('link', 'prs'), ('name', 'close')):
-        if row.get(key) and row[key][0] * s <= x <= row[key][1] * s:
-            return row, kind
+    for fields in rows:
+        try:
+            line, number, x0, y0, x1, y1 = int(fields[0]), int(fields[1]), *(float(v) for v in fields[2:6])
+            info = regions['terminal_links'][str(line)][number - 1]
+        except (IndexError, KeyError, ValueError):
+            continue
+        if x0 * s <= x <= x1 * s and y0 * s <= y <= y1 * s:
+            return dict(info), 'issue'
     return None
 
 
-def ready_prs(links, branch, run=subprocess.run):
-    """The pull requests of `links` still open, carrying READY_LABEL and from `branch`, read
-    from GitHub: a session's ledger also waits on other sessions' pull requests that block it.
-    One gh cannot read (not installed, logged out, offline) is not opened, and is logged."""
-    ready = []
-    for link in links:
-        try:
-            out = run(['gh', 'pr', 'view', link, '--json', 'state,labels,headRefName'], capture_output=True,
-                      text=True, timeout=15)
-            pr = json.loads(out.stdout) if out.returncode == 0 else None
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pr = None
-        if pr is None:
-            core.log(f'{link}: gh could not read it, so it is not opened')
-        elif (pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]
-              and branch and pr.get('headRefName') == branch):
-            ready.append(link)
-        else:
-            core.log(f'{link}: not ready ({pr.get("state")}, from {pr.get("headRefName")})')
-    return ready
+def link_at(regions, s, x, y):
+    """(session row, 'close') when the session's name is under card-relative (x, y), else
+    None; or an issue or pull request number in the terminal, terminal_link_at's."""
+    row = row_at(regions, s, x, y)
+    if not row:
+        return terminal_link_at(regions, s, x, y)
+    at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
+    line = row['top'] + row.get('head', 0)                   # the name's line: not the section's title above it
+    if row.get('name') and line <= at < line + regions['list_scroll'][1] and row['name'][0] * s <= x <= row['name'][1] * s:
+        return row, 'close'
+    return None
 
 
 def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
-    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on an issue
-    number) or its ready pull requests ('prs', a click on its pill). Chrome takes them all at once;
-    without it, xdg-open takes each."""
+    """Opens, in a new browser tab, the issue or pull request (`row['issue']`, the URL) a click
+    on its number in a message's header in the terminal asked for. Chrome takes it; without
+    it, xdg-open does."""
     try:
-        if kind == 'issue':
-            links = [row['issue']]
-        else:
-            links = ready_prs(row.get('prs') or [], row.get('branch') or '', run)
-        if not links:
-            core.log(f'session {row["id"]}: no ready pull request to open')
-            return
+        links = [row['issue']]
         core.log('open: ' + ' '.join(links))
         quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
@@ -220,8 +214,8 @@ opened = {}                                    # click_key(): when a click last 
 
 
 def click_key(row, kind):
-    """What a click opens, for telling a double click from a click on another: a session's pull
-    requests or its close prompt, or one of its issues, each issue number its own."""
+    """What a click opens, for telling a double click from a click on another: a session's close
+    prompt, or an issue or pull request, each number its own."""
     return (row['id'], row.get('issue') if kind == 'issue' else kind)
 
 
@@ -235,17 +229,6 @@ def open_once(row, kind, now=time.monotonic):
     opening.add(key)
     opened[key] = now()
     threading.Thread(target=open_links, args=(row, kind), daemon=True).start()
-
-
-def segment_at(regions, s, x, y):
-    """(session id, setting) of the segment under card-relative (x, y), or None."""
-    row, on_control = row_at(regions, s, x, y)
-    if not on_control:
-        return None
-    for key in SETTINGS:
-        if row[key][0] * s <= x <= row[key][1] * s:
-            return row['id'], key
-    return None
 
 
 def set_volume(d, win, regions, s, track):
@@ -276,66 +259,117 @@ def set_volume(d, win, regions, s, track):
             pass
 
 
-def menu_at(menu, x, y, scroll):
-    """The index of the voice under card-relative (x, y) logical px in the open list `menu`
-    (regions.json's), scrolled `scroll` voices down; None off its rows."""
-    x0, top, x1, bottom = menu['box']
-    top += menu['pad']
-    rows = min(menu['rows'], len(menu['names']) - scroll)
-    if not (x0 <= x <= x1 and top <= y < top + rows * menu['item_h']):
-        return None
-    return scroll + int((y - top) // menu['item_h'])
-
-
-def menu_scroll(menu, scroll, rows):
-    """`scroll` moved `rows` voices down (up when negative), within the list."""
-    return min(max(scroll + rows, 0), max(len(menu['names']) - menu['rows'], 0))
-
-
-def write_menu(scroll, hover):
+def move_divider(d, win, regions, s, track):
+    """Follow `track` (follow_pointer() or a Touch) while the divider is held, writing the
+    share of the width the sessions column takes with the pointer at the middle of the gap,
+    within the limits speechqueue.py gave in regions.json's `divider_drag`; it lays the columns
+    out again within a tenth of a second."""
+    left, avail, gap, low, high = regions['divider_drag']
+    wx, _, _, _ = core.card_of(core.geometry(d, win), s)
+    os.makedirs(os.path.dirname(SPLIT), exist_ok=True)
     os.makedirs(CACHE, exist_ok=True)
-    with open(VOICE_MENU + '.tmp', 'w') as f:
-        f.write(f'{scroll} {hover}')
-    os.replace(VOICE_MENU + '.tmp', VOICE_MENU)
-
-
-def run_menu(menu, events, now=time.monotonic, sleep=time.sleep):
-    """Shows the open voice list until it is closed, and returns the name picked, or None.
-    `events()` gives the card-relative logical-px events that arrived since it was last
-    called: ('move', x, y), ('press', x, y), ('wheel', down), ('scroll', rows) and ('escape',).
-    A press on a voice picks it and one anywhere else closes the list; it closes by itself
-    after MENU_TIMEOUT without an event. draw.lua draws it from VOICE_MENU for as long as this
-    runs."""
-    current = menu.get('current', -1)
-    scroll = menu_scroll(menu, 0, current - menu['rows'] // 2 if current >= menu['rows'] else 0)
-    pointer, hover, shown = None, -1, None
-    deadline = now() + MENU_TIMEOUT
+    open(DIVIDER_DRAG, 'w').close()
+    held, last = True, None
     try:
-        while now() < deadline:
-            for kind, *args in events():
-                deadline = now() + MENU_TIMEOUT
-                if kind == 'move':
-                    pointer = args
-                elif kind == 'wheel':
-                    scroll = menu_scroll(menu, scroll, 1 if args[0] else -1)
-                elif kind == 'scroll':
-                    scroll = menu_scroll(menu, scroll, args[0])
-                elif kind == 'press':
-                    i = menu_at(menu, *args, scroll)
-                    return None if i is None else menu['names'][i]
-                elif kind == 'escape':
-                    return None
-                # the voice under the pointer, which a scroll moves from under it too
-                i = menu_at(menu, *pointer, scroll) if pointer else None
-                hover = -1 if i is None else i
-            if (scroll, hover) != shown:
-                shown = scroll, hover
-                write_menu(scroll, hover)
-            sleep(0.02)
-        return None
+        while held:
+            px, _, held = track()
+            share = round(min(max(((px - wx) / s - left - gap / 2) / avail, low), high), 4)
+            if share != last:
+                last = share
+                with open(SPLIT + '.tmp', 'w') as f:
+                    f.write(f'{share:.4f}\n')
+                os.replace(SPLIT + '.tmp', SPLIT)
+            time.sleep(0.02)
     finally:
         try:
-            os.remove(VOICE_MENU)
+            os.remove(DIVIDER_DRAG)
+        except OSError:
+            pass
+
+
+def menu_hit(region, scroll, count, x, y):
+    """What card-relative logical (x, y) is on in the settings menu `region` (regions.json's
+    `menu`), whose rows are scrolled `scroll` down and number `count`: ('row', index), ('title',)
+    for its first line, ('panel',) for the rest of it, or None outside."""
+    if not inside(region['box'], 1, x, y):
+        return None
+    if region['title'][0] <= y <= region['title'][1]:
+        return ('title',)
+    index = int((y - region['first']) // region['row']) if y >= region['first'] else -1
+    if 0 <= index < region['visible'] and scroll + index < count:
+        return 'row', scroll + index
+    return ('panel',)
+
+
+def write_menu(model, visible):
+    """What draw.lua draws the menu from: the cursor and how far it is scrolled, the page's
+    title, then a row a line, "<label>\t<value>\t<flag>"."""
+    os.makedirs(CACHE, exist_ok=True)
+    rows = ''.join('\t'.join(row) + '\n' for row in model.rows())
+    with open(SETTINGS_MENU + '.tmp', 'w') as f:
+        f.write(f'{model.selected} {model.top}\n{model.title()}\n{rows}')
+    os.replace(SETTINGS_MENU + '.tmp', SETTINGS_MENU)
+
+
+def run_menu(model, regions, events, now=time.monotonic, sleep=time.sleep):
+    """Shows the settings menu for `model` (menu.Menu) until it is closed. `regions()` gives
+    regions.json's current entries, since a text scaling or a size reset changes the card while
+    the menu is open. `events()` gives the card-relative logical-px events since it was last
+    called: ('move', x, y), ('press', x, y), ('wheel', ±1), ('key', name) for up, down, left,
+    right, enter, space and backspace, and ('escape',). Moving over a row selects it and a press
+    on it changes it; Left and Right turn a setting's value back and forward, Right opens a
+    page, Left and Backspace go back one; a press on the title closes the menu from the first
+    page and goes back from another; Escape and MENU_TIMEOUT without an event close it. Presses in the first CONFIRM_ARMED seconds are
+    ignored, so the second click of a double click on the gear is not an answer. draw.lua draws
+    it from SETTINGS_MENU for as long as this runs."""
+    opened = now()
+    deadline = opened + MENU_TIMEOUT
+    shown = None
+    try:
+        while now() < deadline:
+            region = regions().get('menu')
+            if not region:
+                return
+            visible = region['visible']
+            for kind, *args in events():
+                deadline = now() + MENU_TIMEOUT
+                count = len(model.rows())
+                if kind == 'move':
+                    hit = menu_hit(region, model.top, count, *args)
+                    if hit and hit[0] == 'row':
+                        model.select(hit[1])
+                elif kind == 'press' and now() - opened >= CONFIRM_ARMED:
+                    hit = menu_hit(region, model.top, count, *args)
+                    if hit and hit[0] == 'row':
+                        model.activate(hit[1])
+                    elif hit and hit[0] == 'title' and not model.back():
+                        return
+                elif kind == 'wheel':
+                    model.move(args[0], visible)
+                elif kind == 'key':
+                    name = args[0]
+                    if name == 'up':
+                        model.move(-1, visible)
+                    elif name == 'down':
+                        model.move(1, visible)
+                    elif name in ('enter', 'space'):
+                        model.activate()
+                    elif name in ('right', 'left'):
+                        model.nudge(1 if name == 'right' else -1)
+                    elif name == 'backspace':
+                        model.back()
+                elif kind == 'escape':
+                    return
+                model.follow(visible)
+            model.follow(visible)
+            state = (model.selected, model.top, tuple(model.rows()), model.title())
+            if state != shown:
+                shown = state
+                write_menu(model, visible)
+            sleep(0.02)
+    finally:
+        try:
+            os.remove(SETTINGS_MENU)
         except OSError:
             pass
 
@@ -349,6 +383,60 @@ def declare(x11):
     x11.XUngrabPointer.argtypes = x11.XUngrabKeyboard.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     x11.XKeysymToKeycode.restype = ctypes.c_ubyte
+
+
+class XWMHints(ctypes.Structure):
+    _fields_ = [('flags', ctypes.c_long), ('input', ctypes.c_int), ('initial_state', ctypes.c_int),
+                ('icon_pixmap', ctypes.c_ulong), ('icon_window', ctypes.c_ulong), ('icon_x', ctypes.c_int),
+                ('icon_y', ctypes.c_int), ('icon_mask', ctypes.c_ulong), ('window_group', ctypes.c_ulong)]
+
+
+INPUT_HINT, REVERT_TO_PARENT = 1, 2
+
+
+def set_accepts_input(d, win, accepts):
+    """Sets whether the window accepts keyboard focus (WM_HINTS' input), which conky leaves
+    False, so the window manager never gives the widget a key. Returns the value it had, or
+    None when the window has no hints to change."""
+    x11 = core.x11
+    x11.XGetWMHints.restype = ctypes.POINTER(XWMHints)
+    x11.XGetWMHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XSetWMHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XWMHints)]
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    hints = x11.XGetWMHints(d, win)
+    if not hints:
+        return None
+    try:
+        before = bool(hints.contents.flags & INPUT_HINT and hints.contents.input)
+        hints.contents.flags |= INPUT_HINT
+        hints.contents.input = int(accepts)
+        x11.XSetWMHints(d, win, hints)
+    finally:
+        x11.XFree(hints)
+    x11.XFlush(d)
+    return before
+
+
+def focus_window(d, win, sleep=time.sleep):
+    """Asks for keyboard focus on `win` for the open menu: lets it accept input, asks the window
+    manager to activate it (_NET_ACTIVE_WINDOW, as a pager does) and sets the focus itself.
+    Returns (whether the window has the focus now, what accepted input before) so the caller
+    can put the hint back."""
+    x11 = core.x11
+    before = set_accepts_input(d, win, True)
+    root = x11.XDefaultRootWindow(d)
+    ev = core.XClientMessageEvent(type=core.CLIENT_MESSAGE, window=win, format=32,
+                                  message_type=x11.XInternAtom(d, b'_NET_ACTIVE_WINDOW', False))
+    ev.data[:] = [2, 0, 0, 0, 0]
+    x11.XSendEvent(d, root, False, core.SUBSTRUCTURE_REDIRECT_MASK | core.SUBSTRUCTURE_NOTIFY_MASK, ctypes.byref(ev))
+    x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    x11.XSetInputFocus(d, win, REVERT_TO_PARENT, 0)
+    x11.XFlush(d)
+    sleep(0.1)
+    x11.XGetInputFocus.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int)]
+    focus, revert = ctypes.c_ulong(), ctypes.c_int()
+    x11.XGetInputFocus(d, ctypes.byref(focus), ctypes.byref(revert))
+    return focus.value == win, before
 
 
 def grab(d, win):
@@ -369,14 +457,14 @@ def ungrab(d):
     core.x11.XFlush(d)
 
 
-def x_events(d, win, s, opcode, item_h):
-    """run_menu's and run_confirm's events() reading X's queue. A finger that touches down is
-    followed from one call to the next: where it lifts after a tap is a press, and a swipe
-    scrolls the list a voice for each `item_h` (logical px) it moves."""
+def x_events(d, win, s, opcode):
+    """run_menu's and run_confirm's events() reading X's queue. A finger that touches down
+    is followed from one call to the next: where it lifts after a tap is a press, and a swipe
+    is not one."""
     x11, ev = core.x11, core.XEvent()
     escape = x11.XKeysymToKeycode(d, ESCAPE)
-    step = item_h * s
-    touch = {}                                   # the finger being followed: it, where it began, rows scrolled
+    keys = {x11.XKeysymToKeycode(d, sym): name for sym, name in KEYS.items()}
+    touch = {}                                   # the finger being followed: it, where it began, where it tapped
 
     def card(x, y):
         return (x - core.SHADOW * s) / s, (y - core.SHADOW * s) / s
@@ -387,11 +475,6 @@ def x_events(d, win, s, opcode, item_h):
         sx, sy = touch['start']
         if not touch['swiped'] and max(abs(fx - sx), abs(fy - sy)) > core.TAP_SLOP * s:
             touch['swiped'] = True
-        if touch['swiped']:
-            rows = int(-(fy - sy) / step)
-            if rows != touch['rows']:
-                out.append(('scroll', rows - touch['rows']))
-                touch['rows'] = rows
         if not down:
             if not touch['swiped']:
                 out.append(('press', *touch['at']))
@@ -405,38 +488,65 @@ def x_events(d, win, s, opcode, item_h):
             b = ev.xbutton
             if ev.type == core.MOTION_NOTIFY:
                 out.append(('move', *card(b.x, b.y)))
-            elif ev.type == core.BUTTON_PRESS and b.button in (core.WHEEL_UP, core.WHEEL_DOWN):
-                out.append(('wheel', b.button == core.WHEEL_DOWN))
             elif ev.type == core.BUTTON_PRESS and b.button == 1:
                 out.append(('press', *card(b.x, b.y)))
+            elif ev.type == core.BUTTON_PRESS and b.button in (core.WHEEL_UP, core.WHEEL_DOWN):
+                out.append(('wheel', 1 if b.button == core.WHEEL_DOWN else -1))
             elif ev.type == KEY_PRESS and b.button == escape:   # an XKeyEvent's keycode sits where a button's does
                 out.append(('escape',))
+            elif ev.type == KEY_PRESS and b.button in keys:
+                out.append(('key', keys[b.button]))
             elif opcode and ev.type == core.GENERIC_EVENT and not touch:
                 t = core.touch_event(d, ev, opcode)
                 if t and t[0] == core.XI_TOUCH_BEGIN and t[2] == win:
                     start = round(t[3]), round(t[4])
                     touch.update(finger=core.Touch(d, opcode, t[1], *start), start=start,
-                                 at=card(t[5], t[6]), swiped=False, rows=0)
+                                 at=card(t[5], t[6]), swiped=False)
         return out
     return events
 
 
+def set_session_voice(sid, name, speak=None):
+    """Keeps `name` as the voice session `sid` is read in, in <sid>.voice beside its other speech
+    files; '' (the global voice) removes the file."""
+    if not sid or os.path.basename(sid) != sid:
+        return
+    path = os.path.join(speak or SPEAK, sid + '.voice')
+    try:
+        if name:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path + '.tmp', 'w') as f:
+                f.write(name)
+            os.replace(path + '.tmp', path)
+        else:
+            os.remove(path)
+    except OSError as e:
+        if not (isinstance(e, FileNotFoundError) and not name):
+            core.log(f'voice for {sid}: {e}')
+
+
+def set_session_speech(sid, value):
+    speechctl('speech', sid, value)
+
+
 def open_menu(d, win, s, regions):
-    """The voice drop down was pressed: open the list, and set the voice picked from it."""
-    menu = regions.get('menu')
-    if not menu:
+    """The gear was pressed: open the settings menu, and carry out what is chosen in it."""
+    region = regions.get('menu')
+    if not region:
         return
     declare(core.x11)
     pointer, keyboard = grab(d, win)
-    core.log(f'voice list: {len(menu["names"])} voices, pointer {"held" if pointer else "not held"}, '
-             f'keyboard {"held" if keyboard else "not held"}')
+    focused, accepted = focus_window(d, win)
+    core.log(f'settings menu: pointer {"held" if pointer else "not held"}, '
+             f'keyboard {"held" if keyboard else "not held"}, focus {"taken" if focused else "not taken"}')
+    model = menu.Menu(regions.get('rows', ()), region['voices'],
+                      menu.Settings(set_session_voice=set_session_voice, set_session_speech=set_session_speech))
     try:
-        name = run_menu(menu, x_events(d, win, s, core.touch_opcode(d), menu['item_h']))
+        run_menu(model, core.load_regions, x_events(d, win, s, core.touch_opcode(d)))
     finally:
         ungrab(d)
-    core.log('voice list closed' + (f': {name}' if name else ''))
-    if name is not None and menu['names'].index(name) != menu['current']:
-        speechctl('voice', name)
+        set_accepts_input(d, win, bool(accepted))
+    core.log('settings menu closed')
 
 
 def prompt_at(prompt, x, y):
@@ -527,48 +637,40 @@ def close_session(d, win, s, regions, row):
         return
     declare(core.x11)
     pointer, keyboard = grab(d, win)
+    focused, accepted = focus_window(d, win)
     core.log(f'close prompt for {row["id"]}: pointer {"held" if pointer else "not held"}, '
-             f'keyboard {"held" if keyboard else "not held"}')
+             f'keyboard {"held" if keyboard else "not held"}, focus {"taken" if focused else "not taken"}')
     try:
-        ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d),
-                                               prompt['ok'][3] - prompt['ok'][1]))
+        ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d)))
     finally:
         ungrab(d)
+        set_accepts_input(d, win, bool(accepted))
     core.log('close prompt: ' + ('OK' if ok else 'not confirmed'))
     if ok:
         end_session(row)
 
 
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
-    """A press on the volume slider sets the volume along it. A press on the voice drop down:
-    a click or tap opens the list of voices, a drag from it moves the widget. A press on a
-    session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. A press on a session's issue number, pill or name: a click
-    or tap opens its issue, its pull requests, or the prompt that closes it; a drag moves the
-    widget, or with a finger scrolls the list when it can scroll.
-    Returns whether the press was on any of them."""
+    """A press on the volume slider sets the volume along it. A press on a session's name or an
+    issue or pull request number in the terminal: a click or tap opens the prompt that closes the
+    session, or the issue or pull request; a drag moves the widget, or with a finger scrolls the
+    list when it can scroll. Returns whether the press was on any of them."""
     x, y, start = at
     if hit == 'volume' and regions.get('volume_bar'):
         set_volume(d, win, regions, s, track)
         return True
-    if hit == 'voice':
-        if core.clicked(start, s, track, core.TAP_SLOP if touch else core.CLICK_SLOP):
-            open_menu(d, win, s, regions)
-        else:
-            core.remember(*core.drag(d, root, win, s, track, start))
+    if hit == 'divider' and regions.get('divider_drag'):
+        move_divider(d, win, regions, s, track)
         return True
-    segment = segment_at(regions, s, x, y)
-    link = None if segment else link_at(regions, s, x, y)
-    if not (segment or link):
+    link = link_at(regions, s, x, y)
+    if not link:
         return False
     if core.clicked(start, s, track, core.TAP_SLOP if touch else core.CLICK_SLOP):
-        if segment:
-            speechctl('speech', *segment)
-        elif link[1] == 'close':
+        if link[1] == 'close':
             close_session(d, win, s, regions, link[0])
         else:
             open_once(*link)
-    elif touch and (segment or scrollable(regions, s, x, y)):
+    elif touch and scrollable(regions, s, x, y):
         swipe(regions, s, x, y, start[1], track)
     else:
         core.remember(*core.drag(d, root, win, s, track, start))
@@ -590,40 +692,30 @@ def scroll_list(regions, down):
     return at
 
 
-def scroll_bubble(down):
-    """Counts a wheel step over the speech bubble, down or up, for draw.lua to turn into lines."""
+def scroll_terminal(down):
+    """Counts a wheel step over the terminal pane, down or up, for draw.lua to turn into lines."""
     try:
-        with open(BUBBLE_SCROLL) as f:
+        with open(TERMINAL_SCROLL) as f:
             steps = int(f.read().split()[0])
     except (OSError, ValueError, IndexError):
         steps = 0
     os.makedirs(CACHE, exist_ok=True)
-    with open(BUBBLE_SCROLL + '.tmp', 'w') as f:
+    with open(TERMINAL_SCROLL + '.tmp', 'w') as f:
         f.write(f'{steps + (1 if down else -1)}')
-    os.replace(BUBBLE_SCROLL + '.tmp', BUBBLE_SCROLL)
+    os.replace(TERMINAL_SCROLL + '.tmp', TERMINAL_SCROLL)
 
 
 def wheel(regions, s, x, y, down):
     """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down
-    over the slider or its speaker, the next voice, the setting a segment right, the speech
-    bubble's text a line down while the pointer is over it, or the list a row down. Returns
-    what it did, or None where the wheel does nothing."""
+    over the slider or its speaker, the terminal pane's text a line down while the pointer is
+    over it, or the list a row down. Returns what it did, or None where the wheel does nothing."""
     if inside(regions.get('volume_wheel'), s, x, y):
         speechctl('volume', 'down' if down else 'up')
         return 'volume'
-    if inside(regions.get('voice'), s, x, y):
-        speechctl('voice', 'next' if down else 'prev')
-        return 'voice'
-    if inside(regions.get('bubble'), s, x, y):
-        if regions.get('bubble_scroll'):
-            scroll_bubble(down)
-        return 'bubble'
-    row, on_control = row_at(regions, s, x, y)
-    if on_control and row.get('speech') in SETTINGS:
-        i = SETTINGS.index(row['speech']) + (1 if down else -1)
-        if 0 <= i < len(SETTINGS):
-            speechctl('speech', row['id'], SETTINGS[i])
-        return 'setting'
+    if inside(regions.get('terminal'), s, x, y):
+        if regions.get('terminal_scroll'):
+            scroll_terminal(down)
+        return 'terminal'
     if inside(regions.get('list'), s, x, y) and regions.get('list_scroll'):
         scroll_list(regions, down)
         return 'list'

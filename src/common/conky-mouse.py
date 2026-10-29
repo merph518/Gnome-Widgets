@@ -94,7 +94,8 @@ RESCALED = 75                                     # exit status: Xft.dpi changed
 HIDES = ('minimize', 'close')                     # the controls that hide the widget
 # X cursor font shapes (X11/cursorfont.h), by the edges a press there resizes.
 # '' is the arrow anywhere else on the card (left_ptr).
-CURSORS = {'': 68, 'l': 70, 'r': 96, 't': 138, 'b': 16, 'lt': 134, 'rt': 136, 'lb': 12, 'rb': 14}
+CURSORS = {'': 68, 'l': 70, 'r': 96, 't': 138, 'b': 16, 'lt': 134, 'rt': 136, 'lb': 12, 'rb': 14,
+           'divider': 108}                      # a widget's divider: the left-right arrow with a bar
 SHAPE_INPUT, SHAPE_SET, UNSORTED = 2, 0, 0         # X Shape extension
 SHADOW = widget_size.SHADOW                        # logical px of shadow around the card
 GENERIC_EVENT = 35                                 # an extension's event, XInput 2's among them
@@ -885,6 +886,8 @@ def main(widget):
                         edges = ''               # a control reaching the border wins
                     else:
                         edges = hooks.without_idle_edges(edges, regions)
+                elif on_card(x, y, w, h) and region_at(load_regions(), s, x, y) == 'divider':
+                    edges = 'divider'            # the resize cursor over the divider between columns
                 if edges != cursor:
                     set_cursor(d, win, edges)
                     cursor = edges

@@ -17,17 +17,37 @@ trap 'rm -rf "$SANDBOX"' EXIT
 export HOME="$SANDBOX/home"
 mkdir -p "$SANDBOX/bin" "$HOME/.local/bin"
 # The stub lists no output modules for -O and appends the spoken text to SPOKEN.
+# While NOWLOG is set, the stubs also append the now.json the hook published for the clip.
+# The spd-say stub can end its first clip as a pause would, naming the clip in requeue, when
+# REQUEUE_ONCE names a flag file that does not exist yet.
 printf '%s\n' '#!/bin/sh' '[ "$1" = -O ] && exit 0' \
-  'for a in "$@"; do last=$a; done' 'echo "$last" >> "$SPOKEN"' > "$SANDBOX/bin/spd-say"
+  'for a in "$@"; do last=$a; done' \
+  'now=$XDG_RUNTIME_DIR/speak-attention/now.json' \
+  'if [ -n "$NOWLOG" ]; then' \
+  '  for i in $(seq 50); do [ -n "$(jq -r ".player_pid // empty" "$now" 2>/dev/null)" ] && break;' \
+  '    sleep 0.1; done' \
+  '  jq -c . "$now" >> "$NOWLOG"' \
+  'fi' \
+  'if [ -n "$REQUEUE_ONCE" ] && [ ! -e "$REQUEUE_ONCE" ]; then' \
+  '  : > "$REQUEUE_ONCE"; jq -r .clip "$now" > "$XDG_RUNTIME_DIR/speak-attention/requeue"; exit 0' \
+  'fi' \
+  'echo "$last" >> "$SPOKEN"' > "$SANDBOX/bin/spd-say"
 # The piper stub writes its input to the -f file, or fails when PIPER_FAIL is set, and
 # the pw-play stub appends that file to SPOKEN behind a "piper: " mark. A piper on PATH
 # speaks as "path piper: ", which no case expects.
-printf '%s\n' '#!/bin/sh' '[ -n "$PIPER_FAIL" ] && exit 1' \
+printf '%s\n' '#!/bin/sh' 'echo "$*" >> "${PIPER_ARGS:-/dev/null}"' \
+  '[ -n "$PIPER_FAIL" ] && exit 1' \
   'while [ $# -gt 0 ] && [ "$1" != -f ]; do shift; done' 'cat > "$2"' \
   > "$HOME/.local/bin/piper"
 printf '%s\n' '#!/bin/sh' 'while [ $# -gt 0 ] && [ "$1" != -f ]; do shift; done' \
   'printf "path " > "$2"' > "$SANDBOX/bin/piper"
 printf '%s\n' '#!/bin/sh' 'for a in "$@"; do last=$a; done' \
+  'now=$XDG_RUNTIME_DIR/speak-attention/now.json' \
+  'if [ -n "$NOWLOG" ]; then' \
+  '  for i in $(seq 50); do [ -n "$(jq -r ".player_pid // empty" "$now" 2>/dev/null)" ] && break;' \
+  '    sleep 0.1; done' \
+  '  jq -c . "$now" >> "$NOWLOG"' \
+  'fi' \
   'printf "piper: %s" "$(cat "$last")" >> "$SPOKEN"' > "$SANDBOX/bin/pw-play"
 chmod +x "$SANDBOX/bin/spd-say" "$SANDBOX/bin/piper" "$SANDBOX/bin/pw-play" \
   "$HOME/.local/bin/piper"
@@ -160,6 +180,58 @@ prompt human "run the suite"
 check "$(PIPER_FAIL=1 SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.')" \
   "demo session finished" "Speech Dispatcher speaks when Piper fails"
 check "$(ls "$XDG_RUNTIME_DIR/speak-attention" | grep -c wav)" "0" "no clip is left behind"
+
+# Piper options come from settings.json and are passed only when set
+export PIPER_ARGS="$SANDBOX/piper-args"
+settings="$XDG_RUNTIME_DIR/speak-attention/settings.json"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+check "$(grep -cE -- '--(speaker|noise-scale|noise-w-scale|sentence-silence)' "$PIPER_ARGS")" 0 \
+  "Piper options that are not set are left out"
+echo '{"speaker":3,"noise":0.4,"noise_w":0.5,"silence":0.2}' > "$settings"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+for opt in '--speaker 3' '--noise-scale 0.4' '--noise-w-scale 0.5' '--sentence-silence 0.2'; do
+  check "$(grep -c -- "$opt" "$PIPER_ARGS")" 1 "Piper gets $opt when it is set"
+done
+echo '{"speaker":0}' > "$settings"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+check "$(grep -c -- '--speaker 0' "$PIPER_ARGS")" 1 "speaker 0 is passed, not mistaken for unset"
+check "$(grep -c -- '--noise-scale' "$PIPER_ARGS")" 0 "the options still unset stay out"
+rm -f "$settings"
+
+# A session's own voice, <id>.voice, wins over settings.json's for its lines alone.
+piper_dir="$HOME/.local/share/piper"
+mkdir -p "$piper_dir"
+: > "$piper_dir/global.onnx"; : > "$piper_dir/own.onnx"; : > "$piper_dir/other.onnx"
+echo '{"voice":"global"}' > "$settings"
+run_dir="$XDG_RUNTIME_DIR/speak-attention"
+# usage: model_used <extra env assignment...>; the model Piper was given for a stop.
+model_used() {
+  prompt human "run the suite"; : > "$PIPER_ARGS"
+  stop 'Done.' > /dev/null
+  grep -o -- '-m [^ ]*' "$PIPER_ARGS" | sed 's|.*/||'
+}
+check "$(model_used)" "global.onnx" "with no .voice file the global voice speaks"
+printf %s own > "$run_dir/s1.voice"
+check "$(model_used)" "own.onnx" "the session's .voice wins over the global voice"
+printf %s other > "$run_dir/s2.voice"
+check "$(model_used)" "own.onnx" "another session's .voice file is not used"
+rm -f "$run_dir/s1.voice"
+check "$(model_used)" "global.onnx" "another session's .voice file leaves this session on the global voice"
+: > "$run_dir/s1.voice"
+check "$(model_used)" "global.onnx" "an empty .voice file uses the global voice"
+printf %s nosuchvoice > "$run_dir/s1.voice"
+check "$(model_used)" "global.onnx" "an unknown voice falls back to the global voice"
+check "$(stop 'Done.')" "piper: demo session finished" "an unknown voice still speaks the line"
+printf %s ../piper/own > "$run_dir/s1.voice"
+check "$(model_used)" "global.onnx" "a voice name with a slash is not used"
+rm -f "$run_dir/s1.voice" "$run_dir/s2.voice" "$settings"
+printf %s own > "$run_dir/s1.voice"
+check "$(model_used)" "own.onnx" "the session's voice speaks with no global voice set"
+rm -f "$run_dir/s1.voice"
+unset PIPER_ARGS
 
 # usage: ask <question> [cwd]; runs the PreToolUse hook for an AskUserQuestion call.
 ask() {
@@ -355,6 +427,18 @@ mkdir -p "$XDG_RUNTIME_DIR/speak-attention" && printf 'Queued earlier.\n' > \
 text "Next."
 check "$(call)" "Queued earlier.
 Next." "a block waiting on the queue is read before a newer one"
+# a line another session queued is read in that session's voice, not the reading hook's
+export PIPER_ARGS="$SANDBOX/piper-args"; : > "$PIPER_ARGS"
+printf 'From s2.\n' > "$XDG_RUNTIME_DIR/speak-attention/s2.queue"
+printf %s other > "$XDG_RUNTIME_DIR/speak-attention/s2.voice"
+text "Mine."
+printf %s own > "$XDG_RUNTIME_DIR/speak-attention/s1.voice"
+check "$(call)" "piper: Mine.piper: From s2." \
+  "another session's queued line is read in its own voice"
+check "$(grep -o -- '-m [^ ]*' "$PIPER_ARGS" | sed 's|.*/||' | paste -sd,)" "own.onnx,other.onnx" \
+  "each line is rendered with its own session's model"
+unset PIPER_ARGS
+rm -f "$XDG_RUNTIME_DIR/speak-attention"/s[12].voice "$XDG_RUNTIME_DIR/speak-attention"/s2.queue
 prompt human "pick one"
 text "Two ways to go."
 row "$(jq -cn '{type:"assistant", message:{role:"assistant", content:[{type:"tool_use",
@@ -460,6 +544,129 @@ text "Unfollowed."
 CLAUDE_CODE_MESSAGING_SOCKET=/x/88.sock call > /dev/null
 check "$(jq 'length' "$XDG_RUNTIME_DIR/voice-bridge/feed/88.json")" "4" \
   "an unfollowed session feeds nothing"
+# now.json carries the Markdown of the line playing, beside the spoken text.
+export NOWLOG="$SANDBOX/now-log"
+QUEUES="$XDG_RUNTIME_DIR/speak-attention"
+# usage: now <jq filter>; the filter applied to every now.json the stubs logged, as an array.
+now() { jq -sc "map($1)" "$NOWLOG"; }
+typed "/implement-with-speech"
+prompt human "write it up"
+: > "$NOWLOG"
+text "Cutting the branch now."
+check "$(call)" "demo session says: Cutting the branch now." "a plain line is read as before"
+check "$(now '[.session, .name, .text, .markdown]')" \
+  '[["s1","demo session","demo session says: Cutting the branch now.","Cutting the branch now."]]' \
+  "a plain line publishes its source without the name prefix"
+check "$(now 'keys | join(",")')" \
+  '["clip,engine,hook_pid,markdown,name,player_pid,session,started,text"]' \
+  "now.json keeps its other fields beside markdown"
+
+md='Two things changed:
+
+- **Spacing**: the gap is now `12px`.
+- Avatar alignment: see [the PR](https://github.com/o/r/pull/9).
+
+```bash
+make test
+```
+
+Done.'
+: > "$NOWLOG"
+text "$md"
+call > /dev/null
+check "$(now '.markdown')" "$(jq -cn --arg m "$md" '[$m]')" \
+  "a multi-paragraph line keeps its list, bold, code span, fence and newlines"
+check "$(now '.text | contains("**") or contains("`") or contains("\n")')" "[false]" \
+  "the same line's text is still the flat spoken form"
+
+: > "$NOWLOG"
+text "$(printf '\n\n  Indented first line.\n\n\n')"
+call > /dev/null
+check "$(now '.markdown')" '["  Indented first line."]' \
+  "blank lines around a block are trimmed, its indentation kept"
+
+# a source past the cap is cut at a line boundary and ends in an ellipsis
+long=$(for i in $(seq 1 400); do echo "line $i of a long reply"; done)
+: > "$NOWLOG"
+text "$long"
+call > /dev/null
+check "$(now '.markdown | [length <= 2001, endswith("…"), (split("\n") | length > 3),
+  (split("\n") | .[-1] | test("^line [0-9]+ of a long reply…$"))] | all')" "[true]" \
+  "a long source is cut at a line boundary and marked"
+check "$(now '.text | length > 4000')" "[true]" "the cap leaves the spoken text whole"
+
+# the cut falls after a complete line, not before it, and a long run of space is quick
+exact="$(head -c 1990 /dev/zero | tr '\0' x)
+tail line
+after the cap"
+: > "$NOWLOG"
+text "$exact"
+call > /dev/null
+check "$(now '.markdown | endswith("tail line…")')" "[true]" \
+  "a source cut exactly at the end of a line keeps that line"
+: > "$NOWLOG"
+text "start$(head -c 60000 /dev/zero | tr '\0' ' ')end"
+began=$(date +%s)
+call > /dev/null
+check "$(( $(date +%s) - began < 10 ))" "1" \
+  "a block with a long run of spaces queues quickly"
+
+# trailing space past the cap is not content, and a multibyte source survives the read
+: > "$NOWLOG"
+text "$(head -c 1990 /dev/zero | tr '\0' x)$(printf ' %.0s' $(seq 1 50))"
+call > /dev/null
+check "$(now '.markdown | [length, endswith("…")]')" "[[1990,false]]" \
+  "space past the cap does not cut the line before it"
+cjk="x$(printf '日%.0s' $(seq 1 3000))"
+: > "$NOWLOG"
+text "$cjk"
+call > /dev/null
+check "$(now '.markdown | [length, (explode | any(. == 65533)), endswith("…")]')" \
+  "[[2001,false,true]]" "a multibyte source over 4 KB is cut whole, with no replacement characters"
+
+# another session's queue: its line plays with its own source, after this session's own
+printf 'Other session.' > "$QUEUES/s2.name"
+printf '%s\t%s\n' "other session says: Merged it." \
+  "$(jq -cn '"Merged **it**.\n\n- one\n- two"')" > "$QUEUES/s2.queue"
+: > "$NOWLOG"
+text "Own line."
+call > /dev/null
+check "$(now '[.session, .text, .markdown]')" \
+  '[["s1","Own line.","Own line."],["s2","other session says: Merged it.","Merged **it**.\n\n- one\n- two"]]' \
+  "a line read from another session's queue publishes that session and its own source"
+rm -f "$QUEUES/s2.queue" "$QUEUES/s2.name"
+
+# a line paused away is put back with its source and published again
+: > "$NOWLOG"
+rm -f "$SANDBOX/requeued"
+text "Requeued **line**."
+check "$(REQUEUE_ONCE="$SANDBOX/requeued" call)" "Requeued line." \
+  "a line whose clip was paused away is read again"
+check "$(now '[.text, .markdown]')" \
+  '[["Requeued line.","Requeued **line**."],["Requeued line.","Requeued **line**."]]' \
+  "a requeued line publishes the same text and source both times"
+
+# Piper publishes it too, in the publish that stays up while the clip plays
+: > "$NOWLOG"
+text "Piper **line**."
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" call > /dev/null
+check "$(now '[.engine, .player_pid != null, .markdown]')" '[["piper",true,"Piper **line**."]]' \
+  "Piper publishes the source"
+
+# a line with no source: a queue line from before the field, and one the hook composes
+: > "$NOWLOG"
+printf 'Queued earlier.\n' > "$QUEUES/s1.queue"
+call > /dev/null
+check "$(now '[.text, .markdown]')" '[["Queued earlier.",""]]' \
+  "a queue line with no source publishes an empty markdown"
+typed "/implement"
+prompt human "run the suite"
+: > "$NOWLOG"
+stop 'Done.' > /dev/null
+check "$(now '[.text, .markdown]')" '[["demo session finished",""]]' \
+  "an announcement the hook composes publishes an empty markdown"
+unset NOWLOG
+
 typed "/implement"
 : > "$TRANSCRIPT"
 

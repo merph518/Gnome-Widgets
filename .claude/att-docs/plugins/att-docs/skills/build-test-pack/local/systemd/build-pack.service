@@ -1,0 +1,32 @@
+# Runs the test pack queue on the local model, one job at a time, until the
+# queue is empty or the cutoff passes. The timer starts it each night. If a job
+# started by build-pack-now@.service still holds the queue at 22:00, this run
+# polls every 30 seconds until that job finishes, and works the queue then; it
+# gives up only when the cutoff passes.
+#
+# Install as a user unit:
+#   cp build-pack.service build-pack.timer ~/.config/systemd/user/
+#   mkdir -p ~/.config/build-pack
+#   printf 'BUILD_PACK_SCRIPT=%s\nBUILD_PACK_CONFIG=%s\n' <path to build-pack.mjs> <path to pipeline.json> \
+#     > ~/.config/build-pack/env
+#   The env file may also hold PATH and any token the rule export needs, one
+#   NAME=value per line. systemd does not expand $PATH there, so PATH is written
+#   out in full, for example PATH=/home/me/.local/bin:/usr/bin:/bin
+#   systemctl --user daemon-reload && systemctl --user enable --now build-pack.timer
+#
+# If the pipeline config has a pause block, the run stops those units when its
+# first job starts and starts them again when it ends. With scope "system" that
+# needs a sudoers rule for `systemctl stop` and `systemctl start` on each unit;
+# see the skill's "Freeing the machine for a job".
+#
+# The journal holds the status lines and the morning summary, which carry no
+# content: job IDs, phases, reason codes, counts and timings.
+
+[Unit]
+Description=Build queued test packs on the local model
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/build-pack/env
+ExecStart=/usr/bin/node ${BUILD_PACK_SCRIPT} queue run --config ${BUILD_PACK_CONFIG}
+Nice=10
