@@ -348,22 +348,24 @@ local function draw_control(cr, xs, cy, seg_h, s, text, speech)
     end
 end
 
-local function draw_label(cr, r, x, cy, label_w, w, h, s, text)
+local function draw_label(cr, r, x, cy, label_w, w, h, row, s, text)
     -- the repository's box, one width for every row so the names after it line up: its label,
     -- then the number of the issue a click on it opens (n/a, in the secondary colour, without
-    -- one). The card's colour with the foreground's text, outlined on a dark card, tinted under
-    -- the pointer when it opens an issue, and filled with the foreground (the selected
-    -- setting's colours) while its session is speaking
+    -- one). The card's colour with the foreground's text, outlined on a dark card, and filled
+    -- with the foreground (the selected setting's colours) while its session is speaking. When
+    -- it opens an issue it is tinted, or its fill lightened, with the pointer anywhere over it
+    -- on the row's first line, where a click opens it
     if r.label == '' then return end
     local rad = 3 * s
     local issue = r.number:sub(1, 1) == '#'
+    local under = issue and hovered(x, cy - row / 2, x + w, cy + row / 2)
     cairo_new_path(cr)
     if r.speaking then
-        set(cr, fg)
+        set(cr, fg, under and 0.8 or 1)
         rounded_rect(cr, x, cy - h / 2, w, h, rad)
         cairo_fill(cr)
     else
-        if issue and hovered(x, cy - h / 2, x + w, cy + h / 2) then
+        if under then
             set(cr, fg, 0.1)
             rounded_rect(cr, x, cy - h / 2, w, h, rad)
             cairo_fill(cr)
@@ -425,7 +427,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, number_w)
     font(cr, 9, text, s, true)
     local label_w = width_of(cr, 'WWWW') + 10 * s
     local box_w = label_w + (number_w > 0 and number_w + 5 * s or 0)
-    draw_label(cr, r, x0, cy, label_w, box_w, c[5] * s, s, text)
+    draw_label(cr, r, x0, cy, label_w, box_w, c[5] * s, row, s, text)
     local name_x = x0 + box_w + 8 * s
     font(cr, 11, text, s)
     local name = fit(cr, r.name, right - name_x - flags_w - (pill_w > 0 and pill_w + 8 * s or 0))
