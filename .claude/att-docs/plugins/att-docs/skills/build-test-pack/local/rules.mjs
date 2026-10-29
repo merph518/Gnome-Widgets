@@ -122,3 +122,143 @@ export function rulesStale(markdown, entries) {
   const confirmed = reviewed ?? created;
   return Boolean(revised && confirmed && revised > confirmed);
 }
+
+// A struck-through mark: two tildes, not part of a longer run.
+const MARK = /(?<!~)~~(?!~)/g;
+const PAGE_MARKER = /<a id="page-(\d+)"><\/a>/g;
+// A fence line, as the conversion's page script reads one.
+const FENCE = /^\s*(```|~~~)/;
+const STOPWORDS = new Set(['that', 'this', 'with', 'from', 'when', 'then', 'than', 'have', 'will',
+  'shall', 'must', 'been', 'into', 'only', 'also', 'which', 'their', 'there', 'after', 'before']);
+// A sentence ends in . ! ? or :, then perhaps a closing quote or bracket.
+const SENTENCE_END = /[.!?:]["')\]”’]*$/;
+
+/**
+ * The text with fenced code blocks and inline code blanked out, every offset
+ * kept. A fence that never closes is not a block: the text from it on is kept.
+ */
+function withoutCode(markdown) {
+  const lines = markdown.split('\n');
+  let opened = null;
+  const fenced = new Set();
+  lines.forEach((line, i) => {
+    if (FENCE.test(line)) {
+      opened = opened === null ? i : null;
+      fenced.add(i);
+    } else if (opened !== null) {
+      fenced.add(i);
+    }
+  });
+  // An open fence at the end ran to the end of the file; keep that text.
+  if (opened !== null) for (let i = opened; i < lines.length; i += 1) fenced.delete(i);
+  const blank = (line) => line.replace(/[^\n]/g, ' ');
+  return lines.map((line, i) => (fenced.has(i) ? blank(line) : line.replace(/`[^`\n]*`/g, blank)))
+    .join('\n');
+}
+
+const words = (text) => new Set((String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+  .filter((word) => word.length >= 4 && !STOPWORDS.has(word)));
+
+/**
+ * The [open, close] offsets of each struck span. A mark pairs with the next
+ * mark on its line. A mark left over on a line, with no close on it, may wrap
+ * to the lines below in the same paragraph, and only when the next line with
+ * marks has an odd number of them, so its first mark closes the wrap; if not,
+ * the lone mark is no span. A blank line ends a wrap.
+ */
+function spanOffsets(text) {
+  const spans = [];
+  let open = null;
+  let at = 0;
+  for (const line of text.split('\n')) {
+    const marks = [...line.matchAll(MARK)].map((m) => at + m.index);
+    at += line.length + 1;
+    if (!line.trim()) {
+      open = null;
+      continue;
+    }
+    if (open !== null && marks.length) {
+      if (marks.length % 2) spans.push([open, marks.shift()]);
+      open = null;
+    }
+    while (marks.length > 1) spans.push([marks.shift(), marks.shift()]);
+    if (marks.length) open = marks[0];
+  }
+  return spans;
+}
+
+/**
+ * What a struck span is. A fragment is part of a sentence: it does not end a
+ * sentence and does not fill its line, list item or table cell (`~~90~~ 120
+ * days`, `~~not~~`). A restated sentence is followed in its paragraph by a live
+ * sentence holding at least two thirds of its significant words. Anything else
+ * is a removal.
+ */
+function spanKind(text, start, end) {
+  const struck = text.slice(start + 2, end);
+  const lineStart = text.lastIndexOf('\n', start) + 1;
+  const lineEnd = text.indexOf('\n', end);
+  const before = text.slice(lineStart, start).replace(/^\s*(?:(?:[-*+]|\d+[.)]|>|#+)\s+)*/, '').trim();
+  const after = text.slice(end + 2, lineEnd < 0 ? undefined : lineEnd).trim();
+  const wholeLine = (!before || before.endsWith('|')) && (!after || after.startsWith('|'));
+  // A span that starts a sentence and has its full stop outside the tildes is a sentence too.
+  const starts = !before || before.endsWith('|') || /[.!?:]["')\]”’]*$/.test(before);
+  const sentence = SENTENCE_END.test(struck.trim()) || (starts && /^[.!?:]/.test(after));
+  const significant = words(struck);
+  if ((!sentence && !wholeLine) || !significant.size) return 'fragment';
+  // In a table the live sentence is in the same cell; elsewhere it is in the same paragraph.
+  const table = before.endsWith('|') || after.startsWith('|');
+  const paragraph = (table ? after.split('|')[0] : text.slice(end + 2).split(/\n[ \t]*\n/)[0])
+    .trim().replace(/^[.!?:]+["')\]”’]*\s*/, '');
+  // A sentence ends at a stop before a capital letter, so "e.g. the" does not end one.
+  const next = /^[\s\S]+?[.!?:]["')\]”’]*(?=\s+[\p{Lu}\p{N}"'(\[~]|\s*$)/u.exec(paragraph)?.[0]
+    ?? paragraph;
+  if (next && !next.startsWith('~~')) {
+    const live = words(next);
+    if ([...significant].filter((w) => live.has(w)).length * 3 >= significant.size * 2) {
+      return 'restated';
+    }
+  }
+  return 'removal';
+}
+
+/**
+ * The struck-through spans of a converted document that state something, as
+ * { page, heading, text, kind } where each sits: `page` is the number of the
+ * nearest page marker above it (null when the file has none above), `heading`
+ * the normal form of the nearest heading above it (null when none), `kind` one
+ * of fragment, restated or removal. Code blocks and inline code are not read.
+ * A span with no letter or digit in it is empty and is left out.
+ */
+export function struckSpans(markdown) {
+  const visible = withoutCode(markdown);
+  const marks = (pattern, value) => [...visible.matchAll(pattern)]
+    .map((m) => ({ at: m.index, value: value(m) }));
+  const pages = marks(PAGE_MARKER, (m) => Number(m[1]));
+  const headings = marks(/^#+\s+(.+)$/gm, (m) => normal(m[1].replace(/~~/g, '')));
+  const above = (found, at) => found.filter((m) => m.at < at).at(-1)?.value ?? null;
+  return spanOffsets(visible).filter(([start, end]) => /[\p{L}\p{N}]/u.test(visible.slice(start, end)))
+    .map(([start, end]) => ({ page: above(pages, start), heading: above(headings, start),
+      text: visible.slice(start + 2, end), kind: spanKind(visible, start, end) }));
+}
+
+/**
+ * The struck-through spans of a document that nothing cites. A fragment or a
+ * restated sentence is a change to live text and needs no retired rule. A
+ * removal is cited by a retired rule at its place: the rule's `source_page` is
+ * the span's page, a range or list holding it, or the heading above the span.
+ */
+export function uncitedStruck(markdown, rules) {
+  const at = (rule, span) => {
+    const cited = isText(rule?.source_page) ? rule.source_page.trim() : '';
+    if (PAGE_REF.test(cited)) {
+      return span.page !== null && cited.split(', ').some((part) => {
+        const [from, to = from] = part.split('-').map(Number);
+        return span.page >= from && span.page <= to;
+      });
+    }
+    return Boolean(cited) && span.heading !== null && normal(cited) === span.heading;
+  };
+  return struckSpans(markdown).filter((span) => span.kind === 'removal'
+    && !rules.some((rule) => rule?.status === 'retired' && at(rule, span)));
+}

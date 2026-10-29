@@ -15,13 +15,14 @@ import { addJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFro
   summaryLines }
   from './build-pack.mjs';
 import { loadConfig, RULE_SHAPE } from './config.mjs';
-import { rulesStale, shapeProblems } from './rules.mjs';
+import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
 import { createPauser, pausedPath } from './pause.mjs';
 import { ModelError, localEndpoint, modelClient } from './model.mjs';
-import { batches, setsOf, splitText } from './phases.mjs';
+import { batches, expectedProblems, resultsAgree, setsOf, splitText } from './phases.mjs';
 import { runJob } from './run.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { statusFields } from './status.mjs';
+import { readPack } from './pack.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures');
@@ -77,6 +78,8 @@ function fakeModel(answers = {}) {
       if ('assumptionsToProceed' in value) value.assumptionsToProceed = [];
       if (Array.isArray(value.uncovered)) value.uncovered = [];
       if (Array.isArray(value.skipped)) value.skipped = [];
+      // The checklist finds nothing unless a test plants a finding, so no fix round runs.
+      if (request.schemaName.startsWith('phase9_checklist')) value.issues = [];
       // A card call gets one card for each scenario it is offered.
       const offered = value.cards?.[0]?.scenario !== undefined
         && request.schema.properties.cards.items.properties.scenario.enum;
@@ -126,12 +129,14 @@ test('an issue pack builds end to end on the local model alone', async () => {
   assert.ok(pack.testCards.every((card) => /^TC-MOD-501-\d{3}$/.test(card.id)));
   const phases = statusLines(result.outDir).filter((l) => l.event === 'pass').map((l) => l.phase);
   assert.deepEqual(phases, ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6',
-    'phase7', 'phase8', 'phase9-checklist', 'phase9-senior', 'phase9-confidence',
+    'phase7', 'phase8', 'phase9-checklist', 'phase9-confidence', 'phase9-senior',
     'phase9-revalidate', 'phase10', 'done']);
   // Reasoning is on for the judgment phases and off for extraction.
   const thinking = new Map(model.calls.map((c) => [c.schemaName.split('_')[0], c.reasoning]));
+  // Phase 4 ends on its risk rating, an extraction; its impact analysis thinks.
   assert.deepEqual(Object.fromEntries(thinking), { intake: false, phase1: true, phase3: true,
-    phase4: true, phase5: true, phase6: false, phase7: false, phase9: true, phase10: false });
+    phase4: false, phase5: true, phase6: false, phase7: false, phase9: true, phase10: false });
+  assert.equal(model.calls.find((c) => c.schemaName.startsWith('phase4_impact')).reasoning, true);
   assertContentFree(read(path.join(result.outDir, 'status.log')));
 });
 
@@ -155,7 +160,12 @@ test('a suite pack builds through the repository\'s merge', async () => {
 // Scenario design: the inventory, the card batches, and the sets the cards land in.
 
 const INTAKE = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
-const lib = (extra = {}, overrides = {}) => ({ model: fakeModel({ ...INTAKE, ...extra }),
+// The fixture's retired rule is one the change does not concern, so no card is owed for it.
+const NOT_REMOVAL = { phase3: (value) => {
+  value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
+  return value;
+} };
+const lib = (extra = {}, overrides = {}) => ({ model: fakeModel({ ...INTAKE, ...NOT_REMOVAL, ...extra }),
   config: fixtureConfig(overrides) });
 const runLib = ({ model, config }) => runJob(config, { issue: '501', change: '7001' },
   { model, echo: false });
@@ -1193,6 +1203,205 @@ test('an export older than its document is a warning, and a review day outranks 
   assert.equal(rulesStale(dated, entry({}, undefined)), false);
 });
 
+const STRUCK_DOC = 'docs/OTHER/UC05-Struck-Warning.md';
+
+test('struck-through text no retired rule cites is a warning and a limitation, not a stop', async () => {
+  const config = withExport('master-struck.json');
+  const result = await runJob(config, issueJob([STRUCK_DOC]), { model: fakeModel(), echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const lines = statusLines(result.outDir);
+  const warn = lines.filter((l) => l.event === 'warn' && l.reason === 'retired-rule-missing');
+  assert.deepEqual(warn.map((l) => [l.phase, l.document]), [['phase2', 1]]);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  assert.match(read(path.join(result.outDir, 'detail.log')), /struck-through text[^]*page 2/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.match(pack.limitations['Job Intake'], /Struck-through text in UC05 Struck Warning has no rule citing it/);
+});
+
+test('a retired rule that cites the page of the struck-through text leaves no warning', async () => {
+  const config = withExport('master-struck-retired.json');
+  const result = await runJob(config, issueJob([STRUCK_DOC]), { model: fakeModel(), echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.ok(!statusLines(result.outDir).some((l) => l.reason === 'retired-rule-missing'));
+  assert.ok(!JSON.parse(read(result.packPath)).limitations?.['Job Intake']);
+});
+
+const shape = (spans) => spans.map(({ page, heading }) => ({ page, heading }));
+
+test('a struck removal is cited by a retired rule at its page, range or heading', () => {
+  const paged = '<a id="page-1"></a>\n\n- ~~Old option one~~\n\n<a id="page-3"></a>\n\n- ~~Old option two~~\n';
+  const rule = (extra) => ({ status: 'active', ...extra });
+  assert.deepEqual(shape(struckSpans(paged)), [{ page: 1, heading: null }, { page: 3, heading: null }]);
+  // An active rule on the page is not a retired one.
+  assert.equal(uncitedStruck(paged, [rule({ source_page: '1' })]).length, 2);
+  assert.equal(uncitedStruck(paged, [rule({ status: 'retired', source_page: '1' })]).length, 1);
+  // A range or list holds the page.
+  assert.equal(uncitedStruck(paged, [rule({ status: 'retired', source_page: '1, 3' })]).length, 0);
+  assert.equal(uncitedStruck(paged, [rule({ status: 'retired', source_page: '2-4' })]).length, 1);
+  // A rule cites the heading the span sits under.
+  const flat = '# Doc\n\n## Warning\n\n- ~~Old option~~\n';
+  assert.deepEqual(shape(struckSpans(flat)), [{ page: null, heading: 'warning' }]);
+  assert.equal(uncitedStruck(flat, [rule({ status: 'retired', source_page: 'Warning' })]).length, 0);
+  assert.equal(uncitedStruck(flat, [rule({ status: 'retired', source_page: '1' })]).length, 1);
+  assert.equal(uncitedStruck('plain text', []).length, 0);
+});
+
+test('a fragment edit or a restated sentence needs no retired rule, and a removal does', () => {
+  const active = [{ status: 'active', source_page: '1', rule_summary: 'The loan is saved at once.' }];
+  const warns = (text) => uncitedStruck(`<a id="page-1"></a>\n\n${text}\n`, active).length;
+  // The issue's own case: the live sentence says something else, so the warning was removed.
+  assert.equal(warns('~~A warning appears before the loan is saved.~~ The loan is saved at once.'), 1);
+  // The live sentence restates the struck one with a changed value.
+  assert.equal(warns('~~A warning appears after 90 days.~~ A warning appears after 120 days.'), 0);
+  // Part of a sentence: a value or a word changed.
+  assert.equal(warns('The cue shows ~~90~~ 120 days'), 0);
+  assert.equal(warns('The page ~~may~~ must show it.'), 0);
+  assert.equal(warns('The page is ~~not~~ saved.'), 0);
+  // A whole list item or table cell is a removal.
+  assert.equal(warns('- ~~Print the receipt~~'), 1);
+  assert.equal(warns('1. ~~Print the receipt~~'), 1);
+  assert.equal(warns('| Print | ~~Receipt printed~~ | Yes |'), 1);
+  // The full stop outside the tildes still ends a sentence.
+  assert.equal(warns('~~A warning appears before the loan is saved~~. The loan is saved at once.'), 1);
+  // "e.g." does not end the live sentence, so the restatement is read whole.
+  assert.equal(warns('~~Show the cue e.g. the warning banner.~~ Show the cue e.g. the warning banner too.'), 0);
+  // A sentence that starts with a number is a new sentence.
+  assert.equal(warns('~~A warning appears before the loan is saved.~~ The loan is saved. 3 warning appears before loan.'), 1);
+  // In a table the live sentence is in the same cell, not in the next row.
+  assert.equal(warns('| ~~Print the receipt.~~ | Yes |\n| Print the receipt. | No |'), 1);
+  assert.equal(warns('| ~~Print the receipt.~~ Print the receipt now. | Yes |'), 0);
+  // A struck sentence followed by another struck one has no live sentence.
+  assert.equal(warns('~~Print the receipt.~~ ~~Show the balance.~~'), 2);
+});
+
+test('a struck heading is still the heading its spans sit under', () => {
+  const text = '## ~~Save Warning~~\n\n- ~~Old item~~\n';
+  const retired = [{ status: 'retired', source_page: 'Save Warning' }];
+  assert.deepEqual(struckSpans(text).map((s) => s.heading), ['save warning', 'save warning']);
+  assert.equal(uncitedStruck(text, retired).length, 0);
+  assert.equal(uncitedStruck(text, []).length, 2);
+});
+
+test('a span wrapped over a line break is read whole, and a lone mark pairs with nothing', () => {
+  const text = '<a id="page-1"></a>\n\nThe ~~warning with Yes and\nNo buttons~~ is gone; ~~second span~~ too.\n\n'
+    + 'A ~~left open\n\nblank line~~ is not a span.\n\n'
+    + 'approx ~~5 units\nnext ~~real removed~~ end\n';
+  assert.deepEqual(struckSpans(text).map((s) => s.text),
+    ['warning with Yes and\nNo buttons', 'second span', 'real removed']);
+});
+
+test('struck text in code is not read, an unclosed fence hides nothing after it, and headings in code are not headings', () => {
+  const text = '<a id="page-1"></a>\n\n## Real\n\n```\n## Fake heading\nx ~~in fence~~ y\n```\n\n'
+    + 'Use `~~in code~~` here, ~~a real one~~.\n\n~~~\n~~also fenced~~\n~~~\n';
+  assert.deepEqual(struckSpans(text).map(({ page, heading, text: t }) => ({ page, heading, t })),
+    [{ page: 1, heading: 'real', t: 'a real one' }]);
+  // A fence with no close is not a block.
+  const open = '## Real\n\n```\nafter ~~kept~~ here\n';
+  assert.deepEqual(struckSpans(open).map((s) => s.text), ['kept']);
+});
+
+// A retired rule the change concerns is tested by a card that verifies the behavior is gone.
+const RETIRED = 'BR-LIB.UC05-003';
+const struckRun = (extra = {}) => lib({
+  intake: (value) => ({ ...value, documents: [STRUCK_DOC] }),
+  // The inventory names the live rules only.
+  phase6_scenarios: (value) => ({ ...value, scenarios: [
+    { kind: 'decision', rules: ['BR-LIB.UC05-001'], population: 'p0', action: 'a0', outcome: 'o' },
+    { kind: 'decision', rules: ['BR-LIB.UC05-002'], population: 'p1', action: 'a1', outcome: 'o' }] }),
+  phase6_cards: titled,
+  ...extra,
+}, { inputs: { ...fixtureInputs(), ruleExport: exportFrom('master-struck-retired.json') } });
+
+test('a retired Direct Change rule no scenario names gets a scenario and a card that verifies it is gone', async () => {
+  const run = struckRun();
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const asked = callsNamed(run, 'phase6_cards_d1_removed');
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].user, /check that the behavior of BR-LIB\.UC05-003 is gone/);
+  assert.match(asked[0].user, /verifies the behavior is gone/);
+  assert.match(callsNamed(run, 'phase6_scenarios')[0].user, /list a scenario that checks its behavior is gone/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.testCards.some((card) => card.rules.includes(RETIRED)));
+  assert.ok(!pack.coverage.some((row) => row.ruleId === RETIRED && row.status === 'Missing'));
+});
+
+test('a retired Direct Change rule a card already cites needs no further call', async () => {
+  const run = struckRun({ phase6_scenarios: (value) => ({ ...value, scenarios: [
+    { kind: 'decision', rules: [RETIRED], population: 'p0', action: 'a0', outcome: 'o' }] }) });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_cards_d1_removed').length, 0);
+});
+
+test('a scenario the inventory made for a retired rule, however it settled, adds no further scenario', async () => {
+  const run = struckRun({
+    phase6_scenarios: (value) => ({ ...value, scenarios: [
+      { kind: 'decision', rules: ['BR-LIB.UC05-001'], population: 'p0', action: 'a0', outcome: 'o' },
+      { kind: 'decision', rules: [RETIRED], population: 'p1', action: 'a1', outcome: 'o' }] }),
+    phase6_cards: (value) => titled({ ...value, cards: value.cards.filter((c) => c.scenario === 'S1'),
+      skipped: [{ scenario: 'S2', how: 'reused', reason: 'An existing test covers it.' }] }),
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_cards_d1_removed').length, 0);
+  assert.equal(phase6Pass(result.outDir).unsettled, 0);
+});
+
+test('a scenario for a retired rule that a card settled without citing it still owes a removed scenario', async () => {
+  const run = struckRun({
+    phase6_scenarios: (value) => ({ ...value, scenarios: [
+      { kind: 'decision', rules: ['BR-LIB.UC05-001', RETIRED], population: 'p0', action: 'a0', outcome: 'o' }] }),
+    // The card keeps only the live rule.
+    phase6_cards: (value) => titled({ ...value, cards: value.cards.map((c) => (c.scenario !== 'S1' ? c : { ...c,
+      rules: ['BR-LIB.UC05-001'], steps: c.steps.map((st) => ({ ...st, rules: ['BR-LIB.UC05-001'] })) })) }),
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_cards_d1_removed').length, 1);
+});
+
+test('verification reads a retired rule as removed, so a card stating the behavior is absent survives', async () => {
+  // A verifier that rejects a card citing the retired rule unless its Expected Result says it is gone.
+  const judgeRemoved = (value, calls) => {
+    const user = calls.at(-1).user;
+    const cards = {};
+    for (const [, label, body] of user.matchAll(/### (C\d+)\n([\s\S]*?)(?=\n\n### C|\n## |$)/g)) {
+      const bad = /BR-LIB\.UC05-003/.test(body) && !/Expected Result: [^\n]*(absent|gone)/.test(body);
+      cards[label] = bad ? { why: 'The rule says it happens.', verdict: 'does not follow' }
+        : { why: 'It follows.', verdict: 'follows' };
+    }
+    return { ...value, cards };
+  };
+  const run = struckRun({
+    phase6_cards: (value) => titled({ ...value, cards: value.cards.map((card) => (card.rules.includes(RETIRED)
+      ? { ...card, expected: 'The warning is absent',
+        steps: card.steps.map((step, i, all) => (i === all.length - 1
+          ? { ...step, expected: 'The warning is absent' } : step)) } : card)) }),
+    phase6_verify: judgeRemoved,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const verify = callsNamed(run, 'phase6_verify');
+  assert.ok(verify.length > 0);
+  assert.ok(verify.some((call) => /removed: the card must show this no longer happens/.test(call.user)));
+  assert.match(verify[0].user, /A rule marked removed was taken out/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.testCards.some((card) => card.rules.includes(RETIRED) && /absent/.test(card.expected)));
+});
+
+test('a retired rule no card can cover is asked for twice, then recorded as a gap and a limitation', async () => {
+  const run = struckRun({ phase6_cards: (value) => titled({ ...value,
+    cards: value.cards.filter((card) => card.scenario !== 'S3') }) });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_cards_d1_removed').length, 2);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.coverage.some((row) => row.ruleId === RETIRED && row.status === 'Missing'));
+  assert.match(pack.limitations['Coverage Matrix'], /BR-LIB\.UC05-003/);
+  assert.ok(pack.assumptions.some((a) => a.assumption.startsWith('No test card covers scenario S3:')));
+});
+
 test('check reports each input by code without a model call, and fails on a missing one', () => {
   const run = (args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'check',
     '--config', path.join(FIXTURES, 'pipeline.json'), ...args], { encoding: 'utf8' });
@@ -1252,14 +1461,14 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
       const model = fakeModel(pick);
       const result = await runJob(config, { ...job, resume: true }, { model, echo: false });
       assert.equal(result.ok, true, JSON.stringify(result));
-      // The checklist passed before the failure, so only the calls after it run again.
+      // The checklist and the confidence passed before the failure, so only the calls after them run again.
       assert.deepEqual([...new Set(model.calls.map((c) => c.schemaName))],
-        ['phase9_senior', 'phase9_confidence', 'phase9_revalidation', 'phase10_notes']);
+        ['phase9_senior', 'phase9_revalidation', 'phase10_notes']);
       const lines = statusLines(result.outDir);
       assert.ok(lines.some((l) => l.event === 'resume' && l.phase === 'phase9-senior'
-        && l.after === 'phase9-checklist'));
-      assert.deepEqual(lines.filter((l) => l.event === 'pass').map((l) => l.phase).slice(-5),
-        ['phase9-senior', 'phase9-confidence', 'phase9-revalidate', 'phase10', 'done']);
+        && l.after === 'phase9-confidence'));
+      assert.deepEqual(lines.filter((l) => l.event === 'pass').map((l) => l.phase).slice(-4),
+        ['phase9-senior', 'phase9-revalidate', 'phase10', 'done']);
       // The pack carries what the first run's phases built.
       const pack = JSON.parse(read(result.packPath));
       assert.ok(pack.testCards.length > 0);
@@ -1896,4 +2105,731 @@ test('a change token with no separator before it is still read, or counted when 
   assert.deepEqual([...result.added].sort(), ['issue-9415-change-7001', 'issue-9416-change-7002',
     'issue-9417', 'issue-9418', 'issue-9419', 'issue-9420']);
   assert.equal(result.invalid, 2);
+});
+
+// Expected Results: the check against the final step, and the per-card verification.
+// The conflicting-rule fixture: UC03-001 allows a borrow, UC03-002 blocks it, UC03-003 is a Reset,
+// and UC03-004 is a supervisor override that is an exception to the block.
+
+const [ALLOW, BLOCK, RESET, OVERRIDE] = ['BR-LIB.UC03-001', 'BR-LIB.UC03-002', 'BR-LIB.UC03-003',
+  'BR-LIB.UC03-004'];
+const REFUSED = 'The loan is refused with the message Account on hold';
+const WRONG_LOAN = 'The loan goes ahead because the card is current';
+const SAVED = 'The loan length shows the saved value';
+const WRONG_RESET = 'The loan length shows the edited value';
+const OVERRIDDEN = 'The loan is made and the supervisor reason code is recorded';
+
+const holdRun = (extra = {}) => {
+  const inputs = { ...fixtureInputs(), documentIndex: 'docs/HOLD/*.md',
+    description: 'issues-hold/ISSUE_{issue}_*.md',
+    ruleExport: ['node', 'export.mjs', '--doc', '{doc}', '--master', 'master-conflict.json'] };
+  return lib({
+    // The break pass is matched before the inventory, whose name it extends.
+    ...(extra.phase6_scenarios_d1_break
+      ? { phase6_scenarios_d1_break: extra.phase6_scenarios_d1_break } : {}),
+    intake: (value) => ({ ...value, documents: ['docs/HOLD/UC03-Loan-Holds.md'] }),
+    phase6_scenarios: (value) => ({ ...value, scenarios: [
+      { kind: 'decision', rules: [ALLOW, BLOCK], population: 'a patron with a current card and a hold',
+        action: 'borrow an item', outcome: 'refused' },
+      { kind: 'decision', rules: [RESET], population: 'a patron editing the loan length',
+        action: 'edit, then press Reset', outcome: 'saved value' },
+      { kind: 'break', rules: [BLOCK], population: 'a patron with a hold', action: 'borrow again and again',
+        outcome: 'refused' },
+      { kind: 'decision', rules: [BLOCK, OVERRIDE], population: 'a patron with a hold and a supervisor',
+        action: 'borrow with an override', outcome: 'allowed once' }] }),
+    // No card is added to an objective after the cards are written.
+    phase6_objective: (value) => ({ ...value, cards: [] }),
+    ...extra }, { inputs });
+};
+const runHold = (run, job = {}) => runJob(run.config, { issue: '502', change: '7002', ...job },
+  { model: run.model, echo: false });
+
+/** The card for a scenario; `wrong` names the scenarios whose Expected Result is the wrong one. */
+const holdCard = (scenario, wrong = []) => {
+  // Only the Reset card names Workflow Validation.
+  const [rules, right, bad, objectives] = {
+    S1: [[ALLOW, BLOCK], REFUSED, WRONG_LOAN, ['Core Change Validation', 'Negative / Exclusion']],
+    S2: [[RESET], SAVED, WRONG_RESET, ['Core Change Validation', 'Workflow Validation']],
+    S3: [[BLOCK], REFUSED, WRONG_LOAN, ['Core Change Validation', 'Negative / Exclusion']],
+    S4: [[BLOCK, OVERRIDE], OVERRIDDEN, REFUSED, ['Core Change Validation', 'Negative / Exclusion']],
+  }[scenario];
+  const expected = wrong.includes(scenario) ? bad : right;
+  return { title: `Hold ${scenario}`, scenario, mission: 'mission', focus: ['focus'], expected, rules,
+    objectives, derivation: 'Requirement',
+    steps: [{ description: 'Act', expected, rules }] };
+};
+const holdCards = (wrong = []) => (value) => ({ ...value,
+  cards: value.cards.map((card) => holdCard(card.scenario, wrong)) });
+
+/** A verification reply that rejects any card whose text carries a wrong Expected Result. */
+const judge = (value, calls) => {
+  const cards = {};
+  for (const [, label, body] of calls.at(-1).user.matchAll(/### (C\d+)\n([\s\S]*?)(?=\n\n### C|\n## |$)/g)) {
+    const noException = /supervisor reason code/.test(body)
+      && !/unless a cited rule says it is an exception/.test(calls.at(-1).user);
+    const bad = noException || /because the card is current|edited value/.test(body);
+    cards[label] = bad ? { why: noException ? 'The block wins.' : /current/.test(body)
+      ? 'The hold blocks the loan, and a block outranks the allowance for a current card.'
+      : 'Reset restores the saved value.', verdict: 'does not follow' }
+      : { why: 'It follows.', verdict: 'follows' };
+  }
+  return { ...value, cards };
+};
+const callsNamed = (run, prefix) => run.model.calls.filter((c) => c.schemaName.startsWith(prefix));
+
+/**
+ * A run whose Phase 8 sees a card the design passes accepted but whose final step then
+ * disagrees: the first run stops before Phase 7, its saved cards are changed, and the
+ * job resumes into the builder.
+ */
+async function resumedWithMismatch(repair, answers = {}) {
+  const first = holdRun({ phase6_cards: holdCards(), phase6_verify: judge,
+    phase7_sets: () => { throw new Error('stop'); } });
+  const stopped = await runHold(first);
+  assert.equal(stopped.ok, false);
+  const file = path.join(stopped.outDir, 'work', 'checkpoint.json');
+  const saved = JSON.parse(read(file));
+  const [designed] = Object.values(saved.state.designed);
+  designed.cards.find((card) => card.scenario === 'S1').steps.at(-1).expected = 'The page shows nothing';
+  fs.writeFileSync(file, JSON.stringify(saved));
+  const second = { config: first.config, model: fakeModel({ ...INTAKE, phase8_repair: repair, ...answers }) };
+  return { second, result: await runHold(second, { resume: true }) };
+}
+
+test('a card that agrees with its rules and its last step passes untouched, after one verification call', async () => {
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.repairs, 0);
+  const verify = callsNamed(run, 'phase6_verify');
+  assert.equal(verify.length, 1);
+  // Never an empty enum: one row per card in the call, two verdicts.
+  const rows = verify[0].schema.properties.cards;
+  assert.deepEqual(rows.required, ['C1', 'C2', 'C3', 'C4']);
+  assert.deepEqual(rows.properties.C1.properties.verdict.enum, ['follows', 'does not follow']);
+  // The call carries the card, the rules it cites and their wording, and says which rule wins.
+  assert.match(verify[0].user, /Expected Result: The loan is refused with the message Account on hold/);
+  assert.match(verify[0].user, /BR-LIB\.UC03-001 \|[^\n]*may borrow up to five items/);
+  assert.match(verify[0].user, /BR-LIB\.UC03-002 \|[^\n]*blocks every new loan/);
+  assert.match(verify[0].user, /blocks an action outranks one that allows it/);
+  assert.match(verify[0].user, /Reset restores the saved value/);
+  assert.equal(callsNamed(run, 'phase6_redo').length, 0);
+  assert.equal(callsNamed(run, 'phase6_reverify').length, 0);
+  const pass = phase6Pass(result.outDir);
+  assert.equal(pass.redesigned, 0);
+  assert.equal(pass.removed, 0);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testCards.map((c) => c.expected).sort(), [OVERRIDDEN, REFUSED, REFUSED, SAVED]);
+});
+
+test('the prompt makes the precedence a default, and the override card passes only with the exception clause', async () => {
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const verify = callsNamed(run, 'phase6_verify')[0];
+  assert.match(verify.user, /unless a cited rule says it is an exception to the block or overrides it/);
+  assert.match(verify.user, /BR-LIB\.UC03-004 \|[^\n]*override allows one loan despite a hold/);
+  assert.match(verify.user, /Expected Result: The loan is made and the supervisor reason code is recorded/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.testCards.some((c) => c.expected === OVERRIDDEN && c.rules.includes(OVERRIDE)));
+  assert.equal(phase6Pass(result.outDir).redesigned, 0);
+});
+
+test('a card whose Expected Result follows the allowance is redesigned once, told why, and kept when it now follows', async () => {
+  const run = holdRun({ phase6_cards: holdCards(['S1']), phase6_verify: judge,
+    phase6_redo: holdCards(), phase6_reverify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const redo = callsNamed(run, 'phase6_redo');
+  assert.equal(redo.length, 1);
+  assert.deepEqual(redo[0].schema.properties.cards.items.properties.scenario.enum, ['S1']);
+  assert.match(redo[0].user, /a block outranks the allowance for a current card/);
+  assert.match(redo[0].user, /The loan goes ahead because the card is current/);
+  assert.equal(callsNamed(run, 'phase6_reverify').length, 1);
+  const pass = phase6Pass(result.outDir);
+  assert.equal(pass.redesigned, 1);
+  assert.equal(pass.removed, 0);
+  const pack = JSON.parse(read(result.packPath));
+  const card = pack.testCards.find((c) => c.title === 'Hold S1');
+  assert.equal(card.expected, REFUSED);
+  assert.equal(card.steps.at(-1).expected, REFUSED);
+  assert.equal(pack.testCards.length, 4);
+  assert.ok(!pack.coverage.some((row) => row.status === 'Missing'));
+});
+
+test('a card that fails twice is removed, its rule reads Missing with the reason, and no set or objective points at it', async () => {
+  const run = holdRun({ phase6_cards: holdCards(['S2']), phase6_verify: judge,
+    phase6_redo: holdCards(['S2']), phase6_reverify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pass = phase6Pass(result.outDir);
+  assert.equal(pass.redesigned, 1);
+  assert.equal(pass.removed, 1);
+  assert.equal(callsNamed(run, 'phase6_redo').length, 1);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testCards.map((c) => c.title).sort(), ['Hold S1', 'Hold S3', 'Hold S4']);
+  const row = pack.coverage.find((r) => r.ruleId === RESET);
+  assert.equal(row.status, 'Missing');
+  assert.match(row.gap, /was removed: Reset restores the saved value/);
+  assert.ok(pack.assumptions.some((a) => /Hold S2.*scenario S2/.test(a.assumption)
+    && /Reset restores the saved value/.test(a.why)));
+  // The rules the other cards cover keep their cards and get no Missing row.
+  assert.ok(!pack.coverage.some((r) => [ALLOW, BLOCK].includes(r.ruleId) && r.status === 'Missing'));
+  // Only the removed card named Workflow Validation: the objective is off and no set holds it.
+  const workflow = pack.objectives.find((r) => r.objective === 'Workflow Validation');
+  assert.equal(workflow.applicable, false);
+  const ids = new Set(pack.testCards.map((c) => c.id));
+  assert.ok(pack.testSets.every((set) => set.cards.every((id) => ids.has(id))));
+  assert.ok(!pack.testSets.some((set) => set.objective === 'Workflow Validation'));
+});
+
+test('a redesign that comes back with no card removes the card the same way', async () => {
+  const run = holdRun({ phase6_cards: holdCards(['S1']), phase6_verify: judge,
+    phase6_redo: (value) => ({ ...value, cards: [] }) });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_reverify').length, 0);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testCards.map((c) => c.title).sort(), ['Hold S2', 'Hold S3', 'Hold S4']);
+  assert.equal(pack.coverage.find((r) => r.ruleId === ALLOW).status, 'Missing');
+});
+
+test('a skip the redesign answers with settles the scenario and gives the rule its reason', async () => {
+  const run = holdRun({ phase6_cards: holdCards(['S2']), phase6_verify: judge,
+    phase6_redo: (value) => ({ ...value, cards: [],
+      skipped: [{ scenario: 'S2', how: 'gap', reason: 'The page keeps no saved value to restore.' }] }) });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  const row = pack.coverage.find((r) => r.ruleId === RESET);
+  assert.equal(row.status, 'Missing');
+  assert.match(row.gap, /No card can cover this rule: The page keeps no saved value to restore\./);
+  assert.ok(pack.assumptions.some((a) => /Hold S2/.test(a.assumption)
+    && /keeps no saved value/.test(a.why)));
+});
+
+test('a skip with a blank reason falls back to the verifier\'s reason', async () => {
+  const run = holdRun({ phase6_cards: holdCards(['S2']), phase6_verify: judge,
+    phase6_redo: (value) => ({ ...value, cards: [],
+      skipped: [{ scenario: 'S2', how: 'gap', reason: ' ' }] }) });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.match(pack.coverage.find((r) => r.ruleId === RESET).gap, /No card can cover this rule: Reset restores the saved value\./);
+});
+
+test('a wrong card from the BREAK IT pass is checked too, and BREAK IT is dropped when it ends up empty', async () => {
+  const run = holdRun({
+    phase6_scenarios: (value) => ({ ...value, scenarios: [
+      { kind: 'decision', rules: [ALLOW, BLOCK], population: 'a patron with a current card and a hold',
+        action: 'borrow an item', outcome: 'refused' },
+      { kind: 'decision', rules: [RESET], population: 'a patron editing the loan length',
+        action: 'edit, then press Reset', outcome: 'saved value' }] }),
+    phase6_scenarios_d1_break: (value) => ({ ...value, scenarios: [
+      { kind: 'break', rules: [BLOCK], population: 'a patron with a hold', action: 'borrow again and again',
+        outcome: 'refused' }] }),
+    phase6_cards: holdCards(['S3']), phase6_verify: judge,
+    phase6_redo: holdCards(['S3']), phase6_reverify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // The break pass's calls carry their own step names.
+  const names = run.model.calls.map((c) => c.schemaName);
+  assert.ok(names.includes('phase6_verify_d1_1'));
+  assert.ok(names.includes('phase6_verify_d1_break_1'));
+  assert.ok(names.includes('phase6_reverify_d1_break_1'));
+  const pass = phase6Pass(result.outDir);
+  assert.equal(pass.redesigned, 1);
+  assert.equal(pass.removed, 1);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testCards.map((c) => c.title).sort(), ['Hold S1', 'Hold S2']);
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  assert.ok(!pack.testSets.some((set) => set.objective === 'BREAK IT'));
+});
+
+test('a card too big for one verification call is retried with summaries only', async () => {
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
+  // The master's full description of the block rule is what makes a call too big.
+  const count = run.model.countTokens;
+  run.model.countTokens = async (text) => (text.includes('Staff clear the hold to lift') ? 1e9 : count(text));
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const names = run.model.calls.map((c) => c.schemaName);
+  assert.ok(names.some((name) => /^phase6_verify_d1_1s\d+short$/.test(name)));
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.testCards.length, 4);
+  assert.ok(!pack.assumptions.some((a) => /was not checked against its rules/.test(a.assumption)));
+});
+
+test('a card too big even with summaries only is kept, with an assumption that it was not verified', async () => {
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
+  const count = run.model.countTokens;
+  run.model.countTokens = async (text) => (text.includes('### C') ? 1e9 : count(text));
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.testCards.length, 4);
+  assert.ok(pack.assumptions.some((a) => /was not checked against its rules/.test(a.assumption)));
+  assert.equal(phase6Pass(result.outDir).removed, 0);
+});
+
+test('a card whose final step only words the result differently is kept and its step aligned, not redone', async () => {
+  const wordier = (value) => ({ ...value, cards: value.cards.map((card) => {
+    const made = holdCard(card.scenario);
+    return card.scenario === 'S1' ? { ...made, steps: [{ ...made.steps[0],
+      expected: `${REFUSED} and no loan record is created` }] } : made;
+  }) });
+  const run = holdRun({ phase6_cards: wordier, phase6_verify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.repairs, 0);
+  // The card goes to the verification call like any other, and nothing is redone.
+  assert.match(callsNamed(run, 'phase6_verify')[0].user, /and no loan record is created/);
+  assert.equal(callsNamed(run, 'phase6_redo').length, 0);
+  const pass = phase6Pass(result.outDir);
+  assert.equal(pass.redesigned, 0);
+  assert.equal(pass.removed, 0);
+  const pack = JSON.parse(read(result.packPath));
+  const card = pack.testCards.find((c) => c.title === 'Hold S1');
+  assert.equal(card.expected, REFUSED);
+  assert.equal(card.steps.at(-1).expected, REFUSED);
+});
+
+test('a card that does not follow is redone whether or not its final step agrees', async () => {
+  const both = (value) => ({ ...value, cards: value.cards.map((card) => {
+    const made = holdCard(card.scenario, ['S1']);
+    return card.scenario === 'S1' ? { ...made, steps: [{ ...made.steps[0], expected: 'The page shows nothing' }] }
+      : made;
+  }) });
+  const run = holdRun({ phase6_cards: both, phase6_verify: judge, phase6_redo: holdCards(),
+    phase6_reverify: judge });
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_redo').length, 1);
+  assert.equal(phase6Pass(result.outDir).redesigned, 1);
+});
+
+test('a batch too big for one call is split, with one counts-only status line', async () => {
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
+  const count = run.model.countTokens;
+  let first = true;
+  run.model.countTokens = async (text) => {
+    if (first && text.includes('### C4')) {
+      first = false;
+      return 1e9;
+    }
+    return count(text);
+  };
+  const result = await runHold(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const split = statusLines(result.outDir).filter((l) => l.event === 'split');
+  assert.equal(split.length, 1);
+  assert.equal(split[0].cards, 4);
+  assert.ok(callsNamed(run, 'phase6_verify').length >= 4);
+});
+
+test('an Expected Result that disagrees with its last step reaches repair, which is told to keep the card side', async () => {
+  const { second, result } = await resumedWithMismatch((value) => ({ ...value, coverage: [], limitations: [],
+    cards: value.cards.map((card) => ({ ...card, expected: REFUSED,
+      steps: [{ description: 'Act', expected: REFUSED, rules: card.rules }] })) }));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.repairs, 1);
+  const repair = callsNamed(second, 'phase8_repair')[0];
+  assert.match(repair.user, /Test Card Expected Results:\nTC-\S+ Expected Result "The loan is refused with the message Account on hold" does not agree with its final step's "The page shows nothing"\. Keep the card's Expected Result/);
+  assert.match(repair.user, /change that step's expected result to say the same/);
+  assert.equal(repair.schema.properties.cards.maxItems, 1);
+  assert.deepEqual(expectedProblems(JSON.parse(read(result.packPath))), []);
+});
+
+test('a repair that changes an Expected Result is checked again, and undone when it no longer follows', async () => {
+  const { second, result } = await resumedWithMismatch((value) => ({ ...value, coverage: [], limitations: [],
+    cards: value.cards.map((card) => ({ ...card, expected: WRONG_LOAN,
+      steps: [{ description: 'Act', expected: WRONG_LOAN, rules: card.rules }] })) }),
+  { phase6_recheck: judge });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.repairs, 1);
+  assert.equal(callsNamed(second, 'phase6_recheck').length, 1);
+  const pack = JSON.parse(read(result.packPath));
+  const card = pack.testCards.find((c) => c.expected === REFUSED && c.steps.at(-1).expected === REFUSED
+    && pack.assumptions.some((x) => x.assumption.includes(c.id)));
+  assert.equal(card.expected, REFUSED);
+  assert.equal(card.steps.at(-1).expected, REFUSED);
+  assert.equal(pack.testCards.length, 4);
+  assert.ok(pack.assumptions.some((a) => /repair of card TC-\S+ changed its Expected Result/.test(a.assumption)));
+});
+
+test('an unfixable mismatch stops the run at the builder gate', async () => {
+  const { result } = await resumedWithMismatch((value) => ({ ...value, coverage: [], limitations: [],
+    cards: value.cards.map((card) => ({ ...card, expected: 'Unchanged' })) }));
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:builder-fail');
+});
+
+test('results agree when equal or when one holds the other, after case and punctuation are set aside', () => {
+  const card = (expected, last) => ({ expected, steps: [{ expected: 'first' }, { expected: last }] });
+  assert.equal(resultsAgree(card('The loan is refused.', 'the loan is REFUSED')), true);
+  assert.equal(resultsAgree(card('The loan is refused', 'The loan is refused with Account on hold')), true);
+  assert.equal(resultsAgree(card('The loan is refused with Account on hold', 'The loan is refused')), true);
+  // Only the last step counts.
+  assert.equal(resultsAgree(card('first', 'The loan is refused')), false);
+  // Whole words only: "no" is not inside "know".
+  assert.equal(resultsAgree(card('no', 'I know')), false);
+  assert.equal(resultsAgree(card('The loan goes ahead', 'The loan is refused')), false);
+  assert.equal(resultsAgree(card('', 'The loan is refused')), false);
+  assert.equal(resultsAgree(card('The loan is refused', ' ')), false);
+  assert.equal(resultsAgree({ expected: 'anything', steps: [] }), true);
+});
+
+test('a containment that adds a negation or a condition is a mismatch', () => {
+  const card = (expected, last) => ({ expected, steps: [{ expected: last }] });
+  assert.equal(resultsAgree(card('Saved', 'Not saved')), false);
+  assert.equal(resultsAgree(card('Error message is shown', 'No error message is shown')), false);
+  assert.equal(resultsAgree(card('The loan is allowed', 'The loan is allowed only when no hold exists')), false);
+  assert.equal(resultsAgree(card('The loan is allowed', 'The loan is allowed unless a hold exists')), false);
+  assert.equal(resultsAgree(card('The loan is allowed', "The loan isn't allowed")), false);
+  assert.equal(resultsAgree(card('The loan is allowed', 'The loan is allowed until the hold is set')), false);
+  assert.equal(resultsAgree(card('The loan is refused', 'The loan is refused except for staff')), false);
+  assert.equal(resultsAgree(card('The loan is allowed', "The loan is allowed and can't be undone")), false);
+  assert.equal(resultsAgree(card("The loan isn't allowed", "The loan isn't allowed with a message")), true);
+  // The same negation on both sides is not extra.
+  assert.equal(resultsAgree(card('The loan is not allowed', 'The loan is not allowed with a message')), true);
+  assert.equal(resultsAgree(card('The loan is refused', 'The loan is refused with the message Account on hold')), true);
+});
+
+// ---- Phase 9: the review reads the built workbook, fixes what it finds, and revalidates ----
+
+const DOCS = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
+const cardIdIn = (text) => /TC-[A-Z0-9]+-501-\d{3}/.exec(text)[0];
+const checksFor = (model, name) => model.calls.filter((c) => c.schemaName.startsWith(name));
+
+/** A checklist that flags the first card's step for as long as the dump shows it unfixed. */
+const plantedChecklist = () => {
+  let planted = null;
+  return (value, calls) => {
+    const { user } = calls.at(-1);
+    planted ??= cardIdIn(user);
+    return { ...value, issues: new RegExp(`Test Name: ${planted} [^\\n]*Description: description value`).test(user)
+      ? [{ issue: `${planted} has a step that reads wrong`,
+        fix: `Change step 1 of ${planted} to read Corrected step` }] : [] };
+  };
+};
+const correctingRepair = (value) => ({ ...value, coverage: [], limitations: [],
+  cards: value.cards.map((card) => ({ ...card,
+    steps: card.steps.map((step, i) => (i ? step : { ...step, description: 'Corrected step' })) })) });
+const failsRevalidation = { phase9_revalidation: (value) => ({ ...value, passed: false,
+  remaining: ['Step 1 still reads wrong'] }) };
+
+test('the review reads the built workbook, applies a fix through repair, and rereads the rebuilt one', async () => {
+  const config = fixtureConfig();
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [first, again] = checksFor(model, 'phase9_checklist');
+  // The review input is the built workbook's rows: card Expected Results and ALM steps.
+  assert.match(first.user, /\[Test Cards Markdown row \d+\] Test Case ID: TC-\S+ \| Test Case Title: .*Expected Result: expected value/);
+  assert.match(first.user, /\[ALM Upload row \d+\] Test Name: TC-\S+ .*Description: description value \| Expected Result: /);
+  assert.match(first.user, /\[Impact Analysis row \d+\] Rule ID: BR-LIB\.UC01-001/);
+  assert.match(first.user, /\[Coverage Matrix row/);
+  // The fix went through repair, and the next read is of the rebuilt workbook.
+  assert.equal(checksFor(model, 'phase8_repair').length, 1);
+  assert.match(checksFor(model, 'phase8_repair')[0].user, /Quality Review:\n- TC-\S+ has a step that reads wrong/);
+  assert.match(again.user, /Description: Corrected step/);
+  assert.ok(again.user.split('description value').length < first.user.split('description value').length);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.testCards.some((c) => c.steps[0].description === 'Corrected step'));
+  assert.equal(pack.revalidation, undefined);
+  // Revalidation reads the rebuilt workbook and the fixes applied.
+  const [revalidation] = checksFor(model, 'phase9_revalidation');
+  assert.match(revalidation.user, /Fixes the review attempted/);
+  assert.match(revalidation.user, /Description: Corrected step/);
+  const validation = readPack(result.workbook).sheet('Workbook Validation');
+  assert.ok(validation.rows.every((row) => row.cells.Status !== 'FAIL'));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a finding repair cannot fix gets two rounds, then revalidation fails: Workbook Validation FAIL and a stop code', async () => {
+  const config = fixtureConfig();
+  const unfixed = (value) => ({ ...value, coverage: [], limitations: [] });
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: unfixed,
+    ...failsRevalidation });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:revalidation-failed');
+  assert.equal(result.phase, 'phase9-revalidate');
+  // Two fix rounds at most, each followed by a read of the rebuilt workbook.
+  assert.equal(checksFor(model, 'phase8_repair').length, 2);
+  assert.equal(checksFor(model, 'phase9_checklist').length, 3);
+  // The workbook is kept so the reviewer can see what remains, with the FAIL shown, never PASS.
+  assert.ok(result.workbook && fs.existsSync(result.workbook));
+  const rows = readPack(result.workbook).sheet('Workbook Validation').rows;
+  const row = rows.find((r) => r.cells.Sheet === 'Workbook Validation');
+  assert.equal(row.cells.Status, 'FAIL');
+  assert.match(row.cells.Notes, /Step 1 still reads wrong/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.revalidation.passed, false);
+  const lines = statusLines(result.outDir);
+  assert.equal(lines.findLast((l) => l.event === 'fail').reason, 'gate:revalidation-failed');
+  assert.ok(!lines.some((l) => l.phase === 'done'));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a builder that does not show the FAIL leaves no workbook that reads PASS', async () => {
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
+    command: ['node', 'builder-lax.mjs', '{pack}', '--out', '{out}'] } });
+  const result = await runJob(config, { issue: '501', change: '7001' },
+    { model: fakeModel({ ...DOCS, ...failsRevalidation }), echo: false });
+  assert.equal(result.reason, 'gate:revalidation-failed');
+  assert.equal(result.workbook, null);
+  assert.ok(!fs.readdirSync(result.outDir).some((name) => name.endsWith('.xlsx')));
+});
+
+test('the morning report lists a revalidation-failed job as failing', () => {
+  const at = new Date().toISOString();
+  const queue = { jobs: [{ id: 'issue-9', status: 'queued', finished: null, ms: 5, phase: 'phase9-revalidate',
+    reason: 'gate:revalidation-failed', workbook: '/out/w.xlsx',
+    failures: [{ at, phase: 'phase9-revalidate', reason: 'gate:revalidation-failed', ms: 5 }] }] };
+  const data = reportData(fixtureConfig(), queue, { now: new Date(Date.now() + 1000) });
+  assert.equal(data.failing.length, 1);
+  assert.deepEqual(data.failing[0].reasons, ['gate:revalidation-failed']);
+});
+
+test('with no Requirements Matrix export the checklist runs OPS-009 limited and the pack says so', async () => {
+  const derivedModel = fakeModel({ intake: (value) => ({ ...value, documents: ['docs/OTHER/UC09-Unmapped.md'] }) });
+  const derived = await runJob(fixtureConfig(), { issue: '501', change: '7001', allowDerivedRules: true },
+    { model: derivedModel, echo: false });
+  assert.equal(derived.ok, true, JSON.stringify(derived));
+  assert.match(checksFor(derivedModel, 'phase9_checklist')[0].user, /OPS-009 as limited/);
+  const pack = JSON.parse(read(derived.packPath));
+  assert.ok(pack.assumptions.some((a) => /OPS-009 ran limited for the rules of/.test(a.assumption)));
+
+  const exported = fakeModel(DOCS);
+  const ok = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model: exported, echo: false });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.doesNotMatch(checksFor(exported, 'phase9_checklist')[0].user, /OPS-009/);
+  assert.ok(!JSON.parse(read(ok.packPath)).assumptions.some((a) => /OPS-009/.test(a.assumption)));
+});
+
+test('a workbook too long for one review call is read in parts, and a failing part fails revalidation', async () => {
+  const config = fixtureConfig();
+  // The room shrinks once the cards are built, so only the review's reads are split.
+  const shrink = (value) => {
+    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500 });
+    return value;
+  };
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
+  const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink, phase9_revalidation: (value, calls) => ({ ...value,
+    remaining: [], passed: calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length !== 2 }) });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const parts = checksFor(model, 'phase9_checklist');
+  assert.ok(parts.length > 1, `${parts.length} checklist calls: ${JSON.stringify(result)}`);
+  assert.match(parts[0].user, /Built workbook, part 1 of \d+/);
+  assert.equal(result.reason, 'gate:revalidation-failed');
+});
+
+test('a placeholder fix, or one naming no card or rule, is not handed to repair', async () => {
+  const flag = (fix) => () => ({ issues: [{ issue: 'The coverage reads thin', fix }], coverage: [], assumptions: [] });
+  for (const fix of ['N/A', 'None needed', 'Review the pack again', 'Strengthen the coverage of BR-LIB.UC01-001']) {
+    const model = fakeModel({ ...DOCS, phase9_checklist: flag(fix) });
+    const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(checksFor(model, 'phase8_repair').length, 0, fix);
+    assert.equal(checksFor(model, 'phase9_checklist').length, 1, fix);
+  }
+});
+
+test('a fix round leaves the pack\'s coverage rows and limitations as they were', async () => {
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(),
+    phase8_repair: (value) => ({ ...correctingRepair(value),
+      coverage: [{ ruleId: 'BR-LIB.UC01-001', status: 'Missing', strength: 'Weak', gap: 'x', recommendation: 'y' }],
+      limitations: [{ sheet: 'Coverage Matrix', text: 'A repair limitation.' }] }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(!pack.coverage.some((row) => row.ruleId === 'BR-LIB.UC01-001' && row.status === 'Missing'));
+  assert.ok(!Object.values(pack.limitations ?? {}).includes('A repair limitation.'));
+});
+
+test('a draft the builder writes no workbook for leaves the review the pack summary, and says so', async () => {
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
+    command: ['node', '-e', '0'] } });
+  const model = fakeModel(DOCS);
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.doesNotMatch(checksFor(model, 'phase9_checklist')[0].user, /\[ALM Upload row/);
+  assert.ok(statusLines(result.outDir).some((l) => l.phase === 'phase9' && l.event === 'warn'
+    && l.reason === 'review-workbook-missing'));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('every part of a split workbook opens with the rules index, and a job missing rules says which documents', async () => {
+  const config = fixtureConfig();
+  const shrink = (value) => {
+    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500 });
+    return value;
+  };
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
+  const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink });
+  await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const parts = checksFor(model, 'phase9_checklist');
+  assert.ok(parts.length > 1);
+  for (const part of parts) assert.match(part.user, /Rules in this part and the cards that cite them[\s\S]*BR-LIB\.UC01-001 \| [^|]+ \| cards: /);
+  const mixed = fakeModel({ intake: (value) => ({ ...value,
+    documents: ['docs/LIB/UC01-Card-Renewal.md', 'docs/OTHER/UC09-Unmapped.md'] }) });
+  await runJob(fixtureConfig(), { issue: '501', change: '7001', allowDerivedRules: true }, { model: mixed, echo: false });
+  assert.match(checksFor(mixed, 'phase9_checklist')[0].user, /rule export held no rules for [^.]*UC09/);
+});
+
+test('a job whose revalidation failed is not retried by the queue', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '300', now: true });
+  let runs = 0;
+  const run = async () => {
+    runs += 1;
+    return { ok: false, id: 'issue-300', phase: 'phase9-revalidate', reason: 'gate:revalidation-failed',
+      ms: 1, workbook: '/out/w.xlsx' };
+  };
+  const t = new Date('2026-10-28T14:00:00');
+  await drainQueue(config, { nowOnly: true, run, clock: () => t });
+  const [row] = readQueue(config).jobs;
+  assert.equal(runs, 1);
+  assert.equal(row.status, 'failed');
+  assert.equal(row.workbook, '/out/w.xlsx');
+});
+
+test('Phase 4 rates the impacted rules from the impact analysis and raises a Direct Change rule below High', async () => {
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL,
+    phase3: (value) => {
+      value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
+      value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
+      value.rules['BR-LIB.UC01-002'] = { ...value.rules['BR-LIB.UC01-002'], impact: 'Indirect Impact' };
+      return value;
+    },
+    phase4_risk: (value) => {
+      for (const id of Object.keys(value.rules)) value.rules[id] = { ...value.rules[id], risk: 'Medium' };
+      return value;
+    } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  const risk = (id) => pack.rules.find((rule) => rule.id === id).risk;
+  // The Direct Change rule is raised to High; the Indirect one keeps what the analysis gave.
+  assert.equal(risk('BR-LIB.UC01-001'), 'High');
+  assert.equal(risk('BR-LIB.UC01-002'), 'Medium');
+  assert.match(read(path.join(result.outDir, 'detail.log')),
+    /phase4 raised risk[\s\S]*BR-LIB\.UC01-001: Medium to High/);
+  // The rating call sees the impact and the master's risk, beside the impact analysis.
+  const rating = model.calls.find((call) => call.schemaName.startsWith('phase4_risk'));
+  assert.match(rating.user, /BR-LIB\.UC01-001 .*\| Direct Change \| master risk: \w+/);
+  assert.match(rating.user, /Impact analysis/);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('Phase 4 rates only the impacted rules when every rule carries a master risk', async () => {
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL,
+    phase3: (value) => {
+      for (const id of Object.keys(value.rules)) value.rules[id] = { ...value.rules[id], impact: 'Not Impacted' };
+      value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
+      return value;
+    } });
+  // The pack with one impacted rule stops at the builder, after Phase 4 has rated its rules.
+  await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  const rated = model.calls.filter((call) => call.schemaName.startsWith('phase4_risk'))
+    .flatMap((call) => Object.keys(call.schema.properties.rules.properties));
+  assert.deepEqual(rated, ['BR-LIB.UC01-001']);
+});
+
+test('a suite pack keeps the approved risks and rates no rule that has one', async () => {
+  const model = fakeModel();
+  const result = await runJob(fixtureConfig(), { suite: 'LIB' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const rated = model.calls.filter((call) => call.schemaName.startsWith('phase4_risk'));
+  assert.equal(rated.length, 0);
+  assert.doesNotMatch(read(path.join(result.outDir, 'detail.log')), /phase4 raised risk/);
+});
+
+test('the Phase 4 rating call carries the executive summary its batches are budgeted for', async () => {
+  const config = fixtureConfig();
+  const long = { phase4_impact: (value) => ({ ...value,
+    executiveSummary: { ...value.executiveSummary, summary: 'Long summary. '.repeat(900) } }),
+  phase3: (value) => {
+    value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
+    value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
+    return value;
+  } };
+  const model = fakeModel({ ...INTAKE, ...long });
+  await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const rating = model.calls.find((call) => call.schemaName.startsWith('phase4_risk'));
+  assert.ok(rating, 'Phase 4 made no rating call');
+  assert.match(rating.user, /Long summary\./);
+});
+
+// ---- Phase 9: the confidence assessment field by field, and the senior review last ----
+
+test('each Confidence Assessment field is written on its own from the finished workbook, before the senior review', async () => {
+  const model = fakeModel(DOCS);
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const names = [...new Set(model.calls.map((call) => call.schemaName))]
+    .filter((name) => /^phase9_(confidence|senior)/.test(name));
+  assert.deepEqual(names, ['phase9_confidence_overall', 'phase9_confidence_coverage',
+    'phase9_confidence_remainingRisks', 'phase9_confidence_assumptions',
+    'phase9_confidence_regressionScope', 'phase9_confidence_breakItScope',
+    'phase9_confidence_manualReview', 'phase9_senior']);
+  // A field call asks for that field alone and sees the fields already written.
+  const second = model.calls.find((call) => call.schemaName === 'phase9_confidence_remainingRisks');
+  assert.deepEqual(Object.keys(second.schema.properties), ['remainingRisks']);
+  assert.match(second.user, /Fields already written[\s\S]*Confidence Assessment coverage: coverage value/);
+  // The review of the finished workbook: card rows from the built workbook are in view.
+  assert.match(second.user, /\[Test Cards Markdown row \d+\]/);
+  // The senior review comes last and sees the confidence assessment.
+  const senior = model.calls.find((call) => call.schemaName === 'phase9_senior');
+  assert.match(senior.user, /Confidence assessment[\s\S]*"coverage":"coverage value"/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.confidence.manualReview, 'manualReview value');
+  assert.equal(pack.confidence.overall, 'High');
+});
+
+test('a field that repeats another is asked for again with what was wrong', async () => {
+  const long = 'Every rule is covered by at least one card in this workbook.';
+  const model = fakeModel({ ...DOCS,
+    'phase9_confidence_coverage': () => ({ coverage: long }),
+    'phase9_confidence_remainingRisks': (value, calls) => {
+      const tries = calls.filter((call) => call.schemaName === 'phase9_confidence_remainingRisks').length;
+      return tries === 1 ? { remainingRisks: long } : value;
+    } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const asks = model.calls.filter((call) => call.schemaName === 'phase9_confidence_remainingRisks');
+  assert.equal(asks.length, 2);
+  assert.match(asks[1].user, /refused: it repeats the text of Confidence Assessment coverage/);
+  assert.equal(JSON.parse(read(result.packPath)).confidence.remainingRisks, 'remainingRisks value');
+});
+
+test('a field that cites a card the workbook lacks is refused, and a second refusal stops the job', async () => {
+  const cited = (value) => ({ ...value, coverage: 'Card TC-MOD-501-999 covers it.' });
+  const once = fakeModel({ ...DOCS, 'phase9_confidence_coverage': (value, calls) =>
+    (calls.filter((call) => call.schemaName === 'phase9_confidence_coverage').length === 1 ? cited(value) : value) });
+  const fixed = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model: once, echo: false });
+  assert.equal(fixed.ok, true, JSON.stringify(fixed));
+  const asks = once.calls.filter((call) => call.schemaName === 'phase9_confidence_coverage');
+  assert.match(asks[1].user, /refused: it cites TC-MOD-501-999, which the workbook does not hold/);
+
+  const always = fakeModel({ ...DOCS, 'phase9_confidence_coverage': cited });
+  const stopped = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model: always, echo: false });
+  assert.equal(stopped.ok, false);
+  assert.equal(stopped.reason, 'gate:review-field-unsupported');
+  assert.equal(stopped.phase, 'phase9-confidence');
+  assertContentFree(read(path.join(stopped.outDir, 'status.log')));
+});
+
+test('a senior review answer with a repeated or unsupported field is asked for again', async () => {
+  const model = fakeModel({ ...DOCS, phase9_senior: (value, calls) => {
+    const tries = calls.filter((call) => call.schemaName === 'phase9_senior').length;
+    return tries === 1
+      ? { ...value, seniorReview: { ...value.seniorReview, missed: 'See BR-LIB.UC01-099.' } } : value;
+  } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const asks = model.calls.filter((call) => call.schemaName === 'phase9_senior');
+  assert.equal(asks.length, 2);
+  assert.match(asks[1].user, /Senior Tester Review missed: it cites BR-LIB\.UC01-099/);
+  assert.equal(JSON.parse(read(result.packPath)).seniorReview.missed, 'missed value');
 });

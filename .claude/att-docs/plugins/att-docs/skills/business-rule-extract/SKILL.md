@@ -153,17 +153,12 @@ retired row. A
 span that only corrects wording, or that the live text repeats unchanged, is not a
 retired rule.
 
-The rule store sets a rule retired only when an approved row classifies as
-retired, and a first extraction stages only `new` rows. So a struck-through row
-staged here, which is classified `new`, still lands in the master as active until
-the store honors the "Retired:" marker. Until the store does, name every such row
-under `manual_review_items`. After approval, and before anyone uploads a workbook,
-the reviewer sets each one's `status` to `retired` with a direct update of
-`<master-table>`. `<review-commands>` has no action for it, and the update does
-not record the batch that changed the row. The reviewer then exports the document
-again with `<workbook-command>` and its `--doc` form, which `<update-skill>`
-describes, so the removed behavior is not uploaded as a live rule. The review
-states how many such rows the batch holds.
+A struck-through row is classified `new`, and the rule store reads the "Retired:" marker
+on it: approval inserts the row with `status` `retired`, counted as `new_retired`
+rather than `new`. The workbook leaves it off the Business Rules sheet, so the removed
+behavior is never uploaded as a live rule, and names its rule ID in the Extraction QA
+row for struck-through rules approved as retired. The review states how many such rows
+the batch holds.
 
 The converted files carry no images, and whatever a screenshot said is not in
 the repository copy. A document with a screen print or image section gets that

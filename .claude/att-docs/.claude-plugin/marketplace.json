@@ -10,7 +10,7 @@
     {
       "name": "general",
       "source": "./plugins/general",
-      "description": "Workflow skills that are not tied to one subject: implementing issues, plus repo hooks driven by extension.json"
+      "description": "Workflow skills that are not tied to one subject (implementing issues, working the backlog) and the repo hooks that read a repository's extension.json"
     },
     {
       "name": "voice",

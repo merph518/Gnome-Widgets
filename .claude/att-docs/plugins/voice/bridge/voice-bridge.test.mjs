@@ -21,12 +21,12 @@ import {
   hashPassphrase, QUIET_MS,
   headerText, listSessions, sessionRoots, markHeard, notifyFiles, NUMBER_GRACE_MS, numberedSessions,
   openState, publishPluginDir, pushedUpdates,
-  MARKER_STALE_MS, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
+  MARKER_STALE_MS, REQUEST_PREFIX, RELAY_HEADER, sendToSession, turnStopped, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
   runBackgroundPending, lastTurnEnd, cursorSeqs, nextUpdates,
   appArchived, sessionBranch, sessionWork, sharedFiles,
   START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
   startOfYesterday, startSession, codeCheckouts, repoCheckout, useExtension, resetExtension,
-  VOICE_AUTHORITY,
+  VOICE_AUTHORITY, TOOLS,
 } from './voice-bridge.mjs';
 
 // What every read-back ends with, for the voice chat to say aloud.
@@ -352,14 +352,14 @@ test('send posts one user line; read_reply gives the reply, then repeats it', as
     await arrived;
     const message = JSON.parse(lines.join('').trim());
     assert.equal(message.type, 'user');
-    assert.equal(message.message.content, 'Voice request: status?');
+    assert.equal(message.message.content, REQUEST_PREFIX + 'status?');
     assert.match(await callTool('read_reply', { session: 'wt' }, context), /still working/);
     assert.match(await callTool('list_sessions', {}, context), /^Wt, working on your request/);
 
     const replies = path.join(paths.bridgeDir, 'replies');
     fs.mkdirSync(replies, { recursive: true });
     fs.writeFileSync(path.join(replies, '77.json'), JSON.stringify({ text: 'All green.' }));
-    assert.match(await callTool('list_sessions', {}, context), /reply ready/);
+    assert.match(await callTool('list_sessions', { replies: false }, context), /reply ready/);
     assert.equal(await callTool('read_reply', { session: 'wt' }, context), 'All green.');
     // A retry of a read whose answer was lost hears the reply again, said as a repeat.
     assert.equal(await callTool('read_reply', { session: 'wt' }, context),
@@ -403,7 +403,7 @@ test('stop_turn reads a busy session back, then posts a priority now line', asyn
   assert.equal(posted.length, 1);
   assert.equal(posted[0].message.priority, 'now');
   assert.equal(posted[0].message.message.content,
-    'Voice request: Stop what you were doing and do not resume it. Reply with only: Stopped.');
+    REQUEST_PREFIX + 'Stop what you were doing and do not resume it. Reply with only: Stopped.');
   assert.ok(fs.existsSync(path.join(paths.bridgeDir, 'pending', '90')));
 });
 
@@ -469,7 +469,7 @@ test('stop_turn carries a follow-up in the stop line and has read_reply answer i
   assert.match(await callTool('stop_turn', args, context), /then ask it to: run the lint/);
   const stopped = await callTool('stop_turn', { ...args, confirm: 'true' }, context);
   assert.match(stopped, /working on the follow-up/);
-  assert.equal(posted[0].message.message.content, 'Voice request: Stop what you were doing '
+  assert.equal(posted[0].message.message.content, REQUEST_PREFIX + 'Stop what you were doing '
     + 'and do not resume it. Then do this instead: run the lint instead');
   await assert.rejects(callTool('stop_turn', { session: 'runner',
     text: 'x'.repeat(4001) }, context), /follow-up request is too long/);
@@ -769,7 +769,7 @@ test('stop_turn says nothing of a queued request older than the turn', async () 
 
 test('stop_turn takes the stop line\'s own transcript row as the turn stopping', async () => {
   const row = { type: 'user', timestamp: new Date(BEGAN + 3600 * 1000).toISOString(),
-    message: { content: 'Voice request: Stop what you were doing and do not resume it. '
+    message: { content: REQUEST_PREFIX + 'Stop what you were doing and do not resume it. '
       + 'Reply with only: Stopped.' } };
   const { context } = stopContext({ transcript: [said('Working.'), row] });
   await callTool('stop_turn', { session: 'runner' }, context);
@@ -2172,52 +2172,22 @@ test('follow refuses a mode other than all or milestones', async () => {
   assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'follow', '65.mode')), false);
 });
 
-test('follow sets and clears a spoken reply style for the session', async () => {
-  const paths = fakeMachine([{ pid: 66, cwd: '/repo/wt', name: 'Styled', sessionId: 's66' }]);
-  const context = { paths, config: { roots: ['/repo'] } };
-  const spoken = path.join(paths.bridgeDir, 'follow', '66.spoken');
-  await assert.rejects(callTool('follow', { session: 'styled', style: 'loud' }, context),
-    /Reply style is normal or spoken, not loud\./);
-  assert.equal(fs.existsSync(spoken), false);
-  assert.match(await callTool('follow', { session: 'styled', style: 'Spoken' }, context),
-    /short spoken replies/);
-  assert.equal(fs.readFileSync(spoken, 'utf8'), 's66');
-  assert.match(await callTool('follow', { session: 'styled', style: 'normal' }, context),
-    /not in the spoken style/);
-  assert.equal(fs.existsSync(spoken), false);
-});
-
-test('follow refuses the spoken style for a session with no id', async () => {
-  const paths = fakeMachine([{ pid: 69, cwd: '/repo/wt', name: 'Idless' }]);
-  const context = { paths, config: { roots: ['/repo'] } };
-  await assert.rejects(callTool('follow', { session: 'idless', style: 'spoken' }, context),
-    /no session id yet/);
-  assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'follow', '69.spoken')), false);
-});
-
-test('a follow that names no style leaves the style as it is', async () => {
-  const paths = fakeMachine([{ pid: 67, cwd: '/repo/wt', name: 'Kept', sessionId: 's67' }]);
-  const context = { paths, config: { roots: ['/repo'] } };
-  const spoken = path.join(paths.bridgeDir, 'follow', '67.spoken');
-  await callTool('follow', { session: 'kept', style: 'spoken' }, context);
-  await callTool('follow', { session: 'kept', mode: 'milestones' }, context);
-  assert.equal(fs.readFileSync(spoken, 'utf8'), 's67');
-  await callTool('follow', { session: 'kept', style: null }, context);
-  await callTool('follow', { session: 'kept', style: '' }, context);
-  assert.equal(fs.readFileSync(spoken, 'utf8'), 's67');
-  await callTool('list_sessions', {}, context);
-  assert.equal(fs.readFileSync(spoken, 'utf8'), 's67');
-});
-
-test('stop_following clears the spoken style and keeps the told stamp', async () => {
+test('follow and stop_following remove marker files an earlier release left', async () => {
   const paths = fakeMachine([{ pid: 68, cwd: '/repo/wt', name: 'Stopped', sessionId: 's68' }]);
   const context = { paths, config: { roots: ['/repo'] } };
   const folder = path.join(paths.bridgeDir, 'follow');
-  await callTool('follow', { session: 'stopped', style: 'spoken' }, context);
-  fs.writeFileSync(path.join(folder, '68.spoken-told'), 's68');
+  const leave = () => {
+    fs.mkdirSync(folder, { recursive: true });
+    for (const name of ['68.spoken', '68.spoken-told']) fs.writeFileSync(path.join(folder, name), 's68');
+  };
+  const left = () => ['68.spoken', '68.spoken-told']
+    .filter(name => fs.existsSync(path.join(folder, name)));
+  leave();
+  await callTool('follow', { session: 'stopped' }, context);
+  assert.deepEqual(left(), []);
+  leave();
   await callTool('stop_following', { session: 'stopped' }, context);
-  assert.equal(fs.existsSync(path.join(folder, '68.spoken')), false);
-  assert.equal(fs.readFileSync(path.join(folder, '68.spoken-told'), 'utf8'), 's68');
+  assert.deepEqual(left(), []);
 });
 
 test('next_update waits for a reply that lands during the call', async () => {
@@ -2339,7 +2309,7 @@ test('start_session launches claude in the start folder and follows the new sess
   };
   const result = await callTool('start_session',
     { name: '  Phone   Test ', request: '-v check the sweep' }, context);
-  assert.match(result, /^Started Phone Test on Opus 5.5 and following it/);
+  assert.match(result, /^Started Phone Test on Sonnet 5.5 and following it/);
   assert.ok(fs.existsSync(path.join(paths.managedDir, 'new-42.managed')),
     'the started session is a managed session');
   assert.deepEqual(fs.readdirSync(paths.managedDir), ['new-42.managed']);
@@ -2410,7 +2380,7 @@ test('start_session says to approve the start when the app session has not shown
   const result = await callTool('start_session', { name: 'Phone Test' }, context);
   assert.equal(posts.length, 1);
   assert.ok(result.startsWith(`Asked ${LAUNCHER_NAME} to start Phone Test in the Claude app `
-    + `on Opus 5.5, but it has not shown up yet. If ${LAUNCHER_NAME} asks to start it, `
+    + `on Sonnet 5.5, but it has not shown up yet. If ${LAUNCHER_NAME} asks to start it, `
     + 'approve that.'), result);
 });
 
@@ -2517,7 +2487,7 @@ test('start_session with a repo opens the session in that repo\'s checkout', asy
   };
   const first = await callTool('start_session',
     { name: 'Issue 100', request: '/implement 100', repo: 'Overmind' }, context);
-  assert.match(first, /^Started Issue 100 in overmind on Opus 5\.5 and following it/);
+  assert.match(first, /^Started Issue 100 in overmind on Sonnet 5\.5 and following it/);
   assert.equal(launches[0].cwd, overmind);
   // The new session is found although its checkout is outside the configured roots.
   assert.match(await callTool('start_session',
@@ -2551,7 +2521,7 @@ test('start_session reads a milestone from the repo it opens in', async () => {
   context.config.codeDir = codeDir;
   const reply = await callTool('start_session',
     { milestone: 'sweep round 2', repo: 'overmind' }, context);
-  assert.match(reply, /^Started Issue 7 in overmind on Opus 5\.5 for issue 7/);
+  assert.match(reply, /^Started Issue 7 in overmind on Sonnet 5\.5 for issue 7/);
   assert.equal(launches[0].cwd, overmind);
   assert.ok(calls.every(c => c.cwd === overmind));
 });
@@ -2649,7 +2619,7 @@ test('a running session the bridge could not follow is named once',
 });
 
 test('claudeBackgroundArgs starts the background session on START_MODEL', () => {
-  assert.equal(START_MODEL, 'claude-opus-5-5');
+  assert.equal(START_MODEL, 'claude-sonnet-5-5');
   assert.deepEqual(claudeBackgroundArgs({ name: 'Phone Test', prompt: 'check the sweep' }),
     ['--bg', '--model', START_MODEL, '-n', 'Phone Test', 'check the sweep']);
 });
@@ -2789,7 +2759,7 @@ test('send reaches a session by its nickname', async () => {
       /^Sent to MR phase fix\./);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(inbox.lines.length, 1);
-    assert.equal(inbox.lines[0].message.content, 'Voice request: status?');
+    assert.equal(inbox.lines[0].message.content, REQUEST_PREFIX + 'status?');
   } finally {
     await inbox.close();
   }
@@ -5833,7 +5803,9 @@ test('the full code flow issues a token that opens /mcp', async () => {
       'read_pull_request', 'merge_pull_request', 'pull_request_merged', 'set_issue_fields',
       'create_issue', 'close_issue', 'reopen_issue', 'edit_issue', 'create_milestone',
       'create_label', 'comment_pull_request', 'approve_pull_request', 'set_pull_request_draft',
-      'list_runs', 'update_bridge', 'summary',
+      'list_runs', 'list_scheduled_tasks', 'read_scheduled_task_result',
+      'list_project_conversations', 'read_project_conversation', 'update_bridge',
+      'summary',
     ]);
   // next_update holds a call no longer than read_reply waits, short of the voice chat's
   // move to the background.
@@ -5862,6 +5834,9 @@ test('the full code flow issues a token that opens /mcp', async () => {
     headers: auth, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }),
   });
   assert.equal(JSON.parse(again.body).result.tools[0].description.split('Never announce').length, 2);
+  const dayHelp = JSON.parse(list.body).result.tools
+    .find(t => t.name === 'read_scheduled_task_result').inputSchema.properties.day.description;
+  assert.match(dayHelp, /a weekday such as Tuesday or last Thursday/);
   const send = JSON.parse(list.body).result.tools.find(t => t.name === 'send').inputSchema;
   assert.equal(send.properties.amend.type, 'boolean');
   assert.deepEqual(send.required, ['session', 'text']);
@@ -6643,7 +6618,7 @@ test('start_session with a milestone takes its oldest unstarted issue and names 
     });
     const reply = await callTool('start_session', { milestone: 'sweep round 2' }, context);
     assert.match(reply,
-      /^Started Issue 5144 on Opus 5.5 for issue 5144, Next up, the next unstarted issue in /);
+      /^Started Issue 5144 on Sonnet 5.5 for issue 5144, Next up, the next unstarted issue in /);
     assert.match(reply, /Sweep Round 2 Cleanup and following it\. It can still wait at its /);
     assert.equal(launches.length, 1);
     assert.equal(launches[0].name, 'Issue 5144');
@@ -6688,8 +6663,8 @@ test('start_session with a milestone that has no unstarted issue starts nothing'
 // --- start_session's model ------------------------------------------------------------------
 
 test('startModel resolves each spoken family name, with or without its version', () => {
-  assert.deepEqual(startModel(undefined), START_MODELS.opus);
-  assert.deepEqual(startModel(' '), START_MODELS.opus);
+  assert.deepEqual(startModel(undefined), START_MODELS.sonnet);
+  assert.deepEqual(startModel(' '), START_MODELS.sonnet);
   const said = {
     opus: ['Opus', 'opus five point five', 'claude-opus-5-5', 'the Opus model'],
     sonnet: ['Sonnet', 'sonnet 5.5', 'Claude Sonnet five point five'],
@@ -6849,7 +6824,7 @@ test('a start records each issue a list after issues names', async () => {
 
 // --- send with amend ---------------------------------------------------------------------
 
-const AMEND_TEXT = 'Voice request: Correction to the request you are working on: apply this '
+const AMEND_TEXT = REQUEST_PREFIX + 'Correction to the request you are working on: apply this '
   + 'before your next step, in place of what it changes. use the implement skill';
 // How a message from another session reads once its turn runs.
 const WRAPPED = 'Another Claude session sent a message:\n';
@@ -6923,7 +6898,7 @@ test('send with amend says an unread earlier request is read together with it', 
   });
   const file = path.join(paths.projectsDir, '-repo-wt', 'sess-90.jsonl');
   fs.appendFileSync(file, `${JSON.stringify(queueRow('enqueue',
-    { content: 'Voice request: first thing' }, BEGAN + 2000))}\n`);
+    { content: REQUEST_PREFIX + 'first thing' }, BEGAN + 2000))}\n`);
   fs.mkdirSync(path.join(paths.bridgeDir, 'pending'), { recursive: true });
   fs.writeFileSync(path.join(paths.bridgeDir, 'pending', '90'), String(BEGAN + 1000));
   const sent = await callTool('send', { session: 'runner', text: 'x', amend: true }, context);
@@ -6935,7 +6910,7 @@ test('send with amend does not call a read earlier request unread', async () => 
     rows: content => [queueRow('enqueue', { content })],
   });
   const file = path.join(paths.projectsDir, '-repo-wt', 'sess-90.jsonl');
-  const first = 'Voice request: first thing';
+  const first = REQUEST_PREFIX + 'first thing';
   fs.appendFileSync(file, `${[queueRow('enqueue', { content: first }, BEGAN + 2000),
     queueRow('remove', { content: first, reason: 'absorbed_mid_turn' }, BEGAN + 3000)]
     .map(row => JSON.stringify(row)).join('\n')}\n`);
@@ -6951,7 +6926,7 @@ test('a plain send posts the bare request, with no priority and no correction le
     const { posted, context } = amendContext({ status });
     const sent = await callTool('send', { session: 'runner', text: 'status?' }, context);
     assert.deepEqual(posted,
-      [{ type: 'user', message: { role: 'user', content: 'Voice request: status?' } }]);
+      [{ type: 'user', message: { role: 'user', content: REQUEST_PREFIX + 'status?' } }]);
     assert.match(sent, /^Sent to Runner\./);
     assert.doesNotMatch(sent, /correction/);
   }
@@ -6962,7 +6937,7 @@ test('send with amend does not call a running earlier request unread', async () 
     rows: content => [queueRow('enqueue', { content })],
   });
   const file = path.join(paths.projectsDir, '-repo-wt', 'sess-90.jsonl');
-  const first = 'Voice request: first thing';
+  const first = REQUEST_PREFIX + 'first thing';
   fs.appendFileSync(file, `${[queueRow('enqueue', { content: first }, BEGAN + 2000),
     queueRow('dequeue', {}, BEGAN + 2100),
     { type: 'user', timestamp: new Date(BEGAN + 2200).toISOString(),
@@ -7020,7 +6995,7 @@ test('send with queue holds requests for a busy session and lists them in order'
 test('send with queue posts at once to an idle session with nothing held', async () => {
   const { posted, context } = stopContext({ status: 'idle' });
   assert.match(await callTool('send', queueArgs('now please'), context), /^Sent to Runner\./);
-  assert.deepEqual(heldContents(posted), ['Voice request: now please']);
+  assert.deepEqual(heldContents(posted), [REQUEST_PREFIX + 'now please']);
 });
 
 test('a drop reads the request back, then removes it so it never goes out', async () => {
@@ -7038,7 +7013,7 @@ test('a drop reads the request back, then removes it so it never goes out', asyn
     fs.rmSync(path.join(paths.bridgeDir, 'pending', '90'), { force: true });
     out.push(...heldContents(posted.splice(0)));
   }
-  assert.deepEqual(out, ['Voice request: one', 'Voice request: three']);
+  assert.deepEqual(out, [REQUEST_PREFIX + 'one', REQUEST_PREFIX + 'three']);
 });
 
 test('a drop is refused without a read-back, too soon, or for another number', async () => {
@@ -7083,7 +7058,7 @@ test('a held request waits for the last answer to be heard, then goes', async ()
   assert.equal(await callTool('read_reply', { session: 'runner' }, context), 'All green.');
   assert.deepEqual(await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN }),
     ['90']);
-  assert.deepEqual(heldContents(sent), ['Voice request: next']);
+  assert.deepEqual(heldContents(sent), [REQUEST_PREFIX + 'next']);
 });
 
 test('a held request waits for a busy session and for its own conversation', async () => {
@@ -7131,7 +7106,7 @@ test('a session whose post fails does not stop the others from getting theirs', 
   };
   const keys = await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN });
   assert.deepEqual(keys, ['91']);
-  assert.deepEqual(heldContents(sent), ['Voice request: for 91']);
+  assert.deepEqual(heldContents(sent), [REQUEST_PREFIX + 'for 91']);
 });
 
 test('a request held while another is being posted stays held', async () => {
@@ -7175,14 +7150,14 @@ test('held requests wait on a prompt and on an answer the session never wrote', 
     { ...context, now: () => BEGAN + 10 * 1000 }),
   /They go once Runner has answered the last request\./);
   await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN + 120 * 1000 });
-  assert.deepEqual(heldContents(sent), ['Voice request: after the prompt']);
+  assert.deepEqual(heldContents(sent), [REQUEST_PREFIX + 'after the prompt']);
 });
 
 test('a release cut off by a restart is settled from the transcript', async () => {
   const text = 'cut off';
-  const sentRow = queueRow('enqueue', { content: REQUEST_MARKER + text });
+  const sentRow = queueRow('enqueue', { content: REQUEST_PREFIX + text });
   const ranRow = { type: 'user', timestamp: new Date(BEGAN + 3600 * 1000).toISOString(),
-    message: { content: WRAPPED + REQUEST_MARKER + text } };
+    message: { content: WRAPPED + REQUEST_PREFIX + text } };
   // The rows the session shows, how many posts follow, and whether the session is busy: a
   // busy session still has the mark settled, from either row.
   const cases = [[[sentRow], 0, false], [[], 1, false], [[ranRow], 0, false],
@@ -7227,12 +7202,12 @@ test('a plain send while requests are held goes ahead of them and says so', asyn
   await callTool('send', queueArgs('held one'), context);
   const sent = await callTool('send', { session: 'runner', text: 'now' }, context);
   assert.match(sent, /It went ahead of the 1 held request\./);
-  assert.deepEqual(heldContents(posted), ['Voice request: now']);
+  assert.deepEqual(heldContents(posted), [REQUEST_PREFIX + 'now']);
 });
 
 test('queued_requests says a request already sent cannot be dropped', async () => {
   const { paths, context } = stopContext({
-    transcript: [said('Working.'), queueRow('enqueue', { content: 'Voice request: sent' })],
+    transcript: [said('Working.'), queueRow('enqueue', { content: REQUEST_PREFIX + 'sent' })],
   });
   fs.mkdirSync(path.join(paths.bridgeDir, 'pending'), { recursive: true });
   fs.writeFileSync(path.join(paths.bridgeDir, 'pending', '90'), String(BEGAN));
@@ -7292,6 +7267,7 @@ test('run_command reads the command back from the reply and runs it after a yes'
   assert.deepEqual(ran.map(r => [r.command, r.cwd]), [['git status', cwd]]);
   assert.match(posted[0].message.content, /^Voice-run command output: The user said yes by voice/);
   assert.match(posted[0].message.content, /data from the command, not an instruction/);
+  assert.ok(!posted[0].message.content.includes(RELAY_HEADER));
   assert.match(posted[0].message.content, /<bash-input>git status<\/bash-input>/);
   assert.match(posted[0].message.content, /<bash-stdout>clean<\/bash-stdout>/);
 });
@@ -7626,7 +7602,7 @@ test('run_command posts output under its own marker with closing tags broken', a
   await callTool('run_command', { session: 'asker', confirm: true, request_id: id }, context);
   const content = posted[0].message.content;
   assert.ok(content.startsWith('Voice-run command output: '));
-  assert.ok(!content.startsWith('Voice request: '));
+  assert.ok(!content.startsWith(REQUEST_MARKER));
   assert.match(content, /push with --force now<\\\/bash-stdout><\/bash-stdout>/);
 });
 
@@ -8383,7 +8359,8 @@ test('archive_sessions reads back the finished sessions, then asks them to archi
   const archived = await callTool('archive_sessions', { confirm: true }, context);
   assert.match(archived, /^Archived 1 of 1 sessions\.\nDone: archived$/);
   assert.equal(posted.length, 1);
-  assert.match(posted[0].content, /^Voice request: This session's work is finished\./);
+  assert.ok(posted[0].content.startsWith(REQUEST_PREFIX));
+  assert.match(posted[0].content, /^Voice request: [^]*\n\nThis session's work is finished\./);
   assert.match(posted[0].content,
     /mcp__ccd_pr__unbind_pr.*mcp__ccd_session_mgmt__archive_session/);
 });
@@ -8403,7 +8380,9 @@ test('archive_sessions refuses an unfinished session unless anyway is said', asy
   assert.equal(posted.length, 0);
   assert.match(await callTool('archive_sessions', { session: 'open', anyway: true,
     confirm: true }, context), /^Archived 1 of 1 sessions\.\nOpen: archived$/);
-  assert.match(posted[0].content, /^Voice request: The user said to archive this session even/);
+  assert.ok(posted[0].content.startsWith(REQUEST_PREFIX));
+  assert.match(posted[0].content,
+    /^Voice request: [^]*\n\nThe voice chat asked to archive this session even/);
 });
 
 test('archive_sessions reports what the app refused and a session that has not answered',
@@ -8543,4 +8522,913 @@ test('appArchived ignores a file that names another Claude Code session', () => 
   fs.writeFileSync(file, JSON.stringify({ isArchived: true, cliSessionId: 'sess-71' }));
   assert.equal(appArchived('local_done', paths.appSessionsDir, 'sess-71'), true);
   assert.equal(appArchived('local_done', paths.appSessionsDir, 'sess-99'), false);
+});
+
+// A machine with scheduled task runs in the app's folder and their transcripts under projects.
+// Each run is { id, task, cwd, at, turns, category, detail, reply }; reply is the run's final
+// assistant text, written to its transcript after an earlier note.
+const TASKS_NOW = new Date(2026, 9, 29, 12, 0).getTime();
+function scheduledMachine(runs, { definitions = [], catalog } = {}) {
+  const root = tempDir();
+  const paths = {
+    appSessionsDir: path.join(root, 'app'), projectsDir: path.join(root, 'projects'),
+    scheduledTasksDir: path.join(root, 'tasks'),
+  };
+  const folder = path.join(paths.appSessionsDir, 'account', 'org');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'local_plain.json'), JSON.stringify({ title: 'Not a task' }));
+  for (const run of runs) {
+    fs.writeFileSync(path.join(folder, `local_${run.id}.json`), JSON.stringify({
+      scheduledTaskId: run.task, cliSessionId: `cli-${run.id}`, cwd: run.cwd, originCwd: run.cwd,
+      createdAt: run.at, lastActivityAt: run.at + 60000, completedTurns: run.turns ?? 1,
+      postTurnSummary: run.category === '' ? undefined : {
+        status_category: run.category ?? 'completed', status_detail: run.detail,
+        needs_action: run.needsAction ?? '',
+      },
+      lastAssistantUuid: `reply-${run.id}`,
+    }));
+    if (run.reply === undefined) continue;
+    const dir = path.join(paths.projectsDir, run.cwd.replace(/[^A-Za-z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `cli-${run.id}.jsonl`), [
+      { type: 'assistant', uuid: 'early', message: { content: [{ type: 'text', text: 'Working.' }] } },
+      { type: 'assistant', uuid: `reply-${run.id}`,
+        message: { content: [{ type: 'text', text: run.reply }] } },
+      { type: 'system', uuid: 'end' },
+    ].map(row => JSON.stringify(row)).join('\n'));
+  }
+  for (const [task, description] of definitions) {
+    fs.mkdirSync(path.join(paths.scheduledTasksDir, task), { recursive: true });
+    fs.writeFileSync(path.join(paths.scheduledTasksDir, task, 'SKILL.md'),
+      `---\nname: ${task}\ndescription: ${description}\n---\n\nBody.\n`);
+  }
+  if (catalog) {
+    fs.writeFileSync(path.join(folder, 'scheduled-tasks.json'), JSON.stringify({
+      scheduledTasks: catalog.map(([id, displayName, extra = {}]) => ({
+        id, displayName, enabled: true, ...extra,
+      })),
+    }));
+  }
+  return paths;
+}
+const dayAt = (month, day, hour, minute = 0) => new Date(2026, month - 1, day, hour, minute).getTime();
+const taskContext = paths => ({ paths, config: {}, now: () => TASKS_NOW });
+const SCAN = {
+  id: 'scan2', task: 'gmail-calendar-scan', cwd: '/work/michael-cowork', at: dayAt(10, 29, 7, 5),
+  detail: 'created 2 events, skipped 1',
+  reply: 'Read 12 emails.\n\nCreated: dentist on Friday, soccer on Sunday.\n\nSkipped: a newsletter.',
+};
+const OLD_SCAN = {
+  id: 'scan1', task: 'gmail-calendar-scan', cwd: '/work/michael-cowork', at: dayAt(10, 28, 7, 5),
+  category: 'completed', detail: 'no new events', reply: 'Nothing new.',
+};
+
+test('list_scheduled_tasks gives each task with its last run and how it ended', async () => {
+  const paths = scheduledMachine([SCAN, OLD_SCAN,
+    { id: 'bad', task: 'import-mail', cwd: '/work/health-coach', at: dayAt(10, 27, 6), turns: 0,
+      category: '' },
+  ], { definitions: [['never-ran', 'Has not run']] });
+  const text = await callTool('list_scheduled_tasks', {}, taskContext(paths));
+  const lines = text.split('\n');
+  assert.equal(lines[0], '3 scheduled tasks, most recently run first.');
+  assert.match(lines[1], /^gmail-calendar-scan, in michael-cowork: last ran October 29 at 7:05\sAM, 5 hours ago, and finished\. created 2 events, skipped 1\. 2 runs on record\.$/);
+  assert.match(lines[2], /^import-mail, in health-coach: last ran October 27 at 6:00\sAM, 2 days ago, and did not finish\. 1 run on record\.$/);
+  assert.equal(lines[3], 'never-ran: no run on record.');
+});
+
+test('list_scheduled_tasks keeps to a named project by a part of its folder name', async () => {
+  const paths = scheduledMachine([SCAN,
+    { id: 'x', task: 'other', cwd: '/work/health-coach', at: dayAt(10, 27, 6) }]);
+  const text = await callTool('list_scheduled_tasks', { project: 'Michael Cowork' },
+    taskContext(paths));
+  assert.match(text, /^1 scheduled task in michael-cowork, most recently run first\.\ngmail-calendar-scan/);
+  assert.doesNotMatch(text, /other/);
+  assert.equal(await callTool('list_scheduled_tasks', { project: 'nowhere' }, taskContext(paths)),
+    'No scheduled task runs for nowhere in the Claude desktop app.');
+});
+
+test('read_scheduled_task_result reads the latest run\'s final reply', async () => {
+  const paths = scheduledMachine([OLD_SCAN, SCAN]);
+  const text = await callTool('read_scheduled_task_result',
+    { project: 'michael-cowork', task: 'gmail calendar scan' }, taskContext(paths));
+  assert.match(text, /^gmail-calendar-scan, in michael-cowork, ran October 29 at 7:05\sAM and finished\.\n/);
+  assert.match(text, /\nIn short: created 2 events, skipped 1\.\n/);
+  assert.ok(text.endsWith(
+    'Read 12 emails.\nCreated: dentist on Friday, soccer on Sunday.\nSkipped: a newsletter.'));
+});
+
+test('read_scheduled_task_result reads yesterday\'s or a dated run, and says when none ran', async () => {
+  const context = taskContext(scheduledMachine([OLD_SCAN, SCAN]));
+  for (const day of ['yesterday', '2026-10-28', 'October 28', 'Oct 28th']) {
+    const text = await callTool('read_scheduled_task_result', { day }, context);
+    assert.match(text, /ran October 28 at 7:05\sAM and finished\.\nIn short: no new events\.\nNothing new\.$/, day);
+  }
+  assert.match(await callTool('read_scheduled_task_result', { day: '2026-10-20' }, context),
+    /^gmail-calendar-scan had no run on October 20\. Its latest runs started October 29 at 7:05\sAM and October 28 at 7:05\sAM\.$/);
+  await assert.rejects(callTool('read_scheduled_task_result', { day: 'someday' }, context),
+    /"someday" is not a day/);
+});
+
+test('read_scheduled_task_result asks which task when several fit and when none does', async () => {
+  const context = taskContext(scheduledMachine([SCAN, { id: 'b', task: 'tidy-notes',
+    cwd: '/work/michael-cowork', at: dayAt(10, 28, 9) }],
+  { definitions: [['tidy-notes', 'Tidies the note files']] }));
+  assert.equal(await callTool('read_scheduled_task_result', { project: 'michael-cowork' }, context),
+    'More than one scheduled task fits: gmail-calendar-scan and tidy-notes. Say which one.');
+  assert.equal(await callTool('read_scheduled_task_result', { task: 'weather' }, context),
+    'No scheduled task matches weather. The tasks are gmail-calendar-scan and tidy-notes.');
+  assert.match(await callTool('read_scheduled_task_result', { task: 'note files' }, context),
+    /^tidy-notes, in michael-cowork, ran October 28/);
+});
+
+test('read_scheduled_task_result pages a long reply and names a run that did not succeed', async () => {
+  const paragraphs = Array.from({ length: 7 }, (_, i) => `Paragraph ${i + 1}.`);
+  const context = taskContext(scheduledMachine(
+    [{ ...SCAN, category: 'needs_input', reply: paragraphs.join('\n\n') }]));
+  const first = await callTool('read_scheduled_task_result', {}, context);
+  assert.match(first, /ran October 29 at 7:05\sAM and ended as needs input\./);
+  assert.match(first, /Paragraph 5\.\nAnd 2 paragraphs more; ask with offset 5 for the next\.$/);
+  assert.doesNotMatch(first, /Paragraph 6/);
+  const second = await callTool('read_scheduled_task_result', { offset: 5 }, context);
+  assert.ok(second.endsWith('Paragraph 6.\nParagraph 7.'));
+  assert.doesNotMatch(second, /In short/);
+});
+
+test('read_scheduled_task_result says so when the run\'s transcript is gone', async () => {
+  const context = taskContext(scheduledMachine([{ ...SCAN, reply: undefined }]));
+  const text = await callTool('read_scheduled_task_result', {}, context);
+  assert.ok(text.endsWith('The run left no reply the bridge can read.'));
+});
+
+const CATALOG = [
+  ['gmail-calendar-scan', 'Gmail to calendar scan'],
+  ['import-michael-health-email', "Import Michael's Apple Health emails"],
+];
+
+test('scheduled task names match word by word, in any order, and by display name', async () => {
+  const health = { id: 'h', task: 'import-michael-health-email', cwd: '/work/health-coach',
+    at: dayAt(10, 28, 9), reply: 'Imported one row.' };
+  const context = taskContext(scheduledMachine([SCAN, health], { catalog: CATALOG }));
+  for (const task of ['the Gmail calendar scan', 'calendar gmail', 'Gmail to calendar scan']) {
+    assert.match(await callTool('read_scheduled_task_result', { task }, context),
+      /^Gmail to calendar scan, in michael-cowork, ran October 29/, task);
+  }
+  for (const task of ['health email import', 'the apple health emails', 'Import Michael\'s Apple Health emails']) {
+    assert.match(await callTool('read_scheduled_task_result', { task }, context),
+      /^Import Michael's Apple Health emails, in health-coach, ran October 28/, task);
+  }
+  assert.match(await callTool('read_scheduled_task_result', { task: 'gmail' }, context),
+    /^Gmail to calendar scan/);
+  const listed = await callTool('list_scheduled_tasks', { project: 'the health coach project' },
+    context);
+  assert.match(listed, /^1 scheduled task in health-coach, most recently run first\.\nImport Michael's/);
+});
+
+test('the app\'s task list decides which tasks exist and says when one is disabled', async () => {
+  const paths = scheduledMachine([SCAN, OLD_SCAN,
+    { id: 'gone', task: 'removed-task', cwd: '/work/michael-cowork', at: dayAt(10, 29, 8) }],
+  { catalog: [['gmail-calendar-scan', 'Gmail to calendar scan', { enabled: false }],
+    ['waiting-task', 'Waiting task', { cwd: '/work/michael-cowork' }]],
+  definitions: [['not-listed', 'Left over']] });
+  const lines = (await callTool('list_scheduled_tasks', {}, taskContext(paths))).split('\n');
+  assert.equal(lines[0], '2 scheduled tasks, most recently run first.');
+  assert.match(lines[1], /^Gmail to calendar scan, in michael-cowork: last ran .* 2 runs on record\. It is disabled\.$/);
+  assert.equal(lines[2], 'Waiting task, in michael-cowork: no run on record.');
+  assert.match(await callTool('read_scheduled_task_result', {}, taskContext(paths)),
+    /^More than one/);
+  assert.match(await callTool('read_scheduled_task_result', { task: 'gmail' }, taskContext(paths)),
+    /^Gmail to calendar scan, in michael-cowork, ran October 29 at 7:05\sAM and finished\. The task is disabled\.\n/);
+  assert.equal(await callTool('read_scheduled_task_result', { task: 'waiting' }, taskContext(paths)),
+    'Waiting task has no run on record.');
+});
+
+test('a task folder without a SKILL.md is not a task when no task list exists', async () => {
+  const paths = scheduledMachine([], { definitions: [['real-task', 'Real']] });
+  fs.mkdirSync(path.join(paths.scheduledTasksDir, 'empty-folder'));
+  fs.writeFileSync(path.join(paths.scheduledTasksDir, 'stray.txt'), 'x');
+  const text = await callTool('list_scheduled_tasks', {}, taskContext(paths));
+  assert.equal(text, '1 scheduled task, most recently run first.\nreal-task: no run on record.');
+});
+
+test('a completed turn is finished, and needs attention when the run says something failed', async () => {
+  const paths = scheduledMachine([
+    { ...SCAN, detail: 'could not reach the calendar; no events created' },
+    { id: 'n', task: 'other', cwd: '/work/other-project', at: dayAt(10, 28, 6),
+      detail: 'done', needsAction: 'sign in again' },
+  ]);
+  const text = await callTool('list_scheduled_tasks', {}, taskContext(paths));
+  assert.match(text, /gmail-calendar-scan, in michael-cowork: .*, and finished and needs attention\. could not reach/);
+  assert.match(text, /other, in other-project: .*, and finished and needs attention\. done\./);
+  assert.match(await callTool('read_scheduled_task_result', { task: 'gmail' }, taskContext(paths)),
+    /ran October 29 at 7:05\sAM and finished and needs attention\./);
+});
+
+test('a result\'s open checklist items are read, not left out', async () => {
+  const context = taskContext(scheduledMachine([{ ...SCAN,
+    reply: 'Done.\n\n- [x] Read mail\n- [ ] Review the skipped newsletter\n- [ ] Reply to the dentist' }]));
+  const text = await callTool('read_scheduled_task_result', {}, context);
+  assert.ok(text.endsWith('Done.\nRead mail. Review the skipped newsletter. Reply to the dentist.'), text);
+});
+
+test('list_scheduled_tasks names every project a partial name matches', async () => {
+  const paths = scheduledMachine([SCAN,
+    { id: 'x', task: 'other', cwd: '/work/michael-health', at: dayAt(10, 27, 6) },
+    { id: 'y', task: 'third', cwd: '/work/unrelated', at: dayAt(10, 27, 7) }]);
+  const text = await callTool('list_scheduled_tasks', { project: 'michael' }, taskContext(paths));
+  assert.match(text, /^2 scheduled tasks in 2 projects, michael-cowork and michael-health, most recently run first\./);
+  assert.doesNotMatch(text, /third/);
+});
+
+test('read_scheduled_task_result reads more ways to say a day and refuses ones the calendar lacks', async () => {
+  const context = taskContext(scheduledMachine([OLD_SCAN, SCAN]));
+  for (const day of ['October 28, 2026', '28 October', '10/28', '10/28/2026', 'Yesterday.',
+    '28th of October', '2026-10-28']) {
+    assert.match(await callTool('read_scheduled_task_result', { day }, context),
+      /ran October 28 at/, day);
+  }
+  for (const day of ['February 30', '2026-02-30', '2/30', '31 June']) {
+    await assert.rejects(callTool('read_scheduled_task_result', { day }, context),
+      /is not a date\./, day);
+  }
+  assert.match(await callTool('read_scheduled_task_result', { day: 'Feb 29' }, context),
+    /had no run on February 29, 2024\./);
+});
+
+test('read_scheduled_task_result words an absent day plainly', async () => {
+  const context = taskContext(scheduledMachine([OLD_SCAN]));
+  assert.match(await callTool('read_scheduled_task_result', { day: 'today' }, context),
+    /^gmail-calendar-scan had no run today\. Its latest runs started October 28 at 7:05\sAM\.$/);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'October 26' }, context),
+    /^gmail-calendar-scan had no run on October 26\./);
+});
+
+const WORD_CATALOG = [
+  ['doc-watch-signin-reminder', 'Doc watch sign-in reminder', { cwd: '/work/docs' }],
+  ['file-coach-feedback', 'File coach feedback as issues', { cwd: '/work/health-coach' }],
+  ['import-michael-health-email', "Import Michael's Apple Health emails",
+    { cwd: '/work/health-coach' }],
+];
+const wordRuns = ['doc-watch-signin-reminder', 'file-coach-feedback', 'import-michael-health-email']
+  .map((task, i) => ({ id: `w${i}`, task, cwd: i ? '/work/health-coach' : '/work/docs',
+    at: dayAt(10, 28, 9 + i), reply: 'Ok.' }));
+
+test('short spoken fragments name only whole words or word starts, and a miss names nothing', async () => {
+  const paths = scheduledMachine(wordRuns, { catalog: WORD_CATALOG,
+    definitions: [['file-coach-feedback', 'Sends the digest online']] });
+  const context = taskContext(paths);
+  for (const task of ['ai', 'AI digest', 'ma']) {
+    assert.match(await callTool('read_scheduled_task_result', { task }, context),
+      /^No scheduled task matches /, task);
+  }
+  for (const project of ['o', 'e', 'x']) {
+    assert.equal(await callTool('list_scheduled_tasks', { project }, context),
+      `No scheduled task runs for ${project} in the Claude desktop app.`, project);
+  }
+  assert.match(await callTool('read_scheduled_task_result', { task: 'digest' }, context),
+    /^File coach feedback as issues/);
+});
+
+test('apostrophes, plurals and agent endings do not stop a name matching', async () => {
+  const context = taskContext(scheduledMachine(wordRuns, { catalog: WORD_CATALOG }));
+  const reads = {
+    'michaels health': "Import Michael's", 'import michaels health emails': "Import Michael's",
+    'sign-in reminders': 'Doc watch sign-in', 'coach feedbacks': 'File coach feedback',
+    'doc watcher': 'Doc watch sign-in', 'health importer': "Import Michael's",
+  };
+  for (const [task, start] of Object.entries(reads)) {
+    assert.ok((await callTool('read_scheduled_task_result', { task }, context)).startsWith(start),
+      task);
+  }
+});
+
+test('a day with no year is last year\'s when this year\'s is ahead, leap days included', async () => {
+  const context = { ...taskContext(scheduledMachine([OLD_SCAN])), now: () => new Date(2029, 0, 5).getTime() };
+  assert.match(await callTool('read_scheduled_task_result', { day: 'February 29' }, context),
+    /had no run on February 29, 2028\./);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'December 3' }, context),
+    /had no run on December 3, 2028\./);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'January 2' }, context),
+    /had no run on January 2\./);
+  await assert.rejects(callTool('read_scheduled_task_result', { day: 'February 30' }, context),
+    /is not a date\./);
+});
+
+test('failure words count unless they are negated', async () => {
+  const detail = text => ({ ...SCAN, detail: text });
+  for (const [text, flagged] of [['No errors found', false], ['0 failed, 3 imported', false],
+    ['nothing failed', false], ['finished without errors', false], ['2 imported', false],
+    ['import failed for one email', true], ['no mail; unable to reach calendar', true],
+    ['Error: calendar down', true]]) {
+    const listed = await callTool('list_scheduled_tasks', {},
+      taskContext(scheduledMachine([detail(text)])));
+    assert.equal(listed.includes('and needs attention'), flagged, text);
+  }
+});
+
+test('a category that already needs something is not said to need attention again', async () => {
+  const paths = scheduledMachine([{ ...SCAN, category: 'needs_action', needsAction: 'sign in' }]);
+  const text = await callTool('read_scheduled_task_result', {}, taskContext(paths));
+  assert.match(text, /and ended as needs action\.\n/);
+});
+
+test('a weekday names the latest such day before today, and a past year is in the label', async () => {
+  const weekly = [OLD_SCAN, { ...SCAN, id: 'wk', at: dayAt(10, 22, 7) }];
+  const context = taskContext(scheduledMachine(weekly));
+  assert.match(await callTool('read_scheduled_task_result', { day: 'Wednesday' }, context),
+    /ran October 28 at/);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'last Thursday' }, context),
+    /ran October 22 at/);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'tues' }, context),
+    /had no run on October 27\./);
+  assert.match(await callTool('read_scheduled_task_result', { day: 'October 3, 2025' }, context),
+    /had no run on October 3, 2025\./);
+});
+
+const REAL_CATALOG = [
+  ['file-coach-feedback', 'File coach feedback as GitHub issues', { cwd: '/work/health-coach' }],
+  ['import-michael-health-email', "Import Michael's Apple Health emails",
+    { cwd: '/work/health-coach' }],
+  ['doc-watch-signin-reminder', 'Doc watch sign-in reminder', { cwd: '/work/docs' }],
+];
+const realRuns = REAL_CATALOG.map(([task, , { cwd }], i) => ({ id: `r${i}`, task, cwd,
+  at: dayAt(10, 28, 9 + i), reply: 'Ok.' }));
+
+test('names that fit no task match none, and the plural and agent forms still match', async () => {
+  const paths = scheduledMachine(realRuns, { catalog: REAL_CATALOG,
+    definitions: [['doc-watch-signin-reminder', 'Checks the library for changes']] });
+  const context = taskContext(paths);
+  for (const task of ['therapy reminder', 'doctor reminder', 'water reminder', 'news', 'newsletter',
+    'login', 'automation', 'important', 'marketing', 'table', 'signal', 'scanner']) {
+    assert.match(await callTool('read_scheduled_task_result', { task }, context),
+      /^No scheduled task matches /, task);
+  }
+  const reads = {
+    'sign-in reminders': 'Doc watch sign-in reminder', 'doc watcher': 'Doc watch sign-in reminder',
+    'health importer': "Import Michael's", 'michaels health': "Import Michael's",
+    'coach feedbacks': 'File coach feedback',
+  };
+  for (const [task, start] of Object.entries(reads)) {
+    assert.ok((await callTool('read_scheduled_task_result', { task }, context)).startsWith(start),
+      task);
+  }
+});
+
+test('a date with no year uses the most recent year that has it', async () => {
+  const days = new Map([[new Date(2026, 9, 29).getTime(), 'February 29, 2024'],
+    [new Date(2029, 0, 5).getTime(), 'February 29, 2028']]);
+  for (const [now, label] of days) {
+    const context = { ...taskContext(scheduledMachine([OLD_SCAN])), now: () => now };
+    assert.match(await callTool('read_scheduled_task_result', { day: 'February 29' }, context),
+      new RegExp(`had no run on ${label}\\.`));
+    await assert.rejects(callTool('read_scheduled_task_result', { day: 'February 30' }, context),
+      /is not a date\./);
+  }
+});
+
+test('failure words are only unflagged when the detail really negates them', async () => {
+  for (const [text, flagged] of [['File not found error while reading', true],
+    ['Page not found error', true], ['Not authorized error', true], ['No connection error', true],
+    ['Version 2.0 failed to install', true], ['Imported 3.0 failed rows', true],
+    ['No errors found', false], ['0 failed', false], ['nothing failed', false],
+    ['finished without errors', false], ['no new errors', false], ['zero failures', false]]) {
+    const listed = await callTool('list_scheduled_tasks', {},
+      taskContext(scheduledMachine([{ ...SCAN, detail: text }])));
+    assert.equal(listed.includes('and needs attention'), flagged, text);
+  }
+});
+
+test('an absent day lists the latest runs with the year when it is not this year', async () => {
+  const context = taskContext(scheduledMachine([{ ...OLD_SCAN, at: new Date(2025, 11, 30, 7, 5).getTime() }]));
+  assert.match(await callTool('read_scheduled_task_result', { day: 'yesterday' }, context),
+    /Its latest runs started December 30, 2025 at 7:05\sAM\.$/);
+});
+
+test('the help for a day that is not one names weekdays', async () => {
+  await assert.rejects(callTool('read_scheduled_task_result', { day: 'someday' },
+    taskContext(scheduledMachine([SCAN]))), /a weekday such as Tuesday or last Thursday/);
+});
+
+test('a plural of a three-letter word names it, and the near misses still match nothing', async () => {
+  const context = taskContext(scheduledMachine(realRuns, { catalog: REAL_CATALOG }));
+  for (const task of ['docs watch', 'docs watcher', 'docs watch reminder', 'docs']) {
+    assert.ok((await callTool('read_scheduled_task_result', { task }, context))
+      .startsWith('Doc watch sign-in reminder'), task);
+  }
+  for (const task of ['document', 'library', 'signing', 'therapy reminder', 'news', 'login',
+    'important', 'scanner', 'doctor reminder']) {
+    assert.match(await callTool('read_scheduled_task_result', { task }, context),
+      /^No scheduled task matches /, task);
+  }
+});
+
+test('a plural failure word may follow any one word of a negation, a singular one only a quantity', async () => {
+  for (const [text, flagged] of [['No import errors', false], ['No sync errors', false],
+    ['No parsing errors', false], ['No login failures', false], ['zero sync failures', false],
+    ['No connection error', true], ['No import error', true], ['2 import errors', true],
+    ['no mail, sync errors', true]]) {
+    const listed = await callTool('list_scheduled_tasks', {},
+      taskContext(scheduledMachine([{ ...SCAN, detail: text }])));
+    assert.equal(listed.includes('and needs attention'), flagged, text);
+  }
+});
+
+test('a run from another year says its year in the list and the result', async () => {
+  const context = taskContext(scheduledMachine(
+    [{ ...OLD_SCAN, at: new Date(2025, 11, 30, 7, 5).getTime() }]));
+  assert.match(await callTool('list_scheduled_tasks', {}, context),
+    /last ran December 30, 2025 at 7:05\sAM/);
+  assert.match(await callTool('read_scheduled_task_result', {}, context),
+    /ran December 30, 2025 at 7:05\sAM and finished/);
+});
+
+test('plural failures are caught, and negated ones with up to two words between are not', async () => {
+  for (const [text, flagged] of [['2 import failures', true], ['3 failures', true],
+    ['Sync failures: 2', true], ['Two failures during import', true],
+    ['No login failures', false], ['zero sync failures', false],
+    ['No new import errors', false], ['no further sync errors', false],
+    ['0 new login failures', false], ['no mail; sync failures', true]]) {
+    const listed = await callTool('list_scheduled_tasks', {},
+      taskContext(scheduledMachine([{ ...SCAN, detail: text }])));
+    assert.equal(listed.includes('and needs attention'), flagged, text);
+  }
+});
+
+test('list_sessions reads each ready reply next to its session and marks it read', async () => {
+  const root = tempDir();
+  const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], root);
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+  const replies = path.join(paths.bridgeDir, 'replies');
+  fs.mkdirSync(replies, { recursive: true });
+  const write = text => fs.writeFileSync(path.join(replies, '77.json'), JSON.stringify({ text }));
+  const pending = path.join(paths.bridgeDir, 'pending');
+  fs.mkdirSync(pending, { recursive: true });
+
+  // A short reply is read whole beside the state, once: the listing marks it read.
+  write('All green.\nTwo tests added.');
+  assert.match(await callTool('list_sessions', {}, context),
+    /^Wt, reply ready.*\. It said: All green\. Two tests added\.$/);
+  assert.doesNotMatch(await callTool('list_sessions', {}, context), /reply ready|It said/);
+  assert.equal(await callTool('read_reply', { session: 'wt' }, context),
+    'Already read out once, and here it is again: All green.\nTwo tests added.');
+
+  // With replies false the states are listed and the reply stays unread for read_reply.
+  write('Second reply.');
+  assert.doesNotMatch(await callTool('list_sessions', { replies: false }, context), /It said/);
+  assert.match(await callTool('list_sessions', { replies: false }, context), /reply ready/);
+  assert.equal(await callTool('read_reply', { session: 'wt' }, context), 'Second reply.');
+
+  // A long reply is its summary with the offer of the rest, and read_full_reply reads it all.
+  const long = `Summary: The checks pass on all three branches.\n\n${'Detail line. '.repeat(80)}`;
+  write(long);
+  const listed = await callTool('list_sessions', {}, context);
+  assert.match(listed, /It said: The checks pass on all three branches\. More is available/);
+  assert.doesNotMatch(listed, /Detail line/);
+  assert.match(await callTool('read_full_reply', { session: 'wt' }, context), /Detail line\./);
+});
+
+test('the list_sessions description tells the model to read ready replies aloud', () => {
+  const tool = TOOLS.find(t => t.name === 'list_sessions');
+  assert.match(tool.description, /check on my sessions.*read the ready replies aloud/s);
+  assert.equal(tool.inputSchema.properties.replies.type, 'boolean');
+});
+
+test('list_sessions does not read a reply the follow feed already carried, and marks it read', async () => {
+  const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], tempDir());
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+  const at = 1_800_000_000;
+  fs.mkdirSync(path.join(paths.bridgeDir, 'replies'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '77.json'),
+    JSON.stringify({ text: 'Done and pushed.', at }));
+  fs.mkdirSync(path.join(paths.bridgeDir, 'feed'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'feed', '77.json'),
+    JSON.stringify([{ seq: 4, at, text: 'Done and pushed.', reply: true }]));
+  fs.mkdirSync(path.join(paths.bridgeDir, 'follow'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'follow', '77'), '4');
+  const listed = await callTool('list_sessions', {}, context);
+  assert.match(listed, /reply ready.*, already heard/);
+  assert.doesNotMatch(listed, /It said/);
+  // It counts as read, so it no longer holds the next request, and read_reply repeats it.
+  assert.doesNotMatch(await callTool('list_sessions', {}, context), /reply ready/);
+  assert.equal(await callTool('read_reply', { session: 'wt' }, context),
+    'Already read out once, and here it is again: Done and pushed.');
+});
+
+test('list_sessions cuts a long reply on one line, however replies are set to be read', async () => {
+  const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], tempDir());
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+  fs.mkdirSync(paths.bridgeDir, { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'reply-length.json'), JSON.stringify({ length: 'long' }));
+  fs.mkdirSync(path.join(paths.bridgeDir, 'replies'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '77.json'),
+    JSON.stringify({ text: `  ${'Word and more words. '.repeat(200)}` }));
+  const listed = await callTool('list_sessions', {}, context);
+  assert.ok(listed.length < 1800, `${listed.length} characters`);
+  assert.match(listed, /It said: Word and more words\..*\.\.\. Call read_reply to hear all of it\.$/s);
+  assert.doesNotMatch(listed, /It said:  /);
+  assert.ok(!listed.includes('\n'));
+});
+
+// A machine with conversations in the app's folder. Each is { id, title, cwd, sessionCwd, at,
+// turns, task, reply, needsAction, category }; at is the last activity.
+function conversationMachine(chats) {
+  const root = tempDir();
+  const paths = {
+    appSessionsDir: path.join(root, 'app'), projectsDir: path.join(root, 'projects'),
+  };
+  const folder = path.join(paths.appSessionsDir, 'account', 'org');
+  fs.mkdirSync(folder, { recursive: true });
+  for (const chat of chats) {
+    fs.writeFileSync(path.join(folder, `local_${chat.id}.json`), JSON.stringify({
+      title: chat.title, scheduledTaskId: chat.task, cliSessionId: `cli-${chat.id}`,
+      cwd: chat.sessionCwd ?? chat.cwd, originCwd: chat.cwd,
+      createdAt: chat.at - 3600000, lastActivityAt: chat.at, completedTurns: chat.turns ?? 2,
+      lastAssistantUuid: chat.turns === 0 ? undefined : chat.lastId ?? `reply-${chat.id}`,
+      latestUserFrameAt: chat.userFrameAt,
+      postTurnSummary: chat.category === undefined ? undefined : {
+        status_category: chat.category, status_detail: '', needs_action: chat.needsAction ?? '',
+      },
+    }));
+    if (chat.reply === undefined) continue;
+    const dir = path.join(paths.projectsDir,
+      (chat.transcriptCwd ?? chat.sessionCwd ?? chat.cwd).replace(/[^A-Za-z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `cli-${chat.id}.jsonl`), [
+      { type: 'assistant', uuid: 'early', message: { content: [{ type: 'text', text: 'Looking.' }] } },
+      { type: 'assistant', uuid: `reply-${chat.id}`, timestamp: chat.replyAt,
+        message: { stop_reason: chat.stop, content: [{ type: 'text', text: chat.reply }] } },
+      ...(chat.after ?? []),
+    ].map(row => JSON.stringify(row)).join('\n'));
+    const modified = new Date(chat.modified ?? chat.at);
+    fs.utimesSync(path.join(dir, `cli-${chat.id}.jsonl`), modified, modified);
+  }
+  return paths;
+}
+const CHAT_NEWEST = {
+  id: 'c3', title: 'Plan the garden bed', cwd: '/work/home-garden', at: dayAt(10, 29, 9, 30),
+  reply: 'Use cedar boards.\n\nWater twice a week.',
+};
+const CHAT_OLDER = {
+  id: 'c2', title: 'Pick tomato varieties', cwd: '/work/home-garden', at: dayAt(10, 27, 15, 10),
+  reply: 'Roma and Cherokee Purple.',
+};
+const CHAT_RUN = {
+  id: 'c1', title: 'Weed check', task: 'weed-check', cwd: '/work/home-garden',
+  at: dayAt(10, 29, 11, 0), reply: 'No weeds.',
+};
+
+test('list_project_conversations lists ordinary chats newest first and leaves scheduled runs out', async () => {
+  const context = taskContext(conversationMachine([CHAT_OLDER, CHAT_RUN, CHAT_NEWEST]));
+  const lines = (await callTool('list_project_conversations', { project: 'garden' }, context))
+    .split('\n');
+  assert.equal(lines[0], '2 conversations in home-garden, most recently active first.');
+  assert.match(lines[1], /^1\. Plan the garden bed, last active October 29 at 9:30\sAM, 3 hours ago\.$/);
+  assert.match(lines[2], /^2\. Pick tomato varieties, last active October 27 at 3:10\sPM, /);
+  const all = await callTool('list_project_conversations',
+    { project: 'garden', include_scheduled: true }, context);
+  assert.match(all, /^3 conversations in home-garden/);
+  assert.match(all, /\n1\. Weed check \(a scheduled run\), last active October 29 at 11:00\sAM/);
+});
+
+test('project conversations take the project from where the chat started, not its worktree', async () => {
+  const context = taskContext(conversationMachine([{ ...CHAT_NEWEST,
+    sessionCwd: '/work/home-garden/.claude/worktrees/bed' }]));
+  assert.match(await callTool('list_project_conversations', { project: 'home garden' }, context),
+    /^1 conversation in home-garden/);
+  assert.match(await callTool('read_project_conversation', { project: 'home garden' }, context),
+    /Water twice a week\.$/);
+});
+
+test('project conversations say plainly when nothing matches, and that Cowork is not read', async () => {
+  const context = taskContext(conversationMachine([CHAT_NEWEST, { ...CHAT_RUN, cwd: '/work/lawn' }]));
+  const none = 'No conversations for nowhere in the Claude desktop app. Only the Claude Code '
+    + 'conversations in the Claude desktop app are read; Cowork projects keep theirs elsewhere, '
+    + 'and the bridge cannot read them.';
+  assert.equal(await callTool('list_project_conversations', { project: 'nowhere' }, context), none);
+  assert.equal(await callTool('read_project_conversation', { project: 'nowhere' }, context), none);
+  // A word that only continues a project's name, or a name that carries more than it has,
+  // matches nothing.
+  for (const project of ['gardening', 'garden-center', 'xyz']) {
+    assert.match(await callTool('read_project_conversation', { project }, context),
+      /^No conversations for /, project);
+  }
+  assert.equal(await callTool('list_project_conversations', { project: 'lawn' }, context),
+    'lawn has no ordinary conversations, only 1 scheduled task run. '
+    + 'Ask again with include_scheduled to hear them.');
+  assert.equal(await callTool('list_project_conversations', {}, context), 'Say which project.');
+});
+
+test('read_project_conversation reads the newest last reply, by position, or by title', async () => {
+  const context = taskContext(conversationMachine([CHAT_OLDER, CHAT_RUN, CHAT_NEWEST]));
+  const newest = await callTool('read_project_conversation', { project: 'garden' }, context);
+  assert.match(newest, /^Plan the garden bed, number 1 in home-garden, last active October 29 at 9:30\sAM, 3 hours ago\.\n/);
+  assert.ok(newest.endsWith('Use cedar boards.\nWater twice a week.'));
+  assert.doesNotMatch(newest, /Looking/);
+  assert.match(await callTool('read_project_conversation', { project: 'garden', position: 2 }, context),
+    /^Pick tomato varieties, number 2 [^]*\nRoma and Cherokee Purple\.$/);
+  assert.match(await callTool('read_project_conversation', { project: 'garden', title: 'tomato' }, context),
+    /^Pick tomato varieties, number 2 /);
+  assert.equal(await callTool('read_project_conversation', { project: 'garden', position: 3 }, context),
+    'home-garden has only 2 conversations. Ask for a position from 1 to 2.');
+  assert.equal(await callTool('read_project_conversation',
+    { project: 'garden', title: 'tomato', position: 1 }, context),
+    'Give a position or a title, not both.');
+  assert.match(await callTool('read_project_conversation',
+    { project: 'garden', title: 'weed', include_scheduled: true }, context), /^Weed check, number 1 /);
+  await assert.rejects(callTool('read_project_conversation', { project: 'garden', position: 0 }, context),
+    /whole number/);
+});
+
+test('read_project_conversation refuses a title that matches nothing or several chats', async () => {
+  const context = taskContext(conversationMachine([CHAT_OLDER, CHAT_NEWEST,
+    { ...CHAT_OLDER, id: 'c4', title: 'Pick tomato stakes', at: dayAt(10, 26, 8) }]));
+  assert.equal(await callTool('read_project_conversation', { project: 'garden', title: 'irrigation' }, context),
+    'No conversation in home-garden matches irrigation. Ask for the list to hear them.');
+  assert.equal(await callTool('read_project_conversation', { project: 'garden', title: 'tomato' }, context),
+    'More than one conversation fits tomato: 2, Pick tomato varieties; 3, Pick tomato stakes. Say the position.');
+  assert.match(await callTool('read_project_conversation', { project: 'garden', title: 'bedrock' }, context),
+    /^No conversation in home-garden matches bedrock/);
+});
+
+test('read_project_conversation pages a long reply and keeps checklist lines', async () => {
+  const paragraphs = Array.from({ length: 6 }, (_, i) => `Paragraph ${i + 1}.`);
+  paragraphs.push('- [ ] Buy cedar\n- [x] Order soil');
+  const context = taskContext(conversationMachine([{ ...CHAT_NEWEST, reply: paragraphs.join('\n\n') }]));
+  const first = await callTool('read_project_conversation', { project: 'garden' }, context);
+  assert.match(first, /Paragraph 5\.\nAnd 2 paragraphs more; ask with offset 5 for the next\.$/);
+  const second = await callTool('read_project_conversation', { project: 'garden', offset: 5 }, context);
+  assert.match(second, /Paragraph 6\.\n[^]*Buy cedar/);
+});
+
+test('read_project_conversation does not call a turn that only ended a success', async () => {
+  const waiting = taskContext(conversationMachine([{ ...CHAT_NEWEST, category: 'completed',
+    needsAction: 'approve the plan' }]));
+  const text = await callTool('read_project_conversation', { project: 'garden' }, waiting);
+  assert.match(text, /The app marks it as waiting on you\./);
+  assert.doesNotMatch(text, /success|succeeded|finished|done/i);
+  const live = { paths: conversationMachine([{ ...CHAT_NEWEST, at: TASKS_NOW - 60000,
+      replyAt: new Date(TASKS_NOW - 60000).toISOString(), stop: 'tool_use' }]),
+    config: {}, now: () => TASKS_NOW };
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, live),
+    /It may still be going/);
+  const bare = taskContext(conversationMachine([CHAT_NEWEST]));
+  fs.writeFileSync(path.join(bare.paths.projectsDir, '-work-home-garden', 'cli-c3.jsonl'),
+    JSON.stringify({ type: 'system', uuid: 'end' }));
+  assert.ok((await callTool('read_project_conversation', { project: 'garden' }, bare))
+    .endsWith('The conversation left no reply the bridge can read.'));
+  const gone = taskContext(conversationMachine([{ ...CHAT_NEWEST, reply: undefined }]));
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, gone),
+    /^No conversations for garden /);
+});
+
+test('project conversations skip a chat with no turn and no reply', async () => {
+  const context = taskContext(conversationMachine([CHAT_NEWEST,
+    { ...CHAT_OLDER, turns: 0, reply: undefined, id: 'empty' }]));
+  assert.match(await callTool('list_project_conversations', { project: 'garden' }, context),
+    /^1 conversation in home-garden/);
+});
+
+const NOTE_AFTER = [
+  { type: 'assistant', uuid: 'note', message: { stop_reason: 'tool_use',
+    content: [{ type: 'text', text: 'Checking one more thing.' },
+      { type: 'tool_use', name: 'Read', input: {} }] } },
+];
+
+test('read_project_conversation reads the reply that ended the turn, not a later mid-turn note', async () => {
+  const context = taskContext(conversationMachine([{ ...CHAT_NEWEST, lastId: 'missing',
+    stop: 'end_turn', reply: 'Final answer.', after: NOTE_AFTER }]));
+  const text = await callTool('read_project_conversation', { project: 'garden' }, context);
+  assert.ok(text.endsWith('Final answer.'), text);
+  const noEnd = taskContext(conversationMachine([{ ...CHAT_NEWEST, lastId: 'missing',
+    reply: 'Only note.' }]));
+  assert.ok((await callTool('read_project_conversation', { project: 'garden' }, noEnd))
+    .endsWith('Only note.'));
+});
+
+test('read_scheduled_task_result reads the reply that ended the turn, not a later mid-turn note', async () => {
+  const paths = scheduledMachine([SCAN]);
+  const dir = path.join(paths.projectsDir, SCAN.cwd.replace(/[^A-Za-z0-9]/g, '-'));
+  fs.writeFileSync(path.join(dir, 'cli-scan2.jsonl'), [
+    { type: 'assistant', uuid: 'final', message: { stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'Final answer.' }] } },
+    ...NOTE_AFTER,
+  ].map(row => JSON.stringify(row)).join('\n'));
+  const text = await callTool('read_scheduled_task_result', {}, taskContext(paths));
+  assert.ok(text.endsWith('Final answer.'), text);
+});
+
+test('folders that differ only in hyphens are one project, unless a name spells one exactly', async () => {
+  const mine = { ...CHAT_NEWEST, id: 'h1', title: 'Hyphen chat', cwd: '/work/my-project' };
+  const flat = { ...CHAT_OLDER, id: 'h2', title: 'Flat chat', cwd: '/work/myproject' };
+  const context = taskContext(conversationMachine([mine, flat]));
+  const only = async project => (await callTool('list_project_conversations', { project }, context));
+  assert.match(await only('my-project'), /^1 conversation in my-project[^]*Hyphen chat/);
+  assert.match(await only('MyProject'), /^1 conversation in myproject[^]*Flat chat/);
+  const merged = await only('my project');
+  assert.match(merged, /^2 conversations in my project \(across 2 folders\), [^]*1\. Hyphen chat[^]*2\. Flat chat/);
+  assert.match(await callTool('read_project_conversation', { project: 'my project', position: 2 }, context),
+    /^Flat chat, number 2 /);
+  // The scheduled task tools resolve the same way.
+  const tasks = scheduledMachine([
+    { ...SCAN, id: 't1', cwd: '/work/my-project' },
+    { id: 't2', task: 'tidy-notes', cwd: '/work/myproject', at: dayAt(10, 28, 6), detail: 'ok' },
+  ]);
+  assert.match(await callTool('list_scheduled_tasks', { project: 'myproject' }, taskContext(tasks)),
+    /^1 scheduled task in myproject/);
+  assert.match(await callTool('list_scheduled_tasks', { project: 'my project' }, taskContext(tasks)),
+    /^2 scheduled tasks /);
+});
+
+test('a conversation adopted from another surface counts, and its transcript time sets when it was active', async () => {
+  const paths = conversationMachine([{ ...CHAT_OLDER, id: 'adopt', turns: 0, reply: 'Adopted reply.',
+    at: dayAt(10, 20, 8), replyAt: new Date(dayAt(10, 29, 11, 15)).toISOString(),
+    stop: 'end_turn', modified: dayAt(10, 29, 11, 59) }, CHAT_NEWEST]);
+  const file = path.join(paths.appSessionsDir, 'account', 'org', 'local_adopt.json');
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const key of ['completedTurns', 'lastAssistantUuid', 'latestUserFrameAt']) delete data[key];
+  fs.writeFileSync(file, JSON.stringify({ ...data, adoptedFromOtherSurface: true,
+    indexedAt: dayAt(10, 20, 8) }));
+  const context = taskContext(paths);
+  const lines = (await callTool('list_project_conversations', { project: 'garden' }, context)).split('\n');
+  assert.match(lines[1], /^1\. Pick tomato varieties, last active October 29 at 11:15\sAM, 45 minutes ago/);
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, context),
+    /Adopted reply\.$/);
+  // Without a session id there is nothing to read.
+  fs.writeFileSync(file, JSON.stringify({ ...data, cliSessionId: '' }));
+  assert.match(await callTool('list_project_conversations', { project: 'garden' }, context), /^1 conversation /);
+});
+
+test('read_project_conversation says it may still be going when a new turn has begun', async () => {
+  const replyAt = new Date(dayAt(10, 29, 11, 50)).toISOString();
+  const spoke = taskContext(conversationMachine([{ ...CHAT_NEWEST, category: 'completed',
+    at: dayAt(10, 29, 11, 50), replyAt, stop: 'end_turn', userFrameAt: dayAt(10, 29, 11, 55) }]));
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, spoke),
+    /It may still be going/);
+  // A message sent hours ago that never got a reply is said as that, not as still going.
+  const stopped = taskContext(conversationMachine([{ ...CHAT_NEWEST, category: 'completed',
+    replyAt: new Date(dayAt(10, 29, 9, 30)).toISOString(), stop: 'end_turn',
+    userFrameAt: dayAt(10, 29, 9, 45) }]));
+  const text = await callTool('read_project_conversation', { project: 'garden' }, stopped);
+  assert.match(text, /The last message sent to it got no finished reply\./);
+  assert.doesNotMatch(text, /still be going/);
+  const quiet = taskContext(conversationMachine([{ ...CHAT_NEWEST, category: 'completed',
+    replyAt: new Date(dayAt(10, 29, 9, 30)).toISOString(), stop: 'end_turn',
+    userFrameAt: dayAt(10, 29, 9, 20) }]));
+  assert.doesNotMatch(await callTool('read_project_conversation', { project: 'garden' }, quiet),
+    /still be going|no finished reply/);
+});
+
+// An adopted conversation has neither a turn count nor a reply id in its file.
+function adopt(paths, id) {
+  const file = path.join(paths.appSessionsDir, 'account', 'org', `local_${id}.json`);
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const key of ['completedTurns', 'lastAssistantUuid', 'latestUserFrameAt']) delete data[key];
+  fs.writeFileSync(file, JSON.stringify({ ...data, adoptedFromOtherSurface: true }));
+}
+
+test('a transcript written to long after the chat moved does not change when it was active', async () => {
+  const recent = dayAt(10, 29, 11, 55);
+  const paths = conversationMachine([{ ...CHAT_NEWEST, category: 'completed', modified: recent },
+    { ...CHAT_OLDER, modified: recent }]);
+  const context = taskContext(paths);
+  const lines = (await callTool('list_project_conversations', { project: 'garden' }, context)).split('\n');
+  assert.match(lines[1], /^1\. Plan the garden bed, last active October 29 at 9:30\sAM/);
+  assert.match(lines[2], /^2\. Pick tomato varieties, last active October 27 at 3:10\sPM/);
+  assert.doesNotMatch(await callTool('read_project_conversation', { project: 'garden' }, context),
+    /still be going/);
+  // An adopted conversation goes by its newest message, not the file's modified time.
+  const adopted = conversationMachine([{ ...CHAT_NEWEST, id: 'ad', category: 'completed',
+    replyAt: new Date(dayAt(10, 29, 11, 55)).toISOString(), modified: dayAt(10, 29, 11, 56) }]);
+  adopt(adopted, 'ad');
+  const text = await callTool('read_project_conversation', { project: 'garden' },
+    taskContext(adopted));
+  assert.match(text, /last active October 29 at 11:55\sAM/);
+  assert.match(text, /It may still be going/);
+});
+
+test('a transcript under the folder the chat started from is found', async () => {
+  const context = taskContext(conversationMachine([{ ...CHAT_NEWEST,
+    sessionCwd: '/work/home-garden/.claude/worktrees/bed', transcriptCwd: '/work/home-garden' }]));
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, context),
+    /Water twice a week\.$/);
+});
+
+test('read_project_conversation says how many titles fit when it names only some', async () => {
+  const chats = Array.from({ length: 7 }, (_, i) => ({ ...CHAT_OLDER, id: `m${i}`,
+    title: `Bed layout ${i}`, at: dayAt(10, 20 + i, 8) }));
+  const text = await callTool('read_project_conversation',
+    { project: 'garden', title: 'layout' }, taskContext(conversationMachine(chats)));
+  assert.match(text, /^7 conversations fit layout; the newest are 1, Bed layout 6; /);
+  assert.match(text, /Say the position\.$/);
+});
+
+test('a merged project is named by what was said, and its transcripts are found beyond the first folder', async () => {
+  const a = { ...CHAT_RUN, id: 's1', cwd: '/work/my-project' };
+  const b = { ...CHAT_RUN, id: 's2', cwd: '/work/myproject',
+    sessionCwd: '/work/myproject/.claude/worktrees/x', transcriptCwd: '/elsewhere' };
+  const context = taskContext(conversationMachine([a, b]));
+  assert.equal(await callTool('list_project_conversations', { project: 'my project' }, context),
+    'my project (across 2 folders) has no ordinary conversations, only 2 scheduled task runs. '
+    + 'Ask again with include_scheduled to hear them.');
+  assert.match(await callTool('list_project_conversations',
+    { project: 'my project', include_scheduled: true }, context), /^2 conversations in my project \(across 2 folders\),/);
+});
+
+test('a turn in progress is told apart from one that was abandoned', async () => {
+  const sent = dayAt(10, 29, 11, 45);
+  const base = { ...CHAT_NEWEST, category: 'completed', stop: 'end_turn', userFrameAt: sent,
+    replyAt: new Date(dayAt(10, 29, 9, 30)).toISOString() };
+  const noteAt = (h, m) => [{ ...NOTE_AFTER[0], timestamp: new Date(dayAt(10, 29, h, m)).toISOString() }];
+  const running = taskContext(conversationMachine([{ ...base, after: noteAt(11, 59), modified: dayAt(10, 29, 11, 59) }]));
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, running),
+    /It may still be going/);
+  const idle = taskContext(conversationMachine([{ ...base, after: noteAt(9, 31), modified: dayAt(10, 29, 9, 31) }]));
+  assert.match(await callTool('read_project_conversation', { project: 'garden' }, idle),
+    /The last message sent to it got no finished reply\./);
+});
+
+test('without a projects folder no transcript is found', async () => {
+  const paths = conversationMachine([CHAT_NEWEST]);
+  assert.match(await callTool('list_project_conversations', { project: 'garden' },
+    taskContext({ appSessionsDir: paths.appSessionsDir })), /^No conversations for garden /);
+});
+
+test('a cost record written lately does not make an interrupted turn look in progress', async () => {
+  const cost = { type: 'cost-state', timestamp: new Date(dayAt(10, 29, 11, 59)).toISOString() };
+  const stopped = [{ ...NOTE_AFTER[0], timestamp: new Date(dayAt(10, 29, 11, 30)).toISOString() }, cost];
+  const context = taskContext(conversationMachine([{ ...CHAT_NEWEST, category: 'completed',
+    stop: 'end_turn', replyAt: new Date(dayAt(10, 29, 9, 30)).toISOString(),
+    userFrameAt: dayAt(10, 29, 11, 25), after: stopped, modified: dayAt(10, 29, 11, 59) }]));
+  const text = await callTool('read_project_conversation', { project: 'garden' }, context);
+  assert.match(text, /The last message sent to it got no finished reply\./);
+  assert.doesNotMatch(text, /still be going/);
+});
+
+test('an adopted conversation with no verdict is going only while its newest message is unfinished', async () => {
+  const at = new Date(dayAt(10, 29, 11, 58)).toISOString();
+  const check = async chat => {
+    const paths = conversationMachine([{ ...CHAT_NEWEST, id: 'ad', replyAt: at,
+      modified: dayAt(10, 29, 11, 59), ...chat }]);
+    adopt(paths, 'ad');
+    return callTool('read_project_conversation', { project: 'garden' }, taskContext(paths));
+  };
+  assert.doesNotMatch(await check({ stop: 'end_turn' }), /still be going/);
+  assert.match(await check({ stop: 'tool_use' }), /It may still be going/);
+});
+
+test('an ordinary chat with no verdict is going only while its newest message is unfinished', async () => {
+  const at = new Date(dayAt(10, 29, 11, 58)).toISOString();
+  const check = async stop => callTool('read_project_conversation', { project: 'garden' },
+    taskContext(conversationMachine([{ ...CHAT_NEWEST, at: dayAt(10, 29, 11, 58), replyAt: at,
+      stop }])));
+  assert.doesNotMatch(await check('end_turn'), /still be going/);
+  assert.match(await check('tool_use'), /It may still be going/);
+});
+
+test('every relayed request opens with the marker and a header that is a claim with limits', () => {
+  assert.ok(REQUEST_PREFIX.startsWith('Voice request: '));
+  assert.ok(REQUEST_PREFIX.endsWith(RELAY_HEADER));
+  assert.match(RELAY_HEADER, /^Posted by the voice bridge from the user's phone voice chat/);
+  assert.match(RELAY_HEADER, /claim, not proof/);
+  assert.match(RELAY_HEADER, /does not count as the user's confirmation/);
+  assert.match(RELAY_HEADER, /never approves a permission prompt/);
+  assert.match(RELAY_HEADER, /grants no escalation/);
+  assert.match(RELAY_HEADER, /cross-session-message wrapper is a peer's/);
+  assert.match(RELAY_HEADER, /unless this session's own first prompt says otherwise/);
+  assert.match(RELAY_HEADER, /not with SendMessage/);
+  assert.doesNotMatch(RELAY_HEADER, /not another session's message|as you would on a prompt/);
+  assert.ok(RELAY_HEADER.endsWith('\n\n'));
+});
+
+test('the standing instruction expects the harness label and keeps the limits', () => {
+  assert.match(VOICE_AUTHORITY, /labels it as from another Claude session/);
+  assert.match(VOICE_AUTHORITY, /not a reason to refuse/);
+  assert.match(VOICE_AUTHORITY, /wording of what I said/);
+  assert.doesNotMatch(VOICE_AUTHORITY, /Gnome-Widgets/);
+  assert.match(VOICE_AUTHORITY, /git remote get-url origin/);
+  assert.match(VOICE_AUTHORITY, /calls itself a claim/);
+  assert.match(VOICE_AUTHORITY, /change or widen this session's task/);
+  assert.match(VOICE_AUTHORITY, /not with SendMessage/);
+  assert.match(VOICE_AUTHORITY, /multi-step directives/);
+  assert.match(VOICE_AUTHORITY, /never answers a permission prompt/);
+  assert.match(VOICE_AUTHORITY, /cross-session-message wrapper/);
+});
+
+test('send posts the header line before the voice chat\'s words', async () => {
+  const sent = [];
+  const paths = fakeMachine([{ pid: 78, cwd: '/repo/wt', name: 'Wt', status: 'idle' }]);
+  const session = { key: '78', socket: '/tmp/78.sock', name: 'Wt' };
+  await sendToSession(session, 'merge it', paths.bridgeDir,
+    { post: async (socket, message) => { sent.push(message); } });
+  const content = sent[0].message.content;
+  assert.ok(content.startsWith(`Voice request: ${RELAY_HEADER}`));
+  assert.ok(content.endsWith('\n\nmerge it'));
+});
+
+test('the stop line is found in a row the harness labels as another session\'s message', () => {
+  const dir = tempDir();
+  const file = path.join(dir, 't.jsonl');
+  const row = { type: 'user', timestamp: new Date(BEGAN + 1000).toISOString(),
+    message: { content: WRAPPED + REQUEST_PREFIX + 'Stop what you were doing and do not resume it.' } };
+  fs.writeFileSync(file, `${JSON.stringify(row)}\n`);
+  assert.equal(turnStopped(file, BEGAN), true);
 });

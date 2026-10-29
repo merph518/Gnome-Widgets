@@ -12,6 +12,7 @@
 //   node build-pack.mjs queue status --config <pipeline.json> --job <id>
 //   node build-pack.mjs queue summary --config <pipeline.json>
 //   node build-pack.mjs report --config <pipeline.json> [--period day|week|auto] [--seed <n>]
+//   node build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <pipeline.json>]
 //
 // Console output is the content-free status lines only: phase names, pass or
 // fail, reason codes, counts and timings. What the model wrote stays in each
@@ -21,7 +22,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runCompare, UsageError } from './compare.mjs';
 import { fill, globFiles, loadConfig, MAX_TRIES } from './config.mjs';
+import { modelClient } from './model.mjs';
 import { createPauser } from './pause.mjs';
 import { documentRules, USABLE_RULE_CODES } from './phases.mjs';
 import { seededRandom, writeReports } from './report.mjs';
@@ -40,7 +43,9 @@ const USAGE = `usage:
   build-pack.mjs queue status --config <file> --job <id>
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
-exit codes of check: 0 every input present, 1 an input missing, 3 documents not named, so their rules are unchecked`;
+  build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <file>]
+exit codes of check: 0 every input present, 1 an input missing, 3 documents not named, so their rules are unchecked
+exit codes of compare: 0 the comparison was written, 1 it failed while running, 2 bad arguments or unreadable input`;
 
 export function parseArgs(argv) {
   const args = { docs: [] };
@@ -51,8 +56,8 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume, --now and --allow-derived-rules take no value.
-    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules') {
+    // --resume, --now, --allow-derived-rules and --model take no value.
+    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model') {
       args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
     }
@@ -430,7 +435,10 @@ function settleRow(row, result, at, config) {
   }
   for (const field of ['started', 'now', 'finished', 'ms', 'phase', 'reason', 'workbook', 'outDir',
     'notBefore']) delete row[field];
-  if (!result.ok && failures.length < MAX_TRIES) {
+  // A failed revalidation is the review's verdict on the finished pack; a resume would skip
+  // every phase and build the same pack again, so the job is not retried.
+  const retry = result.reason !== 'gate:revalidation-failed';
+  if (!result.ok && retry && failures.length < MAX_TRIES) {
     const wait = result.reason !== 'interrupted' && inNightWindow(config, at);
     Object.assign(row, { status: 'queued', resume: true, failures,
       ...(wait ? { notBefore: cutoffAfter(at, config.queue.cutoff).toISOString() } : {}) });
@@ -534,6 +542,7 @@ export function jobStatus(config, id) {
 async function main(argv) {
   const args = parseArgs(argv);
   const [command, sub] = args.words ?? [];
+  if (command === 'compare') return compareCommand(args);
   if (!args.config || !command) {
     console.error(USAGE);
     return 2;
@@ -580,6 +589,28 @@ function printFill({ added, known, invalid, errors }) {
   for (const id of added) console.log(`queued ${id}`);
   console.log(`filled ${added.length} job(s), ${known} already known, ${invalid} unreadable line(s)`
     + (errors.length ? `, source problems: ${errors.join(' ')}` : ''));
+}
+
+/** The compare command: needs no job config unless --model asks for the endpoint. */
+async function compareCommand(args) {
+  try {
+    const lines = await runCompare(args, {
+      makeClient: (configPath) => {
+        try {
+          return modelClient(loadConfig(configPath).model);
+        } catch {
+          throw new UsageError('--config could not be read');
+        }
+      },
+    });
+    for (const line of lines) console.log(line);
+    return 0;
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    // A failure while comparing is not a bad argument; the message names no content.
+    console.error(`compare failed (${error.name})`);
+    return 1;
+  }
 }
 
 async function dispatch(args, command, sub, config, track) {

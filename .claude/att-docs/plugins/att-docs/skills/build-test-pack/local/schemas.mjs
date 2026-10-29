@@ -122,6 +122,14 @@ export function cardSchema({ ids, objectives, derivations, scenarios }) {
   });
 }
 
+// The two answers to whether a card's Expected Result follows from its rules.
+export const VERDICTS = ['follows', 'does not follow'];
+
+// One row per card in the call; the reason comes first, so the verdict follows from it.
+export const verificationSchema = (refs) => obj({
+  cards: keyed('card', refs, { why: str, verdict: oneOf(VERDICTS) }),
+});
+
 // A scenario no card is written for is skipped: an existing test covers it, or no card can.
 export const SKIP_REASONS = ['reused', 'gap'];
 
@@ -162,13 +170,14 @@ export const seniorReviewSchema = obj({
   }),
 });
 
-export const confidenceSchema = ({ confidence }) => obj({
-  confidence: obj({
-    overall: oneOf(confidence), coverage: str, remainingRisks: str, assumptions: str,
-    regressionScope: str, breakItScope: str, manualReview: str,
-  }),
-  lowConfidenceReason: str,
+/** The overall confidence level, and why when it is Low. */
+export const confidenceOverallSchema = ({ confidence }) => obj({
+  overall: oneOf(confidence), lowConfidenceReason: str,
 });
+
+/** One prose field of the Confidence Assessment, written on its own. */
+export const confidenceFieldSchema = (field) => obj({ [field]: str });
+
 
 export const revalidationSchema = obj({ passed: { type: 'boolean' }, remaining: strs });
 
