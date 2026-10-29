@@ -109,8 +109,8 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
-BLOCK_RULE = 2                                # the rule left of a repository's name and issue numbers
-BLOCK_PAD = 7                                 # that rule to the text
+BLOCK_RULE = 2                                # the room left of a repository's name and issue numbers, inside a row's fill
+BLOCK_PAD = 7                                 # and the room after it, before the text
 BLOCK_MIN = 90                                # the text's least width, however short the names are
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
@@ -742,7 +742,7 @@ def wrap_lines(text, font, width):
 
 def block_width(listed):
     """The width of a repository's name and issue numbers, one for every row so the names after
-    it line up, as draw.lua draws it: the rule, then text as wide as the longest repository
+    it line up, as draw.lua draws it: BLOCK_RULE and BLOCK_PAD, then text as wide as the longest repository
     name listed, and at least BLOCK_MIN, so no name is cut. BLOCK_SLACK widens the longest name
     to what draw.lua measures, so it is not cut either."""
     names = [math.ceil(text_width(s['repo'], SEGMENT_FONT) * BLOCK_SLACK) for s in listed if s.get('repo')]

@@ -81,14 +81,14 @@ local function label_after(rest, n)
 end
 
 local function load_sessions(version)
-    -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
+    -- sessions.txt's lines (speechqueue.py's session_line) as {id, speech, speaking, queued,
     -- flags, name, repo, last, pill, chips, span}, each chip {line, x, width, text}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
         local f = {}
         for v in (line .. '\t'):gmatch('([^\t]*)\t') do f[#f + 1] = v end
-        rows[#rows + 1] = {speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
+        rows[#rows + 1] = {id = f[1] or '', speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', repo = f[7] or '',
                            last = f[8] or '', pill = f[9] or '', chips = {},
@@ -502,6 +502,19 @@ local function draw_scrollbar(cr, x, top, height, s, rows, count, at, last)
     rounded_line(cr, x, ty, x, ty + len, w)
 end
 
+local flips = {}                            -- session id -> how far its row has turned, 0 to 1
+local row_flip = 0                          -- how far the row being drawn has turned to the opposite colours
+
+local function ink()
+    -- the row's text and icons: the foreground, turning into the card's colour as its row flips
+    return theme.mix(fg, fg_back, row_flip)
+end
+
+local function ink2()
+    -- the row's quieter text, the same way
+    return theme.mix(secondary(), theme.mix(fg_back, fg, 0.2), row_flip)
+end
+
 local SPEECH_SETTINGS = {{'on', 'On'}, {'alerts', 'Alerts'}, {'off', 'Off'}}
 local GEAR_SHADE = {on = 1, alerts = 0.7, off = 0.4}
 
@@ -512,7 +525,7 @@ local function draw_gear(cr, c, cy, row, s, speech)
     local cx, size = (c[1] + c[2]) / 2 * s, c[3] * s
     local on = hovered(c[1] * s, cy - row / 2, c[2] * s, cy + row / 2)
     local r, teeth = size * 0.32, 8
-    set(cr, fg, on and 1 or GEAR_SHADE[speech] or 0.7)
+    set(cr, ink(), on and 1 or GEAR_SHADE[speech] or 0.7)
     cairo_set_line_width(cr, size * 0.17)
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, r, 0, 2 * math.pi)
@@ -531,35 +544,26 @@ local function draw_block(cr, r, x0, y, row, b, s, text)
     -- the repository's name on the row's first line, cut to the block's width, and under it the
     -- issue numbers, wrapped as speechqueue.py laid them (b is its block line); a click on one
     -- opens that issue. A number is plain text on the card, with no border or background and
-    -- nothing right of it, lit while its session is speaking and underlined under the pointer.
-    -- A rule at the block's left runs the whole height: a thin dim one, or while its session is
-    -- speaking a thicker, lit one
+    -- nothing right of it, and underlined under the pointer
     if r.repo == '' then return end
     local rule, pad, tw = b[1] * s, b[2] * s, b[3] * s
     local chips_top, pitch, chip_h = b[4] * s, b[5] * s, b[6] * s
     local cy = y + row / 2
     font(cr, 9, text, s, true)
-    cairo_font_extents(cr, fext)
-    local top, bottom = cy - fext.height / 2, cy + fext.height / 2
-    if #r.chips > 0 then bottom = y + chips_top + (r.chips[#r.chips].line + 1) * pitch end
-    local thick = r.speaking and rule * 2 or rule
-    set(cr, fg, r.speaking and 1 or 0.35)
-    cairo_rectangle(cr, x0, top, thick, bottom - top)
-    cairo_fill(cr)
     local tx = x0 + rule + pad
-    set(cr, fg)
+    set(cr, ink())
     show(cr, fit(cr, r.repo, tw), tx, cy, 'left')
     font(cr, 9, text, s)
     for _, c in ipairs(r.chips) do
         local cx, ccy, w = tx + c.x * s, y + chips_top + c.line * pitch + pitch / 2, c.w * s
         if hovered(cx, ccy - chip_h / 2, cx + w, ccy + chip_h / 2) then
-            set(cr, fg, 0.6)
+            set(cr, ink(), 0.6)
             cairo_set_line_width(cr, 1 * s)
             cairo_move_to(cr, cx + w - width_of(cr, c.text), ccy + chip_h * 0.38)
             cairo_line_to(cr, cx + w, ccy + chip_h * 0.38)
             cairo_stroke(cr)
         end
-        if r.speaking then set(cr, fg) else set(cr, secondary()) end
+        set(cr, ink2())
         show(cr, c.text, cx + w, ccy, 'right')
     end
 end
@@ -567,12 +571,12 @@ end
 local function draw_pill(cr, str, x, cy, w, h, s, text, on)
     -- the pill after a session's name, naming the ready pull requests a click on it opens: the
     -- foreground with its text in fg_back, a little bigger under the pointer
-    set(cr, fg)
+    set(cr, ink())
     local grow = on and 1.5 * s or 0
     rounded_rect(cr, x - grow, cy - h / 2 - grow, w + 2 * grow, h + 2 * grow, h / 2 + grow)
     cairo_fill(cr)
     font(cr, 9, text, s)
-    set(cr, fg_back)
+    set(cr, theme.mix(fg_back, fg, row_flip))
     show(cr, str, x + w / 2, cy, 'centre')
 end
 
@@ -586,7 +590,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     draw_gear(cr, c, cy, row, s, r.speech)
     local right = c[5] * s
     font(cr, 9, text, s)
-    set(cr, secondary())
+    set(cr, ink2())
     if r.queued > 0 then right = right - show(cr, r.queued .. ' queued', right, cy, 'right') - 10 * s end
     local flags_w = r.flags ~= '' and width_of(cr, r.flags) + 8 * s or 0
     local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 12 * s or 0
@@ -598,7 +602,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local nw = width_of(cr, name)
     local after = name_x + nw
     if hovered(name_x - 4 * s, cy - row / 2, after + 4 * s, cy + row / 2) then
-        set(cr, fg, 0.6)
+        set(cr, ink(), 0.6)
         cairo_set_line_width(cr, 1 * s)
         cairo_move_to(cr, name_x, cy + row * 0.32)
         cairo_line_to(cr, after, cy + row * 0.32)
@@ -611,16 +615,16 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         after = x1
         font(cr, 11, text, s)
     end
-    set(cr, fg)
+    set(cr, ink())
     show(cr, name, name_x, cy, 'left')
     if flags_w > 0 then
         font(cr, 9, text, s)
-        set(cr, secondary())
+        set(cr, ink2())
         show(cr, r.flags, after + 8 * s, cy, 'left')
     end
     if r.speech ~= 'on' then return r.span end
     font(cr, 11, text, s)
-    set(cr, secondary(), 0.65)                     -- a lighter grey than the name and tags
+    set(cr, ink2(), 0.65)                          -- a lighter grey than the name and tags
     show(cr, fit(cr, r.last, c[1] * s - 10 * s - name_x), name_x, cy + row, 'left')   -- clear of the gear
     return r.span
 end
@@ -645,15 +649,40 @@ local function draw_list(cr, l, version, c, blk, s, text)
         for _, r in ipairs(rows) do total = total + r.span end
         draw_scrollbar(cr, x1 + 8 * s, top, height, s, height / row, total, scroll, last)
     end
+    local seen = {}
+    for _, r in ipairs(rows) do                    -- each row turns over in about a third of a second
+        local to = r.speaking and 1 or 0
+        local now = flips[r.id] or to
+        now = now + (to - now) * (1 - math.exp(-dt() * 10 / 1.1))
+        flips[r.id] = math.abs(to - now) < 0.01 and to or now
+        seen[r.id] = true
+    end
+    for id in pairs(flips) do
+        if not seen[id] then flips[id] = nil end
+    end
+    local bleed = 8 * s                            -- a row's fill reaches this far past the text
     cairo_save(cr)
-    cairo_rectangle(cr, x0, top, x1 - x0, height)
+    cairo_rectangle(cr, x0 - bleed, top, x1 - x0 + bleed, height)
     cairo_clip(cr)
     local at = 0
-    for _, r in ipairs(rows) do
+    for i, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
+        local h = r.span * row
+        if i % 2 == 0 then                         -- every other row dimmed, as a table's
+            set(cr, fg, 0.07)
+            cairo_rectangle(cr, x0 - bleed, y, x1 - x0 + bleed, h)
+            cairo_fill(cr)
+        end
+        row_flip = flips[r.id] or 0
+        if row_flip > 0 then                       -- the row being read aloud, in the opposite colours
+            set(cr, fg, row_flip)
+            cairo_rectangle(cr, x0 - bleed, y, x1 - x0 + bleed, h)
+            cairo_fill(cr)
+        end
         at = at + draw_row(cr, r, x0, y, row, c, s, text, blk)
     end
+    row_flip = 0
     cairo_restore(cr)
 end
 

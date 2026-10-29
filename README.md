@@ -95,12 +95,16 @@ itself.
   and its length) to their right, as the Spotify widget's seek bar is; the volume is at the top
   right, left of minimize
 
+The sessions are rows of a table, every other one dimmed to read across, and the row of the
+session being read aloud turns to the opposite colours (the foreground filled, its text in the
+card's colour), fading over about a third of a second as the session starts and stops speaking.
+
 Each session in the speech widget's list starts with its repository's whole name, named after
-its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
+its GitHub origin remote (or its folder, without one), in bold. Under it are the issue numbers of that repository,
 each in a chip: the issue a session's branch names, on a branch named `<type>/issue-<N>-...` as
 `/implement` names them, and the same for any other open session in that repository, in number
 order. They wrap onto more lines when they do not fit, and the session's row grows to hold them.
-While the session is speaking, the rule is thicker and the chips are tinted and lit. Every block is as wide
+Every block is as wide
 as the longest name in the list (at least 90 px), so no name is cut and the names after it still line up. A
 click or tap on a chip opens that issue in a new Google Chrome tab, and the chip is tinted under
 the pointer (a chip is otherwise plain text on the card); a repository with no issue shows its name alone.
