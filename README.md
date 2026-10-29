@@ -77,10 +77,13 @@ left and right (the sessions column's share of the width is kept in
 `~/.config/conky-widgets/speech/split`; each column keeps a least width).
 
 - **Sessions**: the left column, in one column and in the terminal's look, as the CLI sets its
-  session list in monospace: each repository's name in bold, then its sessions indented under it
-  behind a green dot, or a turning spinner and a bold name while busy, a finished one's name dim. A session takes a line for its name, with its gear at the right (the gear
-  opens the session's settings), a line for its tag, its pull requests and how many lines it has queued,
-  then its issue numbers.
+  session list in monospace: sections as the CLI names a session's state, in bold (**Needs
+  input** while a question waits to be read, **Working** for busy, waiting and background
+  sessions, **Completed** for idle ones), and under each its sessions behind a green dot, or a
+  turning spinner and a bold name while busy, a finished one's name dim. A session takes a line
+  for its name, with its gear at the right (the gear opens the session's settings), a line for
+  its repository and tag, its pull requests and how many lines it has queued, then its issue
+  numbers.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions

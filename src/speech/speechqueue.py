@@ -115,7 +115,7 @@ SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's 
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
 GROUP_PAD = 10                                # the list's edge to a repository's name
-SESSION_INDENT = 24                           # a repository's name to the sessions listed under it
+SESSION_INDENT = 20                           # a repository's name's left to the names of the sessions under it, after their bullets, which are not indented
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
 CHIP_GAP = 3                                  # between chips, and between their lines
@@ -701,7 +701,7 @@ def box(cx, cy, half_w, half_h):
 def session_line(s, chips=(), span=1, header=''):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
     repository's name, the pull requests' pill, its issue chips as line:x:width:text
-    (block_chips'), how many rows it takes, and the repository's name when this session is the
+    (block_chips'), how many rows it takes, and its section's title when this session is the
     first listed under it, which draw.lua prints on a row above it."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('repo', ''),
@@ -912,14 +912,34 @@ def encode_runs(runs):
     return ''.join(STYLE_MARK + (style or 'n') + text for text, style in runs)
 
 
+STATUS_GROUPS = ('Needs input', 'Working', 'Completed')   # the sessions column's sections, in order, as the CLI names its session states
+
+
+def status_group(s):
+    """The section a session is listed under: Needs input while a question waits to be read,
+    Completed while it is idle, else Working, which holds busy, waiting and background."""
+    tag = row_flags(s)
+    return 'Needs input' if tag == 'question' else 'Completed' if tag == 'idle' else 'Working'
+
+
 def grouped(listed):
-    """`listed` with the sessions of one repository together, the repositories in the order the
-    first of their sessions comes, and each repository's sessions in their order."""
-    order = []
-    for sess in listed:
-        if sess.get('repo', '') not in order:
-            order.append(sess.get('repo', ''))
-    return sorted(listed, key=lambda sess: order.index(sess.get('repo', '')))
+    """`listed` with the sessions of one section together, in STATUS_GROUPS' order, and each
+    section's sessions in their order."""
+    return sorted(listed, key=lambda sess: STATUS_GROUPS.index(status_group(sess)))
+
+
+def tag_line(s, room=None):
+    """The text of a session's line under its name: its repository's name, then its tag. The
+    repository's name is cut to fit `room` px, if given, so the tag stays whole."""
+    repo, tag = s.get('repo') or '', row_flags(s)
+    if not repo:
+        return tag
+    rest = f' \u00b7 {tag}'
+    if room is not None:
+        repo = fit(repo, LIST_TAG_FONT, (room - text_width(rest, LIST_TAG_FONT) * BLOCK_SLACK) / BLOCK_SLACK)
+        if repo in ('', '\u2026'):                          # nothing of it fits: the tag alone
+            return tag
+    return repo + rest
 
 
 def block_chips(issues, width):
@@ -958,8 +978,9 @@ def name_spans(s, right):
     pill = link_pill(s.get('prs'))
     if not pill:
         return span, None
-    x0 = name_x + text_width(row_flags(s), LIST_TAG_FONT) * BLOCK_SLACK + 8
-    return span, [round(x0 - 2, 2), round(x0 + text_width(pill, LIST_TAG_FONT) * BLOCK_SLACK + 4, 2)]
+    pill_w = text_width(pill, LIST_TAG_FONT) * BLOCK_SLACK
+    x0 = name_x + text_width(tag_line(s, right - name_x - pill_w - 8), LIST_TAG_FONT) * BLOCK_SLACK + 8
+    return span, [round(x0 - 2, 2), round(x0 + pill_w + 4, 2)]
 
 
 def write_sessions(listed, layout):
@@ -1088,8 +1109,9 @@ def render(state, now=None):
     low, high = split_limits(avail)
     list_right = MARGIN + round(avail * min(max(load_split(), low), high))
     term_left = list_right + COLUMN_GAP
-    # One column: each repository's name, then its sessions indented under it, a session's name
-    # line followed by its tag line and its issue numbers.
+    # One column: a section for each state the CLI names (needs input, working, completed) with
+    # its sessions under it, a session's name line followed by its repository and tag and its
+    # issue numbers.
     listed = grouped(listed)
     # The gear at the right of each row, which opens that session's settings: its icon, and
     # the click area round it that runs the row's name line
@@ -1103,11 +1125,11 @@ def render(state, now=None):
     rows_fit = list_height / row
     count = len(listed)
     chips_top, pitch, chip_h = block_rows(row)
-    layout, spans, heads, repo = [], [], [], None
+    layout, spans, heads, section = [], [], [], None
     for s in listed:
         chips, lines = block_chips(s.get('issues', ()), text_w)
-        header = s.get('repo', '') if s.get('repo', '') != repo and s.get('repo') else ''
-        repo = s.get('repo', '')
+        header = status_group(s) if status_group(s) != section else ''
+        section = status_group(s)
         head = row if header else 0
         # the name line, its tag line and its issue numbers take as many rows as they need
         height = head + chips_top + lines * pitch

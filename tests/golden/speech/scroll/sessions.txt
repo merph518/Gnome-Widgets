@@ -1,4 +1,4 @@
-00000000-eeee	alerts	0	1	idle	Session 0				2	
+00000000-eeee	alerts	0	1	idle	Session 0				3	Completed
 00000001-eeee	alerts	0	1	idle	Session 1				2	
 00000002-eeee	alerts	0	1	idle	Session 2				2	
 00000003-eeee	alerts	0	1	idle	Session 3				2	

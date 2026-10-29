@@ -385,7 +385,8 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     -- the text behind a white bullet, and a dim "✻ Read aloud for 7s · done Thursday 9:47 AM" line.
     -- t[9] lines show at once, the rest above them scrolled by `scrolled` lines and clipped to
     -- where they show. At the foot the CLI's working line: the spinner turning and "Reading
-    -- aloud…" with the clip's time while one plays, or "Paused", and nothing when idle.
+    -- aloud…" with the clip's time while one plays, or "Paused", and once the speech is done a
+    -- gray spinner at rest and "Idle".
     local x0, x1, pad = t[1] * s, t[3] * s, t[5] * s
     local head_cy, first_cy, step, shown, status_cy = t[6] * s, t[7] * s, t[8] * s, t[9], t[10] * s
     local playing, paused, queued = t[11] == 1, t[12] == 1, t[13]
@@ -435,10 +436,13 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     end
     cairo_restore(cr)
 
-    if not (playing or queued > 0) then return end
-    draw_spark(cr, left + 0.55 * cw, status_cy, 5.5 * s, playing and not paused and pos * 3 or 0, playing and 1 or 0.45)
-    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or 'Waiting'
-    set(cr, ORANGE, playing and 1 or 0.6)
+    -- the working line stays: the orange spinner turning while a clip plays, then once the
+    -- speech is done a gray one that is not moving, "Idle", as the CLI's rests
+    local working = playing and not paused
+    draw_spark(cr, left + 0.55 * cw, status_cy, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6,
+               (playing or queued > 0) and ORANGE or fg)
+    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or queued > 0 and 'Waiting' or 'Idle'
+    if playing or queued > 0 then set(cr, ORANGE, working and 1 or 0.6) else set(cr, fg, 0.5) end
     local lw = show(cr, label, left + 2 * cw, status_cy, 'left')
     local detail = {}
     if playing then detail[#detail + 1] = fmt_time(math.min(pos, duration > 0 and duration or pos)) .. ' / ' .. fmt_time(duration) end
@@ -543,7 +547,7 @@ end
 local GREEN = {0.33, 0.78, 0.40}          -- the CLI's dot before a finished item
 
 local function draw_group(cr, r, x0, y, row, c, b, s, text)
-    -- the repository's name on a row of its own above the first session listed under it, bold
+    -- the section's title on a row of its own above the first session listed under it, bold
     -- as the CLI's section titles are
     mono(cr, text, s, true)
     set(cr, fg)
@@ -573,7 +577,7 @@ end
 
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     -- a session's rows, set as the CLI sets its session list, in the terminal's font: its
-    -- repository's name above it, in bold, when it is the first listed under that; then its name
+    -- section's title above it, in bold, when it is the first listed under that; then its name
     -- line, indented behind a green dot, or the turning spinner and a bold name while it is busy
     -- (a finished session's name is dim), with its setting's gear at the right (a click on the
     -- name asks to close the session); under it the line of its tag (busy / idle / waiting /
@@ -587,14 +591,15 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local cy = y + row / 2
     draw_gear(cr, c, cy, row, s, r.speech)
     local name_x = x0 + (blk[1] + blk[2]) * s
+    local bullet_x = x0 + blk[1] * s + 5 * s               -- under the repository's name, not indented
     local busy = r.flags == 'busy'
     local lit = busy or r.speaking or r.speech == 'on'      -- a session in play is bright, the rest dim
     if busy then
-        draw_spark(cr, name_x - 12 * s, cy, 5 * s, os.clock() * 3, 1, fg)
+        draw_spark(cr, bullet_x, cy, 5 * s, os.clock() * 3, 1, fg)
     else
         set(cr, GREEN)
         cairo_new_path(cr)
-        cairo_arc(cr, name_x - 12 * s, cy, 1.8 * s, 0, 2 * math.pi)
+        cairo_arc(cr, bullet_x, cy, 1.8 * s, 0, 2 * math.pi)
         cairo_fill(cr)
     end
     mono(cr, text, s, busy)
@@ -614,7 +619,12 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     font(cr, 11, text, s, false, false, true)
     set(cr, secondary(), 0.8)
     local x = name_x
-    if r.flags ~= '' then x = x + show(cr, r.flags, x, my, 'left') + 8 * s end
+    local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 8 * s or 0
+    local rest = ' \u{b7} ' .. r.flags
+    -- its repository, cut so its tag and the pull requests after it stay whole, then its tag
+    local repo = r.repo ~= '' and fit(cr, r.repo, c[5] * s - name_x - pill_w - width_of(cr, rest)) or ''
+    local tag = (repo ~= '' and repo ~= '\u{2026}') and repo .. rest or r.flags
+    if tag ~= '' then x = x + show(cr, tag, x, my, 'left') + 8 * s end
     if r.pill ~= '' then
         local on = hovered(x - 2 * s, my - row / 2, x + width_of(cr, r.pill) + 4 * s, my + row / 2)
         set(cr, ORANGE, on and 1 or 0.85)
@@ -628,7 +638,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         x = x + w + 8 * s
         set(cr, secondary(), 0.8)
     end
-    if r.queued > 0 then show(cr, r.queued .. ' queued', x, my, 'left') end
+    if r.queued > 0 and x + width_of(cr, r.queued .. ' queued') < c[5] * s then show(cr, r.queued .. ' queued', x, my, 'left') end
 
     draw_chips(cr, r, name_x, y, blk, s, text)
     return r.span

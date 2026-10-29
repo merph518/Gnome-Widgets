@@ -402,13 +402,13 @@ class Links(Repos):
         with open(speechqueue.SESSIONS) as f:
             lines = [line.split('\t') for line in f.read().splitlines()]
         self.assertEqual([l[6] for l in lines], ['Gnome-Widgets', 'Gnome-Widgets'])
-        self.assertEqual([l[10] for l in lines], ['Gnome-Widgets', ''])         # the repository's name above the first only
+        self.assertEqual([l[10] for l in lines], ['Working', 'Completed'])      # each section's title above its first
         self.assertEqual([l[7] for l in lines], ['PR #151', ''])
         self.assertEqual([[t.split(':')[3] for t in l[8].split()] for l in lines], [['#127', '#131']] * 2)
         self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
         with open(speechqueue.REGIONS) as f:
             row = json.load(f)['list_scroll'][1]
-        self.assertEqual((one['head'], two['head']), (row, 0))     # a row for the repository's name over the first
+        self.assertEqual((one['head'], two['head']), (row, row))   # a row for the section's title over each, in sections of their own
         self.assertGreaterEqual(one['issues'][0][1], one['head'] + 2 * row)   # the numbers under the name and the tag line
         self.assertLess(one['link'][0], one['link'][1])            # the pill, after the tag
         self.assertLess(one['link'][1], one['gear'][0])            # clear of the gear
@@ -428,7 +428,7 @@ class Links(Repos):
         with open(speechqueue.SESSIONS) as f:
             line = f.read().splitlines()[0].split('\t')
         self.assertNotIn('issues', row)
-        self.assertEqual(line[8:], ['', '3', 'Gnome-Widgets'])     # a name, a tag line and the repository's name
+        self.assertEqual(line[8:], ['', '3', 'Completed'])     # a name, a tag line and the section's title
 
     def test_a_repository_lists_the_issues_of_the_sessions_in_it_in_number_order(self):
         issue = lambda repo, n: f'https://github.com/{repo}/issues/{n}'
@@ -440,10 +440,15 @@ class Links(Repos):
                          [['#7', '#31']] * 4 + [['#2'], []])
         self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
 
-    def test_the_sessions_of_a_repository_are_listed_together_in_the_order_its_first_comes(self):
-        listed = [dict(id='a', repo='x'), dict(id='b', repo='y'), dict(id='c', repo='x'), dict(id='d', repo=''),
-                  dict(id='e', repo='y')]
-        self.assertEqual([s['id'] for s in speechqueue.grouped(listed)], ['a', 'c', 'b', 'e', 'd'])
+    def test_the_sessions_are_listed_in_the_sections_the_cli_names_for_their_state(self):
+        listed = [dict(id='a', busy=False, background=False), dict(id='b', busy=True, background=False),
+                  dict(id='c', busy=False, background=False, question=True), dict(id='d', busy=False, background=True),
+                  dict(id='e', busy=False, background=False, waiting='merge')]
+        self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
+                         [('Needs input', 'c'), ('Working', 'b'), ('Working', 'd'), ('Working', 'e'),
+                          ('Completed', 'a')])
+        self.assertEqual(speechqueue.tag_line(dict(listed[0], repo='Overmind')), 'Overmind \u00b7 idle')
+        self.assertEqual(speechqueue.tag_line(listed[0]), 'idle')
 
     def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):
         with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 10 * len(t)):
