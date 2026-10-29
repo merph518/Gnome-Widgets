@@ -4,6 +4,8 @@
 --   widget.txt    conky's markup (the column headers), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
+--   bubble-scroll how many lines conky-mouse.py has turned the wheel over the speech bubble, in all
+--                 (down counts up); the bubble follows the clip again BUBBLE_HOLD seconds after the last
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 --   voice-menu    present while conky-mouse.py has the voice list open: the first voice shown and the
 --                 one under the pointer (-1 for none), as "<scroll> <hover>"
@@ -35,6 +37,12 @@ local fg, fg_back = theme.LIGHT, theme.DARK   -- fg_back: drawn on fg, like the 
 local clock = {stamp = nil, pos = 0, running = false}
 local sessions = {version = nil, rows = {}}
 local scroll = nil                        -- eased list scroll position, in rows
+local said = {key = nil, shown = 0, manual = nil, hold = 0, steps = nil}   -- the bubble's text: its eased offset in lines, the wheel's offset and how long it holds
+local bubble = {snap = nil, open = 0, idle = 0}   -- the bubble last sent, kept to fade out after the speech ends; how far open (0..1); seconds since it was last sent
+local BUBBLE_OPEN = 0.15                  -- seconds the bubble takes to open when speech starts
+local BUBBLE_LINGER = 2                   -- seconds it stays after the speech ends
+local BUBBLE_FADE = 0.6                   -- seconds it then takes to fade away
+local BUBBLE_HOLD = 5                     -- seconds the wheel's place in the bubble stays before it follows the clip again
 
 local function read(name)
     local f = io.open(cache .. name)
@@ -318,12 +326,71 @@ local function draw_avatar(cr, a, path, s)
     end
 end
 
-local function draw_bubble(cr, b, name, lines, s, text)
+local function bubble_offset(lines, shown_lines, progress, clock_pos)
+    -- how many lines the bubble's text is scrolled: where the wheel left it for BUBBLE_HOLD
+    -- seconds, else the clip's elapsed share of the lines past the ones shown; eased between
+    local last = math.max(#lines - shown_lines, 0)
+    local key = table.concat(lines, '\n')
+    if said.key ~= key then
+        said = {key = key, shown = 0, manual = nil, hold = 0, steps = said.steps}   -- a new line starts at the top
+    end
+    local steps = tonumber((read('bubble-scroll') or ''):match('^%s*(%S+)') or '')
+    if steps and said.steps == nil then said.steps = steps end
+    if steps and steps ~= said.steps then
+        local from = said.manual or said.shown
+        said.manual = math.min(math.max(from + (steps - said.steps), 0), last)
+        said.hold, said.steps = BUBBLE_HOLD, steps
+    end
+    local target = 0
+    if progress and progress[6] and progress[6] > 0 then
+        target = math.min(math.max(clock_pos / progress[6], 0), 1) * last
+    end
+    if said.manual then
+        said.hold = said.hold - dt()
+        if said.hold <= 0 then said.manual = nil else target = said.manual end
+    end
+    said.shown = said.shown + (target - said.shown) * (1 - math.exp(-dt() * 12 / 1.1))
+    return said.shown
+end
+
+local function bubble_state(d)
+    -- the bubble to draw this frame, or nil: what draw.txt sends while speech plays; once it
+    -- ends the last one stays BUBBLE_LINGER seconds, then fades over BUBBLE_FADE. Returns the
+    -- bubble, its speaker and lines, how far open (0..1) and how opaque (0..1).
+    local step = dt()
+    if d.bubble and #d.bubble < 10 then d.bubble = nil end   -- one an older speechqueue.py wrote, until it restarts
+    if d.bubble then
+        bubble.snap = {b = d.bubble, name = d.text.speaker or '', lines = d.lines}
+        bubble.idle = 0
+        bubble.open = math.min(bubble.open + step / BUBBLE_OPEN, 1)
+    elseif bubble.snap then
+        bubble.idle = bubble.idle + step
+        if bubble.idle > BUBBLE_LINGER + BUBBLE_FADE then bubble = {snap = nil, open = 0, idle = 0} end
+    end
+    local snap = bubble.snap
+    if not snap then
+        said.key = nil
+        return nil
+    end
+    local fade = 1 - math.max(bubble.idle - BUBBLE_LINGER, 0) / BUBBLE_FADE
+    return snap, 1 - (1 - bubble.open) ^ 3, fade
+end
+
+local function draw_bubble(cr, b, name, lines, s, text, scrolled, open, alpha)
     -- the line being read aloud in a bubble whose tail points left at the avatar: the box
     -- x = b[1]..b[3], y = b[2]..b[4], the name centred on y = b[6] and the lines from b[7],
-    -- b[8] apart, all from x + b[5]; the tail's tip is level with y = b[9]
+    -- b[8] apart, all from x + b[5]; the tail's tip is level with y = b[9]; b[10] lines show
+    -- at once, the rest scrolled by `scrolled` lines, clipped to where they show; grown from
+    -- the tail's tip by `open` (0..1) and drawn `alpha` as strong
     local x0, y0, x1, y1, pad = b[1] * s, b[2] * s, b[3] * s, b[4] * s, b[5] * s
-    set(cr, fg, 0.14)
+    cairo_save(cr)
+    if open < 1 then
+        cairo_translate(cr, x0, b[9] * s)
+        cairo_scale(cr, open, open)
+        cairo_translate(cr, -x0, -b[9] * s)
+    end
+    alpha = alpha * open
+    set(cr, fg, 0.14 * alpha)
     -- one path for the body and its tail, which reaches into it, so no seam shows between them
     rounded_rect(cr, x0, y0, x1 - x0, y1 - y0, 12 * s)
     local tip = b[9] * s
@@ -333,12 +400,19 @@ local function draw_bubble(cr, b, name, lines, s, text)
     cairo_close_path(cr)
     cairo_fill(cr)
     font(cr, 9, text, s, true)
-    set(cr, fg)
+    set(cr, fg, alpha)
     show(cr, name, x0 + pad, b[6] * s, 'left')
     font(cr, 11, text, s)
+    local step = b[8] * s
+    cairo_save(cr)
+    cairo_rectangle(cr, x0 + pad, (b[7] - b[8] / 2) * s, x1 - x0 - 2 * pad, b[10] * step)
+    cairo_clip(cr)
     for i, line in ipairs(lines) do
-        show(cr, line, x0 + pad, (b[7] + (i - 1) * b[8]) * s, 'left')
+        local y = b[7] * s + (i - 1 - scrolled) * step
+        if y > (b[7] - b[8]) * s and y < (b[7] + b[10] * b[8]) * s then show(cr, line, x0 + pad, y, 'left') end
     end
+    cairo_restore(cr)
+    cairo_restore(cr)
 end
 
 local function round_button(cr, cx, cy, size, active)
@@ -742,7 +816,11 @@ function conky_draw_widget()
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.title then draw_title(cr, d.title, label_after(d.text.title, 3), s, text) end
         if d.avatar then draw_avatar(cr, d.avatar, label_after(d.text.avatar, 3), s) end
-        if d.bubble then draw_bubble(cr, d.bubble, d.text.speaker or '', d.lines, s, text) end
+        local snap, open, alpha = bubble_state(d)
+        if snap then
+            draw_bubble(cr, snap.b, snap.name, snap.lines, s, text,
+                        bubble_offset(snap.lines, snap.b[10], p, clock.pos), open, alpha)
+        end
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end

@@ -70,14 +70,13 @@ SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 AVATAR_D = 36                                 # the speaker's avatar, left of the bubble
 # The avatar's image, the first of these that is there: one the user puts in the widget's own folder,
-# else the icon Claude Desktop installs. Without either, draw.lua draws a spark.
-AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), '/usr/share/icons/hicolor/256x256/apps/claude-desktop.png')
+# else the one shipped beside this file. Without either, draw.lua draws a spark.
+AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), os.path.join(HERE, 'avatar.png'))
 AVATAR_GAP = 12                               # the avatar to the bubble, which its tail points across
 BUBBLE_PAD_X = 12                             # the bubble's edge to its text
 BUBBLE_PAD_Y = 8
 BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
-BUBBLE_LINES = 3                              # lines of the text read aloud the bubble holds, always
-BUBBLE_TEXT_MAX = 400                         # characters of the line read aloud that are laid out
+BUBBLE_LINES = 3                              # lines of the text read aloud the bubble shows at once, always
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
 HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
@@ -708,25 +707,30 @@ def row_flags(s):
 _wrapped = {}
 
 
-def wrap_lines(text, font, width, lines):
-    """`text` broken at spaces into at most `lines` lines of `font` that fit `width`, the last cut
-    with an ellipsis when more follows it and any line cut the same way when one word is wider
-    than `width`."""
-    key = (text, font, width, lines, text_scale)
+def wrap_lines(text, font, width):
+    """`text` broken at spaces into lines of `font` that fit `width`, every word kept; a word
+    wider than `width` is broken across lines."""
+    key = (text, font, width, text_scale)
     if key not in _wrapped:
         if len(_wrapped) > 32:
             _wrapped.clear()
-        words, out, line, i = text.split(), [], '', 0
-        while i < len(words) and len(out) < lines - 1:
-            trial = f'{line} {words[i]}'.strip()
-            if line and text_width(trial, font) > width:
-                out.append(fit(line, font, width))
-                line = ''
+        out, line = [], ''
+        for word in text.split():
+            trial = f'{line} {word}'.strip()
+            if text_width(trial, font) <= width:
+                line = trial
                 continue
-            line, i = trial, i + 1
-        last = ' '.join(([line] if line else []) + words[i:])
-        if last:
-            out.append(fit(last, font, width))
+            if line:
+                out.append(line)
+            while text_width(word, font) > width and len(word) > 1:
+                cut = len(word) - 1
+                while cut > 1 and text_width(word[:cut], font) > width:
+                    cut -= 1
+                out.append(word[:cut])
+                word = word[cut:]
+            line = word
+        if line:
+            out.append(line)
         _wrapped[key] = out
     return _wrapped[key]
 
@@ -923,10 +927,10 @@ def render(state, now=None):
     # progress bar and the sessions, when conky-mouse.py has it open.
     out.gap(FOOTER_GAP)
     # The speaker's avatar, level with the bottom of a bubble whose tail points at it. While a
-    # clip plays the bubble holds the speaker's name, then up to BUBBLE_LINES lines of the
-    # line being read aloud; while nothing plays there is the avatar alone. The row is as
-    # tall either way, so the card's size does not change as lines play. draw.lua draws it
-    # from these lines.
+    # clip plays the bubble holds the speaker's name, then BUBBLE_LINES lines at a time of the
+    # whole line being read aloud, which draw.lua scrolls; while nothing plays there is the
+    # avatar alone. The row is as tall either way, so the card's size does not change as
+    # lines play. draw.lua draws it from these lines.
     name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
     bubble_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
     bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
@@ -938,10 +942,12 @@ def render(state, now=None):
         draw.append(f'bubble {bubble_x0} {top} {right} {top + bubble_h} {BUBBLE_PAD_X} '
                     f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
                     f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
-                    f'{top + bubble_h - AVATAR_D / 2:.2f}')
+                    f'{top + bubble_h - AVATAR_D / 2:.2f} {BUBBLE_LINES}')
         draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
-        said = without_speaker(state.get('text') or '')[:BUBBLE_TEXT_MAX]
-        draw.extend(f'line {line}' for line in wrap_lines(said, ROW_FONT, inner, BUBBLE_LINES))
+        said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
+        draw.extend(f'line {line}' for line in said)
+        regions['bubble'] = [bubble_x0, top, right, top + bubble_h]
+        regions['bubble_scroll'] = max(len(said) - BUBBLE_LINES, 0)     # lines past what it shows
     out.gap(max(bubble_h, AVATAR_D))
     out.gap(HEADER_GAP)
     # The progress bar, always there: the current line's while its length is known (0:00 while

@@ -745,7 +745,7 @@ class TitleAndFooter(Fixture):
         self.assertLess(y1, progress_y)
         self.assertLess(progress_y, controls_y)
 
-    def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_three_lines(self):
+    def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_the_whole_text(self):
         lines, _, _ = self.draw(text=self.LONG)
         ax, ay, d = (float(v) for v in lines['avatar'].split())
         x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
@@ -754,11 +754,31 @@ class TitleAndFooter(Fixture):
         self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
         self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
         self.assertEqual(lines['speaker'], 'Claude Voice Widget')
-        self.assertEqual(len(lines['line']), speechqueue.BUBBLE_LINES)
-        self.assertTrue(lines['line'][-1].endswith('\u2026'))           # more follows the third line
+        self.assertEqual(int(lines['bubble'].split()[9]), speechqueue.BUBBLE_LINES)     # lines shown at once
+        self.assertGreater(len(lines['line']), speechqueue.BUBBLE_LINES)
+        self.assertEqual(' '.join(lines['line']), self.LONG)            # every word, none cut
         self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
         for line in lines['line']:
             self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+
+    def test_a_word_wider_than_the_bubble_is_broken_across_lines_and_none_is_lost(self):
+        word = 'x' * 300
+        lines, _, _ = self.draw(text=f'See {word} now')
+        x0, _, x1, _, pad = (float(v) for v in lines['bubble'].split()[:5])
+        self.assertEqual(''.join(lines['line']).replace(' ', ''), 'See' + word + 'now')
+        for line in lines['line']:
+            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+
+    def test_the_bubble_is_a_wheel_area_and_counts_the_lines_past_what_it_shows(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
+        self.assertEqual(regions['bubble'], [x0, y0, x1, y1])
+        self.assertEqual(regions['bubble_scroll'], len(lines['line']) - speechqueue.BUBBLE_LINES)
+        lines, regions, _ = self.draw(text='Done.')
+        self.assertEqual(regions['bubble_scroll'], 0)                   # nothing to scroll
+        os.remove(os.path.join(self.f.speak, 'now.json'))
+        lines, regions, _ = self.draw(quiet=True)
+        self.assertNotIn('bubble', regions)                             # no bubble while nothing plays
 
     def test_the_avatar_is_the_first_image_there_is_and_without_one_the_line_names_none(self):
         mine = os.path.join(self.root, 'avatar.png')
