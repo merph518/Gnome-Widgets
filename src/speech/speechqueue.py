@@ -938,7 +938,8 @@ def render(state, now=None):
     bottom = out.y + full_h
     avatar_at(bottom - AVATAR_D)                              # level with the bubble's bottom
     if n:
-        speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A session'   # the hook's "<name> session"
+        speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A'   # the hook's "<name> session"
+        speaker += ' Session:'
         said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
         shown = min(max(len(said), 1), BUBBLE_LINES)
         top = bottom - (2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + shown * line_h)

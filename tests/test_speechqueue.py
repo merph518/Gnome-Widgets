@@ -753,7 +753,7 @@ class TitleAndFooter(Fixture):
         self.assertEqual(ay + d / 2, y1)                                # level with the bubble's bottom
         self.assertEqual(float(lines['bubble'].split()[8]), ay)         # and the tail points at its middle
         self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
-        self.assertEqual(lines['speaker'], 'Claude Voice Widget')
+        self.assertEqual(lines['speaker'], 'Claude Voice Widget Session:')
         self.assertEqual(int(lines['bubble'].split()[9]), len(lines['line']))           # lines shown at once
         self.assertEqual(' '.join(lines['line']), self.LONG)            # every word, none cut
         self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
@@ -791,14 +791,14 @@ class TitleAndFooter(Fixture):
             fields = lines['avatar'].split(None, 3)
             self.assertEqual(fields[3] if len(fields) > 3 else None, want)
 
-    def test_the_speaker_is_named_without_the_hooks_session_suffix(self):
+    def test_the_speaker_is_the_name_without_the_hooks_suffix_then_session_and_a_colon(self):
         self.three()
         self.f.now(ME, 'Table Headers session', 'Checks pass.', hook_pid=9001)
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
         self.f.wav(9001, 6.0)
         speechqueue.render(self.state(), now=1000.0)
         with open(speechqueue.DRAW) as f:
-            self.assertIn('speaker Table Headers', f.read().splitlines())
+            self.assertIn('speaker Table Headers Session:', f.read().splitlines())
 
     def test_the_bubble_is_one_line_high_for_a_short_line_and_grows_upward_to_six(self):
         def box(text):
