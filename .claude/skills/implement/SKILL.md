@@ -180,7 +180,7 @@ A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
 [static-checks.md](../_shared/static-checks.md#then-a-run), as an isolated copy of
 the widgets that belongs to this session, started from the checkout. The copy has its
 own home, so its cache, config, pid file and window position are its own; its orchestrator
-widget reads fixture Claude sessions and plays no sound; it has no tray icon, no
+widget reads fixture Claude sessions; it has no tray icon, no
 Spotify login and so sends no Web API request; and its windows have a class and a
 position of their own, on the built-in display, so a copy never covers the monitor
 the user works on. Any number of them run beside the user's copy and each
@@ -302,5 +302,3 @@ leave the branch alone.
   [ui-options.md](../_shared/ui-options.md).
 - [/create-issue](../create-issue/SKILL.md), [/new-branch](../new-branch/SKILL.md) and
   [/release](../release/SKILL.md).
-- [implement-with-speech](../implement-with-speech/SKILL.md), which runs this skill with
-  speech on.

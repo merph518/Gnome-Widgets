@@ -1,6 +1,6 @@
 ---
 name: voice-bridge-hooks
-description: The speech and voice tunnel hooks, run from the voice plugin with this repository's extension.json, which announce what a session needs, read replies aloud for /implement-with-speech, and feed the voice bridge the phone follows. Use when changing those hooks or their values, or working out why a session spoke, stayed quiet, or never reached the phone - "why did the stop not speak", "the ready announcement is wrong", "the phone missed that reply".
+description: The speech and voice tunnel hooks, run from the voice plugin with this repository's extension.json, which announce what a session needs, read replies aloud in speech mode, and feed the voice bridge the phone follows. Use when changing those hooks or their values, or working out why a session spoke, stayed quiet, or never reached the phone - "why did the stop not speak", "the ready announcement is wrong", "the phone missed that reply".
 ---
 
 # Voice bridge hooks
@@ -41,5 +41,3 @@ None.
 ## Repository notes
 
 - [ready-signal.md](../_shared/ready-signal.md): the ready line and the label.
-- [implement-with-speech](../implement-with-speech/SKILL.md): speech mode as a
-  session sees it.
