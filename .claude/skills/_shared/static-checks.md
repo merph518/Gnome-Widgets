@@ -70,17 +70,27 @@ directory, and a second session's build waits for the first.
 
 The checks cannot see a Lua runtime error or a path that only exists under
 `/usr`. A change that touches `src/`, `bin/`, `packaging/` or `debian/` has not
-been checked until it has run: from the checkout, as in `/implement` Section 6 or
-the `run` skill, or built and installed, as in `/release` step 4. Either way
-the widget's log is read afterwards:
+been checked until it has run: as an isolated copy of the widgets that belongs to
+the session, as in `/implement` Section 6, or installed, as in `/release` step 4.
+The isolated copy is the standard way to run from a working session, and its
+`--installed` option runs the installed launcher in the same isolation:
 
 ```bash
-grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
+scripts/isolated-widgets.py start                  # a copy of its own, beside the user's
+RUN=$(scripts/isolated-widgets.py path)/home/.cache
+grep -iE 'error|critical|traceback|lua' "$RUN/conky-widgets/run.log"
+grep 'api:' "$RUN/conky-spotify-nowplaying/nowplaying.log"    # must print nothing
+scripts/isolated-widgets.py stop
 ```
 
-`critical` is there for GLib's `Gtk-CRITICAL` lines, which name no error.
-The only line expected in the log besides conky's startup chatter is the
-`libayatana-appindicator is deprecated` warning.
+The copy has its own home, fixture speech sessions and no sound, no tray icon, no
+Spotify login and window class and position of its own. A session never stops,
+replaces, restarts or captures a copy it did not start: the user's, installed or
+from a checkout, or another session's. `critical` is there for GLib's
+`Gtk-CRITICAL` lines, which name no error. The log should hold nothing beyond
+conky's startup chatter; a run in the user's own copy (the installed smoke test of
+`/release` step 4, which the user does) also shows the
+`libayatana-appindicator is deprecated` warning from the tray.
 
 The pull request's test plan says which run was done. A change to
 documentation, skills or `scripts/` alone owes no run.

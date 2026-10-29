@@ -377,6 +377,13 @@ class SuperviseTest(LauncherTest):
         self.assertEqual((tray_ended[4], tray_ended[6]), (False, True))   # kept for speech, then gone
         self.assertEqual(os.listdir(launcher.UP), [])
 
+    def test_no_tray_is_started_when_csn_no_tray_is_set(self):
+        with mock.patch.dict(os.environ, {'CSN_NO_TRAY': '1'}), \
+                mock.patch.object(launcher, 'processes', lambda w: [
+                    ('tray', ['py', 'tray.py'])] if w == launcher.BUNDLE else [('conky', ['conky', '-c', w])]):
+            started = self.run_supervisor(3, lambda n, procs: None)
+        self.assertEqual(self.names(started), ['conky'])
+
     def test_the_tray_is_the_bundles_not_a_widgets(self):
         self.assertEqual([name for name, _ in launcher.processes(launcher.BUNDLE)], ['tray'])
         self.assertTrue(launcher.processes(launcher.BUNDLE)[0][1][1].endswith(os.path.join('src', 'tray.py')))
