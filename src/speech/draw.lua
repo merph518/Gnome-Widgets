@@ -572,7 +572,6 @@ local function draw_scrollbar(cr, x, top, height, s, rows, count, at, last)
     rounded_line(cr, x, ty, x, ty + len, w)
 end
 
-local glows = {}                            -- session id -> how bright its row is, 0 to 1
 
 local SPEECH_SETTINGS = {{'on', 'On'}, {'alerts', 'Alerts'}, {'off', 'Off'}}
 local function draw_gear(cr, g, s, open)
@@ -615,7 +614,7 @@ end
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     -- a session's line, set as the CLI sets its session list, in the terminal's font: behind a
     -- small green dot, or the turning spinner and a bold name while it is busy, its name dim
-    -- unless it is busy or being read aloud; then dim after it its repository, and at the right the lines it has queued (a click on
+    -- unless it is busy; then dim after it its repository, and at the right the lines it has queued (a click on
     -- the name asks to close the session). A section's title above it
     -- when it is the first listed under that, after a blank row unless it is the first section.
     -- Its issue and pull request numbers are in its messages' headers in the terminal. The name
@@ -651,7 +650,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         cairo_line_to(cr, after, cy + row * 0.34)
         cairo_stroke(cr)
     end
-    if busy or r.speaking then set(cr, fg) else set(cr, secondary()) end
+    if busy then set(cr, fg) else set(cr, secondary()) end
     show(cr, name, name_x, cy, 'left')
 
     font(cr, 11, text, s, false, false, true)
@@ -683,17 +682,6 @@ local function draw_list(cr, l, version, c, blk, s, text)
         for _, r in ipairs(rows) do total = total + r.span end
         draw_scrollbar(cr, x1 + 4 * s, top, height, s, height / row, total, scroll, last)
     end
-    local seen = {}
-    for _, r in ipairs(rows) do                    -- each row brightens and dims over about a third of a second
-        local to = r.speaking and 1 or 0
-        local now = glows[r.id] or to
-        now = now + (to - now) * (1 - math.exp(-dt() * 10 / 1.1))
-        glows[r.id] = math.abs(to - now) < 0.01 and to or now
-        seen[r.id] = true
-    end
-    for id in pairs(glows) do
-        if not seen[id] then glows[id] = nil end
-    end
     cairo_save(cr)
     cairo_rectangle(cr, x0, top, x1 - x0, height)
     cairo_clip(cr)
@@ -701,12 +689,6 @@ local function draw_list(cr, l, version, c, blk, s, text)
     for _, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
-        local glow = glows[r.id] or 0              -- the row being read aloud, brighter
-        if glow > 0 then
-            set(cr, fg, glow * 0.2)
-            rounded_rect(cr, x0, y, x1 - x0, r.span * row, 6 * s)
-            cairo_fill(cr)
-        end
         at = at + draw_row(cr, r, x0, y, row, c, s, text, blk)
     end
     cairo_restore(cr)

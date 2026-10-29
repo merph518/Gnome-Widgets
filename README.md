@@ -81,8 +81,7 @@ left and right (the sessions column's share of the width is kept in
   session list in monospace: sections as the CLI names a session's state, in bold (**Needs
   input** while a question waits to be read, **Working** for busy sessions and ones waiting,
   **Completed** for idle ones), and under each its sessions behind a green dot, or a
-  turning spinner and a bold name while busy, a finished one's name dim, the one being read
-  aloud white. A session is one line: its name, its repository dimmer, and the lines it has
+  turning spinner and a bold name while busy, a finished one's name dim. A session is one line: its name, its repository dimmer, and the lines it has
   queued; the section says its state, so there is no tag. A section after the first has a blank
   line above its title. A click or tap on the name asks to close the session. A session is
   **waiting**, and so **Working**, when a test run (such as `unittest`, `pytest`, a `test_*.py`
@@ -112,9 +111,6 @@ left and right (the sessions column's share of the width is kept in
   the pane; at the end it follows the newest line again. A row of its own at the foot shows only
   while lines are queued and none plays (**Waiting**). Its colours are Claude's CLI's, and
   fixed
-
-The row of the session being read aloud is brighter, fading in and out over about a third of a
-second as the session starts and stops speaking.
 
 A session's issue and pull request numbers head each of its messages in the terminal, at the
 right of the speaker's name, as `[ Issue #123, #125 | PR #124, #126 ]`. The issues are the one a
