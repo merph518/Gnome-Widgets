@@ -6,9 +6,9 @@ skill. Ported in idea from PlaywrightTesting's `static-checks.md`; the commands
 are this repository's own. This file is the only place the list is written out.
 A skill that needs it points here rather than restating it.
 
-This repository has no CI, so the checks run locally, on the branch head,
-before every push to a pull request, again before the self review starts, and
-before `/release` builds.
+This repository has no CI beyond the Overmind pin check below, so the checks run
+locally, on the branch head, before every push to a pull request, again before
+the self review starts, and before `/release` builds.
 
 ## The list
 
@@ -20,17 +20,18 @@ luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf \
   src/orchestrator/draw.lua src/orchestrator/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/*.desktop
-test "$(git write-tree --prefix=.claude/att-docs/)" = "$(sed -n 's/^tree=//p' .claude/att-docs.lock)" \
-  && git diff --quiet -- .claude/att-docs \
-  && test -z "$(git ls-files --others --exclude-standard -- .claude/att-docs)"
+scripts/overmind-check.sh
 ```
 
 Every command must exit 0 and print nothing, apart from the test summaries
 `catchup_test.py` and `unittest` print.
 
 - The last command fails when the vendored Overmind copy differs from the tree
-  `.claude/att-docs.lock` pins, so a hand edit to it shows offline. Moving the
-  pin is `scripts/overmind-sync.sh <tag>`, followed by
+  `.claude/att-docs.lock` pins, so a hand edit to it shows offline. The same
+  script runs on every pull request as `.github/workflows/overmind-pin.yml`,
+  with `--remote`, which also fetches the pinned tag and fails when the lock no
+  longer matches it. Moving the pin is
+  `scripts/overmind-sync.sh <tag>`, followed by
   `claude plugin update voice@att-docs`. The tree is read from the index, which
   `overmind-sync.sh` fills, so the check passes before the sync is committed;
   an edit, a deletion or a file added under the copy fails it. Run it from the
