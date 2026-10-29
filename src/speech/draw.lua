@@ -68,7 +68,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
-    -- flags, name, label, last}
+    -- flags, name, label, last, pill, ready}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -77,7 +77,7 @@ local function load_sessions(version)
         rows[#rows + 1] = {speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', label = f[7] or '',
-                           last = f[8] or ''}
+                           last = f[8] or '', pill = f[9] or '', ready = f[10] == '1'}
     end
     sessions = {version = version, rows = rows}
 end
@@ -370,10 +370,23 @@ local function draw_label(cr, label, x, cy, w, h, s, text, speaking)
     show(cr, label, x + w / 2, cy, 'centre')
 end
 
+local function draw_pill(cr, str, x, cy, w, h, s, text, ready)
+    -- the pill after a session's name, naming what a click on the name opens: the foreground
+    -- with its text in fg_back for ready pull requests, else the foreground's tint
+    set(cr, fg, ready and 1 or 0.12)
+    rounded_rect(cr, x, cy - h / 2, w, h, h / 2)
+    cairo_fill(cr)
+    font(cr, 9, text, s)
+    set(cr, ready and fg_back or fg)
+    show(cr, str, x + w / 2, cy, 'centre')
+end
+
 local function draw_row(cr, r, x0, y, row, c, s, text)
-    -- a session's row: its repository's label (filled while it is speaking), its name,
-    -- busy / idle / waiting / bg / question, how many lines it has queued and its setting; with speech on, a
-    -- second row of its last line read aloud. Returns how many rows it took.
+    -- a session's row: its repository's label (filled while it is speaking), its name and the
+    -- pill naming what a click on the name opens, busy / idle / waiting / bg / question, how
+    -- many lines it has queued and its setting; with speech on, a second row of its last line
+    -- read aloud. The name and pill are tinted, and the name underlined, under the pointer.
+    -- Returns how many rows it took.
     local cy = y + row / 2
     draw_control(cr, c, cy, c[5], s, text, r.speech)
     local right = c[6] * s
@@ -381,18 +394,37 @@ local function draw_row(cr, r, x0, y, row, c, s, text)
     set(cr, secondary())
     if r.queued > 0 then right = right - show(cr, r.queued .. ' queued', right, cy, 'right') - 10 * s end
     local flags_w = r.flags ~= '' and width_of(cr, r.flags) + 8 * s or 0
+    local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 12 * s or 0
     font(cr, 9, text, s, true)
     local label_w = width_of(cr, 'WWWW') + 10 * s
     draw_label(cr, r.label, x0, cy, label_w, c[5] * s, s, text, r.speaking)
     local name_x = x0 + label_w + 8 * s
     font(cr, 11, text, s)
+    local name = fit(cr, r.name, right - name_x - flags_w - (pill_w > 0 and pill_w + 8 * s or 0))
+    local nw = width_of(cr, name)
+    local after = name_x + nw
+    if pill_w > 0 then
+        local x1 = after + 8 * s + pill_w
+        if hovered(name_x - 4 * s, cy - row / 2, x1 + 4 * s, cy + row / 2) then
+            set(cr, fg, 0.1)
+            rounded_rect(cr, name_x - 4 * s, cy - row / 2 + 1 * s, x1 - name_x + 8 * s, row - 2 * s, 6 * s)
+            cairo_fill(cr)
+            set(cr, fg, 0.6)
+            cairo_set_line_width(cr, 1 * s)
+            cairo_move_to(cr, name_x, cy + row * 0.32)
+            cairo_line_to(cr, after, cy + row * 0.32)
+            cairo_stroke(cr)
+        end
+        draw_pill(cr, r.pill, after + 8 * s, cy, pill_w, c[5] * s * 0.85, s, text, r.ready)
+        after = x1
+        font(cr, 11, text, s)
+    end
     set(cr, fg)
-    local name = fit(cr, r.name, right - name_x - flags_w)
-    local nw = show(cr, name, name_x, cy, 'left')
+    show(cr, name, name_x, cy, 'left')
     if flags_w > 0 then
         font(cr, 9, text, s)
         set(cr, secondary())
-        show(cr, r.flags, name_x + nw + 8 * s, cy, 'left')
+        show(cr, r.flags, after + 8 * s, cy, 'left')
     end
     if r.speech ~= 'on' then return 1 end
     font(cr, 11, text, s)

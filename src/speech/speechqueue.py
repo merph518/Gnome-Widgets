@@ -94,6 +94,8 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
+PILL_PAD = 6                                  # either side of the pill after a session's name
+PILL_GAP = 8                                  # a session's name to its pill
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
 SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 # labels.json's first contents, written when it is missing; keys match without case
@@ -110,9 +112,10 @@ PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain(
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
-SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, as draw.lua draws it
+SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a row's label, as draw.lua draws them
+TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill and queued count, as draw.lua draws them
 FOOTER_FONT = 'Ubuntu Sans 11'                # Voice: amy, and the open list, as draw.lua draws them
-TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, FOOTER_FONT}
+TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
 PangoCairo.context_set_resolution(_pango, 96)
@@ -161,21 +164,40 @@ def without_speaker(text):
     return SPEAKER.sub('', text, count=1) or text
 
 
-def waiting_on(sid, ledgers=None):
-    """What session `sid` waits on by its catchup.py ledgers (scratchpad/ledger, and a
-    skill's own such as scratchpad/sweep/ledger.tsv): 'tests' with a GitHub Actions run open,
-    else 'ci' with a Launchpad build open, else 'merge' with a pull request open, else ''."""
-    keys = set()
+def ledger_rows(sid, ledgers=None):
+    """The open rows of session `sid`'s catchup.py ledgers (scratchpad/ledger, and a skill's
+    own such as scratchpad/sweep/ledger.tsv), each a list of its fields."""
     folder = os.path.join(glob.escape(ledgers or LEDGERS), '*', glob.escape(sid), 'scratchpad')
     paths = glob.glob(os.path.join(folder, 'ledger')) + glob.glob(os.path.join(folder, '*', 'ledger.tsv'))
+    rows = []
     for path in paths:
         for line in (_read(path) or '').splitlines():
             f = line.split('\t')
-            if len(f) < 4 or 'done' in f[3:5]:
-                continue
-            # a row with a run link is a test run in CI, whatever its key
-            keys.add('run:' if any('/actions/runs/' in x for x in f) else f[1])
+            if len(f) >= 4 and 'done' not in f[3:5]:
+                rows.append(f)
+    return rows
+
+
+def waiting_on(rows):
+    """What a session waits on by its open ledger rows: 'tests' with a GitHub Actions run open,
+    else 'ci' with a Launchpad build open, else 'merge' with a pull request open, else ''."""
+    # a row with a run link is a test run in CI, whatever its key
+    keys = {'run:' if any('/actions/runs/' in x for x in f) else f[1] for f in rows}
     return next((wait for prefix, wait in WAITS if any(k.startswith(prefix) for k in keys)), '')
+
+
+def ledger_prs(rows):
+    """The links of the pull requests a session's open ledger rows wait on to merge, which
+    /implement records once it has sent the ready signal."""
+    return list(dict.fromkeys(f[2] for f in rows if f[1].startswith('pr:') and '/pull/' in f[2]))
+
+
+def link_pill(issue, prs):
+    """The pill after a session's name, naming what a click on the name opens: its ready
+    pull requests, else its issue; '' with neither."""
+    if prs:
+        return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
+    return f"#{issue.rsplit('/', 1)[-1]}" if issue else ''
 
 
 def first_wait(process, ledger):
@@ -384,10 +406,10 @@ def speech_setting(speak, sid):
     return 'off' if os.path.exists(os.path.join(speak, sid + '.muted')) else 'alerts'
 
 
-def repo_name(cwd):
-    """The GitHub name of the repository cwd is in: the last part of its origin remote's URL,
-    or the checkout's folder name without one. A worktree's .git is a file pointing into
-    the main checkout's .git, which holds the config. '' outside a repository."""
+def git_paths(cwd):
+    """(top, git folder, config) of the repository cwd is in, or None outside one. A worktree's
+    .git is a file pointing at its own folder in the main checkout's .git, which holds its
+    HEAD, while the config is the main checkout's."""
     d = os.path.abspath(cwd) if cwd else ''
     while d and d != os.path.dirname(d):
         git = os.path.join(d, '.git')
@@ -395,19 +417,54 @@ def repo_name(cwd):
             break
         d = os.path.dirname(d)
     else:
-        return ''
+        return None
     top, config = d, os.path.join(git, 'config')
     if os.path.isfile(git):
         m = re.match(r'gitdir:\s*(.+)', _read(git) or '')
         if m:
-            base = os.path.join(d, m.group(1).strip())     # relative to the worktree, when it is
-            common = (_read(os.path.join(base, 'commondir')) or '').strip()
-            main = os.path.normpath(os.path.join(base, common)) if common else base
+            git = os.path.join(d, m.group(1).strip())      # relative to the worktree, when it is
+            common = (_read(os.path.join(git, 'commondir')) or '').strip()
+            main = os.path.normpath(os.path.join(git, common)) if common else git
             config, top = os.path.join(main, 'config'), os.path.dirname(main)
-    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', _read(config) or '')
-    url = m.group(1).rstrip('/') if m else ''
+    return top, git, config
+
+
+def origin_url(config):
+    m = re.search(r'\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', _read(config) or '', re.M)
+    return m.group(1).rstrip('/') if m else ''
+
+
+def repo_name(cwd):
+    """The GitHub name of the repository cwd is in: the last part of its origin remote's URL,
+    or the checkout's folder name without one. '' outside a repository."""
+    paths = git_paths(cwd)
+    if not paths:
+        return ''
+    url = origin_url(paths[2])
     name = re.sub(r'\.git$', '', url.rsplit('/', 1)[-1].rsplit(':', 1)[-1]) if url else ''
-    return name or os.path.basename(top)
+    return name or os.path.basename(paths[0])
+
+
+_git = {}
+
+
+def session_branch(cwd):
+    """(branch, GitHub owner/repo) of the session in cwd, each '' when it has none. Where its
+    repository is, and its origin, are found once; HEAD is read each time, as it switches."""
+    if cwd not in _git:
+        paths = git_paths(cwd)
+        repo = paths and re.search(r'github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?$', origin_url(paths[2]))
+        _git[cwd] = (paths[1] if paths else '', repo.group(1) if repo else '')
+    gitdir, repo = _git[cwd]
+    m = re.match(r'ref:\s*refs/heads/(\S+)', _read(os.path.join(gitdir, 'HEAD')) or '') if gitdir else None
+    return (m.group(1) if m else ''), repo
+
+
+def session_issue(branch, repo):
+    """The link of the issue a session on `branch` of GitHub's `repo` works: the N of the
+    branch's issue-<N>, as /implement names branches; '' without one."""
+    m = re.search(r'\bissue-(\d+)\b', branch)
+    return f'https://github.com/{repo}/issues/{m.group(1)}' if m and repo else ''
 
 
 def short_label(name):
@@ -546,9 +603,12 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
+        ledger = ledger_rows(s['id'], ledgers)
+        git = session_branch(s['cwd'])
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
                            question=question,
-                           waiting=first_wait(waits.get(s['pid']), waiting_on(s['id'], ledgers)),
+                           waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
+                           issue=session_issue(*git), branch=git[0], prs=ledger_prs(ledger),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
@@ -613,16 +673,35 @@ def box(cx, cy, half_w, half_h):
 
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
-    and for a session with speech on, its last line read aloud (NOTHING_SAID before one)."""
-    # one tag, the first that holds: a question waiting, then busy, waiting (on tests, a unit,
-    # ci or a merge), bg, else idle
-    wait = s.get('waiting')
-    flags = next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
-                                 (f'waiting: {wait}', wait), ('bg', s['background']),
-                                 ('idle', True)) if on)
-    return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), flags,
+    for a session with speech on its last line read aloud (NOTHING_SAID before one), the pill
+    after its name, and 1 when that pill names ready pull requests."""
+    return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('label', ''),
-                      without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else ''))
+                      without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else '',
+                      link_pill(s.get('issue'), s.get('prs')), str(int(bool(s.get('prs'))))))
+
+
+def row_flags(s):
+    """A session's one tag, the first that holds: a question waiting, then busy, waiting (on
+    tests, a unit, ci or a merge), bg, else idle."""
+    wait = s.get('waiting')
+    return next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
+                                (f'waiting: {wait}', wait), ('bg', s['background']),
+                                ('idle', True)) if on)
+
+
+def link_span(s, right):
+    """Where a session's name and pill sit along its row, as draw.lua lays them out between the
+    label and `right` (the queued count's right edge): [left, right]. A name without a pill
+    opens nothing, but a click on it says so in mouse.log."""
+    pill = link_pill(s.get('issue'), s.get('prs'))
+    if s['queued'] > 0:
+        right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
+    name_x = MARGIN + text_width('W' * LABEL_LEN, SEGMENT_FONT) + 10 + 8
+    pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
+    flags_w = text_width(row_flags(s), TAG_FONT) + 8
+    name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
+    return [round(name_x - 4, 2), round(name_x + text_width(name, ROW_FONT) + pill_w + 4, 2)]
 
 
 def write_sessions(listed):
@@ -733,6 +812,8 @@ def render(state, now=None):
                  'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
+        entry.update(link=link_span(s, queued_right), issue=s.get('issue') or '',
+                     branch=s.get('branch') or '', prs=s.get('prs') or [])
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]

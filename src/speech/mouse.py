@@ -10,13 +10,15 @@ holds).
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
+  - a session's name or the pill after it: a click or tap opens, in new Chrome tabs, its
+    pull requests still open with the ready label, else the issue its branch names
   - the wheel: over the volume slider or its speaker it turns it down or up, over the closed
     drop down it steps through the voices, over a session's setting it moves it a segment along, and over the rest of the
     list it scrolls the list a row at a time; a finger swiped over the list scrolls it too
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares.
 """
-import ctypes, os, sys, time
+import ctypes, json, os, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
@@ -32,6 +34,9 @@ REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'voice')   # the regio
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
 SETTINGS = ('on', 'alerts', 'off')             # a session's segments, left to right
+READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
+BROWSER = 'google-chrome'                      # what a session's name opens its links in
+OPEN_AGAIN = 3.0                               # s before a session's name opens its links again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
@@ -91,6 +96,77 @@ def row_at(regions, s, x, y):
                           row['on'][0] * s <= x <= row['off'][1] * s)
             return row, on_control
     return None, False
+
+
+def link_at(regions, s, x, y):
+    """The session row whose name or pill is under card-relative (x, y), or None."""
+    row, _ = row_at(regions, s, x, y)
+    if not (row and row.get('link')):
+        return None
+    at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
+    first_line = at < row['top'] + regions['list_scroll'][1]
+    return row if first_line and row['link'][0] * s <= x <= row['link'][1] * s else None
+
+
+def ready_prs(links, branch, run=subprocess.run):
+    """The pull requests of `links` still open, carrying READY_LABEL and from `branch`, read
+    from GitHub: a session's ledger also waits on other sessions' pull requests that block it.
+    One gh cannot read (not installed, logged out, offline) is not opened, and is logged."""
+    ready = []
+    for link in links:
+        try:
+            out = run(['gh', 'pr', 'view', link, '--json', 'state,labels,headRefName'], capture_output=True,
+                      text=True, timeout=15)
+            pr = json.loads(out.stdout) if out.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pr = None
+        if pr is None:
+            core.log(f'{link}: gh could not read it, so it is not opened')
+        elif (pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]
+              and branch and pr.get('headRefName') == branch):
+            ready.append(link)
+        else:
+            core.log(f'{link}: not ready ({pr.get("state")}, from {pr.get("headRefName")})')
+    return ready
+
+
+def open_links(row, run=subprocess.run, popen=subprocess.Popen):
+    """Opens what a click on a session's name opens, each in a new browser tab: its ready pull
+    requests, else its issue. Chrome takes them all at once; without it, xdg-open takes each."""
+    try:
+        links = (ready_prs(row.get('prs') or [], row.get('branch') or '', run)
+                 or ([row['issue']] if row.get('issue') else []))
+        if not links:
+            core.log(f'session {row["id"]}: no issue or ready pull request to open')
+            return
+        core.log('open: ' + ' '.join(links))
+        quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            launched = [popen([BROWSER, *links], **quiet)]
+        except OSError:
+            launched = [popen(['xdg-open', link], **quiet) for link in links]
+        for p in launched:
+            # reaped on a thread of its own: a launcher that starts Chrome is Chrome, until it quits
+            threading.Thread(target=p.wait, daemon=True).start()
+    except OSError as e:
+        core.log(f'open: {e}')
+    finally:
+        opening.discard(row['id'])
+
+
+opening = set()                                # the sessions whose links a click is still opening
+opened = {}                                    # session id: when a click last opened its links
+
+
+def open_once(row, now=time.monotonic):
+    """Opens a session's links on a thread, as gh reads each pull request, which takes a
+    moment. A second click on the same session while they are still opening, or within
+    OPEN_AGAIN s of the last (a double click), does nothing."""
+    if row['id'] in opening or now() - opened.get(row['id'], -OPEN_AGAIN) < OPEN_AGAIN:
+        return
+    opening.add(row['id'])
+    opened[row['id']] = now()
+    threading.Thread(target=open_links, args=(row,), daemon=True).start()
 
 
 def segment_at(regions, s, x, y):
@@ -299,7 +375,9 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     """A press on the volume slider sets the volume along it. A press on the voice drop down:
     a click or tap opens the list of voices, a drag from it moves the widget. A press on a
     session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. Returns whether the press was on any of them."""
+    with a finger scrolls the list. A press on a session's name or pill: a click or tap opens
+    its links; a drag moves the widget, or with a finger scrolls the list when it can scroll.
+    Returns whether the press was on any of them."""
     x, y, start = at
     if hit == 'volume' and regions.get('volume_bar'):
         set_volume(d, win, regions, s, track)
@@ -311,11 +389,15 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
             core.remember(*core.drag(d, root, win, s, track, start))
         return True
     segment = segment_at(regions, s, x, y)
-    if not segment:
+    link = None if segment else link_at(regions, s, x, y)
+    if not (segment or link):
         return False
     if core.clicked(start, s, track, core.TAP_SLOP if touch else core.CLICK_SLOP):
-        speechctl('speech', *segment)
-    elif touch:
+        if segment:
+            speechctl('speech', *segment)
+        else:
+            open_once(link)
+    elif touch and (segment or scrollable(regions, s, x, y)):
         swipe(regions, s, x, y, start[1], track)
     else:
         core.remember(*core.drag(d, root, win, s, track, start))
