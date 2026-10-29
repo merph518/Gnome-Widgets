@@ -108,13 +108,12 @@ def link_at(regions, s, x, y):
     return row if first_line and row['link'][0] * s <= x <= row['link'][1] * s else None
 
 
-def ready_prs(links, branch='', run=subprocess.run):
-    """The pull requests of `links` still open and carrying READY_LABEL, read from GitHub, and
-    from `branch` when it is given: a session's ledger also waits on other sessions' pull
-    requests that block it. One gh cannot read (not installed, logged out, offline) is kept,
-    since the ledger still waits on it, and the failed read is logged."""
+def ready_prs(links, branch, run=subprocess.run):
+    """The pull requests of `links` still open, carrying READY_LABEL and from `branch`, read
+    from GitHub: a session's ledger also waits on other sessions' pull requests that block it.
+    One gh cannot read (not installed, logged out, offline) is not opened, and is logged."""
     ready = []
-    for link in dict.fromkeys(links):
+    for link in links:
         try:
             out = run(['gh', 'pr', 'view', link, '--json', 'state,labels,headRefName'], capture_output=True,
                       text=True, timeout=15)
@@ -122,10 +121,9 @@ def ready_prs(links, branch='', run=subprocess.run):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pr = None
         if pr is None:
-            core.log(f'{link}: gh could not read it, opened as the ledger has it')
-            ready.append(link)
+            core.log(f'{link}: gh could not read it, so it is not opened')
         elif (pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]
-              and (not branch or pr.get('headRefName') == branch)):
+              and branch and pr.get('headRefName') == branch):
             ready.append(link)
         else:
             core.log(f'{link}: not ready ({pr.get("state")}, from {pr.get("headRefName")})')
@@ -136,7 +134,8 @@ def open_links(row, run=subprocess.run, popen=subprocess.Popen):
     """Opens what a click on a session's name opens, each in a new browser tab: its ready pull
     requests, else its issue. Chrome takes them all at once; without it, xdg-open takes each."""
     try:
-        links = ready_prs(row.get('prs') or [], row.get('branch') or '', run) or ([row['issue']] if row.get('issue') else [])
+        links = (ready_prs(row.get('prs') or [], row.get('branch') or '', run)
+                 or ([row['issue']] if row.get('issue') else []))
         if not links:
             core.log(f'session {row["id"]}: no issue or ready pull request to open')
             return
@@ -147,20 +146,25 @@ def open_links(row, run=subprocess.run, popen=subprocess.Popen):
         except OSError:
             launched = [popen(['xdg-open', link], **quiet) for link in links]
         for p in launched:
-            p.wait()                           # the launchers hand over and exit; reaped here
+            # reaped on a thread of its own: a launcher that starts Chrome is Chrome, until it quits
+            threading.Thread(target=p.wait, daemon=True).start()
     except OSError as e:
         core.log(f'open: {e}')
+    finally:
+        opening.discard(row['id'])
 
 
+opening = set()                                # the sessions whose links a click is still opening
 opened = {}                                    # session id: when a click last opened its links
 
 
 def open_once(row, now=time.monotonic):
     """Opens a session's links on a thread, as gh reads each pull request, which takes a
-    moment; a second click on the same session within OPEN_AGAIN s, a double click or one
-    while they are still opening, does nothing."""
-    if now() - opened.get(row['id'], -OPEN_AGAIN) < OPEN_AGAIN:
+    moment. A second click on the same session while they are still opening, or within
+    OPEN_AGAIN s of the last (a double click), does nothing."""
+    if row['id'] in opening or now() - opened.get(row['id'], -OPEN_AGAIN) < OPEN_AGAIN:
         return
+    opening.add(row['id'])
     opened[row['id']] = now()
     threading.Thread(target=open_links, args=(row,), daemon=True).start()
 

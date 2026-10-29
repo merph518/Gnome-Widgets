@@ -460,10 +460,9 @@ def session_branch(cwd):
     return (m.group(1) if m else ''), repo
 
 
-def session_issue(cwd):
-    """The link of the issue the session in cwd works: the N of its branch's issue-<N>, as
-    /implement names branches, on its origin's GitHub repository; '' without one."""
-    branch, repo = session_branch(cwd)
+def session_issue(branch, repo):
+    """The link of the issue a session on `branch` of GitHub's `repo` works: the N of the
+    branch's issue-<N>, as /implement names branches; '' without one."""
     m = re.search(r'\bissue-(\d+)\b', branch)
     return f'https://github.com/{repo}/issues/{m.group(1)}' if m and repo else ''
 
@@ -605,11 +604,11 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
         ledger = ledger_rows(s['id'], ledgers)
+        git = session_branch(s['cwd'])
         listed.append(dict(s, speech=speech_setting(speak, s['id']), queued=len(lines),
                            question=question,
                            waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
-                           issue=session_issue(s['cwd']), branch=session_branch(s['cwd'])[0],
-                           prs=ledger_prs(ledger),
+                           issue=session_issue(*git), branch=git[0], prs=ledger_prs(ledger),
                            label=session_label(s['cwd'], labels),
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))

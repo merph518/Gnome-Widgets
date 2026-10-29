@@ -357,6 +357,7 @@ class LinksTest(StubSpeechctl):
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
         speech_mouse.opened.clear()
+        speech_mouse.opening.clear()
 
     def gh(self, states):
         """A gh that answers `gh pr view <link>` with states[link]: (state, labels)."""
@@ -413,23 +414,29 @@ class LinksTest(StubSpeechctl):
         self.assertEqual([r['id'] for r in opened], ['aaaa'])
         self.assertEqual(self.ran(), ['speech aaaa on'])
 
-    def test_a_second_click_soon_after_does_nothing(self):
+    def test_a_second_click_soon_after_or_while_it_opens_does_nothing(self):
         started, clock = [], mock.Mock()
         with mock.patch.object(speech_mouse.threading, 'Thread',
                                side_effect=lambda **kw: mock.Mock(start=lambda: started.append(kw))):
-            for t in (100.0, 100.3, 103.5):
+            for t in (100.0, 100.3, 103.5):            # the first still opening at 103.5
                 clock.return_value = t
                 speech_mouse.open_once(self.regions['rows'][0], now=clock)
+            speech_mouse.opening.clear()               # it has opened
+            speech_mouse.open_once(self.regions['rows'][0], now=clock)
         self.assertEqual(len(started), 2)
 
-    def test_a_pull_request_gh_cannot_read_is_opened_and_each_opens_once(self):
+    def test_a_pull_request_gh_cannot_read_is_not_opened(self):
         def fails(args, **kwargs):
             raise FileNotFoundError('gh')
-        row = dict(self.regions['rows'][0], prs=[PR + '151', PR + '151'])
-        speech_mouse.open_links(row, run=fails,
+        speech_mouse.open_links(self.regions['rows'][0], run=fails,
                                 popen=lambda args, **kw: self.opened.append(args[1:]) or mock.Mock())
-        self.assertEqual(self.opened, [[PR + '151']])
+        self.assertEqual(self.opened, [[ISSUE]])
         self.assertIn('gh could not read it', support.read(conky_mouse.LOG))
+
+    def test_without_a_branch_no_pull_request_is_its_own(self):
+        ready = ('OPEN', ['Manual Review Needed'])
+        row = dict(self.regions['rows'][0], branch='')
+        self.assertEqual(self.open(row, {PR + '151': ready}), [ISSUE])
 
     def test_without_chrome_each_link_goes_to_xdg_open(self):
         def popen(args, **kwargs):

@@ -345,12 +345,13 @@ class Links(Labels):
 
     def test_the_issue_is_the_branchs_issue_number_on_the_origin_repository(self):
         wt = self.worktree('ref: refs/heads/feat/issue-123-session-row-links')
-        self.assertEqual(speechqueue.session_issue(wt),
+        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(wt)),
                          'https://github.com/someone/Gnome-Widgets/issues/123')
         top =self.repo('plain', 'https://github.com/someone/Overmind.git')
         with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
             f.write('ref: refs/heads/fix/issue-7-x\n')
-        self.assertEqual(speechqueue.session_issue(top), 'https://github.com/someone/Overmind/issues/7')
+        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(top)),
+                         'https://github.com/someone/Overmind/issues/7')
 
     def test_no_issue_without_one_in_the_branch_a_branch_or_github(self):
         for head, url in (('ref: refs/heads/main', None), ('0123abcd' * 5, None),
@@ -359,9 +360,10 @@ class Links(Labels):
             with self.subTest(head=head):
                 shutil.rmtree(os.path.join(self.root, 'code'), ignore_errors=True)
                 speechqueue._git.clear()
-                self.assertEqual(speechqueue.session_issue(self.worktree(head, url or
-                                 'git@github.com:someone/Gnome-Widgets.git')), '')
-        self.assertEqual(speechqueue.session_issue(os.path.join(self.root, 'nowhere')), '')
+                wt = self.worktree(head, url or 'git@github.com:someone/Gnome-Widgets.git')
+                self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(wt)), '')
+        nowhere = speechqueue.session_branch(os.path.join(self.root, 'nowhere'))
+        self.assertEqual((nowhere, speechqueue.session_issue(*nowhere)), (('', ''), ''))
 
     def test_the_origin_is_the_url_and_not_a_pushurl_before_it(self):
         top = self.repo('fork')
@@ -370,7 +372,8 @@ class Links(Labels):
                     '\turl = https://github.com/org/repo.git\n')
         with open(os.path.join(top, '.git', 'HEAD'), 'w') as f:
             f.write('ref: refs/heads/feat/issue-9-x\n')
-        self.assertEqual(speechqueue.session_issue(top), 'https://github.com/org/repo/issues/9')
+        self.assertEqual(speechqueue.session_issue(*speechqueue.session_branch(top)),
+                         'https://github.com/org/repo/issues/9')
         self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
     def test_the_pill_names_the_ready_pull_requests_else_the_issue(self):
