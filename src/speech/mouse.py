@@ -43,7 +43,6 @@ REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume')   # the regions a pres
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
-SETTINGS = ('on', 'alerts', 'off')             # a session's speech settings, as the popup lists them
 READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
 BROWSER = 'google-chrome'                      # what a session's box and name open their links in
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again

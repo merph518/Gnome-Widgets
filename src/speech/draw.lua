@@ -344,13 +344,12 @@ end
 local SPEECH_SETTINGS = {{'on', 'On'}, {'alerts', 'Alerts'}, {'off', 'Off'}}
 local GEAR_SHADE = {on = 1, alerts = 0.7, off = 0.4}
 
-local function draw_gear(cr, c, cy, s, speech)
+local function draw_gear(cr, c, cy, row, s, speech)
     -- the gear at a row's right, opening its settings: a ring with eight teeth, in the foreground
     -- at full strength for a session read aloud, dimmer for Alerts and dimmer again for Off, and
     -- full under the pointer
-    local cx, size = (c[1] + c[2]) / 2 * s, c[3]
-    local half = (c[2] - c[1]) / 2 * s
-    local on = hovered(c[1] * s, cy - half, c[2] * s, cy + half)
+    local cx, size = (c[1] + c[2]) / 2 * s, c[3] * s
+    local on = hovered(c[1] * s, cy - row / 2, c[2] * s, cy + row / 2)
     local r, teeth = size * 0.32, 8
     set(cr, fg, on and 1 or GEAR_SHADE[speech] or 0.7)
     cairo_set_line_width(cr, size * 0.17)
@@ -423,7 +422,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     -- with speech on, a second row of its last line read aloud. The name is underlined and the
     -- pill grows under the pointer. Returns how many rows it took.
     local cy = y + row / 2
-    draw_gear(cr, c, cy, s, r.speech)
+    draw_gear(cr, c, cy, row, s, r.speech)
     local right = c[5] * s
     font(cr, 9, text, s)
     set(cr, secondary())

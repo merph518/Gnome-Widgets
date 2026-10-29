@@ -113,9 +113,9 @@ PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain(
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
-SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a repository's name, as draw.lua draws them
+SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # a repository's name, as draw.lua draws it
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
-FOOTER_FONT = 'Ubuntu Sans 11'                # Voice: amy, and the open list, as draw.lua draws them
+FOOTER_FONT = 'Ubuntu Sans 11'                # the settings popup's voice rows, as draw.lua draws them
 TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT}
 
 _pango = PangoCairo.FontMap.get_default().create_context()
