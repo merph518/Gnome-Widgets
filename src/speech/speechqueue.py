@@ -12,10 +12,11 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the header ("<name> says:"), the Sessions label and spacer
+  - widget.txt   conky's markup: the sessions' column headers and spacer
                  lines that give conky's window its size, which stays the same while lines play
-  - draw.txt     geometry for draw.lua (logical px, from the card's top left): the buttons,
-                 the progress of the current line, the sessions list and the footer
+  - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
+                 buttons, the sessions list, the speaker's avatar and the bubble with the line
+                 being read, the progress of the current line and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
   - sessions.txt the sessions list, a line per session, rewritten only when it changes
 
@@ -67,12 +68,21 @@ DEFAULT_VOLUME = 1.2
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
-ICON_W = 24                                   # the speaker icon left of the header text
-HEADER_GAP = 6                                # header to the progress bar's row
-LINE_GAP = 14                                 # the progress bar's row to Sessions
+AVATAR_D = 36                                 # the speaker's avatar, left of the bubble
+# The avatar's image, the first of these that is there: one the user puts in the widget's own folder,
+# else the one shipped beside this file. Without either, draw.lua draws a spark.
+AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), os.path.join(HERE, 'avatar.png'))
+AVATAR_GAP = 12                               # the avatar to the bubble, which its tail points across
+BUBBLE_PAD = 10                               # the bubble's edge to its text, on every side
+BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
+BUBBLE_LINES = 6                              # most lines of the text read aloud the bubble shows at once
+TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
+TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
+HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
+LINE_GAP = 14                                 # the title's row to the column headers
 PROGRESS_H = 14                               # the progress bar's row
-LIST_GAP = 0                                  # the Sessions label to the list
-FOOTER_GAP = 8                                # list to the footer
+LIST_GAP = 0                                  # the column headers to the list
+FOOTER_GAP = 8                                # list to the bubble, and the progress bar's row to the controls
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
@@ -112,7 +122,7 @@ SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
+HEADING_FONT = 'Ubuntu Sans Bold 9'           # the column headers over the sessions
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a repository's name, as draw.lua draws them
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
@@ -564,7 +574,7 @@ _heard = None
 
 def last_heard(n, name, duration):
     """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
-    header and the progress bar stay as the last line left them while nothing plays."""
+    progress bar stays as the last line left it while nothing plays."""
     global _heard
     if _heard is None:
         saved = _json(HEARD)
@@ -618,7 +628,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
         name = display_text(n.get('name') or '') or next(
             (s['name'] for s in listed if s['id'] == n.get('session')), '')
     return {
-        'now': n, 'name': name, 'duration': clip_duration(speak, n) if n else None,
+        'now': n, 'name': name, 'text': display_text((n or {}).get('text') or ''),
+        'duration': clip_duration(speak, n) if n else None,
         'paused': os.path.exists(os.path.join(speak, 'paused')),
         'voice': voice, 'volume': round(volume, 1), 'sessions': listed,
     }
@@ -692,6 +703,37 @@ def row_flags(s):
                                 ('idle', True)) if on)
 
 
+_wrapped = {}
+
+
+def wrap_lines(text, font, width):
+    """`text` broken at spaces into lines of `font` that fit `width`, every word kept; a word
+    wider than `width` is broken across lines."""
+    key = (text, font, width, text_scale)
+    if key not in _wrapped:
+        if len(_wrapped) > 32:
+            _wrapped.clear()
+        out, line = [], ''
+        for word in text.split():
+            trial = f'{line} {word}'.strip()
+            if text_width(trial, font) <= width:
+                line = trial
+                continue
+            if line:
+                out.append(line)
+            while text_width(word, font) > width and len(word) > 1:
+                cut = len(word) - 1
+                while cut > 1 and text_width(word[:cut], font) > width:
+                    cut -= 1
+                out.append(word[:cut])
+                word = word[cut:]
+            line = word
+        if line:
+            out.append(line)
+        _wrapped[key] = out
+    return _wrapped[key]
+
+
 def block_width(listed):
     """The width of a repository's name and issue numbers, one for every row so the names after
     it line up, as draw.lua draws it: the rule, then text as wide as the longest repository
@@ -722,6 +764,11 @@ def block_rows(row):
     return row / 2 + name_h / 2 + 1, chip_h + CHIP_GAP, chip_h
 
 
+def name_left(box_w):
+    """Where a session's name begins along its row, after its block, `box_w` wide."""
+    return MARGIN + box_w + 8
+
+
 def name_spans(s, right, box_w):
     """Where a session's name and its pill sit along its row, as draw.lua lays them out between
     its block, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
@@ -730,7 +777,7 @@ def name_spans(s, right, box_w):
     pill = link_pill(s.get('prs'))
     if s['queued'] > 0:
         right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
-    name_x = MARGIN + box_w + 8
+    name_x = name_left(box_w)
     pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
     flags_w = text_width(row_flags(s), TAG_FONT) + 8
     name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
@@ -765,20 +812,17 @@ def render(state, now=None):
     right = MARGIN + widget_width
     idle = not n and not any(s['queued'] for s in listed)
 
-    # The top row: the speaker and "<name> says:" or the idle or paused line, then minimize and
-    # close at the top right.
+    # The top row: the widget's title, then minimize and close at the top right. The title is
+    # drawn by draw.lua, which spaces its letters; the row is a gap here.
     close_cx = right - WINDOW_BUTTON_SIZE / 2
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
     text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - 8
+    em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
+    title = TITLE.upper()
+    title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
     heard = last_heard(n, state['name'], state['duration'])
-    if paused and not n:
-        label = 'Speech paused'
-    elif heard.get('name'):
-        label = fit(f"{heard['name']} says:", LABEL_FONT, text_right - MARGIN - ICON_W)
-    else:
-        label = 'Speech idle'                     # nothing played since the cache was cleared
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -786,49 +830,53 @@ def render(state, now=None):
     }
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
-            f"state {'paused' if paused else 'playing' if n else 'idle'}",
-            f'header {MARGIN + ICON_W / 2 - 4} {cy}']
-    g = f'${{goto {SHADOW + MARGIN + ICON_W}}}'
+            f'title {MARGIN} {cy} {TITLE_TRACK} {title}']
     out = Markup(MARGIN)
-    out.text(f"{g}${{lua_parse fg {'title' if n else 'text'}}}${{font {conky_font(LABEL_FONT)}}}{esc(label)}{plain()}",
-             header_h)
+    out.gap(header_h)
+
+    avatar = next((path for path in AVATAR_IMAGES if os.path.isfile(path)), '')
+
+    def avatar_at(top):
+        """The speaker's avatar, at the card's left from `top`, drawn by draw.lua from its image."""
+        draw.append(f'avatar {MARGIN + AVATAR_D / 2} {top + AVATAR_D / 2} {AVATAR_D} {avatar}'.rstrip())
 
     if idle and collapse_idle():
+        out.gap(HEADER_GAP)
+        avatar_at(out.y)
+        out.gap(AVATAR_D)
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
         write_sessions(listed, [((), 1)] * len(listed))
         return out.end(out.y + MARGIN - 4)
 
-    # The progress bar, always there: the current line's while its length is known (0:00 while
-    # Piper still renders it), else the last line's, left full where it finished.
-    out.gap(HEADER_GAP)
-    progress_top = out.y
-    duration, running = state['duration'] or 0, False
-    if n:
-        elapsed = clock.elapsed(n, paused, now)
-        running = bool(duration) and not paused
-        elapsed = min(elapsed, duration)
-    else:
-        duration = elapsed = float(heard.get('duration') or 0)
-    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
-                f'{elapsed:.3f} {duration:.3f} {int(running)}')
-    out.gap(PROGRESS_H)
-
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
     # they run longer than the list's height. A session with speech on always takes two rows,
     # the second its last line read aloud, so the list's layout doesn't change as lines play.
+    # Three column headers sit over them, each at the left edge of the column it names: the
+    # repository and issue numbers, the name, tag and last line, and the speech setting.
+    box_w = block_width(listed)
+    text_w = box_w - BLOCK_RULE - BLOCK_PAD
+    # The setting's three segments at the right of each row, as wide as their labels
+    xs = [right]
+    for _, label in reversed(SEGMENTS):
+        xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
+    name_x = name_left(box_w)
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
-    out.text(f"${{goto {SHADOW + MARGIN}}}${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}Sessions{plain()}",
-             heading_h)
+    columns = ((MARGIN + BLOCK_RULE + BLOCK_PAD, text_w, 'Identifiers'),
+               (name_x, xs[0] - 8 - name_x, 'Session Information'),
+               (xs[0], right - xs[0], 'Speech Setting')) if listed else ()
+    # a column with no room for even an ellipsis (a narrow card at a large text scale) has no header
+    room = text_width('…', HEADING_FONT)
+    heads = ''.join(f"${{goto {round(SHADOW + x)}}}{esc(fit(label, HEADING_FONT, width))}"
+                    for x, width, label in columns if width >= room)
+    out.text(f"${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
     out.gap(LIST_GAP)
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
-    box_w = block_width(listed)
     chips_top, pitch, chip_h = block_rows(row)
-    text_w = box_w - BLOCK_RULE - BLOCK_PAD
     layout, spans = [], []
     for s in listed:
         chips, lines = block_chips(s.get('issues', ()), text_w)
@@ -838,11 +886,7 @@ def render(state, now=None):
         spans.append(span)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed, layout)
-    # The setting's three segments at the right of each row, as wide as their labels
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
-    xs = [right]
-    for _, label in reversed(SEGMENTS):
-        xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
     queued_right = xs[0] - 10
     draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
@@ -876,9 +920,54 @@ def render(state, now=None):
     draw.append(prompt_line)
     out.gap(list_height)
 
-    # The footer: pause or resume, skip and next, the volume slider, the voice drop down. Skip
-    # and next are drawn dimmed, and are not click areas, while no clip plays. The open list is
-    # drawn above the footer, over the progress bar and the sessions, when conky-mouse.py has it open.
+    # The footer: the says line, the progress bar, then the controls: pause or resume, skip and
+    # next, the volume slider, the voice drop down. Skip and next are drawn dimmed, and are not
+    # click areas, while no clip plays. The open list is drawn above the controls, over the
+    # progress bar and the sessions, when conky-mouse.py has it open.
+    out.gap(FOOTER_GAP)
+    # The speaker's avatar, level with the bottom of a bubble whose tail points at it. While a
+    # clip plays the bubble holds the speaker's name, then the whole line being read aloud: one
+    # line high for a short one, growing upward with it to BUBBLE_LINES lines, after which
+    # draw.lua scrolls it; while nothing plays there is the avatar alone. The row is always as
+    # tall as the tallest bubble, so the card's size does not change as lines play. draw.lua
+    # draws it from these lines.
+    name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
+    full_h = 2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
+    bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
+    inner = (right - bubble_x0 - 2 * BUBBLE_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
+    bottom = out.y + full_h
+    avatar_at(bottom - AVATAR_D)                              # level with the bubble's bottom
+    if n:
+        speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A'   # the hook's "<name> session"
+        speaker += ' Session:'
+        said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
+        shown = min(max(len(said), 1), BUBBLE_LINES)
+        top = bottom - (2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + shown * line_h)
+        name = fit(speaker, SEGMENT_FONT, inner)
+        wide = max([text_width(name, SEGMENT_FONT)] + [text_width(l, ROW_FONT) for l in said]) * BLOCK_SLACK
+        bubble_right = min(bubble_x0 + 2 * BUBBLE_PAD + math.ceil(wide), right)   # as wide as its text needs
+        draw.append(f'bubble {bubble_x0} {top} {bubble_right} {bottom} {BUBBLE_PAD} '
+                    f'{top + BUBBLE_PAD + name_h / 2:.2f} '
+                    f'{top + BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
+                    f'{bottom - AVATAR_D / 2:.2f} {shown}')
+        draw.append(f'speaker {name}')
+        draw.extend(f'line {line}' for line in said)
+        regions['bubble'] = [bubble_x0, top, bubble_right, bottom]
+        regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
+    out.gap(max(full_h, AVATAR_D))
+    out.gap(HEADER_GAP)
+    # The progress bar, always there: the current line's while its length is known (0:00 while
+    # Piper still renders it), else the last line's, left full where it finished.
+    duration, running = state['duration'] or 0, False
+    if n:
+        elapsed = clock.elapsed(n, paused, now)
+        running = bool(duration) and not paused
+        elapsed = min(elapsed, duration)
+    else:
+        duration = elapsed = float(heard.get('duration') or 0)
+    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+                f'{elapsed:.3f} {duration:.3f} {int(running)}')
+    out.gap(PROGRESS_H)
     footer_top = out.y
     out.gap(FOOTER_GAP)
     drop_h = max(DROPDOWN_H, line_height(FOOTER_FONT) + 6)   # taller with the text scale
@@ -916,7 +1005,7 @@ def render(state, now=None):
     names = state.get('voices') or []
     if names:
         menu_lines, menu = voice_menu(names, state['voice'], right, footer_top - MENU_GAP + FOOTER_GAP,
-                                      progress_top)
+                                      list_top)
         draw.extend(menu_lines)
         regions['menu'] = menu
     out.gap(footer_h)

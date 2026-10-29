@@ -1,11 +1,13 @@
 ${font Ubuntu Sans:size=1} ${goto 724}${voffset 30}
-${goto 56}${lua_parse fg title}${font Ubuntu Sans:bold:size=11}Claude Voice Widget says:${font Ubuntu Sans:size=13}
-${font Ubuntu Sans:size=1} ${voffset -16}
+${font Ubuntu Sans:size=1} ${voffset 20}
 ${font Ubuntu Sans:size=1} ${voffset 12}
-${font Ubuntu Sans:size=1} ${voffset 12}
-${goto 32}${lua_parse fg text}${font Ubuntu Sans:bold:size=9}Sessions${font Ubuntu Sans:size=13}
+${lua_parse fg text}${font Ubuntu Sans:bold:size=9}${goto 41}Identifiers${goto 193}Session Information${goto 580}Speech Setting${font Ubuntu Sans:size=13}
 ${font Ubuntu Sans:size=1} ${voffset -22}
 ${font Ubuntu Sans:size=1} ${voffset 126}
+${font Ubuntu Sans:size=1} ${voffset 6}
+${font Ubuntu Sans:size=1} ${voffset 144}
+${font Ubuntu Sans:size=1} ${voffset 4}
+${font Ubuntu Sans:size=1} ${voffset 12}
 ${font Ubuntu Sans:size=1} ${voffset 6}
 ${font Ubuntu Sans:size=1} ${voffset 28}
 ${font Ubuntu Sans:size=1} ${voffset 26}
