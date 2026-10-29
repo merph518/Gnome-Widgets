@@ -69,8 +69,10 @@ itself.
 
 - A header with who is speaking ("<name> says:") and a progress bar with the line's elapsed
   time and length
-- **Sessions**: every open Claude session, the ones with speech on first, each with its
-  repository's label, its name, one tag, how many lines it has queued, and its speech setting.
+- **Sessions**: every open Claude session, the ones with speech on first, under three
+  column headers: **Identifiers** (the repository's label and its issue numbers),
+  **Session Information** (the name, one tag, how many lines it has queued and the last
+  line read) and **Speech Setting** (On | Alerts | Off).
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions

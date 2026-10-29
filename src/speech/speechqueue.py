@@ -12,7 +12,7 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the header ("<name> says:"), the Sessions label and spacer
+  - widget.txt   conky's markup: the header ("<name> says:"), the sessions' column headers and spacer
                  lines that give conky's window its size, which stays the same while lines play
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the buttons,
                  the progress of the current line, the sessions list and the footer
@@ -69,9 +69,9 @@ SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 ICON_W = 24                                   # the speaker icon left of the header text
 HEADER_GAP = 6                                # header to the progress bar's row
-LINE_GAP = 14                                 # the progress bar's row to Sessions
+LINE_GAP = 14                                 # the progress bar's row to the column headers
 PROGRESS_H = 14                               # the progress bar's row
-LIST_GAP = 0                                  # the Sessions label to the list
+LIST_GAP = 0                                  # the column headers to the list
 FOOTER_GAP = 8                                # list to the footer
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
@@ -112,7 +112,7 @@ SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
+HEADING_FONT = 'Ubuntu Sans Bold 9'           # the column headers over the sessions
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a repository's name, as draw.lua draws them
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
@@ -817,18 +817,28 @@ def render(state, now=None):
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
     # they run longer than the list's height. A session with speech on always takes two rows,
     # the second its last line read aloud, so the list's layout doesn't change as lines play.
+    # Three column headers sit over them, each at the left edge of the column it names: the
+    # repository and issue numbers, the name, tag and last line, and the speech setting.
+    box_w = block_width(listed)
+    text_w = box_w - BLOCK_RULE - BLOCK_PAD
+    # The setting's three segments at the right of each row, as wide as their labels
+    xs = [right]
+    for _, label in reversed(SEGMENTS):
+        xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
+    name_x = MARGIN + box_w + 8
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
-    out.text(f"${{goto {SHADOW + MARGIN}}}${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}Sessions{plain()}",
-             heading_h)
+    columns = ((MARGIN + BLOCK_RULE + BLOCK_PAD, text_w, 'Identifiers'),
+               (name_x, xs[0] - 8 - name_x, 'Session Information'),
+               (xs[0], right - xs[0], 'Speech Setting')) if listed else ()
+    heads = ''.join(f"${{goto {SHADOW + x:g}}}{esc(fit(label, HEADING_FONT, width))}" for x, width, label in columns)
+    out.text(f"${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
     out.gap(LIST_GAP)
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
-    box_w = block_width(listed)
     chips_top, pitch, chip_h = block_rows(row)
-    text_w = box_w - BLOCK_RULE - BLOCK_PAD
     layout, spans = [], []
     for s in listed:
         chips, lines = block_chips(s.get('issues', ()), text_w)
@@ -838,11 +848,7 @@ def render(state, now=None):
         spans.append(span)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed, layout)
-    # The setting's three segments at the right of each row, as wide as their labels
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
-    xs = [right]
-    for _, label in reversed(SEGMENTS):
-        xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
     queued_right = xs[0] - 10
     draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')

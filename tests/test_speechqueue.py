@@ -8,6 +8,7 @@ and read the diff before committing it.
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -433,6 +434,36 @@ class Links(Repos):
                          [(100, 'One', False), (200, 'Two', False)])
         self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
         self.assertLess(two['name'][1], two['on'][0])
+
+    def headers(self, state):
+        """[(x, label)] of the column headers widget.txt draws over the list, x from the card's left."""
+        text = speechqueue.render(state)
+        line = next(l for l in text.splitlines() if 'Ubuntu Sans:bold:size=9' in l)
+        return text, [(int(x) - speechqueue.SHADOW, label)
+                      for x, label in re.findall(r'\$\{goto (\d+)\}([^$]+)', line)]
+
+    def test_three_column_headers_replace_the_sessions_heading_each_over_its_column(self):
+        self.f.session(100, ME, 'One')
+        state = self.state()
+        state['sessions'][0].update(repo='Gnome-Widgets', issues=[('#127', 'https://example.test/127')])
+        text, heads = self.headers(state)
+        with open(speechqueue.REGIONS) as f:
+            row = json.load(f)['rows'][0]
+        self.assertNotIn('Sessions', text)
+        self.assertEqual([label for _, label in heads], ['Identifiers', 'Session Information', 'Speech Setting'])
+        self.assertEqual([x for x, _ in heads],
+                         [row['issues'][0][0], row['name'][0] + 4, row['on'][0]])   # the left edge of each column
+
+    def test_the_headers_leave_the_lists_top_where_it_was_and_are_left_out_without_sessions(self):
+        self.f.session(100, ME, 'One')
+        speechqueue.render(self.state())
+        with open(speechqueue.REGIONS) as f:
+            with_sessions = json.load(f)['list']
+        os.remove(os.path.join(self.f.sessions, '100.json'))
+        text, heads = self.headers(self.state())
+        self.assertEqual((heads, 'Sessions' in text), ([], False))
+        with open(speechqueue.REGIONS) as f:
+            self.assertEqual(json.load(f)['list'], with_sessions)   # the same room, so the card does not jump
 
 
     def test_a_session_without_issues_has_no_chips_and_one_row(self):

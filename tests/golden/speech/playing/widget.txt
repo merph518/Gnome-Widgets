@@ -3,7 +3,7 @@ ${goto 56}${lua_parse fg title}${font Ubuntu Sans:bold:size=11}Claude Voice Widg
 ${font Ubuntu Sans:size=1} ${voffset -16}
 ${font Ubuntu Sans:size=1} ${voffset 12}
 ${font Ubuntu Sans:size=1} ${voffset 12}
-${goto 32}${lua_parse fg text}${font Ubuntu Sans:bold:size=9}Sessions${font Ubuntu Sans:size=13}
+${lua_parse fg text}${font Ubuntu Sans:bold:size=9}${goto 41}Identifiers${goto 139}Session Information${goto 580}Speech Setting${font Ubuntu Sans:size=13}
 ${font Ubuntu Sans:size=1} ${voffset -22}
 ${font Ubuntu Sans:size=1} ${voffset 126}
 ${font Ubuntu Sans:size=1} ${voffset 6}

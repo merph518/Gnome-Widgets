@@ -1,7 +1,7 @@
 -- Cairo drawing for the speech widget, fed by speechqueue.py:
 --   draw.txt      geometry (logical px, from the card's top left); its scale line is the
 --                 display's scale and the text scale, its shadow line the margin round the card
---   widget.txt    conky's markup (the header and the Sessions label), shown through conky_widget
+--   widget.txt    conky's markup (the header and the sessions' column headers), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
