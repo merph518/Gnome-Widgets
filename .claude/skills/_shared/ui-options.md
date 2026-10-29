@@ -30,7 +30,11 @@ playing.
 Each option is a `git diff` against `origin/main` of the smallest change to
 `src/` that draws it, written in a scratch worktree and never committed: read
 `src/<widget>/draw.lua` and the colours and fonts in `src/common/theme.lua`, so
-an option shows what the code can draw. The patch is throwaway; the real change
+an option shows what the code can draw. A state the fixture rows do not have
+(a session with a pull request ready, say) is added by the same patch editing
+the fixtures in `scripts/isolated-widgets.py`, since the copy draws what they
+hold. A pointer state cannot be rendered, as the pointer is the user's; it is
+drawn as a text sketch in the question. The patch is throwaway; the real change
 is written after the user answers, and may differ from it.
 
 When the copy cannot be started or the capture fails (nothing is playing, so the
