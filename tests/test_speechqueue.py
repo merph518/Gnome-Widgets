@@ -454,6 +454,23 @@ class Links(Repos):
         self.assertEqual([x for x, _ in heads],
                          [row['issues'][0][0], speechqueue.name_left(speechqueue.block_width(state['sessions']))])   # the left edge of each column; the gear has none
 
+    def test_a_table_surrounds_the_headers_and_the_rows_with_the_header_band_over_the_headers(self):
+        self.f.session(100, ME, 'One')
+        text, heads = self.headers(self.state())
+        with open(speechqueue.DRAW) as f:
+            table = next(l for l in f.read().splitlines() if l.startswith('table ')).split()[1:]
+        with open(speechqueue.REGIONS) as f:
+            regions = json.load(f)
+        x0, y0, x1, y1, band = (float(v) for v in table)
+        self.assertEqual((x0, x1), (speechqueue.MARGIN - speechqueue.TABLE_BLEED, regions['list'][2]))
+        self.assertEqual((band, y1), (regions['list'][1], regions['list'][3]))     # the band down to the rows
+        self.assertLess(y0, band)
+        self.assertIn('${lua_parse fg head}', text)                                # the headers in the band's colour
+        os.remove(os.path.join(self.f.sessions, '100.json'))
+        speechqueue.render(self.state())
+        with open(speechqueue.DRAW) as f:
+            self.assertFalse([l for l in f.read().splitlines() if l.startswith('table ')])   # none without sessions
+
     def test_the_headers_stay_whole_numbers_and_clear_of_each_other_at_any_size(self):
         self.f.session(100, ME, 'One')
         for size in ((660, 128, 1.1), (400, 128, 2.0), (9999, 128, 0.7)):

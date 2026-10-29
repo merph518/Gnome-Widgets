@@ -146,8 +146,9 @@ function conky_widget()
 end
 
 function conky_fg(which)
-    -- ${lua_parse fg title} and ${lua_parse fg text} in speechqueue.py's markup
-    return theme.conky_colour(which == 'title' and fg or secondary())
+    -- ${lua_parse fg title}, ${lua_parse fg head} (on the table's header band) and
+    -- ${lua_parse fg text} in speechqueue.py's markup
+    return theme.conky_colour(which == 'title' and fg or which == 'head' and fg_back or secondary())
 end
 
 function conky_draw_background()
@@ -165,6 +166,16 @@ function conky_draw_background()
         rounded_rect(cr, margin, margin, w, h, rad)
         cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
         cairo_fill(cr)
+        local t = d.table
+        if t then                                  -- the table's header band, in the opposite colours
+            cairo_save(cr)
+            rounded_rect(cr, margin + t[1] * s, margin + t[2] * s, (t[3] - t[1]) * s, (t[4] - t[2]) * s, 6 * s)
+            cairo_clip(cr)
+            set(cr, fg)
+            cairo_rectangle(cr, margin + t[1] * s, margin + t[2] * s, (t[3] - t[1]) * s, (t[5] - t[2]) * s)
+            cairo_fill(cr)
+            cairo_restore(cr)
+        end
     end)
 end
 
@@ -502,18 +513,7 @@ local function draw_scrollbar(cr, x, top, height, s, rows, count, at, last)
     rounded_line(cr, x, ty, x, ty + len, w)
 end
 
-local flips = {}                            -- session id -> how far its row has turned, 0 to 1
-local row_flip = 0                          -- how far the row being drawn has turned to the opposite colours
-
-local function ink()
-    -- the row's text and icons: the foreground, turning into the card's colour as its row flips
-    return theme.mix(fg, fg_back, row_flip)
-end
-
-local function ink2()
-    -- the row's quieter text, the same way
-    return theme.mix(secondary(), theme.mix(fg_back, fg, 0.2), row_flip)
-end
+local glows = {}                            -- session id -> how bright its row is, 0 to 1
 
 local SPEECH_SETTINGS = {{'on', 'On'}, {'alerts', 'Alerts'}, {'off', 'Off'}}
 local GEAR_SHADE = {on = 1, alerts = 0.7, off = 0.4}
@@ -525,7 +525,7 @@ local function draw_gear(cr, c, cy, row, s, speech)
     local cx, size = (c[1] + c[2]) / 2 * s, c[3] * s
     local on = hovered(c[1] * s, cy - row / 2, c[2] * s, cy + row / 2)
     local r, teeth = size * 0.32, 8
-    set(cr, ink(), on and 1 or GEAR_SHADE[speech] or 0.7)
+    set(cr, fg, on and 1 or GEAR_SHADE[speech] or 0.7)
     cairo_set_line_width(cr, size * 0.17)
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, r, 0, 2 * math.pi)
@@ -551,19 +551,19 @@ local function draw_block(cr, r, x0, y, row, b, s, text)
     local cy = y + row / 2
     font(cr, 9, text, s, true)
     local tx = x0 + rule + pad
-    set(cr, ink())
+    set(cr, fg)
     show(cr, fit(cr, r.repo, tw), tx, cy, 'left')
     font(cr, 9, text, s)
     for _, c in ipairs(r.chips) do
         local cx, ccy, w = tx + c.x * s, y + chips_top + c.line * pitch + pitch / 2, c.w * s
         if hovered(cx, ccy - chip_h / 2, cx + w, ccy + chip_h / 2) then
-            set(cr, ink(), 0.6)
+            set(cr, fg, 0.6)
             cairo_set_line_width(cr, 1 * s)
             cairo_move_to(cr, cx + w - width_of(cr, c.text), ccy + chip_h * 0.38)
             cairo_line_to(cr, cx + w, ccy + chip_h * 0.38)
             cairo_stroke(cr)
         end
-        set(cr, ink2())
+        set(cr, secondary())
         show(cr, c.text, cx + w, ccy, 'right')
     end
 end
@@ -571,12 +571,12 @@ end
 local function draw_pill(cr, str, x, cy, w, h, s, text, on)
     -- the pill after a session's name, naming the ready pull requests a click on it opens: the
     -- foreground with its text in fg_back, a little bigger under the pointer
-    set(cr, ink())
+    set(cr, fg)
     local grow = on and 1.5 * s or 0
     rounded_rect(cr, x - grow, cy - h / 2 - grow, w + 2 * grow, h + 2 * grow, h / 2 + grow)
     cairo_fill(cr)
     font(cr, 9, text, s)
-    set(cr, theme.mix(fg_back, fg, row_flip))
+    set(cr, fg_back)
     show(cr, str, x + w / 2, cy, 'centre')
 end
 
@@ -590,7 +590,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     draw_gear(cr, c, cy, row, s, r.speech)
     local right = c[5] * s
     font(cr, 9, text, s)
-    set(cr, ink2())
+    set(cr, secondary())
     if r.queued > 0 then right = right - show(cr, r.queued .. ' queued', right, cy, 'right') - 10 * s end
     local flags_w = r.flags ~= '' and width_of(cr, r.flags) + 8 * s or 0
     local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 12 * s or 0
@@ -602,7 +602,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
     local nw = width_of(cr, name)
     local after = name_x + nw
     if hovered(name_x - 4 * s, cy - row / 2, after + 4 * s, cy + row / 2) then
-        set(cr, ink(), 0.6)
+        set(cr, fg, 0.6)
         cairo_set_line_width(cr, 1 * s)
         cairo_move_to(cr, name_x, cy + row * 0.32)
         cairo_line_to(cr, after, cy + row * 0.32)
@@ -615,21 +615,29 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         after = x1
         font(cr, 11, text, s)
     end
-    set(cr, ink())
+    set(cr, fg)
     show(cr, name, name_x, cy, 'left')
     if flags_w > 0 then
         font(cr, 9, text, s)
-        set(cr, ink2())
+        set(cr, secondary())
         show(cr, r.flags, after + 8 * s, cy, 'left')
     end
     if r.speech ~= 'on' then return r.span end
     font(cr, 11, text, s)
-    set(cr, ink2(), 0.65)                          -- a lighter grey than the name and tags
+    set(cr, secondary(), 0.65)                          -- a lighter grey than the name and tags
     show(cr, fit(cr, r.last, c[1] * s - 10 * s - name_x), name_x, cy + row, 'left')   -- clear of the gear
     return r.span
 end
 
-local function draw_list(cr, l, version, c, blk, s, text)
+local function draw_table_border(cr, t, s)
+    -- the line round the whole table: its header and its rows
+    set(cr, fg, 0.5)
+    cairo_set_line_width(cr, 1 * s)
+    rounded_rect(cr, t[1] * s, t[2] * s, (t[3] - t[1]) * s, (t[4] - t[2]) * s, 6 * s)
+    cairo_stroke(cr)
+end
+
+local function draw_list(cr, l, version, c, blk, s, text, t)
     local x0, x1, top, row, height = l[1] * s, l[2] * s, l[3] * s, l[4] * s, l[5] * s
     local last = l[8]
     load_sessions(version)
@@ -650,39 +658,37 @@ local function draw_list(cr, l, version, c, blk, s, text)
         draw_scrollbar(cr, x1 + 8 * s, top, height, s, height / row, total, scroll, last)
     end
     local seen = {}
-    for _, r in ipairs(rows) do                    -- each row turns over in about a third of a second
+    for _, r in ipairs(rows) do                    -- each row brightens and dims over about a third of a second
         local to = r.speaking and 1 or 0
-        local now = flips[r.id] or to
+        local now = glows[r.id] or to
         now = now + (to - now) * (1 - math.exp(-dt() * 10 / 1.1))
-        flips[r.id] = math.abs(to - now) < 0.01 and to or now
+        glows[r.id] = math.abs(to - now) < 0.01 and to or now
         seen[r.id] = true
     end
-    for id in pairs(flips) do
-        if not seen[id] then flips[id] = nil end
+    for id in pairs(glows) do
+        if not seen[id] then glows[id] = nil end
     end
-    local bleed = 8 * s                            -- a row's fill reaches this far past the text
+    local bleed = t and x0 - t[1] * s or 0         -- a row's fill reaches the table's left edge
     cairo_save(cr)
     cairo_rectangle(cr, x0 - bleed, top, x1 - x0 + bleed, height)
     cairo_clip(cr)
+    if t then                                      -- and the rows stay inside the table's rounded corners
+        rounded_rect(cr, t[1] * s, t[2] * s, (t[3] - t[1]) * s, (t[4] - t[2]) * s, 6 * s)
+        cairo_clip(cr)
+    end
     local at = 0
     for i, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
         local h = r.span * row
-        if i % 2 == 0 then                         -- every other row dimmed, as a table's
-            set(cr, fg, 0.07)
-            cairo_rectangle(cr, x0 - bleed, y, x1 - x0 + bleed, h)
-            cairo_fill(cr)
-        end
-        row_flip = flips[r.id] or 0
-        if row_flip > 0 then                       -- the row being read aloud, in the opposite colours
-            set(cr, fg, row_flip)
+        local shade = (i % 2 == 0 and 0.07 or 0) + (glows[r.id] or 0) * 0.2   -- every other row dimmed, as a table's; the one read aloud brighter
+        if shade > 0 then
+            set(cr, fg, shade)
             cairo_rectangle(cr, x0 - bleed, y, x1 - x0 + bleed, h)
             cairo_fill(cr)
         end
         at = at + draw_row(cr, r, x0, y, row, c, s, text, blk)
     end
-    row_flip = 0
     cairo_restore(cr)
 end
 
@@ -854,7 +860,8 @@ function conky_draw_widget()
                         bubble_offset(snap.lines, snap.b[10], p, clock.pos), open, alpha)
         end
         if p then draw_progress(cr, p, s, text, clock.pos) end
-        if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
+        if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text, d.table) else scroll = nil end
+        if d.table then draw_table_border(cr, d.table, s) end
         if d.footer then draw_footer(cr, d.footer, s) end
         if d.buttons then draw_skip_buttons(cr, d.buttons, s) end
         if d.volume then draw_volume(cr, d.volume, s) end

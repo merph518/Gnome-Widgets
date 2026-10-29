@@ -109,6 +109,8 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
+TABLE_BLEED = 8                               # the table's edge, left of the text's margin
+TABLE_HEAD_PAD = 3                            # the header band above its text
 BLOCK_RULE = 2                                # the room left of a repository's name and issue numbers, inside a row's fill
 BLOCK_PAD = 7                                 # and the room after it, before the text
 BLOCK_MIN = 90                                # the text's least width, however short the names are
@@ -879,15 +881,19 @@ def render(state, now=None):
     name_x = name_left(box_w)
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
+    heading_top = out.y
     columns = ((MARGIN + BLOCK_RULE + BLOCK_PAD, text_w, 'Identifiers'),
                (name_x, gear_x0 - 8 - name_x, 'Session Information')) if listed else ()
     # a column with no room for even an ellipsis (a narrow card at a large text scale) has no header
     room = text_width('…', HEADING_FONT)
     heads = ''.join(f"${{goto {round(SHADOW + x)}}}{esc(fit(label, HEADING_FONT, width))}"
                     for x, width, label in columns if width >= room)
-    out.text(f"${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
+    out.text(f"${{lua_parse fg head}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
     out.gap(LIST_GAP)
     list_top = out.y
+    if listed:                                    # the table round the headers and the rows, its header band filled
+        draw.append(f'table {MARGIN - TABLE_BLEED} {heading_top - TABLE_HEAD_PAD:.2f} {right} '
+                    f'{list_top + list_height:.2f} {list_top:.2f}')
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)

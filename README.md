@@ -95,9 +95,10 @@ itself.
   and its length) to their right, as the Spotify widget's seek bar is; the volume is at the top
   right, left of minimize
 
-The sessions are rows of a table, every other one dimmed to read across, and the row of the
-session being read aloud turns to the opposite colours (the foreground filled, its text in the
-card's colour), fading over about a third of a second as the session starts and stops speaking.
+The sessions are the rows of a table with a border round it, its header band filled in the
+foreground with the column headers in the card's colour. Every other row is dimmed to read
+across, and the row of the session being read aloud is brighter, fading in and out over about a
+third of a second as the session starts and stops speaking.
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold. Under it are the issue numbers of that repository,

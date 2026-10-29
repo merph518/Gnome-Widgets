@@ -1,7 +1,7 @@
 ${font Ubuntu Sans:size=1} ${goto 724}${voffset 30}
 ${font Ubuntu Sans:size=1} ${voffset 20}
 ${font Ubuntu Sans:size=1} ${voffset 12}
-${lua_parse fg text}${font Ubuntu Sans:bold:size=9}${goto 41}Identifiers${goto 193}Session Information${font Ubuntu Sans:size=13}
+${lua_parse fg head}${font Ubuntu Sans:bold:size=9}${goto 41}Identifiers${goto 193}Session Information${font Ubuntu Sans:size=13}
 ${font Ubuntu Sans:size=1} ${voffset -22}
 ${font Ubuntu Sans:size=1} ${voffset 126}
 ${font Ubuntu Sans:size=1} ${voffset 6}
