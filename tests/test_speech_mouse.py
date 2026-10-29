@@ -311,9 +311,19 @@ class SettingsMenuTest(StubSpeechctl):
         self.assertEqual(model.page, ('session', 1))
         self.assertTrue(any(t.split('\n')[1] == 'Settings \u203a Sessions \u203a Two' for t in shown))
 
-    def test_left_and_backspace_go_back_a_page_and_at_the_first_close_the_menu(self):
-        model, _ = self.show((1.0, [('key', 'enter')]), (0.1, [('key', 'left')]), (0.1, [('key', 'enter')]),
-                             (0.1, [('key', 'backspace')]), (0.1, [('key', 'left')]), (0.1, [('escape',)]))
+    def test_left_and_right_turn_a_value_and_never_close_the_menu(self):
+        model, _ = self.show((1.0, [('key', 'down'), ('key', 'left')]),             # Pace: the one before
+                             (0.1, [('key', 'down'), ('key', 'right')]),            # Text scaling: the next
+                             (0.1, [('key', 'up'), ('key', 'up'), ('key', 'left')]),   # Default voice: nothing to turn, first page
+                             (0.1, [('key', 'down'), ('key', 'down'), ('key', 'down'), ('key', 'left')]),  # Collapse: false -> true
+                             (0.1, [('escape',)]))
+        self.assertEqual(self.settings.log, [('pace', 0.7), ('scale', 1.25), ('collapse', True)])
+        self.assertEqual(model.page, ('root', None))
+
+    def test_right_opens_a_page_and_left_and_backspace_go_back_without_closing_at_the_first(self):
+        model, _ = self.show((1.0, [('key', 'right')]), (0.1, [('key', 'left')]), (0.1, [('key', 'right')]),
+                             (0.1, [('key', 'backspace')]), (0.1, [('key', 'backspace')]), (0.1, [('key', 'left')]),
+                             (0.1, [('escape',)]))
         self.assertEqual(model.page, ('root', None))
         self.assertEqual(model.selected, 0)
 

@@ -170,8 +170,9 @@ keys at the foot. The first page holds the **Default voice** (a page of the inst
 the next on Enter, Space or a click (`true` and `false` for a switch); a row ending in › opens
 a page. **Sessions** lists the open ones with their speech setting, and a session's page holds
 its **Speech** (On, Alerts, Off) and its **Voice** (**Default**, or one of the installed
-voices, the one in use marked). Up and Down, the wheel or the pointer move the cursor, Left and
-Backspace or a click on the title go back a page, and Escape closes the menu, as does twenty
+voices, the one in use marked). Up and Down, the wheel or the pointer move the cursor, Left and Right
+turn a setting's value back and forward (Right also opens a page, and Left leaves one), Backspace
+or a click on the title goes back a page, and Escape closes the menu, as does twenty
 seconds without an event. A choice applies at once. While it is open the widget holds the
 pointer and the keyboard and takes the keyboard focus (conky's window does not accept it, so the
 widget lets it while the menu or the close prompt is open and puts that back after), as it does for the close prompt, and a press in the half second after

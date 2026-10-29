@@ -317,8 +317,9 @@ def run_menu(model, regions, events, now=time.monotonic, sleep=time.sleep):
     the menu is open. `events()` gives the card-relative logical-px events since it was last
     called: ('move', x, y), ('press', x, y), ('wheel', ±1), ('key', name) for up, down, left,
     right, enter, space and backspace, and ('escape',). Moving over a row selects it and a press
-    on it changes it; a press on the title, Left and Backspace go back a page; Escape and
-    MENU_TIMEOUT without an event close it. Presses in the first CONFIRM_ARMED seconds are
+    on it changes it; Left and Right turn a setting's value back and forward, Right opens a
+    page, Left and Backspace go back one; a press on the title closes the menu from the first
+    page and goes back from another; Escape and MENU_TIMEOUT without an event close it. Presses in the first CONFIRM_ARMED seconds are
     ignored, so the second click of a double click on the gear is not an answer. draw.lua draws
     it from SETTINGS_MENU for as long as this runs."""
     opened = now()
@@ -351,10 +352,12 @@ def run_menu(model, regions, events, now=time.monotonic, sleep=time.sleep):
                         model.move(-1, visible)
                     elif name == 'down':
                         model.move(1, visible)
-                    elif name in ('enter', 'space', 'right'):
+                    elif name in ('enter', 'space'):
                         model.activate()
-                    elif name in ('left', 'backspace') and not model.back():
-                        return
+                    elif name in ('right', 'left'):
+                        model.nudge(1 if name == 'right' else -1)
+                    elif name == 'backspace':
+                        model.back()
                 elif kind == 'escape':
                     return
                 model.follow(visible)

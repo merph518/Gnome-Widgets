@@ -74,12 +74,12 @@ class Settings:
                          self.size_path)
 
 
-def next_of(values, current):
-    """The value after `current` in `values`, wrapping; the first when it is not there (a value
-    the presets do not hold, a hand-edited pace)."""
+def next_of(values, current, step=1):
+    """The value `step` after `current` in `values` (before it for -1), wrapping; the first
+    when it is not there (a value the presets do not hold, a hand-edited pace)."""
     for i, v in enumerate(values):
         if abs(v - current) < 1e-6 if isinstance(v, float) else v == current:
-            return values[(i + 1) % len(values)]
+            return values[(i + step) % len(values)]
     return values[0]
 
 
@@ -178,8 +178,24 @@ class Menu:
         self.selected, self.top = self.came_from.pop(), 0
         return True
 
-    def activate(self, index=None):
-        """Changes the selected row (or `index`'s)."""
+    def nudge(self, step):
+        """Right (+1) and Left (-1) on the selected row: a setting that has values turns to the
+        next or the one before; Right on a row that opens a page opens it; Left on one, on a page
+        of choices or on a row with nothing to turn goes back a page, and does nothing on the first
+        page. Never closes the menu."""
+        kind, i = self.page
+        row = self.selected
+        turns = (kind == 'root' and row in (1, 2, 3, 4)) or (kind == 'session' and row == 0)
+        if turns:
+            self.activate(step=step)
+        elif step > 0:
+            self.activate()
+        else:
+            self.back()
+
+    def activate(self, index=None, step=1):
+        """Changes the selected row (or `index`'s); `step` -1 turns a setting that has values
+        backwards."""
         if index is not None:
             self.select(index)
         kind, i = self.page
@@ -188,9 +204,9 @@ class Menu:
             if row == 0:
                 self.go(('voice', None))
             elif row == 1:
-                s.set_pace(next_of(tray_model.PACES, s.pace()))
+                s.set_pace(next_of(tray_model.PACES, s.pace(), step))
             elif row == 2:
-                s.set_scale(next_of(tuple(SCALES), s.scale()))
+                s.set_scale(next_of(tuple(SCALES), s.scale(), step))
             elif row == 3:
                 s.set_collapse(not s.collapse())
             elif row == 4:
@@ -209,7 +225,7 @@ class Menu:
         elif kind == 'session':
             x = self.sessions[i]
             if row == 0:
-                x['speech'] = next_of(SPEECH_CYCLE, x['speech'])
+                x['speech'] = next_of(SPEECH_CYCLE, x['speech'], step)
                 s.set_session_speech(x['id'], x['speech'])
             else:
                 names = [''] + self.voices

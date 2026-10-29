@@ -57,6 +57,29 @@ class MenuTest(unittest.TestCase):
         self.menu.activate(1)
         self.assertEqual(self.fake.log[-1], ('pace', 0.6))
 
+    def test_left_and_right_turn_a_value_back_and_forward_and_open_or_leave_pages(self):
+        self.menu.select(1)
+        self.menu.nudge(-1)
+        self.assertEqual(self.fake.log[-1], ('pace', 0.7))
+        self.menu.nudge(1)
+        self.assertEqual(self.fake.log[-1], ('pace', 0.85))
+        self.menu.select(3)
+        self.menu.nudge(-1)
+        self.assertEqual(self.fake.log[-1], ('collapse', True))
+        self.menu.select(0)
+        self.menu.nudge(-1)                                       # a page row: Left has nothing to turn at the first page
+        self.assertEqual(self.menu.page, ('root', None))
+        self.menu.nudge(1)
+        self.assertEqual(self.menu.page, ('voice', None))
+        self.menu.nudge(-1)                                       # a page of choices: Left goes back
+        self.assertEqual(self.menu.page, ('root', None))
+        self.menu.select(6)
+        self.menu.nudge(1)
+        self.menu.nudge(1)
+        self.menu.select(0)
+        self.menu.nudge(-1)                                       # Speech: On -> Off, the one before
+        self.assertEqual(self.fake.log[-1], ('session speech', 'aaaa', 'off'))
+
     def test_the_default_voice_page_marks_the_voice_in_use_and_picking_one_goes_back(self):
         self.menu.activate(0)
         self.assertEqual(self.menu.title(), 'Settings › Default voice')
