@@ -68,7 +68,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
-    -- flags, name, label, last, pill, ready}
+    -- flags, name, label, last, pill, number}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -77,7 +77,7 @@ local function load_sessions(version)
         rows[#rows + 1] = {speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', label = f[7] or '',
-                           last = f[8] or '', pill = f[9] or '', ready = f[10] == '1'}
+                           last = f[8] or '', pill = f[9] or '', number = f[10] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -348,45 +348,74 @@ local function draw_control(cr, xs, cy, seg_h, s, text, speech)
     end
 end
 
-local function draw_label(cr, label, x, cy, w, h, s, text, speaking)
-    -- the repository's label, one width for every row so the names after it line up: the
-    -- card's colour with the foreground's text, outlined on a dark card, and filled with the
-    -- foreground (the selected setting's colours) while its session is speaking
-    if label == '' then return end
-    local r = 3 * s
+local function draw_label(cr, r, x, cy, label_w, w, h, row, s, text)
+    -- the repository's box, one width for every row so the names after it line up: its label,
+    -- then the number of the issue a click on it opens (n/a, in the secondary colour, without
+    -- one). The card's colour with the foreground's text, outlined on a dark card, and filled
+    -- with the foreground (the selected setting's colours) while its session is speaking. When
+    -- it opens an issue it is tinted, or its fill lightened, with the pointer anywhere over it
+    -- on the row's first line, where a click opens it
+    if r.label == '' then return end
+    local rad = 3 * s
+    local issue = r.number:sub(1, 1) == '#'
+    local under = issue and hovered(x, cy - row / 2, x + w, cy + row / 2)
     cairo_new_path(cr)
-    if speaking then
-        set(cr, fg)
-        rounded_rect(cr, x, cy - h / 2, w, h, r)
+    if r.speaking then
+        set(cr, fg, under and 0.8 or 1)
+        rounded_rect(cr, x, cy - h / 2, w, h, rad)
         cairo_fill(cr)
-    elseif theme.apca_y(fg) > theme.apca_y(bg) then
-        set(cr, fg, 0.6)
-        cairo_set_line_width(cr, 1 * s)
-        rounded_rect(cr, x + 0.5 * s, cy - h / 2 + 0.5 * s, w - s, h - s, r)
-        cairo_stroke(cr)
+    else
+        if under then
+            set(cr, fg, 0.1)
+            rounded_rect(cr, x, cy - h / 2, w, h, rad)
+            cairo_fill(cr)
+        end
+        if theme.apca_y(fg) > theme.apca_y(bg) then
+            set(cr, fg, 0.6)
+            cairo_set_line_width(cr, 1 * s)
+            rounded_rect(cr, x + 0.5 * s, cy - h / 2 + 0.5 * s, w - s, h - s, rad)
+            cairo_stroke(cr)
+        end
     end
     font(cr, 9, text, s, true)
-    set(cr, speaking and fg_back or fg)
-    show(cr, label, x + w / 2, cy, 'centre')
+    set(cr, r.speaking and fg_back or fg)
+    show(cr, r.label, x + label_w / 2, cy, 'centre')
+    if r.number == '' then return end
+    font(cr, 9, text, s)
+    if r.speaking then set(cr, fg_back, issue and 1 or 0.7)
+    elseif issue then set(cr, fg)
+    else set(cr, secondary()) end
+    show(cr, r.number, x + w - 5 * s, cy, 'right')
 end
 
-local function draw_pill(cr, str, x, cy, w, h, s, text, ready)
-    -- the pill after a session's name, naming what a click on the name opens: the foreground
-    -- with its text in fg_back for ready pull requests, else the foreground's tint
-    set(cr, fg, ready and 1 or 0.12)
+local function draw_pill(cr, str, x, cy, w, h, s, text)
+    -- the pill after a session's name, naming the ready pull requests a click on the name
+    -- opens: the foreground with its text in fg_back
+    set(cr, fg)
     rounded_rect(cr, x, cy - h / 2, w, h, h / 2)
     cairo_fill(cr)
     font(cr, 9, text, s)
-    set(cr, ready and fg_back or fg)
+    set(cr, fg_back)
     show(cr, str, x + w / 2, cy, 'centre')
 end
 
-local function draw_row(cr, r, x0, y, row, c, s, text)
-    -- a session's row: its repository's label (filled while it is speaking), its name and the
-    -- pill naming what a click on the name opens, busy / idle / waiting / bg / question, how
-    -- many lines it has queued and its setting; with speech on, a second row of its last line
-    -- read aloud. The name and pill are tinted, and the name underlined, under the pointer.
-    -- Returns how many rows it took.
+local function box_number_width(cr, rows, s, text)
+    -- the widest number in the boxes of the sessions with a label, which every box makes room
+    -- for (speechqueue.py's box_width); 0 with none
+    font(cr, 9, text, s)
+    local w = 0
+    for _, r in ipairs(rows) do
+        if r.label ~= '' and r.number ~= '' then w = math.max(w, width_of(cr, r.number)) end
+    end
+    return w
+end
+
+local function draw_row(cr, r, x0, y, row, c, s, text, number_w)
+    -- a session's row: its repository's box (filled while it is speaking) with the issue it
+    -- opens, its name and the pill naming the pull requests a click on the name opens,
+    -- busy / idle / waiting / bg / question, how many lines it has queued and its setting;
+    -- with speech on, a second row of its last line read aloud. The name and pill are tinted,
+    -- and the name underlined, under the pointer. Returns how many rows it took.
     local cy = y + row / 2
     draw_control(cr, c, cy, c[5], s, text, r.speech)
     local right = c[6] * s
@@ -397,8 +426,9 @@ local function draw_row(cr, r, x0, y, row, c, s, text)
     local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 12 * s or 0
     font(cr, 9, text, s, true)
     local label_w = width_of(cr, 'WWWW') + 10 * s
-    draw_label(cr, r.label, x0, cy, label_w, c[5] * s, s, text, r.speaking)
-    local name_x = x0 + label_w + 8 * s
+    local box_w = label_w + (number_w > 0 and number_w + 5 * s or 0)
+    draw_label(cr, r, x0, cy, label_w, box_w, c[5] * s, row, s, text)
+    local name_x = x0 + box_w + 8 * s
     font(cr, 11, text, s)
     local name = fit(cr, r.name, right - name_x - flags_w - (pill_w > 0 and pill_w + 8 * s or 0))
     local nw = width_of(cr, name)
@@ -415,7 +445,7 @@ local function draw_row(cr, r, x0, y, row, c, s, text)
             cairo_line_to(cr, after, cy + row * 0.32)
             cairo_stroke(cr)
         end
-        draw_pill(cr, r.pill, after + 8 * s, cy, pill_w, c[5] * s * 0.85, s, text, r.ready)
+        draw_pill(cr, r.pill, after + 8 * s, cy, pill_w, c[5] * s * 0.85, s, text)
         after = x1
         font(cr, 11, text, s)
     end
@@ -457,10 +487,11 @@ local function draw_list(cr, l, version, c, s, text)
     cairo_rectangle(cr, x0, top, x1 - x0, height)
     cairo_clip(cr)
     local at = 0
+    local number_w = box_number_width(cr, rows, s, text)
     for _, r in ipairs(rows) do
         local y = top + (at - scroll) * row
         if y > top + height then break end
-        at = at + draw_row(cr, r, x0, y, row, c, s, text)
+        at = at + draw_row(cr, r, x0, y, row, c, s, text, number_w)
     end
     cairo_restore(cr)
 end

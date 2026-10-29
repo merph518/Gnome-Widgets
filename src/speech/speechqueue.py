@@ -96,6 +96,7 @@ SEGMENT_PAD = 7                               # either side of a segment's label
 LABEL_LEN = 4                                 # a repository's label, in letters
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
+NUMBER_PAD = 5                                # right of the number in a repository's box
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
 SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 # labels.json's first contents, written when it is missing; keys match without case
@@ -192,12 +193,18 @@ def ledger_prs(rows):
     return list(dict.fromkeys(f[2] for f in rows if f[1].startswith('pr:') and '/pull/' in f[2]))
 
 
-def link_pill(issue, prs):
-    """The pill after a session's name, naming what a click on the name opens: its ready
-    pull requests, else its issue; '' with neither."""
-    if prs:
-        return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
-    return f"#{issue.rsplit('/', 1)[-1]}" if issue else ''
+def link_pill(prs):
+    """The pill after a session's name, naming the ready pull requests a click on the name
+    opens; '' without any, when the name opens nothing."""
+    if not prs:
+        return ''
+    return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
+
+
+def box_number(issue):
+    """The number in a repository's box after its label: the issue a click on the box opens,
+    else 'n/a'."""
+    return f"#{issue.rsplit('/', 1)[-1]}" if issue else 'n/a'
 
 
 def first_wait(process, ledger):
@@ -674,11 +681,11 @@ def box(cx, cy, half_w, half_h):
 def session_line(s):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
     for a session with speech on its last line read aloud (NOTHING_SAID before one), the pill
-    after its name, and 1 when that pill names ready pull requests."""
+    after its name, and the number in its repository's box."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('label', ''),
                       without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else '',
-                      link_pill(s.get('issue'), s.get('prs')), str(int(bool(s.get('prs'))))))
+                      link_pill(s.get('prs')), box_number(s.get('issue'))))
 
 
 def row_flags(s):
@@ -690,14 +697,20 @@ def row_flags(s):
                                 ('idle', True)) if on)
 
 
-def link_span(s, right):
-    """Where a session's name and pill sit along its row, as draw.lua lays them out between the
-    label and `right` (the queued count's right edge): [left, right]. A name without a pill
-    opens nothing, but a click on it says so in mouse.log."""
-    pill = link_pill(s.get('issue'), s.get('prs'))
+def box_width(listed):
+    """The repository's box, one width for every row so the names after it line up, as draw.lua
+    sizes it: four capitals, then the widest number of the sessions that have a label."""
+    numbers = [text_width(box_number(s.get('issue')), TAG_FONT) for s in listed if s.get('label')]
+    return text_width('W' * LABEL_LEN, SEGMENT_FONT) + 10 + (max(numbers) + NUMBER_PAD if numbers else 0)
+
+
+def link_span(s, right, box_w):
+    """Where a session's name and pill sit along its row, as draw.lua lays them out between its
+    box, `box_w` wide, and `right` (the queued count's right edge): [left, right]."""
+    pill = link_pill(s.get('prs'))
     if s['queued'] > 0:
         right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
-    name_x = MARGIN + text_width('W' * LABEL_LEN, SEGMENT_FONT) + 10 + 8
+    name_x = MARGIN + box_w + 8
     pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
     flags_w = text_width(row_flags(s), TAG_FONT) + 8
     name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
@@ -807,13 +820,19 @@ def render(state, now=None):
                 f'{last}')
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
     rows, top = [], 0.0
+    box_w = box_width(listed)
     for s, span in zip(listed, spans):
         entry = {'id': s['id'], 'speech': s['speech'], 'top': round(top, 2),
                  'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
-        entry.update(link=link_span(s, queued_right), issue=s.get('issue') or '',
-                     branch=s.get('branch') or '', prs=s.get('prs') or [])
+        # The box opens the session's issue and the name its ready pull requests, each only
+        # with one to open
+        if s.get('label') and s.get('issue'):
+            entry.update(box=[MARGIN, round(MARGIN + box_w, 2)], issue=s['issue'])
+        if s.get('prs'):
+            entry.update(link=link_span(s, queued_right, box_w), branch=s.get('branch') or '',
+                         prs=s['prs'])
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, right, list_top + list_height]
