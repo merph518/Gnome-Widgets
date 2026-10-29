@@ -165,19 +165,23 @@ A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
 [static-checks.md](../_shared/static-checks.md#then-a-run), from the checkout,
 whose launcher uses the `src/` next to it.
 
-Only one widget runs per desktop, and every copy shares one pid file, so `stop`
-stops whichever copy is running. Look first: a widget running from another
+One supervisor runs both widgets per desktop, and every copy shares one pid file,
+so `stop` stops whichever copy is running. A widget's own `stop` leaves the
+supervisor up while the other widget is wanted, and its `start` then goes to
+that supervisor's copy, so the run stops everything and starts each widget that
+was running, from the checkout. Look first: a widget running from another
 worktree's `src/` is another session's test, and this one waits for it rather
 than stopping it. For a visual change, take the before capture now, while the
 copy that was running is still up.
 
 ```bash
-pgrep -af 'nowplaying.py'               # which copy runs, if any: note it
+pgrep -af 'nowplaying.py|speechqueue.py'   # which copies run, if any: note them
 scripts/capture-widget.py <scratchpad>/widget-before.png <widget>   # visual changes only
-bin/conky-widgets spotify stop
+bin/conky-widgets stop
 : > ~/.cache/conky-widgets/run.log
-bin/conky-widgets spotify start
-pgrep -af 'conky-widgets|nowplaying.py|conky-mouse.py|^conky '
+bin/conky-widgets spotify start          # each widget that was running, and <widget>
+bin/conky-widgets speech start
+pgrep -af 'conky-widgets|nowplaying.py|speechqueue.py|conky-mouse.py|^conky '
 grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 ```
 
@@ -276,9 +280,7 @@ leave the branch alone.
 
 ## Added gates
 
-`<static-checks>` before every push, and a layout, control or look the issue
-leaves open put to the user per [ui-options.md](../_shared/ui-options.md)
-before any drawing code.
+`<static-checks>` before every push, and the UI options rule under Section 4.
 
 ## Repository notes
 

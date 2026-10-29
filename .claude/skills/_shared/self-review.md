@@ -45,7 +45,11 @@ commit alone does not show.
    - comments and log strings that describe history rather than how the code
      works now;
    - the pull request body: what changed, why, and a test plan that says what
-     was actually run and what was not.
+     was actually run and what was not;
+   - a look the change settles that the user did not pick: one the issue left
+     open needs a `UI choices` section, per [ui-options.md](ui-options.md), and a
+     fix that changes a look the user picked is put to them the same way
+     rather than settled here.
 3. Check every finding before acting on it. On every pass but the first, read
    the [Settled decisions](#settled-decisions) section first. Read the code the
    finding names; when running the program can settle it (the `run` skill, or

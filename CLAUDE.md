@@ -11,7 +11,7 @@ handed over, and ends in the ready signal. The loop is in
 passes in `.claude/skills/_shared/static-checks.md`.
 
 A layout, control or look to decide is put to the user as a page of mockups
-and one question, before any drawing code. How is in
+and a question, before any drawing code. How is in
 `.claude/skills/_shared/ui-options.md`.
 
 Issues are filed with `/create-issue`, titled `[<area>] <description>` and

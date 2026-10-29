@@ -8,11 +8,11 @@ page is up. This is done before any drawing or layout code is written.
 
 ## First, look at what is there
 
-Look at which copy of the widget runs, as `/implement` Section 6 does:
-`pgrep -af 'nowplaying.py|speechqueue.py'`. When it runs from another
-worktree's `src/`, it is another session's test and may show that session's
-unmerged change, so a capture of it is not taken as the widget today. Otherwise
-capture the widget the change draws:
+Look at which copies run, as `/implement` Section 6 does:
+`pgrep -af 'nowplaying.py|speechqueue.py'`. A capture is taken as the widget
+today only when the widget the change draws runs from the installed package
+(`/usr/share`) or from a checkout whose `HEAD` is `origin/main`; a copy from any
+other branch may show an unmerged change. Then capture it:
 
 ```bash
 scripts/capture-widget.py <scratchpad>/mockup-source.png <widget>   # speech or spotify
@@ -26,9 +26,10 @@ own before capture at the run. Read the drawing code for that part,
 a mockup shows what the code can draw. Capturing only reads the window; it never
 starts or stops a widget.
 
-When the widget is not running, or the copy running is another session's, do
-not start or stop one. Draw the mockups from the code and the theme alone, and
-say on the page that no capture was used.
+When there is no such copy, or the capture fails (the widget is hidden, or
+only the other widget runs), do not start, stop or show one. Draw the mockups
+from the code and the theme alone, and say on the page that no capture was
+used.
 
 ## The page
 
@@ -54,8 +55,10 @@ intent `other` and the page is written by hand. It holds:
   when that is part of the choice.
 
 When the issue leaves more than one look open (where a badge goes, and its
-colour), each gets its own lettered set of options on the page, one heading a
-decision.
+colour), each is a numbered decision on the page with its own options, named
+by number and letter (1A, 1B, 2A). At most four decisions go to the user at
+once, as `AskUserQuestion` takes four questions; more than that is split into
+pages asked one after another.
 
 The page is a mockup, not the widget: HTML and CSS that look like it are enough,
 and it is never wired to anything on the machine.
@@ -65,14 +68,14 @@ and it is never wired to anything on the machine.
 Right after publishing, ask with `AskUserQuestion`, in the same turn, one
 question a decision on the page (the tool takes up to four):
 
-- The question names the issue, the decision and the page by its title, so it
-  stands on its own on the phone. The link goes in the turn's text just before
-  the question, never in the question itself, so the question stays short when
-  it is read aloud.
-- One option per lettered option on the page, with the same letters, the
-  recommended one first and marked `(Recommended)`. The voice bridge reads only
-  the question and the option labels, so each label carries the gist on its own
-  ("A: number pill after the title", not "A").
+- The question names the issue, the decision and the page, with its link, so
+  it stands on its own on the phone: in some modes the voice bridge passes on
+  the question alone. The speech hooks read a bare link as "the following
+  link", so it costs a few words aloud.
+- One option per option on the page, with the same names, the recommended one
+  first and marked `(Recommended)`. Read aloud, a question carries at most its
+  option labels, so each label carries the gist on its own ("A: number pill
+  after the title", not "A").
 - Each option's `description` says what it is and its cost in one or two
   sentences, and its `preview` is a few lines of text sketch of the row, for
   whoever answers on a screen.
@@ -80,7 +83,7 @@ question a decision on the page (the tool takes up to four):
   separate questions when the page already says what the session will do; they
   go under `Judgment calls` as usual.
 
-The answer is the layout. The pull request body names the page and the option
-picked under its own `UI choices` heading, apart from `Judgment calls`, since
-the user made it. Section 6's after capture is read next to the mockup of that
-option as well as its own before capture.
+The answer is the layout. The pull request body names the page and the
+options picked (1A, 2B) under its own `UI choices` heading, apart from
+`Judgment calls`, since the user made them. Section 6's after capture is read
+next to the mockups of those options as well as its own before capture.
