@@ -91,7 +91,8 @@ left and right (the sessions column's share of the width is kept in
   local model pipeline; another unit it polls shows by name), **waiting: ci** or
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), else **idle**. Sessions that run in the background (jobs started with
-  `claude --bg`) are not listed; a clip one of them speaks still prints in the terminal
+  `claude --bg`) are not listed, unless they are on remote control (their file names a
+  `bridgeSessionId`), which are listed like any other; a clip one of them speaks still prints in the terminal
 - **Combined Session Output**: the right column, a terminal as Claude's CLI prints a session,
   in its look: its welcome banner (the creature, the title and what the widget holds), then each
   message as the CLI prints a turn: the speaker's name as the prompt on a grey band behind a

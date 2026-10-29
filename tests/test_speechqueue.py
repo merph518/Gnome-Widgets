@@ -82,6 +82,14 @@ class ReadState(Fixture):
         self.f.session(400, '99999999-jobs', 'A job', kind='bg')
         self.assertEqual([x['id'] for x in self.state()['sessions']], [ME, OTHER, QUIET])
 
+    def test_a_background_session_on_remote_control_is_listed_like_any_other(self):
+        self.three()
+        self.f.session(400, '99999999-jobs', 'Bridge Update', kind='bg', bridge='session_01abc')
+        self.f.session(500, '88888888-jobs', 'Not on it', kind='bg', bridge=None)
+        got = self.state()['sessions']
+        self.assertEqual([x['id'] for x in got], [ME, OTHER, QUIET, '99999999-jobs'])
+        self.assertEqual(got[-1]['remote'], True)
+
     def test_a_background_session_that_speaks_keeps_its_name_in_the_terminal(self):
         self.f.session(400, ME, 'A job', kind='bg')
         self.f.now(ME, 'A job', 'A job says: done.', hook_pid=9001)
