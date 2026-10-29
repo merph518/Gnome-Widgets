@@ -71,8 +71,8 @@ def default_name():
 class Copy:
     """One isolated copy: where its files live and what it runs with."""
 
-    def __init__(self, name, base=BASE, launcher=LAUNCHER):
-        self.name, self.launcher = name, launcher
+    def __init__(self, name, base=BASE):
+        self.name, self.launcher = name, LAUNCHER
         self.root = os.path.join(base, name)
         self.home = os.path.join(self.root, 'home')
         self.runtime = os.path.join(self.root, 'run')
@@ -81,7 +81,6 @@ class Copy:
         self.stub = os.path.join(self.root, 'speechctl')
         self.pids = os.path.join(self.root, 'fixture.pids')
         self.slot_file = os.path.join(self.root, 'slot')
-        self.log = os.path.join(self.home, '.cache', 'conky-widgets', 'run.log')
         # added to each window's class: the user's copy and other copies keep the plain one
         self.suffix = 'Iso' + hashlib.sha1(name.encode()).hexdigest()[:8]
 
@@ -95,8 +94,9 @@ class Copy:
         XDG_RUNTIME_DIR the copy's and no tray."""
         env = dict(os.environ, HOME=self.home, XDG_RUNTIME_DIR=self.runtime, CSN_NO_TRAY='1',
                    CSN_CLASS_SUFFIX=self.suffix)
-        for var in ('CSN_DIR', 'CSN_LAUNCHER', 'CSN_DPI'):
-            env.pop(var, None)
+        for var in ('CSN_DIR', 'CSN_LAUNCHER', 'CSN_DPI', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+                    'XDG_DATA_HOME', 'XDG_STATE_HOME'):
+            env.pop(var, None)       # the copy's HOME decides where its files go
         return env
 
     def exists(self):
@@ -202,7 +202,8 @@ def write_fixtures(copy, pids):
     shutil.rmtree(copy.speak, ignore_errors=True)
     os.makedirs(copy.sessions)
     os.makedirs(copy.speak)
-    for pid, sid, name, busy, setting, cwd in fixture_sessions(copy, pids):
+    sessions = fixture_sessions(copy, pids)
+    for pid, sid, name, busy, setting, cwd in sessions:
         write(os.path.join(copy.sessions, f'{pid}.json'), json.dumps({
             'pid': pid, 'sessionId': sid, 'name': name, 'cwd': cwd, 'kind': 'interactive',
             'status': 'busy' if busy else 'idle', 'messagingSocketPath': f'/nonexistent/{sid}.sock'}))
@@ -211,7 +212,7 @@ def write_fixtures(copy, pids):
             write(os.path.join(copy.speak, f'{sid}.replies'))
         elif setting == 'off':
             write(os.path.join(copy.speak, f'{sid}.muted'))
-    pid, sid, name = pids[0], fixture_sessions(copy, pids)[0][1], fixture_sessions(copy, pids)[0][2]
+    pid, (_, sid, name, *_) = pids[0], sessions[0]
     write(os.path.join(copy.speak, f'{sid}.queue'),
           'The next block of the reply waits behind this one.\nAnd a third block after it.\n')
     write(os.path.join(copy.speak, 'now.json'), json.dumps({
@@ -410,11 +411,11 @@ def stop(copy, installed=False):
         print(f'no isolated copy "{copy.name}"')
         return
     run_launcher(copy, 'stop', installed=installed, quiet=True)
-    pid = supervisor_pid(copy)
-    if pid:                                   # the launcher stops it with the last widget
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and supervisor_pid(copy):
-            time.sleep(0.1)
+    deadline = time.monotonic() + 5           # the launcher stops it with the last widget
+    while time.monotonic() < deadline and supervisor_pid(copy):
+        time.sleep(0.1)
+    if supervisor_pid(copy):                  # keep its files: they are how a later stop finds it
+        sys.exit(f'the copy "{copy.name}" did not stop; its files are left in {copy.root}')
     stop_fixture_processes(copy)
     shutil.rmtree(copy.root, ignore_errors=True)
     print(f'stopped "{copy.name}" and removed {copy.root}')
@@ -457,8 +458,8 @@ def main(argv=None):
     parser.add_argument('command', nargs='?')
     parser.add_argument('rest', nargs='*')
     args = parser.parse_args(argv)
-    if not re.fullmatch(r'[\w.-]+', args.name):
-        sys.exit('the name is letters, digits, dots, dashes and underscores')
+    if not re.fullmatch(r'\w[\w.-]*', args.name):     # never '.' or '..': stop removes the folder
+        sys.exit('the name is letters, digits, dots, dashes and underscores, starting with a letter or digit')
     copy = Copy(args.name)
     cmd, rest = args.command, args.rest
     if cmd == 'start':
@@ -471,7 +472,7 @@ def main(argv=None):
         status(copy)
     elif cmd == 'path':
         print(copy.root)
-    elif cmd == 'capture' and rest:
+    elif cmd == 'capture' and rest and rest[1:2] in ([], ['spotify'], ['speech']):
         sys.exit(capture(copy, rest[0], rest[1] if len(rest) > 1 else 'spotify'))
     elif cmd == '_speechctl':
         speechctl(copy, rest)

@@ -160,6 +160,26 @@ class IsolatedTest(support.TempDirTest):
             iso.start(self.copy, ['spotify'], installed=True)
         run.assert_not_called()
 
+    def test_a_name_that_would_leave_the_base_folder_is_refused(self):
+        for name in ('.', '..', '.hidden', 'a/b', ''):
+            with self.assertRaises(SystemExit), mock.patch.object(iso, 'stop') as stop:
+                iso.main(['--name', name, 'stop'])
+            stop.assert_not_called()
+
+    def test_a_copy_that_does_not_stop_keeps_its_files(self):
+        iso.write(os.path.join(self.copy.home, 'x'), '')
+        with mock.patch.object(iso, 'run_launcher'), mock.patch.object(iso, 'supervisor_pid', return_value=1), \
+                mock.patch.object(iso.time, 'sleep'), mock.patch.object(iso.time, 'monotonic', side_effect=[0, 1, 9]), \
+                self.assertRaises(SystemExit):
+            iso.stop(self.copy)
+        self.assertTrue(os.path.exists(os.path.join(self.copy.home, 'x')))
+
+    def test_the_environment_drops_the_desktops_xdg_base_folders(self):
+        with mock.patch.dict(os.environ, {'XDG_CACHE_HOME': '/real/cache', 'XDG_CONFIG_HOME': '/real/config'}):
+            env = self.copy.env()
+        self.assertNotIn('XDG_CACHE_HOME', env)
+        self.assertNotIn('XDG_CONFIG_HOME', env)
+
     def test_the_default_name_follows_the_checkout(self):
         self.assertEqual(iso.default_name(), os.path.basename(iso.CHECKOUT))
 
