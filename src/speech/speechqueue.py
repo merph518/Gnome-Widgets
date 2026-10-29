@@ -13,11 +13,11 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the sessions' column headers and spacer
-                 lines that give conky's window its size, which stays the same while lines play
+  - widget.txt   conky's markup: the spacer lines that give conky's window its size, which
+                 stays the same while lines play
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
-                 buttons, the sessions list, the speaker's avatar and the bubble with the line
-                 being read, the progress of the current line and the footer
+                 buttons, the sessions list, the terminal pane with the line being
+                 read, the clip's clock and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
   - sessions.txt the sessions list, a line per session, rewritten only when it changes
 
@@ -26,7 +26,7 @@ Each session has a speech setting, read from its files the way speechctl reads i
 plays), Alerts only with neither (only its announcements play). Sessions with speech on sort
 first, then by process id, so the ones being read aloud are at the top.
 """
-import fcntl, glob, hashlib, json, math, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
+import datetime, fcntl, glob, hashlib, json, math, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
 import gi
 gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
@@ -47,11 +47,11 @@ DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
 LAST = os.path.join(CACHE, 'last-lines.json')     # {session id: the last line read aloud for it}
-HEARD = os.path.join(CACHE, 'last-heard.json')    # the last clip's speaker and length, kept on
-                                                  # the header and progress bar once it ends
+SCROLLBACK = os.path.join(CACHE, 'scrollback.json')   # [{key, name, markdown, text}]: what the terminal pane has printed, oldest first
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
+SPLIT = os.path.join(CONF, 'split')               # the sessions column's share of the width, 0 to 1; dragged by the divider
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
 # <project>/<session id>/scratchpad/<a LEDGER_FILES name>: a row a line, tab apart, as
@@ -69,22 +69,27 @@ DEFAULT_VOLUME = 1.2
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
-AVATAR_D = 36                                 # the speaker's avatar, left of the bubble
-# The avatar's image, the first of these that is there: one the user puts in the widget's own folder,
-# else the one shipped beside this file. Without either, draw.lua draws a spark.
-AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), os.path.join(HERE, 'avatar.png'))
-AVATAR_GAP = 12                               # the avatar to the bubble, which its tail points across
-BUBBLE_PAD = 10                               # the bubble's edge to its text, on every side
-BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
-BUBBLE_LINES = 6                              # most lines of the text read aloud the bubble shows at once
+TERM_PAD = 10                                 # the terminal pane's border to its text, on every side
+TERM_TITLE = 'Combined Session Output'        # on the pane's border, whichever session is read
+TERM_STATUS_GAP = 4                           # the text to the status line under it
+SCROLLBACK_KEEP = 40                          # the messages the pane keeps to scroll back through
+DUPLICATE_WITHIN = 30                         # s: the same session saying the same words again is one message, not two
+SCROLLBACK_CHARS = 60000                      # and the most text they hold between them
+BULLET_MARK = '\x02'                          # opens a draw.txt line that is the first of a message, which draw.lua draws a bullet by
+PROMPT_MARK = '\x04'                          # opens a draw.txt line that is a speaker's name, which draw.lua draws as the CLI's prompt: on a grey band behind a chevron
+DONE_MARK = '\x05'                            # opens a message's closing line, which draw.lua draws dim behind the CLI's spinner glyph
+TERM_BANNER_LINES = 3                         # the pane's welcome banner: its title, and two dim lines beside the creature
+TERM_INDENT = '  '                            # every line's room at the left, where the first line's bullet is drawn
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
-HEADER_GAP = 6                                # the title to the avatar when collapsed
-CONTROLS_GAP = 12                             # the bubble and avatar to the controls' row
-LINE_GAP = 14                                 # the title's row to the column headers
-LIST_GAP = 0                                  # the column headers to the list
-FOOTER_GAP = 8                                # list to the bubble
-FOOTER_H = 30                                 # the footer row: pause, skip, next and the progress bar
+HEADER_GAP = 6                                # the title to the card's end when collapsed
+COLUMN_GAP = 24                               # the sessions column to the terminal pane, the divider centred in it
+SPLIT_DEFAULT = 0.5                           # the sessions column's share of the width inside the gap, with no setting
+LIST_MIN = 260                                # the sessions column's least width, so a row keeps its name
+TERM_MIN = 200                                # the terminal pane's least width
+LINE_GAP = 14                                 # the title's row to the list
+FOOTER_GAP = 12                               # the two columns to the controls' row
+FOOTER_H = 30                                 # the footer row: pause, skip and next
 ROW_SPACING = 6                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
@@ -110,10 +115,8 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
-TABLE_HEAD_PAD = 3                            # the header band above its text
-BLOCK_RULE = 0                                # draw.lua's block line still carries a rule's width: none now
-BLOCK_PAD = 12                                # the table's edge to a repository's name and issue numbers
-BLOCK_MIN = 90                                # the text's least width, however short the names are
+GROUP_PAD = 12                                # the list's edge to a repository's name
+SESSION_INDENT = 14                           # a repository's name to the sessions listed under it
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
 CHIP_GAP = 3                                  # between chips, and between their lines
@@ -123,12 +126,19 @@ SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-HEADING_FONT = 'Ubuntu Sans Bold 11'          # the column headers over the sessions: a row's text, bold
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # a repository's name, as draw.lua draws it
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
 FOOTER_FONT = 'Ubuntu Sans 11'                # the settings popup's voice rows, as draw.lua draws them
-TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT}
+TERM_FONT = 'Ubuntu Mono 12'                  # the terminal pane's text, as draw.lua draws it
+TERM_BOLD_FONT = 'Ubuntu Mono Bold 12'
+TERM_ITALIC_FONT = 'Ubuntu Mono Italic 12'
+TERM_BOLD_ITALIC_FONT = 'Ubuntu Mono Bold Italic 12'
+STYLE_FONTS = {'': TERM_FONT, 'b': TERM_BOLD_FONT, 'i': TERM_ITALIC_FONT, 'x': TERM_BOLD_ITALIC_FONT, 'c': TERM_FONT}
+TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT,
+              TERM_FONT, TERM_BOLD_FONT, TERM_ITALIC_FONT, TERM_BOLD_ITALIC_FONT}
+MARKDOWN_MAX = 6000                           # the most of a line's markdown the terminal pane reads
+STYLE_MARK = '\x1f'                           # in a draw.txt line, before each run: its style letter, then its text
 
 _pango = PangoCairo.FontMap.get_default().create_context()
 PangoCairo.context_set_resolution(_pango, 96)
@@ -576,25 +586,49 @@ def last_lines(n, live):
     return last
 
 
-_heard = None
+_scrollback = None
 
 
-def last_heard(n, name, duration):
-    """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
-    progress bar stays as the last line left it while nothing plays."""
-    global _heard
-    if _heard is None:
-        saved = _json(HEARD)
-        _heard = saved if isinstance(saved, dict) else {}
+def spoken_log(n, name, duration=None):
+    """The messages the terminal pane has printed, oldest first, kept in SCROLLBACK across
+    restarts. A message is added once, when its clip starts playing, not when the hook
+    published it, so the pane prints what is being read aloud. A clip is known by its id, not by
+    now.json's mtime, which the hook moves when it publishes the same clip again; and the same
+    words from one session within DUPLICATE_WITHIN seconds of the last print are the same
+    message, not a second one."""
+    global _scrollback
+    if _scrollback is None:
+        try:
+            saved = json.loads(_read(SCROLLBACK) or '')
+        except ValueError:
+            saved = None
+        _scrollback = [e for e in saved if isinstance(e, dict) and e.get('key')] if isinstance(saved, list) else []
     if n:
-        heard = {'name': name or 'A session', 'duration': duration or 0}
-        if heard != _heard:
-            _heard = heard
+        text, markdown = display_text(n.get('text') or ''), clean_markdown(n.get('markdown'))
+        key = f"{n.get('session')}|{n.get('clip') or n.get('published')}|{text[:40]}"
+        at = n.get('published') or time.time()
+        last = _scrollback[-1] if _scrollback else {}
+        again = (last.get('key') == key or
+                 (last.get('session') == n.get('session') and last.get('text') == text and
+                  last.get('markdown') == markdown and abs(at - (last.get('at') or 0)) <= DUPLICATE_WITHIN))
+        if not again:
+            _scrollback.append({'key': key, 'session': n.get('session'), 'at': at, 'name': name or 'A session',
+                                'markdown': markdown, 'text': text})
+            while len(_scrollback) > SCROLLBACK_KEEP or (
+                    len(_scrollback) > 1 and sum(len(e['markdown']) + len(e['text']) for e in _scrollback) > SCROLLBACK_CHARS):
+                del _scrollback[0]
             try:
-                write_atomic(HEARD, json.dumps(heard))
+                write_atomic(SCROLLBACK, json.dumps(_scrollback))
             except OSError:
                 pass
-    return _heard
+        cur = _scrollback[-1]
+        if duration and not cur.get('duration'):            # its length is known once the clip has rendered
+            cur['duration'] = duration
+            try:
+                write_atomic(SCROLLBACK, json.dumps(_scrollback))
+            except OSError:
+                pass
+    return _scrollback
 
 
 def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
@@ -637,6 +671,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
             (s['name'] for s in listed if s['id'] == n.get('session')), '')
     return {
         'now': n, 'name': name, 'text': display_text((n or {}).get('text') or ''),
+        'markdown': clean_markdown((n or {}).get('markdown')),
         'duration': clip_duration(speak, n) if n else None,
         'paused': os.path.exists(os.path.join(speak, 'paused')),
         'voice': voice, 'volume': round(volume, 1), 'sessions': listed,
@@ -690,16 +725,17 @@ def box(cx, cy, half_w, half_h):
     return [cx - half_w, cy - half_h, cx + half_w, cy + half_h]
 
 
-def session_line(s, chips=(), span=1):
+def session_line(s, chips=(), span=1, header=''):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
     repository's name, for a session with speech on its last line read aloud (NOTHING_SAID
     before one), the pill after its name, its issue chips as line:x:width:text (block_chips'),
-    and how many rows it takes."""
+    how many rows it takes, and the repository's name when this session is the first listed
+    under it, which draw.lua prints on a row above it."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('repo', ''),
                       without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else '',
                       link_pill(s.get('prs')),
-                      ' '.join(f'{line}:{x:g}:{w:g}:{text}' for line, x, w, text, _ in chips), str(span)))
+                      ' '.join(f'{line}:{x:g}:{w:g}:{text}' for line, x, w, text, _ in chips), str(span), header))
 
 
 def row_flags(s):
@@ -742,13 +778,177 @@ def wrap_lines(text, font, width):
     return _wrapped[key]
 
 
-def block_width(listed):
-    """The width of a repository's name and issue numbers, one for every row so the names after
-    it line up, as draw.lua draws it: BLOCK_RULE and BLOCK_PAD, then text as wide as the longest repository
-    name listed, and at least BLOCK_MIN, so no name is cut. BLOCK_SLACK widens the longest name
-    to what draw.lua measures, so it is not cut either."""
-    names = [math.ceil(text_width(s['repo'], SEGMENT_FONT) * BLOCK_SLACK) for s in listed if s.get('repo')]
-    return BLOCK_RULE + BLOCK_PAD + max(max(names, default=0), BLOCK_MIN)
+def clean_markdown(text):
+    """A line's markdown source as the hook publishes it in now.json, or '' without one: format
+    characters dropped as display_text does, newlines kept, cut at MARKDOWN_MAX."""
+    if not isinstance(text, str):
+        return ''
+    text = ''.join(c for c in text if c in '\n\t' or unicodedata.category(c) != 'Cf')
+    return text.replace('\r', '')[:MARKDOWN_MAX].strip()
+
+
+INLINE = re.compile(r'(?P<code>`+)(?P<c>.+?)(?P=code)|\*\*(?P<b>.+?)\*\*|__(?P<b2>.+?)__'
+                    r'|\*(?P<i>[^\s*][^*]*?)\*|(?<![\w])_(?P<i2>[^\s_][^_]*?)_(?![\w])|\[(?P<l>[^\]]+)\]\([^)]*\)', re.S)
+
+
+def inline_runs(text, style=''):
+    """[(text, style)] for markdown's inline marks: `code` ('c'), **bold** ('b'), *italic* ('i'), both
+    ('x'), and a [link](url) as its label; anything else is kept as written."""
+    runs, at = [], 0
+    for m in INLINE.finditer(text):
+        if m.start() > at:
+            runs.append((text[at:m.start()], style))
+        at = m.end()
+        if m.group('c') is not None:
+            runs.append((m.group('c'), 'c'))
+        elif m.group('b') is not None or m.group('b2') is not None:
+            runs += inline_runs(m.group('b') or m.group('b2'), 'x' if style in ('i', 'x') else 'b')
+        elif m.group('i') is not None or m.group('i2') is not None:
+            runs += inline_runs(m.group('i') or m.group('i2'), 'x' if style in ('b', 'x') else 'i')
+        else:
+            runs += inline_runs(m.group('l'), style)
+    if at < len(text):
+        runs.append((text[at:], style))
+    return runs
+
+
+BULLET = re.compile(r'^(\s*)([-*+]|\d+[.)])\s+(.*)$')
+
+
+def markdown_blocks(markdown):
+    """[(kind, marker, runs)] for the blocks of `markdown`: 'p' a paragraph, 'h' a heading (its
+    runs bold), 'li' a list item (its bullet or number the marker) and 'code' a line of a fenced
+    block (one run, kept as written). Consecutive lines of a paragraph join; a table rule or a
+    horizontal rule is dropped."""
+    blocks, para, fenced = [], [], False
+
+    def flush():
+        if para:
+            blocks.append(('p', '', inline_runs(' '.join(para))))
+            para.clear()
+    for line in markdown.split('\n'):
+        if line.strip().startswith('```'):
+            flush()
+            fenced = not fenced
+        elif fenced:
+            blocks.append(('code', '', [(line.rstrip(), 'c')]))
+        elif not line.strip() or re.fullmatch(r'\s*([-*_]\s*){3,}|\s*\|?[\s:|-]+\|[\s:|-]*', line):
+            flush()
+        elif re.match(r'\s*#{1,6}\s', line):
+            flush()
+            blocks.append(('h', '', [(t, 'x' if st in ('i', 'x') else 'b') for t, st in
+                                    inline_runs(re.sub(r'^\s*#{1,6}\s+|\s+#+\s*$', '', line))]))
+        elif m := BULLET.match(line):
+            flush()
+            blocks.append(('li', '\u2022' if m.group(2) in '-*+' else m.group(2), inline_runs(m.group(3))))
+        else:
+            para.append(re.sub(r'^\s*>\s?', '', line).strip())
+    flush()
+    return blocks
+
+
+def wrap_runs(runs, width, first='', rest=''):
+    """`runs` ([(text, style)]) broken at spaces into lines that fit `width` in the style's own
+    font, as lists of runs, each line after the first opening with the spaces of `rest` and the
+    first with `first`; a word wider than `width` is broken across lines."""
+    sp = text_width('a a', TERM_FONT) - text_width('aa', TERM_FONT)
+    tokens, gap = [], False                              # (text, style, a space before it)
+    for text, style in runs:
+        for part in re.findall(r'\s+|\S+', text):
+            if part.isspace():
+                gap = True
+            else:
+                tokens.append((part, style, gap))
+                gap = False
+    lines, cur, w = [], [], 0.0
+    lead = first
+
+    def width_of(text, style):
+        return text_width(text, STYLE_FONTS[style])
+    for text, style, spaced in tokens:
+        tw = width_of(text, style)
+        lead_w = width_of(lead, '') if not cur and lead else 0
+        add = (sp if spaced and cur else 0) + tw
+        if cur and w + add > width:
+            lines.append(cur)
+            cur, w, lead = [], 0.0, rest
+            lead_w = width_of(lead, '') if lead else 0
+            add = tw
+        if not cur:
+            w = lead_w
+            if lead:
+                cur.append((lead, ''))
+        elif spaced:
+            cur.append((' ', ''))
+        while w + add > width and len(text) > 1:        # a word wider than the line is broken
+            cut = len(text) - 1
+            while cut > 1 and w + width_of(text[:cut], style) > width:
+                cut -= 1
+            cur.append((text[:cut], style))
+            lines.append(cur)
+            text, cur, lead = text[cut:], [], rest
+            w = width_of(lead, '') if lead else 0
+            if lead:
+                cur.append((lead, ''))
+            add = width_of(text, style)
+        cur.append((text, style))
+        w += add
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def markdown_lines(markdown, width, indent=TERM_INDENT):
+    """[(draw.txt text, pixel width)] for the visual lines of `markdown` wrapped to `width`, each
+    opening with `indent`: a list item's lines hang under its first word, and a blank line sits
+    between a paragraph or heading and what follows it. A line with only plain text is its text;
+    one with styled runs has STYLE_MARK, a style letter and the text before each run."""
+    out, prev = [], None
+    for kind, marker, runs in markdown_blocks(markdown):
+        if prev and (kind != 'li' or prev != 'li') and not (kind == 'code' and prev == 'code'):
+            out.append([(indent, '')] if indent else [])
+        prev = kind
+        first = indent + (marker + ' ' if kind == 'li' else '  ' if kind == 'code' else '')
+        rest = ' ' * max(round(text_width(first, TERM_FONT) / max(text_width(' ', TERM_FONT), 1)), 0)
+        if kind == 'code':
+            out += wrap_runs([(runs[0][0] or ' ', 'c')], width, first, rest)
+        else:
+            out += wrap_runs(runs, width, first, rest)
+    return [(encode_runs(r), sum(text_width(t, STYLE_FONTS[st]) for t, st in tidy_runs(r))) for r in out]
+
+
+def tidy_runs(runs):
+    """`runs` with a lone space between two runs of one style taking that style, so a bold phrase
+    or a code span is one run, and neighbours of one style joined."""
+    runs = [(t, st) for t, st in runs if t]
+    for i in range(1, len(runs) - 1):
+        if runs[i] == (' ', '') and runs[i - 1][1] == runs[i + 1][1]:
+            runs[i] = (' ', runs[i - 1][1])
+    out = []
+    for text, style in runs:
+        if out and out[-1][1] == style:
+            out[-1] = (out[-1][0] + text, style)
+        else:
+            out.append((text, style))
+    return out
+
+
+def encode_runs(runs):
+    """One draw.txt line's text for `runs`."""
+    runs = tidy_runs(runs)
+    if all(not style for _, style in runs):
+        return ''.join(text for text, _ in runs)
+    return ''.join(STYLE_MARK + (style or 'n') + text for text, style in runs)
+
+
+def grouped(listed):
+    """`listed` with the sessions of one repository together, the repositories in the order the
+    first of their sessions comes, and each repository's sessions in their order."""
+    order = []
+    for sess in listed:
+        if sess.get('repo', '') not in order:
+            order.append(sess.get('repo', ''))
+    return sorted(listed, key=lambda sess: order.index(sess.get('repo', '')))
 
 
 def block_chips(issues, width):
@@ -765,35 +965,30 @@ def block_chips(issues, width):
 
 
 def block_rows(row):
-    """(chips_top, pitch, chip_h) of a repository's block in a session's rows, `row` high: its
-    name is centred on the first line, as the session's name is, and the chips follow it."""
-    name_h = line_height(SEGMENT_FONT)
+    """(chips_top, pitch, chip_h) of a session's issue numbers: their first line's top below the
+    session's name line and the line of its tag, pill and queued count, each `row` high, and
+    each line's pitch and height."""
     chip_h = line_height(TAG_FONT) + 2
-    return row / 2 + name_h / 2 + 1, chip_h + CHIP_GAP, chip_h
+    return 2 * row, chip_h + CHIP_GAP, chip_h
 
 
-def name_left(box_w):
-    """Where a session's name begins along its row, after its block, `box_w` wide."""
-    return MARGIN + box_w + 8
+def name_left():
+    """Where a session's name begins along its row, indented under its repository's name."""
+    return MARGIN + GROUP_PAD + SESSION_INDENT
 
 
-def name_spans(s, right, box_w):
-    """Where a session's name and its pill sit along its row, as draw.lua lays them out between
-    its block, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
-    [left, right] of the pill, or None without one). The name's span ends where the pill's
-    begins."""
+def name_spans(s, right):
+    """Where a session's name and its pill sit, as draw.lua lays them out: ([left, right] of the
+    name on the name line, which ends at `right`, the gear's left edge; [left, right] of the pill
+    on the line under it, after the session's tag, or None without a pill)."""
+    name_x = name_left()
+    name = fit(display_text(s['name']), ROW_FONT, right - name_x)
+    span = [round(name_x - 4, 2), round(name_x + text_width(name, ROW_FONT) + 4, 2)]
     pill = link_pill(s.get('prs'))
-    if s['queued'] > 0:
-        right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
-    name_x = name_left(box_w)
-    pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
-    flags_w = text_width(row_flags(s), TAG_FONT) + 8
-    name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
-    after = name_x + text_width(name, ROW_FONT)
     if not pill:
-        return [round(name_x - 4, 2), round(after + 4, 2)], None
-    return ([round(name_x - 4, 2), round(after + PILL_GAP / 2, 2)],
-            [round(after + PILL_GAP / 2, 2), round(after + pill_w + 4, 2)])
+        return span, None
+    x0 = name_x + text_width(row_flags(s), TAG_FONT) + 8
+    return span, [round(x0, 2), round(x0 + text_width(pill, TAG_FONT) + 2 * PILL_PAD + 4, 2)]
 
 
 def write_sessions(listed, layout):
@@ -808,6 +1003,58 @@ def write_sessions(listed, layout):
 
 def collapse_idle():
     return (_read(COLLAPSE) or '').strip() == 'on'
+
+
+def load_split():
+    """The sessions column's share of the width inside the gap, 0 to 1, from the SPLIT file the
+    divider's drag writes; SPLIT_DEFAULT when it is missing or bad."""
+    try:
+        with open(SPLIT) as f:
+            v = float(f.read().split()[0])
+    except (OSError, IndexError, ValueError):
+        return SPLIT_DEFAULT
+    return min(max(v, 0.0), 1.0) if v == v else SPLIT_DEFAULT
+
+
+def split_limits(avail):
+    """(least, most) share of `avail`, the width inside the gap, the sessions column may take:
+    each column keeps its minimum, or half the width where both cannot."""
+    low = min(LIST_MIN / avail, 0.5)
+    return low, max(1 - TERM_MIN / avail, 0.5)
+
+
+_message_lines = {}
+
+
+def took(seconds):
+    """`seconds` as the CLI says how long it worked: 7s, 1m 5s."""
+    seconds = max(round(seconds), 0)
+    return f'{seconds // 60}m {seconds % 60}s' if seconds >= 60 else f'{seconds}s'
+
+
+def message_lines(entry, width):
+    """draw.txt's lines for one printed message, wrapped to `width`, as the CLI prints a turn: the
+    speaker's name as the prompt, a blank line, the text behind a bullet (its markdown formatted
+    when the hook published it), a blank line, and a closing line with how long it was read and
+    when. Kept until the width, the text scale or the message changes, since a scrollback of
+    them is laid out four times a second."""
+    key = (entry['key'], width, text_scale, entry.get('duration'))
+    if key not in _message_lines:
+        if len(_message_lines) > 4 * SCROLLBACK_KEEP:
+            _message_lines.clear()
+        if entry.get('markdown'):
+            body = [line for line, _ in markdown_lines(entry['markdown'], width)]
+        else:
+            body = [TERM_INDENT + l for l in wrap_lines(without_speaker(entry.get('text') or ''), TERM_FONT,
+                                                         width - text_width(TERM_INDENT, TERM_FONT))]
+        if body:
+            body[0] = BULLET_MARK + body[0]
+        done = 'Read aloud' + (f" for {took(entry['duration'])}" if entry.get('duration') else '')
+        if entry.get('at'):
+            done += ' \u00b7 done ' + datetime.datetime.fromtimestamp(entry['at']).strftime('%A %-I:%M %p')
+        _message_lines[key] = ([PROMPT_MARK + fit(entry['name'], TERM_FONT, width - 2 * text_width(' ', TERM_FONT)), '']
+                               + body + ['', DONE_MARK + fit(done, TERM_FONT, width - 2 * text_width(' ', TERM_FONT))])
+    return _message_lines[key]
 
 
 def render(state, now=None):
@@ -835,7 +1082,7 @@ def render(state, now=None):
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
-    heard = last_heard(n, state['name'], state['duration'])
+    spoken = spoken_log(n, re.sub(r' session$', '', state['name'] or '', flags=re.I), state['duration'])
     half = WINDOW_BUTTON_PITCH / 2
     level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     regions = {
@@ -853,16 +1100,8 @@ def render(state, now=None):
     out = Markup(MARGIN)
     out.gap(header_h)
 
-    avatar = next((path for path in AVATAR_IMAGES if os.path.isfile(path)), '')
-
-    def avatar_at(top):
-        """The speaker's avatar, at the card's left from `top`, drawn by draw.lua from its image."""
-        draw.append(f'avatar {MARGIN + AVATAR_D / 2} {top + AVATAR_D / 2} {AVATAR_D} {avatar}'.rstrip())
-
     if idle and collapse_idle():
         out.gap(HEADER_GAP)
-        avatar_at(out.y)
-        out.gap(AVATAR_D)
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
         write_sessions(listed, [((), 1)] * len(listed))
@@ -871,68 +1110,71 @@ def render(state, now=None):
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
     # they run longer than the list's height. A session with speech on always takes two rows,
     # the second its last line read aloud, so the list's layout doesn't change as lines play.
-    # Two column headers sit over them, each at the left edge of the column it names: the
-    # repository and issue numbers, and the name, tag and last line. The gear's column has none.
-    box_w = block_width(listed)
-    text_w = box_w - BLOCK_RULE - BLOCK_PAD
+    # Two columns of the same height: the sessions at the left, the terminal pane at the right,
+    # the divider between them in the gap, where the drag moves it.
+    avail = right - MARGIN - COLUMN_GAP
+    low, high = split_limits(avail)
+    list_right = MARGIN + round(avail * min(max(load_split(), low), high))
+    term_left = list_right + COLUMN_GAP
+    # One column: each repository's name, then its sessions indented under it, a session's name
+    # line followed by its issue numbers and, with speech on, the last line read aloud.
+    listed = grouped(listed)
     # The gear at the right of each row, which opens that session's settings: its icon, and
-    # the click area round it that runs the row's first line
-    gear_x0 = right - GEAR_SIZE * text_scale - 2 * GEAR_PAD
-    name_x = name_left(box_w)
+    # the click area round it that runs the row's name line
+    gear_x0 = list_right - GEAR_SIZE * text_scale - 2 * GEAR_PAD
+    name_x = name_left()
+    queued_right = gear_x0 - 4
+    text_w = max(queued_right - name_x, 40)                    # the issue numbers wrap inside it
     out.gap(LINE_GAP)
-    heading_h = line_height(HEADING_FONT, PLAIN_FONT)
-    heading_top = out.y
-    columns = ((MARGIN + BLOCK_RULE + BLOCK_PAD, text_w, 'Identifiers'),
-               (name_x, gear_x0 - 8 - name_x, 'Session Information')) if listed else ()
-    # a column with no room for even an ellipsis (a narrow card at a large text scale) has no header
-    room = text_width('…', HEADING_FONT)
-    heads = ''.join(f"${{goto {round(SHADOW + x)}}}{esc(fit(label, HEADING_FONT, width))}"
-                    for x, width, label in columns if width >= room)
-    out.text(f"${{lua_parse fg head}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
-    out.gap(LIST_GAP)
     list_top = out.y
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
     chips_top, pitch, chip_h = block_rows(row)
-    layout, spans = [], []
+    layout, spans, heads, repo = [], [], [], None
     for s in listed:
         chips, lines = block_chips(s.get('issues', ()), text_w)
-        # the block's lines may need more rows than the speech setting does
-        span = max(2 if s['speech'] == 'on' else 1, math.ceil(round((chips_top + lines * pitch) / row, 6)) if lines else 1)
-        layout.append((chips, span))
+        header = s.get('repo', '') if s.get('repo', '') != repo and s.get('repo') else ''
+        repo = s.get('repo', '')
+        head = row if header else 0
+        # the name line, its issue numbers and the last line read take as many rows as they need
+        height = head + chips_top + lines * pitch + (row if s['speech'] == 'on' else 0)
+        span = max(1, math.ceil(round(height / row, 6)))
+        layout.append((chips, span, header))
         spans.append(span)
+        heads.append(head)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
-    if listed:                                    # the table round the headers and the rows, ending at the last row
-        table_bottom = list_top + min(list_height, sum(spans) * row)
-        draw.append(f'table {MARGIN} {heading_top - TABLE_HEAD_PAD:.2f} {right} {table_bottom:.2f} {list_top:.2f}')
     version = write_sessions(listed, layout)
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
-    queued_right = gear_x0 - 4
-    draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
+    draw.append(f'list {MARGIN} {list_right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
-    draw.append(f'control {gear_x0:.2f} {right} {GEAR_SIZE * text_scale:.2f} {seg_h:.2f} {queued_right:.2f}')
-    draw.append(f'block {BLOCK_RULE} {BLOCK_PAD} {text_w:g} {chips_top:.2f} {pitch:.2f} {chip_h:.2f}')
+    draw.append(f'control {gear_x0:.2f} {list_right} {GEAR_SIZE * text_scale:.2f} {seg_h:.2f} {queued_right:.2f}')
+    draw.append(f'block {GROUP_PAD} {SESSION_INDENT} {text_w:g} {chips_top:.2f} {pitch:.2f} {chip_h:.2f}')
     rows, top = [], 0.0
-    for s, (chips, span) in zip(listed, layout):
+    for s, (chips, span, _), head in zip(listed, layout, heads):
         entry = {'id': s['id'], 'speech': s['speech'], 'voice': s['own_voice'], 'top': round(top, 2),
-                 'bottom': round(top + row * span, 2), 'gear': [round(gear_x0, 2), round(right, 2)]}
+                 'bottom': round(top + row * span, 2), 'head': round(head, 2),
+                 'gear': [round(gear_x0, 2), round(list_right, 2)]}
         # Each issue number opens its issue and the pill the ready pull requests, each only
         # with one to open; the name closes the session, once confirmed. An issue's box is
         # [left, top, right, bottom], its top from the row's
-        name_span, pill_span = name_spans(s, queued_right, box_w)
+        name_span, pill_span = name_spans(s, queued_right)
         entry.update(name=name_span, title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
         if chips:
-            x0 = MARGIN + BLOCK_RULE + BLOCK_PAD
-            entry['issues'] = [[round(x0 + x, 2), round(chips_top + line * pitch + (pitch - chip_h) / 2, 2),
-                                round(x0 + x + w, 2),
-                                round(chips_top + line * pitch + (pitch + chip_h) / 2, 2), link]
+            entry['issues'] = [[round(name_x + x, 2), round(head + chips_top + line * pitch + (pitch - chip_h) / 2, 2),
+                                round(name_x + x + w, 2),
+                                round(head + chips_top + line * pitch + (pitch + chip_h) / 2, 2), link]
                                for line, x, w, _, link in chips]
         if s.get('prs'):
             entry.update(link=pill_span, branch=s.get('branch') or '', prs=s['prs'])
         rows.append(entry)
         top += row * span
-    regions['list'] = [MARGIN, list_top, right, list_top + list_height]
+    regions['list'] = [MARGIN, list_top, list_right, list_top + list_height]
+    # The divider's grab area is over the gap, the card's whole height; `divider_drag` is what the drag
+    # needs to turn the pointer's x into the share: [left of the columns, their width inside the
+    # gap, the gap, least share, most share]
+    divider_x = list_right + COLUMN_GAP / 2
+    regions['divider_drag'] = [MARGIN, avail, COLUMN_GAP, round(low, 4), round(high, 4)]
     regions['rows'] = rows
     regions['list_scroll'] = [last, round(row, 2)]
     prompt_line, regions['confirm'] = close_prompt(right, list_top, list_height)
@@ -940,61 +1182,49 @@ def render(state, now=None):
     names = [''] + (state.get('voices') or [])
     settings_lines, regions['settings'] = settings_popup(names, state['voice'], right, list_top, list_height)
     draw.extend(settings_lines)
+    # The terminal pane, as Claude's CLI prints a reply: a bordered box with a static title on its
+    # border, the line being read aloud inside it behind a bullet (its markdown formatted, in
+    # monospace; as many lines show as the column holds and draw.lua scrolls the rest with the
+    # clip), and a status line at the foot of the box. It is as tall as the sessions column.
+    # draw.lua draws it from these lines.
+    line_h = line_height(TERM_FONT)
+    box_top = list_top
+    bottom = list_top + list_height
+    banner_h = (TERM_BANNER_LINES + 1) * line_h                    # the welcome banner and a blank line
+    term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h - TERM_STATUS_GAP - line_h) // line_h), 1)
+    inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
+    said = []
+    for entry in spoken:
+        if said:
+            said.append('')                                    # a blank line between messages
+        said.extend(message_lines(entry, inner))
+    queued = sum(s['queued'] for s in listed)
+    draw.append(f'terminal {term_left} {box_top:.2f} {right} {bottom:.2f} {TERM_PAD} '
+                f'{box_top + TERM_PAD + line_h / 2:.2f} {box_top + TERM_PAD + banner_h + line_h / 2:.2f} {line_h:.2f} '
+                f'{term_lines} {bottom - TERM_PAD - line_h / 2:.2f} {int(bool(n))} {int(paused)} {queued} '
+                f'{count} {sum(1 for x in listed if x["speech"] == "on")}')
+    draw.append(f'speaker {fit(TERM_TITLE, LABEL_FONT, right - term_left - 40)}')
+    draw.extend(f'line {line}' for line in said)
+    regions['terminal'] = [term_left, round(box_top, 2), right, round(bottom, 2)]
+    regions['terminal_scroll'] = max(len(said) - term_lines, 0)       # lines past what it shows
     out.gap(list_height)
 
-    # The footer: the says line, the progress bar, then the controls: pause or resume, skip and
-    # next, the volume slider. Skip and next are drawn dimmed, and are not click areas, while no
-    # clip plays.
+    # The footer: the controls under the sessions: pause or resume, skip and next. Skip and next
+    # are drawn dimmed, and are not click areas, while no clip plays.
     out.gap(FOOTER_GAP)
-    # The speaker's avatar, level with the bottom of a bubble whose tail points at it. While a
-    # clip plays the bubble holds the speaker's name, then the whole line being read aloud: one
-    # line high for a short one, growing upward with it to BUBBLE_LINES lines, after which
-    # draw.lua scrolls it; while nothing plays there is the avatar alone. The row is always as
-    # tall as the tallest bubble, so the card's size does not change as lines play. draw.lua
-    # draws it from these lines.
-    name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
-    full_h = 2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
-    bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
-    inner = (right - bubble_x0 - 2 * BUBBLE_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
-    bottom = out.y + full_h
-    avatar_at(bottom - AVATAR_D)                              # level with the bubble's bottom
-    if n:
-        speaker = re.sub(r' session$', '', state['name'], flags=re.I) or 'A'   # the hook's "<name> session"
-        speaker += ' Session:'
-        said = wrap_lines(without_speaker(state.get('text') or ''), ROW_FONT, inner)
-        shown = min(max(len(said), 1), BUBBLE_LINES)
-        top = bottom - (2 * BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + shown * line_h)
-        name = fit(speaker, SEGMENT_FONT, inner)
-        wide = max([text_width(name, SEGMENT_FONT)] + [text_width(l, ROW_FONT) for l in said]) * BLOCK_SLACK
-        bubble_right = min(bubble_x0 + 2 * BUBBLE_PAD + math.ceil(wide), right)   # as wide as its text needs
-        draw.append(f'bubble {bubble_x0} {top} {bubble_right} {bottom} {BUBBLE_PAD} '
-                    f'{top + BUBBLE_PAD + name_h / 2:.2f} '
-                    f'{top + BUBBLE_PAD + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} '
-                    f'{bottom - AVATAR_D / 2:.2f} {shown}')
-        draw.append(f'speaker {name}')
-        draw.extend(f'line {line}' for line in said)
-        regions['bubble'] = [bubble_x0, top, bubble_right, bottom]
-        regions['bubble_scroll'] = max(len(said) - shown, 0)            # lines past what it shows
-    out.gap(max(full_h, AVATAR_D))
-    out.gap(CONTROLS_GAP)
     footer_h = FOOTER_H
     fy = out.y + footer_h / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2
     skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
     next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
-    # The progress bar, always there, right of the buttons as the Spotify widget's seek bar is:
-    # the current line's while its length is known (0:00 while Piper still renders it), else the
-    # last line's, left full where it finished.
-    duration, running = state['duration'] or 0, False
+    # The clip's clock, which draw.lua prints in the pane's status line: the current line's
+    # while its length is known (0:00 while Piper still renders it).
+    duration, running, elapsed = state['duration'] or 0, False, 0.0
     if n:
         elapsed = clock.elapsed(n, paused, now)
         running = bool(duration) and not paused
         elapsed = min(elapsed, duration)
-    else:
-        duration = elapsed = float(heard.get('duration') or 0)
-    progress_x0 = next_cx + PAUSE_SIZE / 2 + 16
-    draw.append(f'progress {progress_x0} {right} {fy} {time.monotonic():.3f} '
-                f'{elapsed:.3f} {duration:.3f} {int(running)}')
+    draw.append(f'clock {time.monotonic():.3f} {elapsed:.3f} {duration:.3f} {int(running)}')
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
     draw.append(f'buttons {skip_cx} {next_cx} {fy} {PAUSE_SIZE} {int(bool(n))}')
     half = PAUSE_SIZE / 2 + 4
@@ -1003,9 +1233,16 @@ def render(state, now=None):
         regions['skip'] = box(skip_cx, fy, half, half)
         regions['next'] = box(next_cx, fy, half, half)
     out.gap(footer_h)
+    card_h = out.y + MARGIN - 4
+    # The application's chrome: the header and the footer run the card's width, a rule under the
+    # one and over the other, and the columns and their divider sit between the rules.
+    rule_top, rule_bottom = list_top - LINE_GAP / 2, list_top + list_height + FOOTER_GAP / 2
+    draw.append(f'divider {divider_x:.2f} {rule_top:.2f} {rule_bottom:.2f}')
+    draw.append(f'rules {rule_top:.2f} {rule_bottom:.2f}')
+    regions['divider'] = [list_right + 2, round(rule_top, 2), term_left - 2, round(rule_bottom, 2)]
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
-    return out.end(out.y + MARGIN - 4)
+    return out.end(card_h)
 
 
 def close_prompt(right, list_top, list_height):
@@ -1139,11 +1376,11 @@ def main():
             except Exception:
                 text = f"${{lua_parse fg text}}${{font Ubuntu Sans:size=11}}widget error: {esc(str(e))[:60]}\n"
         write_atomic(OUT, text)
-        # Every 0.25 s, or at once when the size settings change.
-        settings = size_file.load(SIZE)
+        # Every 0.25 s, or at once when the size settings or the divider change.
+        settings = size_file.load(SIZE), load_split()
         for _ in range(5):
             time.sleep(0.05)
-            if size_file.load(SIZE) != settings:
+            if (size_file.load(SIZE), load_split()) != settings:
                 break
 
 

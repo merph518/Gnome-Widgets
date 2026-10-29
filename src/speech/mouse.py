@@ -39,7 +39,7 @@ OUTLINE = 0x5e9cf0                             # the outline a resize shows
 # The buttons speechqueue.py writes the regions of, and what each runs.
 COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',)}
 BUTTONS = tuple(COMMANDS) + ('volume_icon',)  # the controls a click or tap presses
-REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume')   # the regions a press looks through, in order
+REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'divider')   # the regions a press looks through, in order
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
@@ -48,7 +48,9 @@ BROWSER = 'google-chrome'                      # what a session's box and name o
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
-BUBBLE_SCROLL = os.path.join(CACHE, 'bubble-scroll')   # wheel steps over the speech bubble, in all, for draw.lua
+TERMINAL_SCROLL = os.path.join(CACHE, 'terminal-scroll')   # wheel steps over the terminal pane, in all, for draw.lua
+SPLIT = os.path.expanduser(f'~/.config/{NAME}/split')   # the sessions column's share of the width, which speechqueue.py lays the columns out by
+DIVIDER_DRAG = os.path.join(CACHE, 'divider-drag')   # exists while the divider is held, so draw.lua brightens it
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
 SESSION_MENU = os.path.join(CACHE, 'session-menu')   # "<under the pointer> <speech> <voice>" and the session's name, while its settings are open
@@ -65,7 +67,7 @@ core = None                                    # conky-mouse.py's module, set wh
 def start():
     """Clears the preview, the open settings and the open prompt a previous run left behind if
     it was killed mid-drag or mid-popup."""
-    for path in (VOLUME_PREVIEW, SESSION_MENU, CLOSE_CONFIRM):
+    for path in (VOLUME_PREVIEW, SESSION_MENU, CLOSE_CONFIRM, DIVIDER_DRAG):
         try:
             os.remove(path)
         except OSError:
@@ -134,14 +136,15 @@ def offset(regions):
 
 def row_at(regions, s, x, y):
     """The session row under card-relative (x, y), and whether (x, y) is on its gear (the row's
-    first line, at its right); (None, False) off the list."""
+    name line, at its right); (None, False) off the list."""
     area, scroll = regions.get('list'), regions.get('list_scroll')
     if not (inside(area, s, x, y) and scroll):
         return None, False
     at = y / s - area[1] + offset(regions) * scroll[1]       # px down the whole list
     for row in regions.get('rows', ()):
         if row['top'] <= at < row['bottom']:
-            on_control = (at < row['top'] + scroll[1] and
+            line = row['top'] + row.get('head', 0)               # its name line, under the repository's name
+            on_control = (line <= at < line + scroll[1] and
                           row['gear'][0] * s <= x <= row['gear'][1] * s)
             return row, on_control
     return None, False
@@ -159,10 +162,11 @@ def link_at(regions, s, x, y):
     for x0, y0, x1, y1, link in row.get('issues', ()):        # on any line of the row's block
         if x0 * s <= x <= x1 * s and (row['top'] + y0) <= at <= (row['top'] + y1):
             return dict(row, issue=link), 'issue'
-    if at >= row['top'] + regions['list_scroll'][1]:          # its second line
-        return None
-    for key, kind in (('link', 'prs'), ('name', 'close')):
-        if row.get(key) and row[key][0] * s <= x <= row[key][1] * s:
+    line, height = row['top'] + row.get('head', 0), regions['list_scroll'][1]
+    # the name closes the session from its name line, the pill opens its pull requests from the
+    # line under that, and the repository's name above and the lines below are neither
+    for key, kind, first in (('link', 'prs', line + height), ('name', 'close', line)):
+        if row.get(key) and first <= at < first + height and row[key][0] * s <= x <= row[key][1] * s:
             return row, kind
     return None
 
@@ -268,6 +272,34 @@ def set_volume(d, win, regions, s, track):
         # a preview left behind would hold the slider at it, so it goes however the drag ends
         try:
             os.remove(VOLUME_PREVIEW)
+        except OSError:
+            pass
+
+
+def move_divider(d, win, regions, s, track):
+    """Follow `track` (follow_pointer() or a Touch) while the divider is held, writing the
+    share of the width the sessions column takes with the pointer at the middle of the gap,
+    within the limits speechqueue.py gave in regions.json's `divider_drag`; it lays the columns
+    out again within a tenth of a second."""
+    left, avail, gap, low, high = regions['divider_drag']
+    wx, _, _, _ = core.card_of(core.geometry(d, win), s)
+    os.makedirs(os.path.dirname(SPLIT), exist_ok=True)
+    os.makedirs(CACHE, exist_ok=True)
+    open(DIVIDER_DRAG, 'w').close()
+    held, last = True, None
+    try:
+        while held:
+            px, _, held = track()
+            share = round(min(max(((px - wx) / s - left - gap / 2) / avail, low), high), 4)
+            if share != last:
+                last = share
+                with open(SPLIT + '.tmp', 'w') as f:
+                    f.write(f'{share:.4f}\n')
+                os.replace(SPLIT + '.tmp', SPLIT)
+            time.sleep(0.02)
+    finally:
+        try:
+            os.remove(DIVIDER_DRAG)
         except OSError:
             pass
 
@@ -576,6 +608,9 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     if hit == 'volume' and regions.get('volume_bar'):
         set_volume(d, win, regions, s, track)
         return True
+    if hit == 'divider' and regions.get('divider_drag'):
+        move_divider(d, win, regions, s, track)
+        return True
     gear = gear_at(regions, s, x, y)
     link = None if gear else link_at(regions, s, x, y)
     if not (gear or link):
@@ -609,30 +644,30 @@ def scroll_list(regions, down):
     return at
 
 
-def scroll_bubble(down):
-    """Counts a wheel step over the speech bubble, down or up, for draw.lua to turn into lines."""
+def scroll_terminal(down):
+    """Counts a wheel step over the terminal pane, down or up, for draw.lua to turn into lines."""
     try:
-        with open(BUBBLE_SCROLL) as f:
+        with open(TERMINAL_SCROLL) as f:
             steps = int(f.read().split()[0])
     except (OSError, ValueError, IndexError):
         steps = 0
     os.makedirs(CACHE, exist_ok=True)
-    with open(BUBBLE_SCROLL + '.tmp', 'w') as f:
+    with open(TERMINAL_SCROLL + '.tmp', 'w') as f:
         f.write(f'{steps + (1 if down else -1)}')
-    os.replace(BUBBLE_SCROLL + '.tmp', BUBBLE_SCROLL)
+    os.replace(TERMINAL_SCROLL + '.tmp', TERMINAL_SCROLL)
 
 
 def wheel(regions, s, x, y, down):
     """What a wheel step down (or up) over card-relative (x, y) does: turns the volume down
-    over the slider or its speaker, the speech bubble's text a line down while the pointer is
+    over the slider or its speaker, the terminal pane's text a line down while the pointer is
     over it, or the list a row down. Returns what it did, or None where the wheel does nothing."""
     if inside(regions.get('volume_wheel'), s, x, y):
         speechctl('volume', 'down' if down else 'up')
         return 'volume'
-    if inside(regions.get('bubble'), s, x, y):
-        if regions.get('bubble_scroll'):
-            scroll_bubble(down)
-        return 'bubble'
+    if inside(regions.get('terminal'), s, x, y):
+        if regions.get('terminal_scroll'):
+            scroll_terminal(down)
+        return 'terminal'
     if inside(regions.get('list'), s, x, y) and regions.get('list_scroll'):
         scroll_list(regions, down)
         return 'list'

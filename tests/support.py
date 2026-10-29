@@ -93,11 +93,13 @@ class SpeechFixture:
     def queue(self, sid, *lines):
         self.file(f'{sid}.queue', ''.join(line + '\n' for line in lines))
 
-    def now(self, sid, name, text, hook_pid=9001, player_pid=9002, engine='piper', clip='1'):
+    def now(self, sid, name, text, hook_pid=9001, player_pid=9002, engine='piper', clip='1', markdown=None):
         self.alive(hook_pid)
-        self.file('now.json', json.dumps({
-            'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
-            'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}))
+        data = {'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
+                'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}
+        if markdown is not None:
+            data['markdown'] = markdown
+        self.file('now.json', json.dumps(data))
 
     def ledger(self, sid, *rows, project='-home-user-project'):
         """Session `sid`'s catchup.py ledger under ledgers/, a (key, state) per row."""

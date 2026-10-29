@@ -17,7 +17,6 @@ src/speech/conky.conf usr/share/conky-widgets/speech
 src/speech/draw.lua usr/share/conky-widgets/speech
 src/speech/speechqueue.py usr/share/conky-widgets/speech
 src/speech/sessions.py usr/share/conky-widgets/speech
-src/speech/avatar.png usr/share/conky-widgets/speech
 src/speech/mouse.py usr/share/conky-widgets/speech
 src/tray.py usr/share/conky-widgets
 src/tray_model.py usr/share/conky-widgets

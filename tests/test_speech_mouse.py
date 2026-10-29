@@ -20,12 +20,14 @@ VOICES = ['', 'en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium
           'en_US-ryan-high']
 REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0, 38.0],
            'skip': [429.0, 14.0, 455.0, 40.0], 'next': [455.0, 14.0, 481.0, 40.0],
-           'list': [16, 94.0, 522, 142.0], 'list_scroll': [1, 24.0],
-           'bubble': [64.0, 250.0, 522, 338.0], 'bubble_scroll': 4,
-           'rows': [{'id': 'aaaa', 'speech': 'on', 'voice': '', 'top': 0.0, 'bottom': 48.0,
+           'list': [16, 94.0, 522, 238.0], 'list_scroll': [1, 24.0],
+           'terminal': [16.0, 250.0, 522, 338.0], 'terminal_scroll': 4,
+           # a session's name line, the line under it of its tag and pill, its issue numbers, and
+           # with speech on its last line read: four rows for the first, two for the second
+           'rows': [{'id': 'aaaa', 'speech': 'on', 'voice': '', 'top': 0.0, 'bottom': 96.0, 'head': 0.0,
                      'gear': [488.0, 522.0]},
-                    {'id': 'bbbb', 'speech': 'alerts', 'voice': 'en_US-amy-medium', 'top': 48.0, 'bottom': 72.0,
-                     'gear': [488.0, 522.0]}],
+                    {'id': 'bbbb', 'speech': 'alerts', 'voice': 'en_US-amy-medium', 'top': 96.0, 'bottom': 144.0,
+                     'head': 0.0, 'gear': [488.0, 522.0]}],
            'pause': [12.0, 339.0, 48.0, 375.0], 'volume': [78.0, 347.0, 170.0, 367.0],
            'volume_icon': [56.0, 347.0, 78.0, 367.0], 'volume_wheel': [56.0, 347.0, 170.0, 367.0],
            'volume_bar': [84.0, 164.0],
@@ -53,7 +55,7 @@ class StubSpeechctl(support.TempDirTest):
         with open(os.path.join(self.dir, 'speechctl-path'), 'w') as f:
             f.write(ctl)
         self.redirect(tray_model, SPEECHCTL='speechctl-path')
-        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', BUBBLE_SCROLL='bubble-scroll', CACHE='',
+        self.redirect(speech_mouse, LIST_SCROLL='list-scroll', TERMINAL_SCROLL='terminal-scroll', CACHE='',
                       SESSION_MENU='session-menu', CLOSE_CONFIRM='close-confirm', SPEAK='speak')
         self.redirect(conky_mouse, LOG='mouse.log')
         popen = subprocess.Popen
@@ -385,7 +387,7 @@ class GearTest(StubSpeechctl):
 
     def test_a_click_on_each_rows_gear_opens_that_sessions_settings(self):
         self.assertEqual(self.press(500, 106), (True, False, ['aaaa']))
-        self.assertEqual(self.press(500, 154 - 12), (True, False, ['bbbb']))
+        self.assertEqual(self.press(500, 94 + 96 + 12), (True, False, ['bbbb']))
 
     def test_a_tap_does_the_same_at_scale_2(self):
         self.assertEqual(self.press(500, 106, s=2, touch=True), (True, False, ['aaaa']))
@@ -397,7 +399,7 @@ class GearTest(StubSpeechctl):
 
     def test_the_list_scrolled_a_row_moves_the_rows_up(self):
         self.scroll_to(1)
-        self.assertEqual(self.press(500, 94 + 48 - 24 + 6), (True, False, ['bbbb']))   # the second row, now 24 px up
+        self.assertEqual(self.press(500, 94 + 96 - 24 + 6), (True, False, ['bbbb']))   # the second session, now 24 px up
 
     def test_a_drag_from_a_gear_moves_the_widget_and_opens_nothing(self):
         self.assertEqual(self.press(500, 106, moved=True), (True, True, []))
@@ -416,11 +418,11 @@ class LinksTest(StubSpeechctl):
     def setUp(self):
         super().setUp()
         rows = [dict(r) for r in REGIONS['rows']]
-        # two issue numbers, the first on the block's first line and the second on its next
-        rows[0].update(issues=[[25.0, 5.0, 60.0, 19.0, ISSUE], [25.0, 29.0, 60.0, 43.0, ISSUE2]],
-                       name=[96.0, 200.0], link=[200.0, 260.0], branch='feat/issue-123-x',
+        # two issue numbers under the session's tag line, the first on one line and the second on the next
+        rows[0].update(issues=[[96.0, 50.0, 130.0, 64.0, ISSUE], [96.0, 74.0, 130.0, 88.0, ISSUE2]],
+                       name=[92.0, 200.0], link=[130.0, 190.0], branch='feat/issue-123-x',
                        prs=[PR + '151', PR + '152'])
-        rows[1].update(name=[96.0, 180.0])
+        rows[1].update(name=[92.0, 180.0])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
         speech_mouse.opened.clear()
@@ -460,20 +462,19 @@ class LinksTest(StubSpeechctl):
     def test_an_issue_number_opens_its_issue(self):
         self.assertEqual(self.open(dict(self.regions['rows'][0], issue=ISSUE2), {}, 'issue'), [ISSUE2])
 
-    def test_each_issue_number_is_a_link_on_any_line_and_the_name_and_pill_only_on_the_first(self):
+    def test_each_issue_number_is_a_link_on_any_line_the_name_on_its_line_and_the_pill_on_the_next(self):
         at = lambda x, y: (lambda hit: hit and (hit[0]['id'], hit[0].get('issue'), hit[1]))(
             speech_mouse.link_at(self.regions, 1, x, y))
-        self.assertEqual(at(50, 106), ('aaaa', ISSUE, 'issue'))
-        self.assertEqual(at(50, 130), ('aaaa', ISSUE2, 'issue'))  # the next line of the block
-        self.assertEqual(at(150, 106), ('aaaa', None, 'close'))   # the name
-        self.assertEqual(at(230, 106), ('aaaa', None, 'prs'))     # the pill, where the name's span ends
-        self.assertIsNone(at(50, 122))                          # between the two issue numbers
-        self.assertIsNone(at(80, 106))                          # between the issue numbers and the name
-        self.assertIsNone(at(270, 106))                         # past the pill
-        self.assertIsNone(at(150, 130))                         # the name's second line
-        self.assertIsNone(at(50, 154 - 12))                     # a session without issues
-        self.assertEqual(at(120, 154 - 12), ('bbbb', None, 'close'))   # a name without pull requests
-        self.assertIsNone(at(200, 154 - 12))                    # and no pill after it
+        self.assertEqual(at(110, 151), ('aaaa', ISSUE, 'issue'))
+        self.assertEqual(at(110, 175), ('aaaa', ISSUE2, 'issue'))  # the next line of the numbers
+        self.assertEqual(at(150, 106), ('aaaa', None, 'close'))   # the name, on its own line
+        self.assertEqual(at(150, 130), ('aaaa', None, 'prs'))     # the pill, on the line under it
+        self.assertIsNone(at(150, 130 + 24))                    # nothing on the numbers' line off them
+        self.assertIsNone(at(210, 130))                         # past the pill
+        self.assertIsNone(at(50, 106))                          # left of the name
+        self.assertIsNone(at(110, 94 + 92))                     # the last line read aloud
+        self.assertEqual(at(120, 94 + 96 + 12), ('bbbb', None, 'close'))   # a name without pull requests
+        self.assertIsNone(at(120, 94 + 96 + 36))                # and no pill under it
         self.assertIsNone(at(425, 106))                         # the setting
 
     def test_a_click_on_a_link_opens_it_and_the_gear_keeps_its_own(self):
@@ -483,10 +484,10 @@ class LinksTest(StubSpeechctl):
                 mock.patch.object(speech_mouse, 'open_links', side_effect=lambda r, k: opened.append((r['id'], k))), \
                 mock.patch.object(speech_mouse, 'open_settings',
                                   side_effect=lambda d, w, s, regions, row: opened.append((row['id'], 'settings'))):
-            for x in (50, 200, 500):
-                track = mock.Mock(return_value=(x, 106, False))
+            for x, y in ((110, 151), (150, 130), (500, 106)):
+                track = mock.Mock(return_value=(x, y, False))
                 hit = speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
-                                                (x, 106, (x, 106)), False)
+                                                (x, y, (x, y)), False)
                 self.assertTrue(hit)
             track = mock.Mock(return_value=(50, 142, False))
             self.assertFalse(speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
@@ -726,20 +727,20 @@ class WheelTest(StubSpeechctl):
         self.assertEqual(support.read(speech_mouse.LIST_SCROLL), '0')
         self.assertEqual(self.ran(), [])
 
-    def test_over_the_bubble_it_counts_steps_for_draw_lua_and_nowhere_else(self):
-        self.assertEqual(self.wheel('bubble', True), 'bubble')
-        self.wheel('bubble', True)
-        self.wheel('bubble', False)
-        self.assertEqual(support.read(speech_mouse.BUBBLE_SCROLL), '1')
-        self.assertIsNone(self.wheel((300, 245), True))              # just above it: not the bubble
-        self.assertEqual(support.read(speech_mouse.BUBBLE_SCROLL), '1')
+    def test_over_the_terminal_it_counts_steps_for_draw_lua_and_nowhere_else(self):
+        self.assertEqual(self.wheel('terminal', True), 'terminal')
+        self.wheel('terminal', True)
+        self.wheel('terminal', False)
+        self.assertEqual(support.read(speech_mouse.TERMINAL_SCROLL), '1')
+        self.assertIsNone(self.wheel((300, 245), True))              # just above it: not the terminal
+        self.assertEqual(support.read(speech_mouse.TERMINAL_SCROLL), '1')
         self.assertEqual(self.ran(), [])
 
-    def test_a_bubble_with_nothing_to_scroll_takes_the_wheel_and_writes_nothing(self):
-        regions = dict(REGIONS, bubble_scroll=0)
-        x, y = centre(REGIONS['bubble'])
-        self.assertEqual(speech_mouse.wheel(regions, 1, x, y, True), 'bubble')
-        self.assertFalse(os.path.exists(speech_mouse.BUBBLE_SCROLL))
+    def test_a_terminal_with_nothing_to_scroll_takes_the_wheel_and_writes_nothing(self):
+        regions = dict(REGIONS, terminal_scroll=0)
+        x, y = centre(REGIONS['terminal'])
+        self.assertEqual(speech_mouse.wheel(regions, 1, x, y, True), 'terminal')
+        self.assertFalse(os.path.exists(speech_mouse.TERMINAL_SCROLL))
 
     def test_anywhere_else_it_does_nothing(self):
         self.assertIsNone(self.wheel((300, 60), True))

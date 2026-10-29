@@ -1,5 +1,4 @@
 ${font Ubuntu Sans:size=1} ${goto 724}${voffset 30}
 ${font Ubuntu Sans:size=1} ${voffset 20}
 ${font Ubuntu Sans:size=1} ${voffset 4}
-${font Ubuntu Sans:size=1} ${voffset 34}
 ${font Ubuntu Sans:size=1} ${voffset 26}

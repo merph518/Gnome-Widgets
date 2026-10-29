@@ -67,11 +67,19 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 (`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
 itself.
 
-- A title along the top, **CLAUDE CODE SESSION MANAGEMENT**, with minimize and close at its right
-- **Sessions**: every open Claude session, the ones with speech on first, under two
-  column headers: **Identifiers** (the repository's label and its issue numbers) and
-  **Session Information** (the name, one tag, how many lines it has queued and the last
-  line read); a gear at each row's right, with no header, opens the session's settings.
+The card is laid out as an application: a header across the top with the title,
+**CLAUDE CODE SESSION MANAGEMENT**, and the volume, minimize and close at its right; a footer
+across the bottom with the controls (pause / resume, skip and next); and between a rule under
+the one and a rule over the other, two columns of the same height, the sessions at the left and
+the terminal at the right, the right a shade darker. A thin line divides them, as Claude's app
+draws its sidebar's; the pointer turns to the resize cursor over it, and dragging it moves it
+left and right (the sessions column's share of the width is kept in
+`~/.config/conky-widgets/speech/split`; each column keeps a least width).
+
+- **Sessions**: the left column, in one column: each repository's name, then its sessions
+  indented under it. A session takes a line for its name, with its gear at the right (the gear
+  opens the session's settings), a line for its tag, its pill and how many lines it has queued,
+  then its issue numbers, and with speech on the last line read aloud.
   The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
@@ -80,39 +88,35 @@ itself.
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
-- A gear at the right of each session, which opens that session's settings
-- A footer with, from the top: the speaker's avatar (the image
-  `~/.config/conky-widgets/speech/avatar.png` when it is there, else the Claude icon the
-  package ships, else a spark drawn on an orange circle) at the bottom left, and, while a clip
-  plays, a speech bubble pointing at it that holds the speaker's name and the whole line being
-  read aloud, as wide as its text needs (up to the card's width) with the same padding on every
-  side: one line high for a short one, growing upward to six lines. A longer one
-  scrolls with the clip's elapsed time, fading at the top and bottom, with no scroll bar, and
-  the mouse wheel moves it while the pointer is over the bubble (it follows the clip again
-  after five seconds). The bubble opens when a clip starts and fades away two seconds after the
-  speech ends (the row is as tall without it, so the card does not change size as lines play);
-  then pause / resume, skip and next, with the progress bar (the line's elapsed time, the bar
-  and its length) to their right, as the Spotify widget's seek bar is; the volume is at the top
-  right, left of minimize
+- **Combined Session Output**: the right column, a terminal as Claude's CLI prints a session,
+  in its look: its welcome banner (the creature, the title and what the widget holds), then each
+  message as the CLI prints a turn: the speaker's name as the prompt on a grey band behind a
+  chevron, the text behind a white bullet, in monospace, with its markdown formatted (headings,
+  **bold**, *italic*, `code` in orange, lists, code blocks and links as their labels) when the
+  Overmind hook publishes it in `now.json`'s `markdown` field, else as the plain line, and a dim
+  line, "Read aloud for 7s, done Thursday 9:47 AM". A message is printed when it starts to be
+  read aloud, not when it was received, once (the same words from one session within 30
+  seconds, or one clip published again, are one message), and stays: the text scrolls like a
+  terminal's, the newest at the bottom, 40 messages kept in
+  `~/.cache/conky-widgets/speech/scrollback.json` across restarts. The wheel scrolls back over
+  the pane; at the end it follows the newest line again. At the foot the CLI's working line
+  turns its spinner and says **Reading aloud…** with the clip's time and length and the
+  queued lines, or **Paused**, and shows nothing while idle. Its colours are Claude's CLI's, and
+  fixed
 
-The sessions are the rows of a table with a border round it, its header band filled in the
-foreground with the column headers in the card's colour. Every other row is dimmed to read
-across, and the row of the session being read aloud is brighter, fading in and out over about a
-third of a second as the session starts and stops speaking.
+The row of the session being read aloud is brighter, fading in and out over about a third of a
+second as the session starts and stops speaking.
 
-Each session in the speech widget's list starts with its repository's whole name, named after
-its GitHub origin remote (or its folder, without one), in bold. Under it are the issue numbers of that repository,
-each in a chip: the issue a session's branch names, on a branch named `<type>/issue-<N>-...` as
-`/implement` names them, and the same for any other open session in that repository, in number
-order. They wrap onto more lines when they do not fit, and the session's row grows to hold them.
-Every block is as wide
-as the longest name in the list (at least 90 px), so no name is cut and the names after it still line up. A
-click or tap on a chip opens that issue in a new Google Chrome tab, and the chip is tinted under
-the pointer (a chip is otherwise plain text on the card); a repository with no issue shows its name alone.
+A repository's issue numbers sit under each of its sessions: the issue a session's branch
+names, on a branch named `<type>/issue-<N>-...` as `/implement` names them, and the same for
+any other open session in that repository, in number order, each plain text. They wrap onto more
+lines when they do not fit, and the session grows to hold them. A click or tap on one opens that
+issue in a new Google Chrome tab, and it is underlined under the pointer; a repository with no
+issue shows its name alone.
 
 Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
 ledger, which `/implement` adds after the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv`
-in its scratchpad, as this repository's and the sibling repositories' scripts keep it), a white pill after its name reads
+in its scratchpad, as this repository's and the sibling repositories' scripts keep it), a white pill after its tag, on the line under its name, reads
 **PR #M** or **2 PRs**. A click or tap on the pill opens, in new Chrome tabs, each of those
 pull requests still open with the **Manual Review Needed** label and from the session's own
 branch, read from GitHub with `gh` at the click; when none is, it opens nothing and notes
@@ -129,25 +133,18 @@ holds the pointer and the keyboard, as it does for a session's settings. Closing
 process SIGTERM, after checking that its file in `~/.claude/sessions` still names that
 session, so it also ends a session the Claude app does not show. It is written to `mouse.log`.
 
-A session with speech on always has a second row under its name: the last line read aloud
-for it, without the hook's opening "<name> session says:" and cut to one line, or *Nothing
-read aloud yet* before its first. A question waiting to
-be read shows as a **question** tag after the name instead of its text.
-The bubble and progress bar stay put between lines: once a line ends, the header keeps
-"<name> says:" and the bar stays full at that line's length until the next one starts.
+A session with speech on always has a last row: the last line read aloud for it, without
+the hook's opening "<name> session says:" and cut to one line, or *Nothing read aloud yet*
+before its first. A question waiting to be read shows as a **question** tag instead of its text.
 
-The speech widget takes the Spotify widget's background: it reads that widget's
-`~/.cache/conky-spotify-nowplaying/bg.txt` and fades with it, in step: both cards show the
-same colour in every frame of the one-second fade, and their text and controls turn dark on a
-light cover at the same moment. It stays on #181818 with white text while there is no
-`bg.txt`. To follow another colour file, put its path on the first line of
-`~/.config/conky-widgets/speech/background`; a file holding just `r g b` (0 to 1) starts a
-fade of the same length each time its colour changes.
+The speech widget's colours are Claude's CLI's, and fixed: white text and its shares on a
+#181818 card, with the CLI's orange for its creature, its code and its spinner. It no longer
+follows the Spotify widget's background.
 
 ### Controls
 
 The controls run `speechctl`, the same one the tray menu uses. In the footer, at the lower
-left, three round buttons in a row, the progress bar to their right: the first pauses or resumes, ⏭ after it skips the line
+left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
 nothing, while no line plays, and grow a little under the pointer, as the pause button does. A
 session's gear opens its settings, an issue number under a session's repository opens that
@@ -291,7 +288,7 @@ the icon stays while both are hidden.
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
 scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
 **Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
-size, **Collapse when idle** (off by default: on, the widget shrinks to its title and the avatar
+size, **Collapse when idle** (off by default: on, the widget shrinks to its title
 while nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
 [Speech widget](#speech-widget)); without one they're greyed out.
 
