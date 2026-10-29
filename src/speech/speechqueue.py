@@ -24,7 +24,7 @@ Each session has a speech setting, read from its files the way speechctl reads i
 plays), Alerts only with neither (only its announcements play). Sessions with speech on sort
 first, then by process id, so the ones being read aloud are at the top.
 """
-import fcntl, glob, hashlib, json, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
+import fcntl, glob, hashlib, json, math, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
 import gi
 gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
@@ -51,7 +51,6 @@ LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
-LABELS = os.path.join(CONF, 'labels.json')        # {repository name: label}, before each session
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
 # <project>/<session id>/scratchpad/ledger: a row a line, label, key, link and state, tab apart
 LEDGERS = os.path.join(tempfile.gettempdir(), f'claude-{os.getuid()}')
@@ -97,28 +96,23 @@ VOLUME_MIN = 32                               # its shortest track, as the Spoti
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
-LABEL_LEN = 4                                 # a repository's label, in letters
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
-NUMBER_PAD = 5                                # right of the number in a repository's box
+BLOCK_RULE = 2                                # the rule left of a repository's name and issue numbers
+BLOCK_PAD = 7                                 # that rule to the text
+BLOCK_MIN, BLOCK_MAX = 90, 170                # the text's width, whatever the names are
+CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
+CHIP_GAP = 3                                  # between chips, and between their lines
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
 SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
-# labels.json's first contents, written when it is missing; keys match without case
-DEFAULT_LABELS = {
-    'Gnome-Widgets': 'GWID', 'conky-widgets': 'GWID', 'Overmind': 'OVMD',
-    'fagerteam-health-coach': 'FTHC', 'LaundryBot': 'LBOT', 'Playwright-Testing': 'PWRT',
-    'TheRPGClub-api': 'RPGA', 'TheRPGClub-bot': 'RPGB', 'CalendarBot': 'CALB',
-    'ATT-Test-Pack-Gen': 'ATPG', 'eve-lectures': 'EVEL',
-}
-
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
 HEADING_FONT = 'Ubuntu Sans Bold 9'           # "Sessions"
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
-SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a row's label, as draw.lua draws them
-TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill and queued count, as draw.lua draws them
+SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # On | Alerts | Off, and a repository's name, as draw.lua draws them
+TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
 FOOTER_FONT = 'Ubuntu Sans 11'                # Voice: amy, and the open list, as draw.lua draws them
 TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, HEADING_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, FOOTER_FONT}
 
@@ -203,12 +197,6 @@ def link_pill(prs):
     if not prs:
         return ''
     return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
-
-
-def box_number(issue):
-    """The number in a repository's box after its label: the issue a click on the box opens,
-    else 'n/a'."""
-    return f"#{issue.rsplit('/', 1)[-1]}" if issue else 'n/a'
 
 
 def first_wait(process, ledger):
@@ -478,41 +466,29 @@ def session_issue(branch, repo):
     return f'https://github.com/{repo}/issues/{m.group(1)}' if m and repo else ''
 
 
-def short_label(name):
-    """A repository name as LABEL_LEN capitals: each word's first letter, filled out with the
-    last word's following letters (LaundryBot -> LBOT, Overmind -> OVER)."""
-    words = re.findall(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+', name)
-    if not words:
-        return ''
-    label = ''.join(w[0] for w in words)[:LABEL_LEN]
-    label += words[-1][1:LABEL_LEN - len(label) + 1]
-    return label[:LABEL_LEN].upper()
-
-
 _repos = {}
 
 
-def session_label(cwd, labels):
-    """The label before a session's name: labels.json's for its repository, else short_label."""
+def session_repo(cwd):
+    """The repository name shown at the left of a session's row: its origin remote's, or its
+    checkout's folder."""
     if cwd not in _repos:
-        _repos[cwd] = repo_name(cwd)
-    name = _repos[cwd]
-    custom = {str(k).lower(): str(v) for k, v in labels.items()}.get(name.lower())
-    return display_text(custom if custom is not None else short_label(name))[:LABEL_LEN]
+        _repos[cwd] = display_text(repo_name(cwd))
+    return _repos[cwd]
 
 
-def read_labels(path=None):
-    labels = _json(path or LABELS)
-    return labels if isinstance(labels, dict) else {}
-
-
-def seed_labels():
-    """labels.json with DEFAULT_LABELS when it is missing; the widget runs without it."""
-    if not os.path.exists(LABELS):
-        try:
-            write_atomic(LABELS, json.dumps(DEFAULT_LABELS, indent=2) + '\n')
-        except OSError as e:
-            log(f'labels.json not written: {e}')
+def repo_issues(listed):
+    """Gives each session the issues of its GitHub repository that the listed sessions work, as
+    [(number text, link)] in number order: the issue a branch names is one, and a repository
+    with two sessions on it lists both, on each."""
+    found = {}
+    for s in listed:
+        m = re.search(r'/issues/(\d+)$', s.get('issue') or '')
+        if m:
+            found.setdefault(s['github'], set()).add(int(m.group(1)))
+    for s in listed:
+        s['issues'] = [(f'#{n}', f"https://github.com/{s['github']}/issues/{n}")
+                       for n in sorted(found.get(s['github'], ()))]
 
 
 def voice_label(voice):
@@ -591,10 +567,9 @@ def last_heard(n, name, duration):
     return _heard
 
 
-def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledgers=None):
+def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
-    labels = read_labels(labels)
     proc = proc_dir or '/proc'
     n = now_playing(speak, proc)
     settings = _json(os.path.join(speak, 'settings.json')) or {}
@@ -620,10 +595,11 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, labels=None, ledger
                            question=question,
                            waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
                            issue=session_issue(*git), branch=git[0], prs=ledger_prs(ledger),
-                           label=session_label(s['cwd'], labels),
+                           repo=session_repo(s['cwd']), github=git[1],
                            last=said.get(s['id'], ''),
                            speaking=bool(n and n.get('session') == s['id'])))
     listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
+    repo_issues(listed)
     name = ''
     if n:
         name = display_text(n.get('name') or '') or next(
@@ -682,14 +658,16 @@ def box(cx, cy, half_w, half_h):
     return [cx - half_w, cy - half_h, cx + half_w, cy + half_h]
 
 
-def session_line(s):
-    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, label,
-    for a session with speech on its last line read aloud (NOTHING_SAID before one), the pill
-    after its name, and the number in its repository's box."""
+def session_line(s, chips=(), span=1):
+    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
+    repository's name, for a session with speech on its last line read aloud (NOTHING_SAID
+    before one), the pill after its name, its issue chips as line:x:width:text (block_chips'),
+    and how many rows it takes."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
-                      display_text(s['name']), s.get('label', ''),
+                      display_text(s['name']), s.get('repo', ''),
                       without_speaker(s.get('last') or NOTHING_SAID) if s['speech'] == 'on' else '',
-                      link_pill(s.get('prs')), box_number(s.get('issue'))))
+                      link_pill(s.get('prs')),
+                      ' '.join(f'{line}:{x:g}:{w:g}:{text}' for line, x, w, text, _ in chips), str(span)))
 
 
 def row_flags(s):
@@ -701,16 +679,38 @@ def row_flags(s):
                                 ('idle', True)) if on)
 
 
-def box_width(listed):
-    """The repository's box, one width for every row so the names after it line up, as draw.lua
-    sizes it: four capitals, then the widest number of the sessions that have a label."""
-    numbers = [text_width(box_number(s.get('issue')), TAG_FONT) for s in listed if s.get('label')]
-    return text_width('W' * LABEL_LEN, SEGMENT_FONT) + 10 + (max(numbers) + NUMBER_PAD if numbers else 0)
+def block_width(listed):
+    """The width of a repository's name and issue numbers, one for every row so the names after
+    it line up, as draw.lua draws it: the rule, then text as wide as the longest repository
+    name listed, within BLOCK_MIN and BLOCK_MAX. Longer names are cut with an ellipsis."""
+    names = [text_width(s['repo'], SEGMENT_FONT) for s in listed if s.get('repo')]
+    return BLOCK_RULE + BLOCK_PAD + min(max(max(names, default=0), BLOCK_MIN), BLOCK_MAX)
+
+
+def block_chips(issues, width):
+    """[(line, x, width, text, link)] for a session's issue numbers laid left to right, each on
+    the next line when it would pass `width`, and how many lines they take."""
+    chips, x, line = [], 0, 0
+    for text, link in issues:
+        w = text_width(text, TAG_FONT) + CHIP_PAD
+        if x and x + w > width:
+            line, x = line + 1, 0
+        chips.append((line, x, w, text, link))
+        x += w + CHIP_GAP
+    return chips, line + 1 if chips else 0
+
+
+def block_rows(row):
+    """(chips_top, pitch, chip_h) of a repository's block in a session's rows, `row` high: its
+    name is centred on the first line, as the session's name is, and the chips follow it."""
+    name_h = line_height(SEGMENT_FONT)
+    chip_h = line_height(TAG_FONT) + 2
+    return row / 2 + name_h / 2 + 1, chip_h + CHIP_GAP, chip_h
 
 
 def name_spans(s, right, box_w):
     """Where a session's name and its pill sit along its row, as draw.lua lays them out between
-    its box, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
+    its block, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
     [left, right] of the pill, or None without one). The name's span ends where the pill's
     begins."""
     pill = link_pill(s.get('prs'))
@@ -727,9 +727,10 @@ def name_spans(s, right, box_w):
             [round(after + PILL_GAP / 2, 2), round(after + pill_w + 4, 2)])
 
 
-def write_sessions(listed):
-    """sessions.txt, rewritten only when it changes; its version is what draw.txt names."""
-    text = ''.join(session_line(s) + '\n' for s in listed)
+def write_sessions(listed, layout):
+    """sessions.txt, rewritten only when it changes; its version is what draw.txt names.
+    `layout` is a (chips, span) for each session."""
+    text = ''.join(session_line(s, *l) + '\n' for s, l in zip(listed, layout))
     version = hashlib.sha1(text.encode()).hexdigest()[:10]
     if _read(SESSIONS) != text:
         write_atomic(SESSIONS, text)
@@ -781,7 +782,7 @@ def render(state, now=None):
     if idle and collapse_idle():
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
-        write_sessions(listed)
+        write_sessions(listed, [((), 1)] * len(listed))
         return out.end(out.y + MARGIN - 4)
 
     # The progress bar, always there: the current line's while its length is known (0:00 while
@@ -811,9 +812,18 @@ def render(state, now=None):
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
-    spans = [2 if s['speech'] == 'on' else 1 for s in listed]
+    box_w = block_width(listed)
+    chips_top, pitch, chip_h = block_rows(row)
+    text_w = box_w - BLOCK_RULE - BLOCK_PAD
+    layout, spans = [], []
+    for s in listed:
+        chips, lines = block_chips(s.get('issues', ()), text_w)
+        # the block's lines may need more rows than the speech setting does
+        span = max(2 if s['speech'] == 'on' else 1, math.ceil(round((chips_top + lines * pitch) / row, 6)) if lines else 1)
+        layout.append((chips, span))
+        spans.append(span)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
-    version = write_sessions(listed)
+    version = write_sessions(listed, layout)
     # The setting's three segments at the right of each row, as wide as their labels
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
     xs = [right]
@@ -823,19 +833,24 @@ def render(state, now=None):
     draw.append(f'list {MARGIN} {right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
     draw.append('control ' + ' '.join(f'{x:.2f}' for x in xs) + f' {seg_h:.2f} {queued_right:.2f}')
+    draw.append(f'block {BLOCK_RULE} {BLOCK_PAD} {text_w:g} {chips_top:.2f} {pitch:.2f} {chip_h:.2f}')
     rows, top = [], 0.0
-    box_w = box_width(listed)
-    for s, span in zip(listed, spans):
+    for s, (chips, span) in zip(listed, layout):
         entry = {'id': s['id'], 'speech': s['speech'], 'top': round(top, 2),
                  'bottom': round(top + row * span, 2)}
         for i, (key, _) in enumerate(SEGMENTS):
             entry[key] = [round(xs[i], 2), round(xs[i + 1], 2)]
-        # The box opens the session's issue and the pill its ready pull requests, each only
-        # with one to open; the name closes the session, once confirmed
+        # Each issue number opens its issue and the pill the ready pull requests, each only
+        # with one to open; the name closes the session, once confirmed. An issue's box is
+        # [left, top, right, bottom], its top from the row's
         name_span, pill_span = name_spans(s, queued_right, box_w)
         entry.update(name=name_span, title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
-        if s.get('label') and s.get('issue'):
-            entry.update(box=[MARGIN, round(MARGIN + box_w, 2)], issue=s['issue'])
+        if chips:
+            x0 = MARGIN + BLOCK_RULE + BLOCK_PAD
+            entry['issues'] = [[round(x0 + x, 2), round(chips_top + line * pitch + (pitch - chip_h) / 2, 2),
+                                round(x0 + x + w, 2),
+                                round(chips_top + line * pitch + (pitch + chip_h) / 2, 2), link]
+                               for line, x, w, _, link in chips]
         if s.get('prs'):
             entry.update(link=pill_span, branch=s.get('branch') or '', prs=s['prs'])
         rows.append(entry)
@@ -972,7 +987,6 @@ def hold_instance_lock():
 
 def main():
     lock = hold_instance_lock()  # noqa: F841  (held until the process exits)
-    seed_labels()
     last_error = None
     while True:
         try:

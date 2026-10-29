@@ -10,8 +10,8 @@ holds).
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
-  - a session's repository box: a click or tap opens the issue its branch names in a new
-    Chrome tab
+  - an issue number under a session's repository name: a click or tap opens that issue in a
+    new Chrome tab
   - the pill after a session's name: a click or tap opens, in new Chrome tabs, its pull
     requests still open with the ready label
   - a session's name: a click or tap asks "Are you sure?" over the list, and OK ends the
@@ -108,16 +108,20 @@ def row_at(regions, s, x, y):
 
 
 def link_at(regions, s, x, y):
-    """(session row, 'issue') when its repository box is under card-relative (x, y), (row,
-    'prs') when its pill is, (row, 'close') when its name is, else None. The box and the pill
-    are there only with something to open."""
+    """(session row, 'issue') when an issue number of its repository is under card-relative
+    (x, y), with the row's 'issue' set to that issue's link, (row, 'prs') when its pill is,
+    (row, 'close') when its name is, else None. An issue number and the pill are there only
+    with something to open."""
     row, _ = row_at(regions, s, x, y)
     if not row:
         return None
     at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
+    for x0, y0, x1, y1, link in row.get('issues', ()):        # on any line of the row's block
+        if x0 * s <= x <= x1 * s and (row['top'] + y0) <= at <= (row['top'] + y1):
+            return dict(row, issue=link), 'issue'
     if at >= row['top'] + regions['list_scroll'][1]:          # its second line
         return None
-    for key, kind in (('box', 'issue'), ('link', 'prs'), ('name', 'close')):
+    for key, kind in (('link', 'prs'), ('name', 'close')):
         if row.get(key) and row[key][0] * s <= x <= row[key][1] * s:
             return row, kind
     return None
@@ -146,8 +150,8 @@ def ready_prs(links, branch, run=subprocess.run):
 
 
 def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
-    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on its box)
-    or its ready pull requests ('prs', a click on its pill). Chrome takes them all at once;
+    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on an issue
+    number) or its ready pull requests ('prs', a click on its pill). Chrome takes them all at once;
     without it, xdg-open takes each."""
     try:
         if kind == 'issue':
@@ -169,18 +173,24 @@ def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
     except OSError as e:
         core.log(f'open: {e}')
     finally:
-        opening.discard((row['id'], kind))
+        opening.discard(click_key(row, kind))
 
 
-opening = set()                                # (session id, kind) a click is still opening
-opened = {}                                    # (session id, kind): when a click last opened it
+opening = set()                                # click_key()s a click is still opening
+opened = {}                                    # click_key(): when a click last opened it
+
+
+def click_key(row, kind):
+    """What a click opens, for telling a double click from a click on another: a session's pull
+    requests or its close prompt, or one of its issues, each issue number its own."""
+    return (row['id'], row.get('issue') if kind == 'issue' else kind)
 
 
 def open_once(row, kind, now=time.monotonic):
     """Opens a session's issue or pull requests on a thread, as gh reads each pull request,
     which takes a moment. A second click on the same one while it is still opening, or within
     OPEN_AGAIN s of the last (a double click), does nothing."""
-    key = (row['id'], kind)
+    key = click_key(row, kind)
     if key in opening or now() - opened.get(key, -OPEN_AGAIN) < OPEN_AGAIN:
         return
     opening.add(key)
@@ -494,9 +504,9 @@ def pull_control(d, root, win, s, regions, hit, track, at, touch):
     """A press on the volume slider sets the volume along it. A press on the voice drop down:
     a click or tap opens the list of voices, a drag from it moves the widget. A press on a
     session's segment: a click or tap sets the setting; a drag from it moves the widget, or
-    with a finger scrolls the list. A press on a session's box, pill or name: a click or tap
-    opens its issue, its pull requests, or the prompt that closes it; a drag moves the widget,
-    or with a finger scrolls the list when it can scroll.
+    with a finger scrolls the list. A press on a session's issue number, pill or name: a click
+    or tap opens its issue, its pull requests, or the prompt that closes it; a drag moves the
+    widget, or with a finger scrolls the list when it can scroll.
     Returns whether the press was on any of them."""
     x, y, start = at
     if hit == 'volume' and regions.get('volume_bar'):

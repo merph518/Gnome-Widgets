@@ -37,7 +37,6 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
-                            ('LABELS', os.path.join(self.root, 'labels.json')),
                             ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
                             ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
                             ('LEDGERS', self.f.ledgers),
@@ -257,7 +256,7 @@ class ReadState(Fixture):
         self.assertEqual(speechqueue.voice_label('my-voice'), 'my-voice')
 
 
-class Labels(Fixture):
+class Repos(Fixture):
     def repo(self, name, url=None):
         top = os.path.join(self.root, 'code', name)
         os.makedirs(os.path.join(top, '.git'))
@@ -266,12 +265,6 @@ class Labels(Fixture):
             if url:
                 f.write(f'[remote "origin"]\n\turl = {url}\n\tfetch = +refs/heads/*\n')
         return top
-
-    def test_short_label_takes_initials_then_the_last_word(self):
-        for name, label in (('Overmind', 'OVER'), ('LaundryBot', 'LBOT'), ('ATT-Test-Pack-Gen', 'ATPG'),
-                            ('fagerteam-health-coach', 'FHCO'), ('a-b-c-d-e', 'ABCD'), ('', '')):
-            with self.subTest(name=name):
-                self.assertEqual(speechqueue.short_label(name), label)
 
     def test_repo_name_is_the_origin_remote_from_a_worktree_subfolder(self):
         top = self.repo('old-folder', 'https://github.com/someone/Gnome-Widgets.git')
@@ -299,21 +292,15 @@ class Labels(Fixture):
     def test_repo_name_without_a_remote_is_the_folder(self):
         self.assertEqual(speechqueue.repo_name(self.repo('LaundryBot')), 'LaundryBot')
 
-    def test_labels_file_wins_without_case_and_is_cut_to_length(self):
-        top = self.repo('x', 'git@github.com:someone/Overmind.git')
-        self.assertEqual(speechqueue.session_label(top, {'overmind': 'OVMD'}), 'OVMD')
-        self.assertEqual(speechqueue.session_label(top, {'Overmind': 'TOOLONG'}), 'TOOL')
-        self.assertEqual(speechqueue.session_label(top, {}), 'OVER')
-
-    def test_the_label_is_the_last_field_of_the_session_line(self):
+    def test_the_session_line_carries_the_whole_repository_name(self):
+        top = self.repo('x', 'git@github.com:someone/fagerteam-health-coach.git')
+        self.assertEqual(speechqueue.session_repo(top), 'fagerteam-health-coach')
         self.f.session(100, ME, 'One')
-        with open(speechqueue.LABELS, 'w') as f:
-            json.dump({'One': 'ONE'}, f)
-        s = self.state()['sessions'][0]
-        self.assertEqual(speechqueue.session_line(s).split('\t')[6], s['label'])
+        s = dict(self.state()['sessions'][0], repo='fagerteam-health-coach')
+        self.assertEqual(speechqueue.session_line(s).split('\t')[6], 'fagerteam-health-coach')
 
 
-class Links(Labels):
+class Links(Repos):
     """What a click on a session's name opens: its issue, from its branch, or its ready pull
     requests, from its ledger."""
 
@@ -376,13 +363,11 @@ class Links(Labels):
                          'https://github.com/org/repo/issues/9')
         self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
-    def test_the_pill_names_the_ready_pull_requests_and_the_box_the_issue(self):
+    def test_the_pill_names_the_ready_pull_requests(self):
         pr = 'https://github.com/o/r/pull/'
         self.assertEqual(speechqueue.link_pill([pr + '151']), 'PR #151')
         self.assertEqual(speechqueue.link_pill([pr + '151', pr + '152']), '2 PRs')
         self.assertEqual(speechqueue.link_pill([]), '')
-        self.assertEqual(speechqueue.box_number('https://github.com/o/r/issues/123'), '#123')
-        self.assertEqual(speechqueue.box_number(''), 'n/a')
 
     def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
         self.f.session(100, ME, 'One')
@@ -390,35 +375,111 @@ class Links(Labels):
         s = self.state()['sessions'][0]
         self.assertEqual(s['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151',
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
-        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', 'n/a'])
+        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '', '1'])
 
-    def test_the_box_opens_the_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
+    def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
         self.pr_ledger(ME, (151, 'open'))
         with mock.patch.object(speechqueue, 'session_branch',
                                side_effect=lambda cwd: ('feat/issue-127-repo-box-links', 'someone/Gnome-Widgets')):
             state = self.state()
-        state['sessions'][1]['issue'] = ''
+        state['sessions'][1]['issue'] = 'https://github.com/someone/Gnome-Widgets/issues/131'
         for s in state['sessions']:
-            s['label'] = 'GWID'
+            s['repo'] = 'Gnome-Widgets'
+        speechqueue.repo_issues(state['sessions'])
         speechqueue.render(state)
         with open(speechqueue.REGIONS) as f:
             one, two = json.load(f)['rows']
+        links = ['https://github.com/someone/Gnome-Widgets/issues/127',
+                 'https://github.com/someone/Gnome-Widgets/issues/131']
+        for row in (one, two):                                      # the repository's issues, on each
+            self.assertEqual([chip[4] for chip in row['issues']], links)
+            self.assertLess(row['issues'][0][2], row['issues'][1][0])   # side by side, a gap between
+        self.assertEqual(one['issues'][0][0], speechqueue.MARGIN + speechqueue.BLOCK_RULE + speechqueue.BLOCK_PAD)
         with open(speechqueue.SESSIONS) as f:
-            self.assertEqual([line.split('\t')[8:] for line in f.read().splitlines()],
-                             [['PR #151', '#127'], ['', 'n/a']])
-        self.assertEqual(one['issue'], 'https://github.com/someone/Gnome-Widgets/issues/127')
+            lines = [line.split('\t') for line in f.read().splitlines()]
+        self.assertEqual([l[6] for l in lines], ['Gnome-Widgets', 'Gnome-Widgets'])
+        self.assertEqual([l[8] for l in lines], ['PR #151', ''])
+        self.assertEqual([[t.split(':')[3] for t in l[9].split()] for l in lines], [['#127', '#131']] * 2)
         self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
-        self.assertEqual(one['box'][0], speechqueue.MARGIN)
-        self.assertLess(one['box'][1], one['name'][0])             # the box, then the name
+        self.assertLess(one['issues'][1][2], one['name'][0])       # the block, then the name
         self.assertEqual(one['name'][1], one['link'][0])           # then the pill
         self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
-        self.assertFalse({'box', 'issue', 'link', 'prs'} & set(two))
+        self.assertFalse({'link', 'prs'} & set(two))
         self.assertEqual([(r['pid'], r['title'], r['busy']) for r in (one, two)],
                          [(100, 'One', False), (200, 'Two', False)])
         self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
         self.assertLess(two['name'][1], two['on'][0])
+
+
+    def test_a_session_without_issues_has_no_chips_and_one_row(self):
+        self.f.session(100, ME, 'One')
+        state = self.state()
+        state['sessions'][0]['repo'] = 'Gnome-Widgets'
+        speechqueue.render(state)
+        with open(speechqueue.REGIONS) as f:
+            row = json.load(f)['rows'][0]
+        with open(speechqueue.SESSIONS) as f:
+            line = f.read().splitlines()[0].split('\t')
+        self.assertNotIn('issues', row)
+        self.assertEqual(line[9:], ['', '1'])
+
+    def test_a_repository_lists_the_issues_of_the_sessions_in_it_in_number_order(self):
+        issue = lambda repo, n: f'https://github.com/{repo}/issues/{n}'
+        listed = [dict(github='o/a', issue=issue('o/a', 31)), dict(github='o/a', issue=issue('o/a', 7)),
+                  dict(github='o/a', issue=issue('o/a', 31)), dict(github='o/a', issue=''),
+                  dict(github='o/b', issue=issue('o/b', 2)), dict(github='', issue='')]
+        speechqueue.repo_issues(listed)
+        self.assertEqual([[n for n, _ in s['issues']] for s in listed],
+                         [['#7', '#31']] * 4 + [['#2'], []])
+        self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
+
+    def test_the_block_is_as_wide_as_the_longest_name_within_its_limits(self):
+        width = lambda *names: speechqueue.block_width([dict(repo=n) for n in names])
+        chrome = speechqueue.BLOCK_RULE + speechqueue.BLOCK_PAD
+        with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 5 * len(t)):
+            self.assertEqual(width('ab', 'cd'), chrome + speechqueue.BLOCK_MIN)
+            self.assertEqual(width('a' * 30, 'b'), chrome + 150)
+            self.assertEqual(width('a' * 100), chrome + speechqueue.BLOCK_MAX)
+            self.assertEqual(width(), chrome + speechqueue.BLOCK_MIN)
+
+    def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):
+        with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 10 * len(t)):
+            issues = [(f'#{n}', f'link{n}') for n in (127, 131, 133, 5)]
+            chips, lines = speechqueue.block_chips(issues, 110)
+        pad, gap = speechqueue.CHIP_PAD, speechqueue.CHIP_GAP
+        w = 40 + pad
+        self.assertEqual([(c[0], c[1]) for c in chips],
+                         [(0, 0), (1, 0), (2, 0), (2, w + gap)] if w * 2 + gap > 110 else
+                         [(0, 0), (0, w + gap), (1, 0), (1, w + gap)])
+        self.assertEqual(lines, chips[-1][0] + 1)
+        self.assertEqual(speechqueue.block_chips([], 110), ([], 0))
+
+    def test_a_session_takes_the_rows_its_block_needs_or_the_two_speech_on_takes(self):
+        self.f.session(100, ME, 'One')
+        self.f.session(200, OTHER, 'Two')
+        self.f.file(ME + '.replies')
+        state = self.state()
+        for s in state['sessions']:
+            s['repo'] = 'Gnome-Widgets'
+        speechqueue.render(state)
+        with open(speechqueue.SESSIONS) as f:
+            spans = [int(line.split('\t')[10]) for line in f.read().splitlines()]
+        self.assertEqual(spans, [2, 1])                             # no issues: speech on takes two
+        for s in state['sessions']:
+            s['issues'] = [(f'#{n}', f'link{n}') for n in range(1, 40)]    # far more than a line holds
+        speechqueue.render(state)
+        with open(speechqueue.SESSIONS) as f:
+            lines = [line.split('\t') for line in f.read().splitlines()]
+        with open(speechqueue.REGIONS) as f:
+            rows = json.load(f)['rows']
+        spans = [int(l[10]) for l in lines]
+        self.assertGreater(min(spans), 2)
+        self.assertEqual([r['bottom'] - r['top'] for r in rows], [sp * 24 for sp in spans])
+        last_line = max(int(t.split(':')[0]) for t in lines[0][9].split())
+        self.assertGreaterEqual(last_line, 1)                       # it wrapped
+        self.assertGreaterEqual(spans[0] * 24, rows[0]['issues'][-1][3])    # the last chip is inside the row
 
     def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
         self.f.session(100, ME, 'One')
@@ -772,6 +833,19 @@ class Golden(Fixture):
         self.f.wav(9001, 4.0)
         self.f.file('paused')
         self.check('paused', self.state())
+
+    def test_repository_names_and_issue_numbers_wrap_inside_the_block(self):
+        self.three()
+        self.f.now(ME, 'Claude Voice Widget', 'Three issues, then one, then too many for a line.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        state = self.state()
+        mine, other, quiet = state['sessions']
+        issues = lambda *numbers: [(f'#{n}', f'https://github.com/o/r/issues/{n}') for n in numbers]
+        mine.update(repo='Gnome-Widgets', issues=issues(127, 131, 133))
+        other.update(repo='fagerteam-health-coach', issues=issues(214))
+        quiet.update(repo='TheRPGClub-bot', issues=issues(31, 48, 52, 53, 60, 61, 64, 70, 71))
+        self.check('issues', state)
 
     def test_many_sessions_scroll(self):
         for i in range(8):
