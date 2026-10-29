@@ -1,4 +1,4 @@
-conky-spotify-nowplaying (2.0.0) UNRELEASED; urgency=medium
+conky-spotify-nowplaying (2.0.0) resolute; urgency=medium
 
   * The package is now called conky-widgets, after the bundle of widgets
     it ships. Upgrading from the PPA moves over on its own:
@@ -6,8 +6,20 @@ conky-spotify-nowplaying (2.0.0) UNRELEASED; urgency=medium
     in conky-widgets and can be removed afterwards. Settings and the
     autostart entry carry over, and a running widget restarts from the
     new files.
+  * New speech widget: a second card that shows what your Claude Code
+    sessions are reading aloud (who is speaking, a progress bar, each
+    session with its repository, status tag and speech setting) and
+    controls it with pause, skip, a volume slider and a voice drop down.
+    Clicking a session's repository or name opens its issue or pull
+    requests; clicking the name asks to close it.
+  * One top-bar icon serves both widgets, each shown or hidden on its
+    own, and the tray menu gains a Pace setting. conky-widgets-voices
+    installs more Piper voices.
+  * The Spotify widget has a volume slider for Spotify's own volume, and
+    both widgets fade their background on one shared clock.
+  * The card is drawn opaque, so it shows the picked colour exactly.
 
- -- mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>  Wed, 28 Oct 2026 10:33:38 -0400
+ -- mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>  Thu, 29 Oct 2026 05:58:22 -0400
 
 conky-spotify-nowplaying (1.8.0) resolute; urgency=medium
 
