@@ -8,7 +8,8 @@ holds).
     runs `speechctl voice <name>`. While it is open this helper holds the pointer and the
     keyboard, so a click anywhere else and Escape close it, and the wheel or a swipe scrolls it
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
-    is let go, a tenth at a time from 0 to 2.0
+    is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
+    0) and the next restores the level from before
   - a session's On / Alerts / Off: a click or tap runs `speechctl speech <id> on|alerts|off`
   - an issue number under a session's repository name: a click or tap opens that issue in a
     new Chrome tab
@@ -35,9 +36,10 @@ WM_CLASS = 'ConkySpeechQueue'                  # conky.conf's own_window_class
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 # The buttons speechqueue.py writes the regions of, and what each runs.
 COMMANDS = {'skip': ('skip',), 'next': ('next',), 'pause': ('toggle',)}
-BUTTONS = tuple(COMMANDS)                      # the controls a click or tap presses
+BUTTONS = tuple(COMMANDS) + ('volume_icon',)  # the controls a click or tap presses
 REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'voice')   # the regions a press looks through, in order
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
+VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
 SETTINGS = ('on', 'alerts', 'off')             # a session's segments, left to right
 READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
@@ -46,6 +48,7 @@ OPEN_AGAIN = 3.0                               # s before a session's box or nam
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
+VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
 VOICE_MENU = os.path.join(CACHE, 'voice-menu')   # "<first voice shown> <voice under the pointer>" while the list is open
 MENU_TIMEOUT = 20.0                            # s an open list waits before it closes itself
 CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
@@ -74,7 +77,41 @@ def speechctl(*args):
 
 def press(d, win, hit):
     """Does what a click or tap on the control `hit` (one of BUTTONS) does."""
-    speechctl(*COMMANDS[hit])
+    if hit == 'volume_icon':
+        toggle_mute()
+    else:
+        speechctl(*COMMANDS[hit])
+
+
+def remembered_volume():
+    """The level before the last mute, or None when none was kept."""
+    try:
+        with open(VOLUME_BEFORE_MUTE) as f:
+            level = float(f.read())
+    except (OSError, ValueError):
+        return None
+    return level if level >= VOLUME_MUTED else None
+
+
+def toggle_mute():
+    """Mutes the speech, keeping its volume in VOLUME_BEFORE_MUTE so a restart while muted still
+    restores it, or restores that volume when it is already muted. The kept level stays when the
+    volume is already zero, and the default volume comes back where none was kept (a slider
+    dragged to its left end)."""
+    level = tray_model.speech_settings()[1]
+    if level >= VOLUME_MUTED:
+        os.makedirs(CACHE, exist_ok=True)
+        with open(VOLUME_BEFORE_MUTE + '.tmp', 'w') as f:
+            f.write(f'{level:.1f}')
+        os.replace(VOLUME_BEFORE_MUTE + '.tmp', VOLUME_BEFORE_MUTE)
+        speechctl('volume', '0')
+        return
+    back = remembered_volume() or tray_model.DEFAULT_VOLUME
+    speechctl('volume', f'{back:.1f}')
+    try:
+        os.remove(VOLUME_BEFORE_MUTE)
+    except OSError:
+        pass
 
 
 def inside(r, s, x, y):

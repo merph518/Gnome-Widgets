@@ -950,7 +950,8 @@ def render():
         'next': [next_cx - SKIP_SIZE / 2 - 5, mid_y - half, next_cx + SKIP_SIZE / 2 + 5, mid_y + half],
         'seek': [bar_x0 - 6, mid_y + BAR_DROP - 12, bar_x1 + 6, mid_y + BAR_DROP + 12],
         'heart': None if heart_hidden else heart_box,
-        # the track takes clicks and drags, the speaker too the wheel
+        # the track takes clicks and drags, the speaker a click that mutes and the wheel too
+        'volume_icon': [vol_icon - 4, top_cy - 10, vol_x0 - 6, top_cy + 10] if has_volume else None,
         'volume': [vol_x0 - 6, top_cy - 10, vol_x1 + 6, top_cy + 10] if has_volume else None,
         'volume_wheel': [vol_icon - 4, top_cy - 10, vol_x1 + 6, top_cy + 10] if has_volume else None,
         'volume_bar': [vol_x0, vol_x1] if has_volume else None,

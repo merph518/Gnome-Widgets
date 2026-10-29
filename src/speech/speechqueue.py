@@ -890,6 +890,7 @@ def render(state, now=None):
     half = PAUSE_SIZE / 2 + 4
     regions.update({
         'pause': box(pause_cx, fy, half, half),
+        'volume_icon': [vol_icon - 4, fy - 10, vol_x0 - 6, fy + 10],   # a click mutes; the wheel reaches it too
         'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
         'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
         'volume_bar': [vol_x0, vol_x1],

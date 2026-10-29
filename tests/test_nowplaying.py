@@ -846,7 +846,10 @@ class SizeSettingsTest(support.TempDirTest):
         self.assertGreater(icon, nowplaying.COLUMN_X + nowplaying.text_width('NOW PLAYING', nowplaying.LABEL_FONT))
         self.assertEqual(icon + size + nowplaying.VOLUME_GAP, x0)
         self.assertEqual(regions['volume_wheel'][0], icon - 4)       # the wheel reaches the speaker
-        self.assertEqual(regions['volume'][0], x0 - 6)               # a click does not
+        self.assertEqual(regions['volume'][0], x0 - 6)               # a click on the track sets it
+        self.assertEqual(regions['volume_icon'][0], icon - 4)        # a click on the speaker mutes
+        self.assertEqual(regions['volume_icon'][2], regions['volume'][0])   # ... beside the track
+        self.assertEqual(regions['volume_icon'][1::2], regions['volume'][1::2])
 
     def test_the_level_follows_spotify_within_its_range(self):
         for volume, want in (('0.72042420080872815', '0.7204'), ('0', '0.0000'), ('1.4', '1.0000'), ('', '0.0000')):
@@ -866,6 +869,7 @@ class SizeSettingsTest(support.TempDirTest):
         self.assertNotIn('volume', draw)
         self.assertIsNone(regions['volume'])
         self.assertIsNone(regions['volume_wheel'])
+        self.assertIsNone(regions['volume_icon'])
 
 
 class FilesTest(support.TempDirTest):

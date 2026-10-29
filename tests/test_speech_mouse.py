@@ -24,7 +24,8 @@ REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0,
                     {'id': 'bbbb', 'speech': 'alerts', 'top': 48.0, 'bottom': 72.0,
                      'on': [410.0, 440.0], 'alerts': [440.0, 489.0], 'off': [489.0, 522]}],
            'pause': [12.0, 339.0, 48.0, 375.0], 'volume': [78.0, 347.0, 170.0, 367.0],
-           'volume_wheel': [56.0, 347.0, 170.0, 367.0], 'volume_bar': [84.0, 164.0],
+           'volume_icon': [56.0, 347.0, 78.0, 367.0], 'volume_wheel': [56.0, 347.0, 170.0, 367.0],
+           'volume_bar': [84.0, 164.0],
            'voice': [440.0, 345.0, 522.0, 369.0],
            # the open list: four rows of 26 px of the six voices, the third (amy) current
            'menu': {'box': [450.0, 223.0, 522, 335], 'item_h': 26.0, 'rows': 4, 'pad': 4,
@@ -87,6 +88,66 @@ class ButtonsTest(StubSpeechctl):
         self.assertIn('speechctl skip: no speechctl', support.read(conky_mouse.LOG))
 
 
+class MuteTest(StubSpeechctl):
+    """The speaker: the first click mutes, keeping the volume, and the next restores it."""
+
+    def setUp(self):
+        super().setUp()
+        self.redirect(tray_model, SPEAK='speak')
+        self.redirect(speech_mouse, VOLUME_BEFORE_MUTE='before-mute')
+        os.makedirs(tray_model.SPEAK)
+
+    def volume_is(self, level):
+        with open(os.path.join(tray_model.SPEAK, 'settings.json'), 'w') as f:
+            json.dump({'volume': level}, f)
+
+    def click(self):
+        speech_mouse.press(None, None, 'volume_icon')
+
+    def test_a_click_mutes_and_the_next_restores_the_volume(self):
+        self.volume_is(1.4)
+        self.click()
+        self.assertEqual(self.ran(), ['volume 0'])
+        self.assertEqual(support.read(speech_mouse.VOLUME_BEFORE_MUTE), '1.4')
+        self.volume_is(0)                               # speechctl has set it
+        self.click()
+        self.assertEqual(self.ran(), ['volume 0', 'volume 1.4'])
+        self.assertFalse(os.path.exists(speech_mouse.VOLUME_BEFORE_MUTE))
+
+    def test_the_level_is_kept_across_a_restart_while_muted(self):
+        with open(speech_mouse.VOLUME_BEFORE_MUTE, 'w') as f:
+            f.write('0.8')
+        self.volume_is(0)
+        self.click()                                    # a fresh process: only the file remembers
+        self.assertEqual(self.ran(), ['volume 0.8'])
+
+    def test_a_click_at_zero_with_nothing_kept_restores_the_default(self):
+        self.volume_is(0)                               # the slider dragged to its left end
+        self.click()
+        self.assertEqual(self.ran(), [f'volume {tray_model.DEFAULT_VOLUME}'])
+        self.assertFalse(os.path.exists(speech_mouse.VOLUME_BEFORE_MUTE))
+
+    def test_muting_at_zero_does_not_overwrite_the_kept_level(self):
+        with open(speech_mouse.VOLUME_BEFORE_MUTE, 'w') as f:
+            f.write('1.6')
+        self.volume_is(0)
+        self.click()
+        self.assertEqual(self.ran(), ['volume 1.6'])
+
+    def test_the_slider_after_a_mute_follows_the_new_level_and_the_next_click_mutes_it(self):
+        self.volume_is(1.4)
+        self.click()
+        self.volume_is(0.6)                             # dragged or wheeled up from the mute
+        self.click()
+        self.assertEqual(self.ran(), ['volume 0', 'volume 0'])
+        self.assertEqual(support.read(speech_mouse.VOLUME_BEFORE_MUTE), '0.6')
+
+    def test_the_stubbed_press_is_logged(self):
+        self.volume_is(1.0)
+        self.click()
+        self.assertIn('speechctl volume 0', support.read(conky_mouse.LOG))
+
+
 class VolumeSliderTest(StubSpeechctl):
     def setUp(self):
         super().setUp()
@@ -128,11 +189,12 @@ class VolumeSliderTest(StubSpeechctl):
         speech_mouse.start()
         self.assertFalse(os.path.exists(speech_mouse.VOLUME_PREVIEW))
 
-    def test_a_press_on_the_slider_sets_the_volume_and_the_speaker_does_not(self):
+    def test_a_press_on_the_slider_sets_the_volume_and_the_speaker_mutes_it(self):
         x, y = centre(REGIONS['volume'])
         self.assertEqual(speech_mouse_region(x, y), 'volume')
         self.assertNotIn('volume', speech_mouse.BUTTONS)
-        self.assertIsNone(speech_mouse_region(64, 357))                 # the speaker
+        self.assertEqual(speech_mouse_region(64, 357), 'volume_icon')   # the speaker
+        self.assertIn('volume_icon', speech_mouse.BUTTONS)              # pressed, not dragged
         with mock.patch.object(speech_mouse, 'set_volume') as set_volume:
             self.assertTrue(speech_mouse.pull_control('d', 'root', 'win', 1, REGIONS, 'volume',
                                                       'track', (x, y, (1000 + x, 500 + y)), False))

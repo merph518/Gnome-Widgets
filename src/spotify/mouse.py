@@ -1,7 +1,7 @@
 """The Spotify widget's part of the mouse helper, loaded by conky-mouse.py when it is
 started as `conky-mouse.py spotify`: what its controls do, the seek bar, the volume slider,
-the album art's colour pick, and the wheel over the volume and the wheel and swipes over
-static lyrics.
+the speaker that mutes it, the album art's colour pick, and the wheel over the volume and the
+wheel and swipes over static lyrics.
 
 conky-mouse.py gives this module itself as `core`, for the window handling it shares:
 logging, following the pointer, dragging and the card's geometry.
@@ -13,15 +13,18 @@ import art_colours
 NAME = 'conky-spotify-nowplaying'              # the config and cache folders, the launcher
 WM_CLASS = 'ConkySpotifyNowPlaying'            # conky.conf's own_window_class
 OUTLINE = 0x1db954                             # Spotify green: the outline a resize shows
-BUTTONS = ('heart', 'play', 'prev', 'next')    # the controls this widget's click or tap presses
+BUTTONS = ('heart', 'play', 'prev', 'next', 'volume_icon')   # the controls this widget's click or tap presses
 # The regions nowplaying.py writes, in the order a press looks through them.
 HEIGHT_REGION = 'lyrics'                       # the region the second size setting is the height of
-REGIONS_ORDER = ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'volume', 'seek', 'art')
+REGIONS_ORDER = ('heart', 'play', 'prev', 'next', 'minimize', 'close', 'volume_icon', 'volume', 'seek', 'art')
 CONF = os.path.expanduser(f'~/.config/{NAME}')
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 SEEK_PREVIEW = os.path.join(CACHE, 'seek-preview')
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOLUME_STEP = 0.05                             # a wheel step's change of Spotify's volume
+VOLUME_MUTED = 0.005                           # below this volume the speaker draws its cross (theme.lua)
+VOLUME_UNMUTED = 0.5                           # what the speaker restores when no level was remembered
+VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
 LYRICS_SCROLL = os.path.join(CACHE, 'lyrics-scroll')   # '<lyrics version> <line offset>', for draw.lua
 HERE = os.path.dirname(os.path.abspath(__file__))
 core = None                                    # conky-mouse.py's module, set when it loads this one
@@ -53,6 +56,54 @@ def press(d, win, hit):
     elif hit == 'next':
         subprocess.Popen(['playerctl', '-p', 'spotify', 'next'])
         core.log('next')
+    elif hit == 'volume_icon':
+        toggle_mute()
+
+
+def spotify_volume():
+    """Spotify's volume through MPRIS, or None when it cannot be read (Spotify is not running)."""
+    try:
+        out = subprocess.run(['playerctl', '-p', 'spotify', 'volume'], capture_output=True, text=True,
+                             timeout=5)
+        return float(out.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def remembered_volume():
+    """The level before the last mute, or None when none was kept."""
+    try:
+        with open(VOLUME_BEFORE_MUTE) as f:
+            level = float(f.read())
+    except (OSError, ValueError):
+        return None
+    return level if level >= VOLUME_MUTED else None
+
+
+def toggle_mute():
+    """Mutes Spotify, keeping its volume in VOLUME_BEFORE_MUTE so a restart while muted still
+    restores it, or restores that volume when it is already muted. The kept level stays when
+    the volume is already zero, and VOLUME_UNMUTED comes back where none was kept (a slider
+    dragged to its left end)."""
+    level = spotify_volume()
+    if level is None:
+        core.log('volume: mute: Spotify volume unreadable')
+        return
+    if level >= VOLUME_MUTED:
+        os.makedirs(CACHE, exist_ok=True)
+        with open(VOLUME_BEFORE_MUTE + '.tmp', 'w') as f:
+            f.write(f'{level:.4f}')
+        os.replace(VOLUME_BEFORE_MUTE + '.tmp', VOLUME_BEFORE_MUTE)
+        subprocess.run(['playerctl', '-p', 'spotify', 'volume', '0'])
+        core.log(f'volume: mute (was {level:.2f})')
+        return
+    back = remembered_volume() or VOLUME_UNMUTED
+    subprocess.run(['playerctl', '-p', 'spotify', 'volume', f'{back:.2f}'])
+    try:
+        os.remove(VOLUME_BEFORE_MUTE)
+    except OSError:
+        pass
+    core.log(f'volume: unmute ({back:.2f})')
 
 
 def pull_control(d, root, win, s, regions, hit, track, at, touch):
