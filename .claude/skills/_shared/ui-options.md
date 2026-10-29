@@ -50,10 +50,12 @@ intent `other` and the page is written by hand. The pictures are the PNGs
 `scripts/render-option.py` produced, embedded as they are, never a CSS redraw
 of the widget. They go up as the page's `files` (`"published/name.png":
 "<source>"`), and the page references them by the published path. A source must
-be under the session's working directory or its scratchpad; a folder in the
-worktree that git ignores or never tracks (`mockups/`, left out of every
-commit) works, and the scratchpad is the default. Name each file for its option
-and state (`2A-issue.png`). The page holds:
+be under the session's working directory; the tool refuses a path outside it,
+such as a job directory under `~/.claude`. The dependable choice is an untracked
+folder inside the session's worktree (`mockups/`), never added to a commit: copy
+the PNGs there before publishing. The session's scratchpad works only when the
+tool lists one. Name each file for its option and state (`2A-issue.png`). The
+page holds:
 
 - A short opening: the issue number, what is being decided, and what stays as it
   is whatever the choice (a control keeping its clicks, say).
