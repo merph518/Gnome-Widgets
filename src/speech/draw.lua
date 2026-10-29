@@ -75,6 +75,12 @@ local function load_draw()
     return d
 end
 
+local function label_after(rest, n)
+    -- the text after the first n fields of a draw.txt line
+    for _ = 1, n do rest = rest:gsub('^%S+%s*', '', 1) end
+    return rest
+end
+
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {speech, speaking, queued,
     -- flags, name, repo, last, pill, chips, span}, each chip {line, x, width, text}
