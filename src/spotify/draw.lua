@@ -27,7 +27,7 @@ local hover_x, hover_y = -1, -1          -- window px
 local margin = 0                          -- the shadow margin around the card, in window px
 local frame = nil                         -- draw.txt as the background hook read it this frame
 local bg = {0.094, 0.094, 0.094}          -- current (fading) colour; starts at Spotify's #181818
-local fg, fg_back = theme.LIGHT, theme.DARK   -- fg_back: drawn on fg, like the play icon
+local fg = theme.LIGHT
 local clock = {stamp = nil, pos = 0, playing = false}
 local lyrics = {version = nil, lines = {}, plain = false}
 local scroll = nil                        -- eased lyric scroll position (line index, or offset)
@@ -108,7 +108,7 @@ local function secondary() return theme.secondary(fg, bg) end
 
 local function fade()
     -- where the ~1 s fade towards bg.txt's colour has got to, and the foreground for it
-    fg, fg_back = theme.fade(bg, cache .. 'bg.txt')
+    fg = theme.fade(bg, cache .. 'bg.txt')
 end
 
 function conky_widget()
@@ -189,12 +189,12 @@ local function draw_controls(cr, c, s)
         set(cr, fg, on and 1 or 0.7)
         skip_icon(cr, b[1], cy, skip, b[2])
     end
-    -- play/pause: a foreground circle with the other foreground's icon; grows slightly on hover
+    -- play/pause: a foreground circle with the icon in the card's colour; grows slightly on hover
     local on = hovered(play_cx - play / 2, cy - play / 2, play_cx + play / 2, cy + play / 2)
     set(cr, fg)
     cairo_arc(cr, play_cx, cy, play / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
     cairo_fill(cr)
-    set(cr, fg_back)
+    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
     if playing then                                  -- pause: two slim rounded bars
         local gap, h = play * 0.12, play * 0.15
         rounded_line(cr, play_cx - gap, cy - h, play_cx - gap, cy + h, play * 0.1)

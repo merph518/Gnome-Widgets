@@ -279,16 +279,28 @@ local function draw_speaker(cr, h, s, state)
     end
 end
 
+local function round_button(cr, cx, cy, size, active)
+    -- a footer button as the pause button is drawn: the foreground's circle, a little bigger
+    -- under the pointer; dimmed, with its icon in the foreground, while there is nothing to skip.
+    -- Leaves the icon's colour set.
+    local on = active and hovered(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
+    set(cr, fg, active and 1 or 0.28)
+    cairo_new_path(cr)
+    cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
+    cairo_fill(cr)
+    if active then cairo_set_source_rgb(cr, bg[1], bg[2], bg[3]) else set(cr, fg, 0.6) end
+end
+
 local function draw_skip_buttons(cr, b, s)
-    -- skip (this line: a triangle at a bar) and next (on to the next session: two triangles)
-    local skip_cx, next_cx, cy, size = b[1] * s, b[2] * s, b[3] * s, b[4] * s
-    local h, half = size / 2, (b[2] - b[1]) * s / 2
-    shade(cr, skip_cx, cy, half)
-    triangle(cr, skip_cx - h * 0.16, cy, h * 0.64, 1)
-    rounded_line(cr, skip_cx + h * 0.64, cy - h * 0.64, skip_cx + h * 0.64, cy + h * 0.64, size * 0.14)
-    shade(cr, next_cx, cy, half)
-    triangle(cr, next_cx - h * 0.42, cy, h * 0.56, 1)
-    triangle(cr, next_cx + h * 0.42, cy, h * 0.56, 1)
+    -- skip (this line: a triangle at a bar) and next (on to the next session: two triangles),
+    -- round buttons after the pause button
+    local skip_cx, next_cx, cy, size, active = b[1] * s, b[2] * s, b[3] * s, b[4] * s, b[5] == 1
+    round_button(cr, skip_cx, cy, size, active)
+    triangle(cr, skip_cx - size * 0.06, cy, size * 0.15, 1)
+    rounded_line(cr, skip_cx + size * 0.2, cy - size * 0.15, skip_cx + size * 0.2, cy + size * 0.15, size * 0.086)
+    round_button(cr, next_cx, cy, size, active)
+    triangle(cr, next_cx - size * 0.12, cy, size * 0.139, 1)
+    triangle(cr, next_cx + size * 0.13, cy, size * 0.139, 1)
 end
 
 local function fmt_time(sec)
@@ -490,14 +502,14 @@ end
 
 local function draw_footer(cr, f, s)
     -- pause (two bars) while speech plays, resume (a triangle) while it is paused: the
-    -- foreground's circle with the icon in fg_back, a little bigger under the pointer
+    -- foreground's circle with the icon in the card's colour, a little bigger under the pointer
     local cx, cy, size, paused = f[1] * s, f[2] * s, f[3] * s, f[4] == 1
     local on = hovered(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
     set(cr, fg)
     cairo_new_path(cr)
     cairo_arc(cr, cx, cy, size / 2 * (on and 1.06 or 1), 0, 2 * math.pi)
     cairo_fill(cr)
-    set(cr, fg_back)
+    cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
     if paused then
         triangle(cr, cx + size * 0.03, cy, size * 0.17, 1)
     else
@@ -667,10 +679,10 @@ function conky_draw_widget()
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.header then draw_speaker(cr, d.header, s, d.state and d.state[1] or 'idle') end
-        if d.buttons then draw_skip_buttons(cr, d.buttons, s) end
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end
+        if d.buttons then draw_skip_buttons(cr, d.buttons, s) end
         if d.volume then draw_volume(cr, d.volume, s) end
         local menu = d.menu and #d.items > 0 and menu_state()
         if d.voice then draw_voice(cr, d.voice, label_after(d.text.voice, 6), s, text, menu and true or false) end

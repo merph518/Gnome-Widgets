@@ -858,7 +858,11 @@ class SizeSettingsTest(support.TempDirTest):
         _, narrow, _ = self.render((400, 63, 1.0))
         x0, x1 = map(float, narrow['volume'][:2])
         self.assertGreaterEqual(x1 - x0, nowplaying.VOLUME_MIN)
-        _, draw, regions = self.render((400, 63, 2.0))                # the label grows into it
+        _, tightest, _ = self.render((400, 63, 2.0))                  # the label grows into it
+        x0, x1 = map(float, tightest['volume'][:2])
+        self.assertEqual(x1 - x0, nowplaying.VOLUME_MIN)              # the least room the settings leave
+        with mock.patch.object(nowplaying, 'VOLUME_MIN', nowplaying.VOLUME_MIN + 1):
+            _, draw, regions = self.render((400, 63, 2.0))
         self.assertNotIn('volume', draw)
         self.assertIsNone(regions['volume'])
         self.assertIsNone(regions['volume_wheel'])

@@ -73,11 +73,10 @@ LIST_GAP = 0                                  # the Sessions label to the list
 FOOTER_GAP = 8                                # list to the footer
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
-BUTTON_SIZE = 16                              # skip and next, right of the header
-BUTTON_PITCH = 26
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
-PAUSE_SIZE = 28                               # the footer's pause/resume circle
+PAUSE_SIZE = 28                               # the footer's pause/resume circle, and skip and next after it
+FOOTER_BUTTON_GAP = 8                         # between the footer's round buttons
 DROPDOWN_H = 24                               # the voice drop down's height, at least
 DROPDOWN_PAD = 10                             # either side of its label
 DROPDOWN_ARROW = 10                           # the arrow's width, after the label
@@ -93,6 +92,7 @@ VOICES_EVERY = 10.0                           # s between asking speechctl for t
 VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
 VOLUME_ICON = 16                              # the speaker and its waves, left of the track
 VOLUME_GAP = 8                                # speaker to track
+VOLUME_MIN = 32                               # its shortest track, as the Spotify widget's: the voice drop down keeps its label first
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))
 SEGMENT_PAD = 7                               # either side of a segment's label
@@ -751,15 +751,13 @@ def render(state, now=None):
     right = MARGIN + widget_width
     idle = not n and not any(s['queued'] for s in listed)
 
-    # The top row: the speaker and "<name> says:" or the idle or paused line, skip and next
-    # while there is a clip, then minimize and close at the top right.
+    # The top row: the speaker and "<name> says:" or the idle or paused line, then minimize and
+    # close at the top right.
     close_cx = right - WINDOW_BUTTON_SIZE / 2
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
-    next_cx = min_cx - WINDOW_BUTTON_PITCH / 2 - 8 - BUTTON_SIZE / 2
-    skip_cx = next_cx - BUTTON_PITCH
-    text_right = (skip_cx - BUTTON_SIZE / 2 if n else min_cx - WINDOW_BUTTON_PITCH / 2) - 8
+    text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - 8
     heard = last_heard(n, state['name'], state['duration'])
     if paused and not n:
         label = 'Speech paused'
@@ -780,10 +778,6 @@ def render(state, now=None):
     out = Markup(MARGIN)
     out.text(f"{g}${{lua_parse fg {'title' if n else 'text'}}}${{font {conky_font(LABEL_FONT)}}}{esc(label)}{plain()}",
              header_h)
-    if n:
-        draw.append(f'buttons {skip_cx} {next_cx} {cy} {BUTTON_SIZE}')
-        regions['skip'] = box(skip_cx, cy, BUTTON_PITCH / 2, BUTTON_PITCH / 2)
-        regions['next'] = box(next_cx, cy, BUTTON_PITCH / 2, BUTTON_PITCH / 2)
 
     if idle and collapse_idle():
         write_atomic(DRAW, '\n'.join(draw) + '\n')
@@ -868,7 +862,8 @@ def render(state, now=None):
     draw.append(prompt_line)
     out.gap(list_height)
 
-    # The footer: pause or resume, the volume slider, the voice drop down. The open list is
+    # The footer: pause or resume, skip and next, the volume slider, the voice drop down. Skip
+    # and next are drawn dimmed, and are not click areas, while no clip plays. The open list is
     # drawn above the footer, over the progress bar and the sessions, when conky-mouse.py has it open.
     footer_top = out.y
     out.gap(FOOTER_GAP)
@@ -876,16 +871,20 @@ def render(state, now=None):
     footer_h = max(FOOTER_H, drop_h + 6)
     fy = out.y + footer_h / 2
     pause_cx = MARGIN + PAUSE_SIZE / 2
-    vol_icon = pause_cx + PAUSE_SIZE / 2 + 16
+    skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
+    next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
+    vol_icon = next_cx + PAUSE_SIZE / 2 + 16
     vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
-    vol_x1 = vol_x0 + VOLUME_WIDTH
     level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
     chrome = 2 * DROPDOWN_PAD + DROPDOWN_GAP + DROPDOWN_ARROW
-    voice = fit(f"Voice: {voice_label(state['voice'])}", FOOTER_FONT,
-                right - (vol_x1 + 6 + 16) - chrome)
+    voice = f"Voice: {voice_label(state['voice'])}"
+    # The track gives up room, down to VOLUME_MIN, before the voice's label is cut
+    vol_x1 = vol_x0 + min(VOLUME_WIDTH, max(VOLUME_MIN, right - (text_width(voice, FOOTER_FONT) + chrome) - 22 - vol_x0))
+    voice = fit(voice, FOOTER_FONT, right - (vol_x1 + 6 + 16) - chrome)
     drop_x0 = right - (text_width(voice, FOOTER_FONT) + chrome)
     drop = [drop_x0, fy - drop_h / 2, right, fy + drop_h / 2]
     draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
+    draw.append(f'buttons {skip_cx} {next_cx} {fy} {PAUSE_SIZE} {int(bool(n))}')
     draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
     draw.append(f'voice {drop_x0} {right} {fy} {drop_h:g} {DROPDOWN_PAD} {DROPDOWN_ARROW} {voice}')
     half = PAUSE_SIZE / 2 + 4
@@ -896,6 +895,9 @@ def render(state, now=None):
         'volume_bar': [vol_x0, vol_x1],
         'voice': drop,
     })
+    if n:
+        regions['skip'] = box(skip_cx, fy, half, half)
+        regions['next'] = box(next_cx, fy, half, half)
     names = state.get('voices') or []
     if names:
         menu_lines, menu = voice_menu(names, state['voice'], right, footer_top - MENU_GAP + FOOTER_GAP,
