@@ -376,13 +376,13 @@ class Links(Labels):
                          'https://github.com/org/repo/issues/9')
         self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
-    def test_the_pill_names_the_ready_pull_requests_else_the_issue(self):
-        issue = 'https://github.com/o/r/issues/123'
+    def test_the_pill_names_the_ready_pull_requests_and_the_box_the_issue(self):
         pr = 'https://github.com/o/r/pull/'
-        self.assertEqual(speechqueue.link_pill(issue, []), '#123')
-        self.assertEqual(speechqueue.link_pill(issue, [pr + '151']), 'PR #151')
-        self.assertEqual(speechqueue.link_pill('', [pr + '151', pr + '152']), '2 PRs')
-        self.assertEqual(speechqueue.link_pill('', []), '')
+        self.assertEqual(speechqueue.link_pill([pr + '151']), 'PR #151')
+        self.assertEqual(speechqueue.link_pill([pr + '151', pr + '152']), '2 PRs')
+        self.assertEqual(speechqueue.link_pill([]), '')
+        self.assertEqual(speechqueue.box_number('https://github.com/o/r/issues/123'), '#123')
+        self.assertEqual(speechqueue.box_number(''), 'n/a')
 
     def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
         self.f.session(100, ME, 'One')
@@ -390,20 +390,31 @@ class Links(Labels):
         s = self.state()['sessions'][0]
         self.assertEqual(s['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151',
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
-        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', '1'])
+        self.assertEqual(speechqueue.session_line(s).split('\t')[8:], ['2 PRs', 'n/a'])
 
-    def test_each_row_has_its_name_and_pill_as_a_click_area_with_what_it_opens(self):
+    def test_the_box_opens_the_issue_and_the_name_the_pull_requests_each_only_with_one(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
         self.pr_ledger(ME, (151, 'open'))
-        speechqueue.render(self.state())
+        with mock.patch.object(speechqueue, 'session_branch',
+                               side_effect=lambda cwd: ('feat/issue-127-repo-box-links', 'someone/Gnome-Widgets')):
+            state = self.state()
+        state['sessions'][1]['issue'] = ''
+        for s in state['sessions']:
+            s['label'] = 'GWID'
+        speechqueue.render(state)
         with open(speechqueue.REGIONS) as f:
             one, two = json.load(f)['rows']
+        with open(speechqueue.SESSIONS) as f:
+            self.assertEqual([line.split('\t')[8:] for line in f.read().splitlines()],
+                             [['PR #151', '#127'], ['', 'n/a']])
+        self.assertEqual(one['issue'], 'https://github.com/someone/Gnome-Widgets/issues/127')
         self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
-        self.assertEqual((two['issue'], two['prs']), ('', []))
+        self.assertEqual(one['box'][0], speechqueue.MARGIN)
+        self.assertLess(one['box'][1], one['link'][0])             # the box, then the name
         self.assertLess(one['link'][1], one['on'][0])              # clear of the setting
-        self.assertGreater(one['link'][1], two['link'][1])         # the pill widens it
-        self.assertEqual(one['link'][0], two['link'][0])
+        self.assertFalse({'box', 'issue', 'link', 'prs'} & set(two))
+
 
 
 @unittest.skipUnless(shutil.which('lua5.3'), 'lua5.3 is not installed')

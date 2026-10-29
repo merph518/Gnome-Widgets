@@ -346,14 +346,14 @@ PR = 'https://github.com/o/r/pull/'
 
 
 class LinksTest(StubSpeechctl):
-    """A click on a session's name or its pill opens its ready pull requests, else its issue."""
+    """A click on a session's repository box opens its issue, and one on its name or pill its
+    ready pull requests; with nothing to open, neither is a click area."""
 
     def setUp(self):
         super().setUp()
         rows = [dict(r) for r in REGIONS['rows']]
-        rows[0].update(link=[73.0, 260.0], issue=ISSUE, branch='feat/issue-123-x',
+        rows[0].update(box=[16.0, 92.0], issue=ISSUE, link=[96.0, 260.0], branch='feat/issue-123-x',
                        prs=[PR + '151', PR + '152'])
-        rows[1].update(link=[73.0, 150.0], issue='', prs=[])
         self.regions = dict(REGIONS, rows=rows)
         self.opened = []
         speech_mouse.opened.clear()
@@ -368,8 +368,8 @@ class LinksTest(StubSpeechctl):
             return subprocess.CompletedProcess(args, 0, out, '')
         return run
 
-    def open(self, row, states):
-        speech_mouse.open_links(row, run=self.gh(states),
+    def open(self, row, states, kind='prs'):
+        speech_mouse.open_links(row, kind, run=self.gh(states),
                                 popen=lambda args, **kw: self.opened.append(args[1:]) or mock.Mock())
         return self.opened.pop() if self.opened else None
 
@@ -384,34 +384,40 @@ class LinksTest(StubSpeechctl):
         blocker = ('OPEN', ['Manual Review Needed'], 'fix/issue-140-other')
         self.assertEqual(self.open(self.regions['rows'][0], {PR + '151': blocker, PR + '152': ready}),
                          [PR + '152'])
-        self.assertEqual(self.open(self.regions['rows'][0], {PR + '151': blocker}), [ISSUE])
+        self.assertIsNone(self.open(self.regions['rows'][0], {PR + '151': blocker}))
 
-    def test_with_none_ready_the_issue_opens(self):
-        self.assertEqual(self.open(self.regions['rows'][0], {}), [ISSUE])
+    def test_with_none_ready_the_name_opens_nothing_and_not_the_issue(self):
+        self.assertIsNone(self.open(self.regions['rows'][0], {}))
+        self.assertIn('aaaa: no ready pull request to open', support.read(conky_mouse.LOG))
 
-    def test_with_no_issue_nothing_opens_and_it_is_logged(self):
-        self.assertIsNone(self.open(self.regions['rows'][1], {}))
-        self.assertIn('bbbb: no issue or ready pull request to open', support.read(conky_mouse.LOG))
+    def test_the_box_opens_the_issue(self):
+        self.assertEqual(self.open(self.regions['rows'][0], {}, 'issue'), [ISSUE])
 
-    def test_the_name_and_pill_on_the_first_line_are_the_link(self):
-        at = lambda x, y: (speech_mouse.link_at(self.regions, 1, x, y) or {}).get('id')
-        self.assertEqual(at(200, 106), 'aaaa')
+    def test_the_box_and_the_name_on_the_first_line_are_the_links(self):
+        at = lambda x, y: (lambda hit: hit and (hit[0]['id'], hit[1]))(speech_mouse.link_at(self.regions, 1, x, y))
+        self.assertEqual(at(50, 106), ('aaaa', 'issue'))
+        self.assertEqual(at(200, 106), ('aaaa', 'prs'))
+        self.assertIsNone(at(94, 106))                          # between the box and the name
         self.assertIsNone(at(270, 106))                         # past the pill
         self.assertIsNone(at(200, 130))                         # its second line
-        self.assertEqual(at(100, 154 - 12), 'bbbb')
+        self.assertIsNone(at(50, 154 - 12))                     # a box without an issue
+        self.assertIsNone(at(120, 154 - 12))                    # a name without pull requests
         self.assertIsNone(at(425, 106))                         # the setting
 
-    def test_a_click_on_the_link_opens_it_and_the_setting_keeps_its_own(self):
+    def test_a_click_on_a_link_opens_it_and_the_setting_keeps_its_own(self):
         opened = []
         thread = lambda target, args, daemon: mock.Mock(start=lambda: target(*args))
         with mock.patch.object(speech_mouse.threading, 'Thread', side_effect=thread), \
-                mock.patch.object(speech_mouse, 'open_links', side_effect=opened.append):
-            for x in (200, 425):
+                mock.patch.object(speech_mouse, 'open_links', side_effect=lambda r, k: opened.append((r['id'], k))):
+            for x in (50, 200, 425):
                 track = mock.Mock(return_value=(x, 106, False))
                 hit = speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
                                                 (x, 106, (x, 106)), False)
                 self.assertTrue(hit)
-        self.assertEqual([r['id'] for r in opened], ['aaaa'])
+            track = mock.Mock(return_value=(120, 142, False))
+            self.assertFalse(speech_mouse.pull_control(None, None, None, 1, self.regions, None, track,
+                                                       (120, 142, (120, 142)), False))
+        self.assertEqual(opened, [('aaaa', 'issue'), ('aaaa', 'prs')])
         self.assertEqual(self.ran(), ['speech aaaa on'])
 
     def test_a_second_click_soon_after_or_while_it_opens_does_nothing(self):
@@ -420,23 +426,24 @@ class LinksTest(StubSpeechctl):
                                side_effect=lambda **kw: mock.Mock(start=lambda: started.append(kw))):
             for t in (100.0, 100.3, 103.5):            # the first still opening at 103.5
                 clock.return_value = t
-                speech_mouse.open_once(self.regions['rows'][0], now=clock)
-            speech_mouse.opening.clear()               # it has opened
-            speech_mouse.open_once(self.regions['rows'][0], now=clock)
-        self.assertEqual(len(started), 2)
+                speech_mouse.open_once(self.regions['rows'][0], 'prs', now=clock)
+            speech_mouse.open_once(self.regions['rows'][0], 'issue', now=clock)   # the box: its own
+            speech_mouse.opening.clear()               # they have opened
+            speech_mouse.open_once(self.regions['rows'][0], 'prs', now=clock)
+        self.assertEqual(len(started), 3)
 
     def test_a_pull_request_gh_cannot_read_is_not_opened(self):
         def fails(args, **kwargs):
             raise FileNotFoundError('gh')
-        speech_mouse.open_links(self.regions['rows'][0], run=fails,
+        speech_mouse.open_links(self.regions['rows'][0], 'prs', run=fails,
                                 popen=lambda args, **kw: self.opened.append(args[1:]) or mock.Mock())
-        self.assertEqual(self.opened, [[ISSUE]])
+        self.assertEqual(self.opened, [])
         self.assertIn('gh could not read it', support.read(conky_mouse.LOG))
 
     def test_without_a_branch_no_pull_request_is_its_own(self):
         ready = ('OPEN', ['Manual Review Needed'])
         row = dict(self.regions['rows'][0], branch='')
-        self.assertEqual(self.open(row, {PR + '151': ready}), [ISSUE])
+        self.assertIsNone(self.open(row, {PR + '151': ready}))
 
     def test_without_chrome_each_link_goes_to_xdg_open(self):
         def popen(args, **kwargs):
@@ -444,8 +451,10 @@ class LinksTest(StubSpeechctl):
                 raise FileNotFoundError(args[0])
             self.opened.append(args)
             return mock.Mock()
-        speech_mouse.open_links(self.regions['rows'][0], run=self.gh({}), popen=popen)
-        self.assertEqual(self.opened, [['xdg-open', ISSUE]])
+        ready = ('OPEN', ['Manual Review Needed'])
+        speech_mouse.open_links(self.regions['rows'][0], 'prs', run=self.gh({PR + '151': ready, PR + '152': ready}),
+                                popen=popen)
+        self.assertEqual(self.opened, [['xdg-open', PR + '151'], ['xdg-open', PR + '152']])
 
     def test_a_finger_dragged_from_a_name_moves_the_widget_unless_the_list_scrolls(self):
         regions = dict(self.regions, list_scroll=[0, 24.0])
