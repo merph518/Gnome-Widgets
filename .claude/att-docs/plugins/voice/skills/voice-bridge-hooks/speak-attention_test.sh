@@ -22,7 +22,8 @@ printf '%s\n' '#!/bin/sh' '[ "$1" = -O ] && exit 0' \
 # The piper stub writes its input to the -f file, or fails when PIPER_FAIL is set, and
 # the pw-play stub appends that file to SPOKEN behind a "piper: " mark. A piper on PATH
 # speaks as "path piper: ", which no case expects.
-printf '%s\n' '#!/bin/sh' '[ -n "$PIPER_FAIL" ] && exit 1' \
+printf '%s\n' '#!/bin/sh' 'echo "$*" >> "${PIPER_ARGS:-/dev/null}"' \
+  '[ -n "$PIPER_FAIL" ] && exit 1' \
   'while [ $# -gt 0 ] && [ "$1" != -f ]; do shift; done' 'cat > "$2"' \
   > "$HOME/.local/bin/piper"
 printf '%s\n' '#!/bin/sh' 'while [ $# -gt 0 ] && [ "$1" != -f ]; do shift; done' \
@@ -160,6 +161,26 @@ prompt human "run the suite"
 check "$(PIPER_FAIL=1 SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.')" \
   "demo session finished" "Speech Dispatcher speaks when Piper fails"
 check "$(ls "$XDG_RUNTIME_DIR/speak-attention" | grep -c wav)" "0" "no clip is left behind"
+
+# Piper options come from settings.json and are passed only when set
+export PIPER_ARGS="$SANDBOX/piper-args"
+settings="$XDG_RUNTIME_DIR/speak-attention/settings.json"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+check "$(grep -cE -- '--(speaker|noise-scale|noise-w-scale|sentence-silence)' "$PIPER_ARGS")" 0 \
+  "Piper options that are not set are left out"
+echo '{"speaker":3,"noise":0.4,"noise_w":0.5,"silence":0.2}' > "$settings"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+for opt in '--speaker 3' '--noise-scale 0.4' '--noise-w-scale 0.5' '--sentence-silence 0.2'; do
+  check "$(grep -c -- "$opt" "$PIPER_ARGS")" 1 "Piper gets $opt when it is set"
+done
+echo '{"speaker":0}' > "$settings"
+prompt human "run the suite"; : > "$PIPER_ARGS"
+SPEAK_PIPER_MODEL="$SANDBOX/voice.onnx" stop 'Done.' > /dev/null
+check "$(grep -c -- '--speaker 0' "$PIPER_ARGS")" 1 "speaker 0 is passed, not mistaken for unset"
+check "$(grep -c -- '--noise-scale' "$PIPER_ARGS")" 0 "the options still unset stay out"
+rm -f "$settings"; unset PIPER_ARGS
 
 # usage: ask <question> [cwd]; runs the PreToolUse hook for an AskUserQuestion call.
 ask() {

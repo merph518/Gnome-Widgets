@@ -4,7 +4,8 @@ description: >-
   Check every write that lands in a repository whose text ships to a separate work side -
   code comments, skip reasons, log strings, shipped Markdown, README text, and text a tool
   posts to the work tracker - against the four rules that govern shipped text: it never
-  names this side's tracker, its CI, or any assistant, it describes how the code works now
+  names this side's tracker, its CI, or any assistant (unless the repository's `<audience>`
+  already knows them), it describes how the code works now
   rather than what it used to do, it uses words the tester who owns the repository would
   reach for, in American spelling, and it runs through the humanizer pass in section 4
   before it is committed. Use before committing any comment or document, whenever another
@@ -15,16 +16,17 @@ description: >-
 # Writing text that ships
 
 Everything under `<shipping-paths>` is copied to `<work-side>`, and text a tool posts to
-the work tracker is read by the same people. The work side has none of this side's
-tracker, CI, or assistant tooling. A sentence leaning on any of them arrives there as a
+the work tracker is read by the same people. Unless `<audience>` says otherwise, the work
+side has none of this side's tracker, CI, or assistant tooling. A sentence leaning on any of them arrives there as a
 dead reference: the reader cannot follow it, and the line spends its space pointing at a
 record instead of carrying the fact.
 
 | Placeholder | Meaning |
 | --- | --- |
+| `<audience>` | Who the shipped text is read by, and what they already know about how the repository is built |
 | `<shipping-paths>` | The paths copied to the work side, and the root files that go with them |
 | `<work-side>` | Where shipped text is read: the work repository and its tracker |
-| `<banned-terms>` | The names of this side's tracker, CI, assistants, and repository, in every form they take |
+| `<banned-terms>` | The names of this side's tracker, CI, assistants, and repository, in every form they take, that `<audience>` cannot resolve |
 | `<kept-terms>` | Identifiers that look like a citation but stay, because the work side has them too |
 | `<voice-words>` | The words the owning tester would not reach for, with the replacement for each |
 | `<exempt-paths>` | Paths the rules and the scan leave alone, and the exceptions inside them |
@@ -58,7 +60,7 @@ This applies to every string that survives into the repository: a `//` comment, 
 block, a `test.skip` reason, a `console.log`, an annotation description, a Markdown heading
 or paragraph, a table cell, a fenced example.
 
-Never name anything in `<banned-terms>`. The categories are always the same:
+Never name anything in `<banned-terms>`. The categories a reader without this side's tooling cannot follow are:
 
 - **This side's tracker.** An issue or pull request number, a link to one, a closing
   keyword. A number carries no keyword to give it away, so every form of it counts:
@@ -69,7 +71,7 @@ Never name anything in `<banned-terms>`. The categories are always the same:
   mechanism's word for starting one of them: the work side runs the suite, so write run.
 - **Any assistant.** By product name, as an agent or a model, a generated-with line, a
   robot emoji. The skills that write here, by name or as a slash command, this one
-  included. A tester wrote this.
+  included. Unless `<audience>` knows the tooling, a tester wrote this.
 - **This repository itself.** Its name, its URL, its branches, its commits, and the
   tooling that belongs only to this side.
 
@@ -88,6 +90,43 @@ The replacement is always the same move. Write the fact the reference stood in f
 Provenance still has to live somewhere, and that somewhere is off to the side: issue and
 run identifiers go in `<side-records>`. Those are not repository text and this skill does
 not touch them.
+
+### A reader who knows how it is built
+
+The categories above are what a reader who knows none of this side's tooling cannot
+follow. `<audience>` says who actually reads the text, and `<banned-terms>` is drawn for
+that reader. A repository shared with someone who knows how the work is developed, such as
+a supervisor who knows which assistant and which skill set build it, leaves those names
+out of its table, and its text may name them. A link to the skill set, a line saying the
+assistant writes and tests the code on synthetic data, and an assistant attribution are
+all clean there.
+
+Where the extension names no `<audience>`, the table holds as written and the reader is
+taken to be the work side. On an interactive run, ask the user who reads the repository
+before cutting a name that is already in the text. A run with nobody to ask leaves the
+name, reports the hit, and stops short of the commit. A name that reaches the work side
+cannot be taken back; a trimmed sentence costs one more commit.
+
+An assistant attribution here means a credit line in the repository's own text. Commit
+messages and pull request bodies are `<side-records>`, and text a tool posts to the work
+tracker (section 6.1) keeps the full table whatever `<audience>` says.
+
+### The boundary is never the subject
+
+Whatever `<audience>` and `<banned-terms>` allow, shipped text says what this repository
+does and how. It never talks about the split it sits on, or about other repositories:
+
+- no "this side", "the work side", or "the other side"
+- no "consuming repository", and no sentence on what a repository other than this one
+  holds, reads, or assumes
+- no line on what this repository may do that another may not, or the reverse
+
+Those words belong to the skills and their config. The reader of a README has one
+repository in front of them, and a sentence about the arrangement around it tells them
+nothing about the code.
+
+    No:  nothing in the pipeline assumes one consuming repository
+    Yes: a config file says where every input lives
 
 ## 2. What the text may never narrate
 
@@ -114,7 +153,7 @@ the measurement ran on and drop the comparison:
 
 ## 3. Words the tester would not reach for
 
-The reader on the work side knows who writes these files. A word that is not in that
+The reader knows who owns these files. A word that is not in that
 person's vocabulary reads as though nobody typed the line, and it does that even when the
 sentence is accurate and carries no dead reference.
 
@@ -265,12 +304,13 @@ the post, and an edit to a posted comment goes through the scan again.
 Answer these out loud, per changed file. A skipped answer is a failure, not a silent pass.
 
 1. Did the mechanical scan come back empty?
-2. Did the `humanizer` pass in section 4 run over every sentence you wrote?
-3. Does every comment describe current behavior rather than a change?
-4. Does every sentence use a word the tester would use, spelled the American way?
-5. Are the identifiers that got cut recorded somewhere off to the side, in
+2. Does no sentence talk about the boundary or about another repository?
+3. Did the `humanizer` pass in section 4 run over every sentence you wrote?
+4. Does every comment describe current behavior rather than a change?
+5. Does every sentence use a word the tester would use, spelled the American way?
+6. Are the identifiers that got cut recorded somewhere off to the side, in
    `<side-records>`?
-6. Did every check in `<companion-checks>` come back empty?
+7. Did every check in `<companion-checks>` come back empty?
 
 The scan is `<scan-command>`, run over the files the branch changed, tracked and
 untracked. It lives outside `<shipping-paths>`, because the check is about the boundary

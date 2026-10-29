@@ -33,9 +33,10 @@ This repository is private and for my own use.
 | `att-docs` | `business-rule-scan` | Check every business rule against the document it came from |
 | `att-docs` | `business-rule-update` | Update a document's rules and stage the result for review |
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
-| `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules |
+| `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
 | `general` | `implement-with-speech` | Run implement with every reply read aloud |
+| `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and the voice bridge relayed |
 
@@ -116,6 +117,14 @@ entries in the repository. A repository adds its own values with an extension fi
 `.claude/skills/voice-bridge-hooks/extension.json`. See the `voice-bridge-hooks`
 skill's Wiring section.
 
+The `general` plugin also registers four repo hooks: a gate that refuses a pull request
+body whose Testing section a repository's checker cannot parse, a reminder to record a
+new pull request in the catch-up ledger and keep a merge watch running, the unit test
+that belongs to an edited file, and Prettier on an edited file. They read their values
+from `.claude/skills/repo-hooks/extension.json`, one section per hook, and a repository
+without that file gets no hook. A repository that vendors this one registers
+`plugins/general/hooks/run.sh` in its own settings. See the `repo-hooks` skill.
+
 The voice bridge server itself is in `plugins/voice/bridge/` and runs from a checkout of
 this repository: `node plugins/voice/bridge/voice-bridge.mjs --config <extension.json>
 serve`. The extension file also names the bridge's repository values: `inProgressLabel`,
@@ -177,6 +186,7 @@ Scripts that ship here:
 - `acronym-guide`: scan, dictionary writer, term verifier
 - `living-wiki`: `wiki.mjs`
 - `voice-bridge-hooks`: the hook scripts
+- `repo-hooks`: the gate, reminder, test and format hooks, in `plugins/general/hooks/`
 
 ### Shims
 

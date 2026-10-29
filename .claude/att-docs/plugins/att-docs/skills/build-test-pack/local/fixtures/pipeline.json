@@ -1,0 +1,37 @@
+{
+ "repoRoot": ".",
+ "model": { "endpoint": "http://localhost:13305/api/v1", "name": "test-model" },
+ "reference": {
+  "procedure": "reference/procedure.md",
+  "workbookStandard": "reference/standard.md",
+  "implementationGuide": "reference/guide.md",
+  "glossary": "reference/glossary.md",
+  "intake": "reference/intake.md",
+  "understandingGate": "reference/gate.md",
+  "ruleIntake": "reference/rule-intake.md",
+  "scope": "reference/scope.md",
+  "validation": "reference/validation.md",
+  "revalidation": "reference/revalidation.md",
+  "methodology": {
+   "file": "reference/methodology.md",
+   "skipBefore": 8,
+   "byPhase": { "4": [10], "5": [9], "6": [4, 7], "9": [13, 14] }
+  }
+ },
+ "idFields": { "issue": "issue", "change": "change", "changeApplies": "changeApplies", "description": "changeDescription" },
+ "packFile": "ISSUE{issue}_pack.json",
+ "suitePackFile": "{suite}_pack.json",
+ "inputs": {
+  "description": "issues/ISSUE_{issue}_*.md",
+  "documentIndex": "docs/LIB/*.md",
+  "ruleExport": ["node", "export.mjs", "--doc", "{doc}"],
+  "folderExport": ["node", "export.mjs", "--doc", "docs/{suite}"]
+ },
+ "builder": {
+  "module": "builder-stub.mjs",
+  "command": ["node", "builder-stub.mjs", "{pack}", "--out", "{out}"],
+  "retries": 2
+ },
+ "suiteMerge": { "module": "merge-stub.mjs" },
+ "queue": { "file": "queue.json" }
+}

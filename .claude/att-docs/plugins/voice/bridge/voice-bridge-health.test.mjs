@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { checkOnce, healthPaths, probe } from './voice-bridge-health.mjs';
 
 const CONFIG = {
@@ -12,8 +12,15 @@ const CONFIG = {
 };
 const MINUTE = 60 * 1000;
 
+// Every scratch folder the tests make, removed once the file's tests finish.
+const tempDirs = [];
+after(() => {
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function stateFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-bridge-health-'));
+  tempDirs.push(dir);
   return path.join(dir, 'state', 'health.json');
 }
 
