@@ -29,13 +29,15 @@ REGIONS = {'minimize': [484.0, 16.0, 506.0, 38.0], 'close': [506.0, 16.0, 540.0,
            'pause': [12.0, 339.0, 48.0, 375.0], 'volume': [78.0, 347.0, 170.0, 367.0],
            'volume_icon': [56.0, 347.0, 78.0, 367.0], 'volume_wheel': [56.0, 347.0, 170.0, 367.0],
            'volume_bar': [84.0, 164.0],
-           # the settings popup: its three speech buttons, four rows of 26 px of the six voices (the
-           # first the global one) from y 164, and Done
+           # the settings popup: its three speech buttons, a button for each of the six voices (the
+           # first, the global one, across the panel, the rest three to a row) and Done
            'settings': {'box': [112.0, 60.0, 412.0, 304.0],
                         'speech': {'on': [126.0, 100.0, 198.0, 128.0], 'alerts': [206.0, 100.0, 278.0, 128.0],
                                    'off': [286.0, 100.0, 358.0, 128.0]},
-                        'list': [126.0, 160.0, 398.0, 272.0], 'item_h': 26.0, 'rows': 4, 'pad': 4,
-                        'names': VOICES, 'done': [330.0, 276.0, 398.0, 296.0]}}
+                        'voices': [[126.0, 160.0, 398.0, 188.0], [126.0, 196.0, 211.0, 224.0],
+                                   [219.0, 196.0, 304.0, 224.0], [312.0, 196.0, 398.0, 224.0],
+                                   [126.0, 232.0, 211.0, 260.0], [219.0, 232.0, 304.0, 260.0]],
+                        'names': VOICES, 'done': [330.0, 268.0, 398.0, 288.0]}}
 
 
 def centre(r):
@@ -209,8 +211,8 @@ class SettingsPopupTest(StubSpeechctl):
     NAMES = REGIONS['settings']['names']
     ROW = dict(REGIONS['rows'][0], title='Widget Settings Session')
 
-    def at(self, x, y, scroll=0):
-        return speech_mouse.settings_at(REGIONS['settings'], x, y, scroll)
+    def at(self, x, y):
+        return speech_mouse.settings_at(REGIONS['settings'], x, y)
 
     def show(self, *steps, row=None, popup=None, timeout=False):
         """run_settings over the (seconds passed, events) of each call to events() (then none),
@@ -229,39 +231,34 @@ class SettingsPopupTest(StubSpeechctl):
         return applied, shown
 
     def test_what_is_under_the_pointer_is_found_by_where_it_is(self):
-        self.assertEqual([self.at(160, 110), self.at(240, 110), self.at(320, 110), self.at(360, 290)],
+        self.assertEqual([self.at(160, 110), self.at(240, 110), self.at(320, 110), self.at(360, 280)],
                          [('speech', 'on'), ('speech', 'alerts'), ('speech', 'off'), ('done',)])
-        self.assertEqual([self.at(200, 165), self.at(200, 190), self.at(200, 267)],
-                         [('voice', 0), ('voice', 1), ('voice', 3)])
-        self.assertEqual(self.at(200, 267, scroll=2), ('voice', 5))
+        self.assertEqual([self.at(200, 165), self.at(160, 210), self.at(250, 210), self.at(350, 210),
+                          self.at(160, 245), self.at(250, 245)],
+                         [('voice', i) for i in range(6)])
 
     def test_the_rest_of_the_panel_is_the_panel_and_outside_it_is_nothing(self):
         self.assertEqual(self.at(150, 75), ('panel',))               # the title
-        self.assertEqual(self.at(200, 162), ('panel',))              # above the first voice's padding
+        self.assertEqual(self.at(200, 192), ('panel',))              # between two rows of voices
+        self.assertEqual(self.at(350, 245), ('panel',))              # a row's empty place
         self.assertIsNone(self.at(111, 110))
         self.assertIsNone(self.at(300, 305))
 
-    def test_with_fewer_voices_than_rows_only_the_voices_are_rows(self):
-        popup = dict(REGIONS['settings'], names=self.NAMES[:2])
-        self.assertEqual(speech_mouse.settings_at(popup, 200, 190, 0), ('voice', 1))
-        self.assertEqual(speech_mouse.settings_at(popup, 200, 216, 0), ('panel',))
-
-    def test_scrolling_stays_within_the_voices(self):
-        popup = REGIONS['settings']
-        self.assertEqual([speech_mouse.settings_scroll(popup, 0, -1), speech_mouse.settings_scroll(popup, 0, 1),
-                          speech_mouse.settings_scroll(popup, 2, 1), speech_mouse.settings_scroll(popup, 2, 5)],
-                         [0, 1, 2, 2])
+    def test_with_fewer_voices_only_the_voices_there_are_have_buttons(self):
+        popup = dict(REGIONS['settings'], names=self.NAMES[:2], voices=REGIONS['settings']['voices'][:2])
+        self.assertEqual(speech_mouse.settings_at(popup, 160, 210), ('voice', 1))
+        self.assertEqual(speech_mouse.settings_at(popup, 250, 210), ('panel',))
 
     def test_a_press_on_a_speech_button_or_a_voice_applies_it_and_the_popup_stays_open(self):
-        applied, shown = self.show((1.0, [('press', 240, 110)]), (0.1, [('press', 200, 190)]),
+        applied, shown = self.show((1.0, [('press', 240, 110)]), (0.1, [('press', 160, 210)]),
                                    (0.1, [('press', 160, 110)]), (0.1, [('escape',)]))
         self.assertEqual(applied, [('speech', 'alerts'), ('voice', 'en_GB-alan-medium'), ('speech', 'on')])
         # what each choice leaves shown: speech, then the voice, as indexes into the list
         self.assertEqual([s.split('\n')[0] for s in shown],
-                         ['none 0 alerts 0', 'none 0 alerts 1', 'none 0 on 1'])
+                         ['none alerts 0', 'none alerts 1', 'none on 1'])
 
     def test_done_a_press_outside_escape_and_the_timeout_close_it_applying_nothing(self):
-        for steps in (((1.0, [('press', 360, 290)]),), ((1.0, [('press', 300, 20)]),),
+        for steps in (((1.0, [('press', 360, 280)]),), ((1.0, [('press', 300, 20)]),),
                       ((1.0, [('escape',), ('press', 240, 110)]),)):
             with self.subTest(steps=steps):
                 self.assertEqual(self.show(*steps)[0], [])
@@ -273,33 +270,28 @@ class SettingsPopupTest(StubSpeechctl):
 
     def test_a_press_just_after_it_opens_answers_nothing(self):
         # the second click of a double click on the gear
-        applied, _ = self.show((0.1, [('press', 240, 110)]), (0.1, [('press', 360, 290)]),
+        applied, _ = self.show((0.1, [('press', 240, 110)]), (0.1, [('press', 360, 280)]),
                                (speech_mouse.CONFIRM_ARMED, [('press', 240, 110)]), (0.1, [('escape',)]))
         self.assertEqual(applied, [('speech', 'alerts')])
 
-    def test_it_shows_the_pointer_the_scroll_and_the_name_until_it_closes(self):
-        _, shown = self.show((1.0, [('move', 240, 110)]), (0.1, [('move', 200, 190)]),
-                             (0.1, [('wheel', True)]), (0.1, [('move', 360, 290)]), (0.1, [('escape',)]))
+    def test_it_shows_the_pointer_and_the_name_until_it_closes(self):
+        _, shown = self.show((1.0, [('move', 240, 110)]), (0.1, [('move', 160, 210)]),
+                             (0.1, [('move', 360, 280)]), (0.1, [('escape',)]))
         self.assertEqual([s.split('\n')[0] for s in shown],
-                         ['speech:alerts 0 on 0', 'item:1 0 on 0', 'item:2 1 on 0', 'done 1 on 0'])
+                         ['speech:alerts on 0', 'item:1 on 0', 'done on 0'])
         self.assertEqual(shown[0].split('\n')[1], 'Widget Settings Session')
         self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
 
-    def test_it_opens_on_the_sessions_own_voice_scrolled_into_view(self):
+    def test_it_opens_on_the_sessions_own_speech_setting_and_voice(self):
         _, shown = self.show((1.0, []), (0.1, [('escape',)]),
                              row=dict(self.ROW, speech='off', voice='en_US-ryan-high'))
-        self.assertEqual(shown[0].split('\n')[0], 'none 2 off 5')    # scrolled as far as it goes
+        self.assertEqual(shown[0].split('\n')[0], 'none off 5')
         _, shown = self.show((1.0, []), (0.1, [('escape',)]), row=dict(self.ROW, voice='gone'))
-        self.assertEqual(shown[0].split('\n')[0], 'none 0 on -1')     # a voice no longer installed marks none
-
-    def test_a_swipe_scrolls_by_the_rows_it_gives(self):
-        _, shown = self.show((1.0, [('scroll', 1)]), (0.1, [('scroll', 5)]), (0.1, [('scroll', -1)]),
-                             (0.1, [('escape',)]))
-        self.assertEqual([s.split()[1] for s in shown], ['1', '2', '1'])
+        self.assertEqual(shown[0].split('\n')[0], 'none on -1')      # a voice no longer installed marks none
 
     def test_each_event_starts_the_timeout_again(self):
-        # 20 s from the last event, not from opening: a wheel step at 15 s keeps it open at 30 s
-        applied, _ = self.show((15.0, [('wheel', True)]), (15.0, []), (4.0, [('press', 240, 110)]),
+        # 20 s from the last event, not from opening: a move at 15 s keeps it open at 30 s
+        applied, _ = self.show((15.0, [('move', 300, 20)]), (15.0, []), (4.0, [('press', 240, 110)]),
                                (0.1, [('escape',)]))
         self.assertEqual(applied, [('speech', 'alerts')])
 
@@ -312,7 +304,7 @@ class SettingsPopupTest(StubSpeechctl):
         self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
 
     def test_a_popup_a_killed_run_left_is_cleared_at_start(self):
-        speech_mouse.write_settings(self.ROW, 'none', 0, 'on', 0)
+        speech_mouse.write_settings(self.ROW, 'none', 'on', 0)
         speech_mouse.start()
         self.assertFalse(os.path.exists(speech_mouse.SESSION_MENU))
 

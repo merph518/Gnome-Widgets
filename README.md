@@ -159,13 +159,12 @@ the list scrolls it too.
 
 A click or tap on a session's gear dims the card under a black veil and opens that session's settings over it, in
 the same panel as the close prompt: its name, its speech setting as three buttons (**On**,
-**Alerts**, **Off**, the current one filled) and the voice it is read in, as a column of buttons, one for each
-installed voice with the session's own filled, **Default** first. A choice applies at once and
+**Alerts**, **Off**, the current one filled) and the voice it is read in, as a grid of buttons, three to a row, one for each
+installed voice with the session's own filled, **Default** across the first row. All of them show at once, so nothing scrolls. A choice applies at once and
 the popup stays open, so a setting and a voice can be changed in one visit; **Done**, a click
 anywhere outside the panel and Escape close it, and it closes by itself after 20 seconds. While
 it is open the widget holds the pointer and the keyboard, as it does for the close prompt, and a
-press in the half second after it opens is ignored. A voice list longer than the four rows shown
-scrolls with the wheel or a swipe. A touch outside the widget is not seen, so it closes on the
+press in the half second after it opens is ignored. A touch outside the widget is not seen, so it closes on the
 timeout instead. The list follows voices installed meanwhile within ten seconds. The gear is
 drawn at full strength while the session is On, dimmer on Alerts and dimmest when Off.
 Taps, dragging, resizing, − and × work as they do on the Spotify widget.

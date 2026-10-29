@@ -885,9 +885,9 @@ class SettingsPopup(Fixture):
 
     def test_the_popup_offers_the_global_voice_first_and_then_every_installed_one(self):
         draw, regions = self.render(VOICES)
-        self.assertEqual([l for l in draw if l.startswith('item ')],
-                         ['item 0 Default (jenny_dioco)', 'item 0 alan', 'item 0 jenny_dioco', 'item 0 amy',
-                          'item 0 hfc_female', 'item 0 joe', 'item 0 lessac', 'item 0 libritts', 'item 0 ryan'])
+        self.assertEqual([l.split(None, 5)[5] for l in draw if l.startswith('item ')],
+                         ['Default (jenny_dioco)', 'alan', 'jenny_dioco', 'amy', 'hfc_female', 'joe', 'lessac',
+                          'libritts', 'ryan'])
         self.assertEqual(regions['settings']['names'], [''] + VOICES)
 
     def test_the_footer_has_no_voice_drop_down_or_list(self):
@@ -902,38 +902,53 @@ class SettingsPopup(Fixture):
         self.assertTrue(x0 <= box[0] < box[2] <= x1 and box[3] - box[1] > 0)
         buttons = [popup['speech'][key] for key in ('on', 'alerts', 'off')]
         self.assertEqual(list(popup['speech']), ['on', 'alerts', 'off'])
-        for b in buttons + [popup['list'], popup['done']]:
+        for b in buttons + popup['voices'] + [popup['done']]:
             self.assertTrue(box[0] <= b[0] < b[2] <= box[2] and box[1] <= b[1] < b[3] <= box[3], b)
         self.assertTrue(buttons[0][2] < buttons[1][0] and buttons[1][2] < buttons[2][0])    # side by side
-        self.assertLess(buttons[0][3], popup['list'][1])                  # buttons, then the voices
-        self.assertLess(popup['list'][3], popup['done'][1])               # then Done, at the right
+        self.assertLess(buttons[0][3], popup['voices'][0][1])             # buttons, then the voices
+        self.assertLess(max(b[3] for b in popup['voices']), popup['done'][1])    # then Done, at the right
         self.assertEqual(popup['done'][2], buttons[2][2])
         line = next(l for l in draw if l.startswith('settings '))
         self.assertEqual([float(v) for v in line.split()[1:5]], box)
 
-    def test_the_speech_buttons_sit_as_far_below_their_label_as_the_voice_rows_below_theirs(self):
+    def test_every_voice_has_a_button_the_size_of_a_speech_one_and_none_scrolls(self):
+        draw, regions = self.render(VOICES)
+        popup = regions['settings']
+        on = popup['speech']['on']
+        first, rest = popup['voices'][0], popup['voices'][1:]
+        self.assertEqual(len(popup['voices']), len(popup['names']))
+        self.assertEqual((first[0], first[2]), (on[0], popup['speech']['off'][2]))    # the global voice, across
+        self.assertEqual({round(b[3] - b[1], 2) for b in popup['voices']}, {round(on[3] - on[1], 2)})
+        for b in rest:
+            self.assertAlmostEqual(b[2] - b[0], on[2] - on[0], delta=0.02)          # the rest, as wide
+        self.assertEqual([b[0] for b in rest[:3]], [popup['speech'][k][0] for k in ('on', 'alerts', 'off')])
+        self.assertEqual(rest[3][0], on[0])                                         # the fourth starts a new row
+        self.assertGreater(rest[3][1], rest[0][3])
+        for upper, lower in zip(popup['voices'], popup['voices'][1:]):
+            self.assertTrue(lower[1] >= upper[3] or lower[0] >= upper[2])         # none overlaps the one before
+        self.assertFalse({'list', 'rows', 'item_h', 'pad'} & set(popup))
+        for line in (l for l in draw if l.startswith('item ')):
+            self.assertEqual(len(line.split(None, 5)), 6)                          # its box, then its label
+
+    def test_the_speech_buttons_sit_as_far_below_their_label_as_the_voice_buttons_below_theirs(self):
         draw, regions = self.render(VOICES)
         popup = regions['settings']
         line = draw[next(i for i, l in enumerate(draw) if l.startswith('settings '))].split()
         speech_cy, voice_cy = float(line[6]), float(line[7])
         label_h = speechqueue.line_height(speechqueue.TAG_FONT)
-        self.assertEqual(popup['speech']['on'][1] - (speech_cy + label_h / 2), speechqueue.SETTINGS_LABEL_GAP)
-        self.assertEqual(popup['list'][1] - (voice_cy + label_h / 2), 0)
+        self.assertEqual(round(popup['speech']['on'][1] - (speech_cy + label_h / 2), 2), speechqueue.SETTINGS_LABEL_GAP)
+        self.assertEqual(round(popup['voices'][0][1] - (voice_cy + label_h / 2), 2), speechqueue.SETTINGS_LABEL_GAP)
 
-    def test_a_long_list_shows_four_rows_and_a_short_one_only_its_voices(self):
-        many = [f'en_US-voice{i:02d}-medium' for i in range(40)]
-        draw, regions = self.render(many, voice=many[20])
-        popup = regions['settings']
-        self.assertEqual((popup['rows'], len(popup['names'])), (speechqueue.SETTINGS_ROWS, 41))
-        self.assertEqual(len([l for l in draw if l.startswith('item ')]), 41)
-        self.assertEqual(round(popup['list'][3] - popup['list'][1] - 2 * popup['pad'], 2),
-                         round(popup['rows'] * popup['item_h'], 2))
-        self.assertEqual(self.render(VOICES[:2])[1]['settings']['rows'], 3)      # the global one and two
+    def test_the_popup_has_a_row_for_the_global_voice_and_a_row_for_each_three_others(self):
+        for voices, rows in (([], 1), (VOICES[:1], 2), (VOICES[:3], 2), (VOICES[:4], 3), (VOICES, 4)):
+            with self.subTest(voices=len(voices)):
+                popup = self.render(voices)[1]['settings']
+                self.assertEqual(len({b[1] for b in popup['voices']}), rows)
 
-    def test_without_installed_voices_the_global_one_is_the_only_row(self):
+    def test_without_installed_voices_the_global_one_is_the_only_button(self):
         draw, regions = self.render([])
-        self.assertEqual((regions['settings']['names'], regions['settings']['rows']), ([''], 1))
-        self.assertEqual([l for l in draw if l.startswith('item ')], ['item 0 Default (jenny_dioco)'])
+        self.assertEqual((regions['settings']['names'], len(regions['settings']['voices'])), ([''], 1))
+        self.assertEqual([l.split(None, 5)[5] for l in draw if l.startswith('item ')], ['Default (jenny_dioco)'])
 
     def test_the_popup_grows_with_the_text(self):
         heights = {}
@@ -942,7 +957,6 @@ class SettingsPopup(Fixture):
                 _, regions = self.render(VOICES)
             box, popup = regions['settings']['box'], regions['settings']
             heights[scale] = (box[3] - box[1], popup['speech']['on'][3] - popup['speech']['on'][1])
-            self.assertGreaterEqual(popup['item_h'], speechqueue.line_height(speechqueue.FOOTER_FONT))
         self.assertGreater(heights[2.0][0], heights[1.0][0])
         self.assertGreater(heights[2.0][1], heights[1.0][1])
 

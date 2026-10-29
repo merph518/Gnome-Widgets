@@ -8,9 +8,8 @@
 --                 (down counts up); the bubble follows the clip again BUBBLE_HOLD seconds after the last
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 --   session-menu present while conky-mouse.py has a session's settings popup open: what is under
---                 the pointer, the voice list's scroll, the session's speech setting and its voice (an
---                 index into the list, 0 the global one), as "<hover> <scroll> <speech> <voice>", then
---                 the session's name
+--                 the pointer, the session's speech setting and its voice (an index into the
+--                 voices, 0 the global one), as "<hover> <speech> <voice>", then the session's name
 --   close-confirm present while conky-mouse.py has the close prompt open: the button under the
 --                 pointer (0 none, 1 OK, 2 Cancel) and whether the session is busy, then its name
 -- and, read only, the Spotify widget's bg.txt (or the file ~/.config/conky-widgets/speech/
@@ -57,15 +56,15 @@ end
 
 local function load_draw()
     -- {key = {numbers...}}, and each line's own text in d.text[key]; d.items is the voice
-    -- list's lines, each {current, label}
+    -- list's lines, each {box, label}
     local d = {text = {}, items = {}, lines = {}}
     for line in (read('draw.txt') or ''):gmatch('[^\n]+') do
         local key, rest = line:match('^(%S+)%s+(.*)$')
         if key == 'line' then
             d.lines[#d.lines + 1] = rest
         elseif key == 'item' then
-            local current, label = rest:match('^(%d)%s+(.*)$')
-            d.items[#d.items + 1] = {current = current == '1', label = label or ''}
+            local x0, y0, x1, y1, label = rest:match('^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(.*)$')
+            d.items[#d.items + 1] = {box = {tonumber(x0), tonumber(y0), tonumber(x1), tonumber(y1)}, label = label or ''}
         elseif key then
             local t = {}
             for v in rest:gmatch('%S+') do t[#t + 1] = tonumber(v) or v end
@@ -690,12 +689,11 @@ local function draw_volume(cr, v, s)
 end
 
 local function settings_state()
-    -- {hover, scroll, speech, voice, name} while a session's settings popup is open, else nil
+    -- {hover, speech, voice, name} while a session's settings popup is open, else nil
     local text = read('session-menu')
     if not text then return nil end
-    local hover, scroll, speech, voice, name = text:match('^%s*(%S+)%s+(-?%d+)%s+(%a+)%s+(-?%d+)\n?(.*)$')
-    return {hover = hover or 'none', scroll = tonumber(scroll) or 0, speech = speech or '',
-            voice = tonumber(voice) or 0, name = name or ''}
+    local hover, speech, voice, name = text:match('^%s*(%S+)%s+(%a+)%s+(-?%d+)\n?(.*)$')
+    return {hover = hover or 'none', speech = speech or '', voice = tonumber(voice) or 0, name = name or ''}
 end
 
 local function confirm_state()
@@ -751,9 +749,8 @@ end
 local function draw_settings(cr, c, items, state, s, text)
     -- a session's settings popup, over the dimmed card, in the close prompt's panel with a shadow: its name,
     -- the speech buttons On, Alerts and Off (the current one a pill of the foreground, as a
-    -- selected segment was), the voices as buttons of the same kind from state.scroll (the
-    -- session's own filled, the one under the pointer tinted, and a slim bar at the right when
-    -- there are more than fit) and Done at the lower right
+    -- selected segment was), a button of the same kind for every voice (the session's own
+    -- filled, the one under the pointer tinted) and Done at the lower right
     local x0, top, x1, bottom = c[1] * s, c[2] * s, c[3] * s, c[4] * s
     local title_cy, speech_cy, voice_cy, buttons_cy, button_h = c[5] * s, c[6] * s, c[7] * s, c[8] * s, c[9] * s
     local pad = 14 * s
@@ -791,29 +788,15 @@ local function draw_settings(cr, c, items, state, s, text)
         button(bx0, bx1, c[8] - c[9] / 2, c[8] + c[9] / 2, seg[2], state.speech == seg[1],
                state.hover == 'speech:' .. seg[1])
     end
-    local lx0, ltop, lx1, lbottom, item_h, rows, ipad, count = c[16] * s, c[17] * s, c[18] * s, c[19] * s,
-        c[20] * s, c[21], c[22] * s, c[23]
     font(cr, 11, text, s, true)
-    local bar = count > rows and 8 * s or 0       -- room for the scroll bar at the right
-    for i = 0, rows - 1 do
-        local item = items[state.scroll + i + 1]
-        if not item then break end
-        local y = ltop + ipad + i * item_h
-        local px0, px1 = lx0 + ipad, lx1 - ipad - bar
-        button(px0 / s, px1 / s, (y + 2 * s) / s, (y + item_h - 2 * s) / s, fit(cr, item.label, px1 - px0 - 16 * s),
-               state.scroll + i == state.voice, state.hover == 'item:' .. (state.scroll + i))
-    end
-    if count > rows then
-        local ty0, ty1 = ltop + ipad + 2 * s, lbottom - ipad - 2 * s
-        local len = (ty1 - ty0) * rows / count
-        local ty = ty0 + (ty1 - ty0 - len) * state.scroll / (count - rows)
-        set(cr, fg, 0.3)
-        rounded_line(cr, lx1 - 4 * s, ty0, lx1 - 4 * s, ty1, 3 * s)
-        set(cr, fg)
-        rounded_line(cr, lx1 - 4 * s, ty, lx1 - 4 * s, ty + len, 3 * s)
+    for i, item in ipairs(items) do
+        local b = item.box
+        local w = b[3] - b[1]
+        button(b[1], b[3], b[2], b[4], fit(cr, item.label, (w - 12) * s), i - 1 == state.voice,
+               state.hover == 'item:' .. (i - 1))
     end
     font(cr, 11, text, s, true)
-    button(c[24], c[26], c[25], c[27], 'Done', false, state.hover == 'done')
+    button(c[16], c[18], c[17], c[19], 'Done', false, state.hover == 'done')
 end
 
 function conky_draw_widget()

@@ -9,7 +9,7 @@ holds).
     and the voice it is read in, which is kept in <id>.voice beside the session's other speech
     files (a voice's name, absent for the global one). Each choice applies at once and the popup
     stays open; Done, a click outside it and Escape close it. While it is open this helper holds
-    the pointer and the keyboard, and the wheel or a swipe scrolls its voices
+    the pointer and the keyboard
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
     0) and the next restores the level from before
@@ -51,7 +51,7 @@ LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is s
 BUBBLE_SCROLL = os.path.join(CACHE, 'bubble-scroll')   # wheel steps over the speech bubble, in all, for draw.lua
 VOLUME_PREVIEW = os.path.join(CACHE, 'volume-preview')   # the level under the pointer, for draw.lua
 VOLUME_BEFORE_MUTE = os.path.join(CACHE, 'volume-before-mute')   # the level the speaker restores
-SESSION_MENU = os.path.join(CACHE, 'session-menu')   # "<under the pointer> <scroll> <speech> <voice>" and the session's name, while its settings are open
+SESSION_MENU = os.path.join(CACHE, 'session-menu')   # "<under the pointer> <speech> <voice>" and the session's name, while its settings are open
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')   # the speaking hook's state
 MENU_TIMEOUT = 20.0                            # s an open popup waits before it closes itself
 CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
@@ -272,10 +272,10 @@ def set_volume(d, win, regions, s, track):
             pass
 
 
-def settings_at(popup, x, y, scroll):
-    """What card-relative logical (x, y) is on in the settings popup `popup` (regions.json's),
-    its voices scrolled `scroll` down: ('speech', key) for a speech button, ('voice', index) for
-    a voice row, ('done',), ('panel',) for the rest of the panel, or None outside it."""
+def settings_at(popup, x, y):
+    """What card-relative logical (x, y) is on in the settings popup `popup` (regions.json's):
+    ('speech', key) for a speech button, ('voice', index) for a voice's button, ('done',),
+    ('panel',) for the rest of the panel, or None outside it."""
     if not inside(popup['box'], 1, x, y):
         return None
     for key, box in popup['speech'].items():
@@ -283,26 +283,19 @@ def settings_at(popup, x, y, scroll):
             return 'speech', key
     if inside(popup['done'], 1, x, y):
         return ('done',)
-    x0, top, x1, _ = popup['list']
-    top += popup['pad']
-    rows = min(popup['rows'], len(popup['names']) - scroll)
-    if x0 <= x <= x1 and top <= y < top + rows * popup['item_h']:
-        return 'voice', scroll + int((y - top) // popup['item_h'])
+    for i, box in enumerate(popup['voices']):
+        if inside(box, 1, x, y):
+            return 'voice', i
     return ('panel',)
 
 
-def settings_scroll(popup, scroll, rows):
-    """`scroll` moved `rows` voices down (up when negative), within the list."""
-    return min(max(scroll + rows, 0), max(len(popup['names']) - popup['rows'], 0))
-
-
-def write_settings(row, hover, scroll, speech, voice):
+def write_settings(row, hover, speech, voice):
     """What draw.lua draws the popup from: what is under the pointer ('none', 'speech:<key>',
-    'item:<index>' or 'done'), the voice list's scroll, the session's speech setting and its voice
-    (an index into the list), then its name."""
+    'item:<index>' or 'done'), the session's speech setting and its voice (an index into the
+    voices), then its name."""
     os.makedirs(CACHE, exist_ok=True)
     with open(SESSION_MENU + '.tmp', 'w') as f:
-        f.write(f"{hover} {scroll} {speech} {voice}\n{row.get('title', '')}")
+        f.write(f"{hover} {speech} {voice}\n{row.get('title', '')}")
     os.replace(SESSION_MENU + '.tmp', SESSION_MENU)
 
 
@@ -314,7 +307,7 @@ def hover_token(hit):
 def run_settings(popup, row, events, act, now=time.monotonic, sleep=time.sleep):
     """Shows the settings popup for session `row` until it is closed. `events()` gives the
     card-relative logical-px events that arrived since it was last called: ('move', x, y),
-    ('press', x, y), ('wheel', down), ('scroll', rows) and ('escape',). A press on a speech
+    ('press', x, y) and ('escape',). A press on a speech
     button or a voice calls act('speech', key) or act('voice', name) at once and the popup stays
     open; Done, a press outside it, Escape and MENU_TIMEOUT without an event close it. Presses
     in the first CONFIRM_ARMED seconds are ignored, so the second click of a double click on the
@@ -322,7 +315,6 @@ def run_settings(popup, row, events, act, now=time.monotonic, sleep=time.sleep):
     names = popup['names']
     speech = row.get('speech', '')
     voice = names.index(row.get('voice') or '') if (row.get('voice') or '') in names else -1
-    scroll = settings_scroll(popup, 0, voice - popup['rows'] // 2 if voice >= popup['rows'] else 0)
     opened = now()
     deadline = opened + MENU_TIMEOUT
     pointer, shown = None, None
@@ -332,12 +324,8 @@ def run_settings(popup, row, events, act, now=time.monotonic, sleep=time.sleep):
                 deadline = now() + MENU_TIMEOUT
                 if kind == 'move':
                     pointer = args
-                elif kind == 'wheel':
-                    scroll = settings_scroll(popup, scroll, 1 if args[0] else -1)
-                elif kind == 'scroll':
-                    scroll = settings_scroll(popup, scroll, args[0])
                 elif kind == 'press' and now() - opened >= CONFIRM_ARMED:
-                    hit = settings_at(popup, *args, scroll)
+                    hit = settings_at(popup, *args)
                     if hit is None or hit[0] == 'done':
                         return
                     if hit[0] == 'speech':
@@ -348,9 +336,9 @@ def run_settings(popup, row, events, act, now=time.monotonic, sleep=time.sleep):
                         act('voice', names[voice])
                 elif kind == 'escape':
                     return
-            hover = hover_token(settings_at(popup, *pointer, scroll) if pointer else None)
-            if (hover, scroll, speech, voice) != shown:
-                shown = hover, scroll, speech, voice
+            hover = hover_token(settings_at(popup, *pointer) if pointer else None)
+            if (hover, speech, voice) != shown:
+                shown = hover, speech, voice
                 write_settings(row, *shown)
             sleep(0.02)
     finally:
@@ -389,14 +377,13 @@ def ungrab(d):
     core.x11.XFlush(d)
 
 
-def x_events(d, win, s, opcode, item_h):
+def x_events(d, win, s, opcode):
     """run_settings's and run_confirm's events() reading X's queue. A finger that touches down
     is followed from one call to the next: where it lifts after a tap is a press, and a swipe
-    scrolls the list a voice for each `item_h` (logical px) it moves."""
+    is not one."""
     x11, ev = core.x11, core.XEvent()
     escape = x11.XKeysymToKeycode(d, ESCAPE)
-    step = item_h * s
-    touch = {}                                   # the finger being followed: it, where it began, rows scrolled
+    touch = {}                                   # the finger being followed: it, where it began, where it tapped
 
     def card(x, y):
         return (x - core.SHADOW * s) / s, (y - core.SHADOW * s) / s
@@ -407,11 +394,6 @@ def x_events(d, win, s, opcode, item_h):
         sx, sy = touch['start']
         if not touch['swiped'] and max(abs(fx - sx), abs(fy - sy)) > core.TAP_SLOP * s:
             touch['swiped'] = True
-        if touch['swiped']:
-            rows = int(-(fy - sy) / step)
-            if rows != touch['rows']:
-                out.append(('scroll', rows - touch['rows']))
-                touch['rows'] = rows
         if not down:
             if not touch['swiped']:
                 out.append(('press', *touch['at']))
@@ -425,8 +407,6 @@ def x_events(d, win, s, opcode, item_h):
             b = ev.xbutton
             if ev.type == core.MOTION_NOTIFY:
                 out.append(('move', *card(b.x, b.y)))
-            elif ev.type == core.BUTTON_PRESS and b.button in (core.WHEEL_UP, core.WHEEL_DOWN):
-                out.append(('wheel', b.button == core.WHEEL_DOWN))
             elif ev.type == core.BUTTON_PRESS and b.button == 1:
                 out.append(('press', *card(b.x, b.y)))
             elif ev.type == KEY_PRESS and b.button == escape:   # an XKeyEvent's keycode sits where a button's does
@@ -436,7 +416,7 @@ def x_events(d, win, s, opcode, item_h):
                 if t and t[0] == core.XI_TOUCH_BEGIN and t[2] == win:
                     start = round(t[3]), round(t[4])
                     touch.update(finger=core.Touch(d, opcode, t[1], *start), start=start,
-                                 at=card(t[5], t[6]), swiped=False, rows=0)
+                                 at=card(t[5], t[6]), swiped=False)
         return out
     return events
 
@@ -479,7 +459,7 @@ def open_settings(d, win, s, regions, row):
     core.log(f'settings for {row["id"]}: pointer {"held" if pointer else "not held"}, '
              f'keyboard {"held" if keyboard else "not held"}')
     try:
-        run_settings(popup, row, x_events(d, win, s, core.touch_opcode(d), popup['item_h']),
+        run_settings(popup, row, x_events(d, win, s, core.touch_opcode(d)),
                      lambda kind, value: apply_setting(row, kind, value))
     finally:
         ungrab(d)
@@ -577,8 +557,7 @@ def close_session(d, win, s, regions, row):
     core.log(f'close prompt for {row["id"]}: pointer {"held" if pointer else "not held"}, '
              f'keyboard {"held" if keyboard else "not held"}')
     try:
-        ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d),
-                                               prompt['ok'][3] - prompt['ok'][1]))
+        ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d)))
     finally:
         ungrab(d)
     core.log('close prompt: ' + ('OK' if ok else 'not confirmed'))

@@ -89,14 +89,13 @@ WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle, and skip and next after it
 FOOTER_BUTTON_GAP = 8                         # between the footer's round buttons
-MENU_PAD = 4                                  # round the settings popup's voice rows
 CONFIRM_W = 320                               # the close prompt's width, at most
 CONFIRM_PAD = 14                              # round its contents
 CONFIRM_GAP = 8                               # between its lines, and its two buttons
 CONFIRM_BUTTON_PAD = 14                       # either side of a button's label
-SETTINGS_W = 300                              # the settings popup's width, at most
+SETTINGS_W = 400                              # the settings popup's width, at most, at text scale 1: three voice names across
 SETTINGS_LABEL_GAP = 6                        # under its Speech label, so the buttons sit as far from it as the first voice
-SETTINGS_ROWS = 4                             # voices it shows at once, the rest scrolled
+SETTINGS_COLUMNS = 3                          # buttons to a row in it, as many as it has speech settings
 GEAR_SIZE = 14                                # a row's gear icon, right of the row
 GEAR_PAD = 8                                  # click room round the icon, and its gap to the row's text
 DEFAULT_VOICE_LABEL = 'Default'               # the popup's first voice: the global one, as the tray sets it
@@ -1036,49 +1035,58 @@ def close_prompt(right, list_top, list_height):
 def settings_popup(names, current, right, list_top, list_height):
     """(draw.txt's lines, regions.json's entry) for the settings popup a click on a row's gear
     opens: a panel over the list, as the close prompt is, with the session's name, the three
-    speech buttons, the voices (`names`, the first '' for the global voice, which is `current`)
-    as rows and Done at its right. conky-mouse.py's session-menu file says which session it is
-    for and what is chosen; draw.lua draws it only while that exists."""
-    title_h, label_h, item_h = line_height(LABEL_FONT), line_height(TAG_FONT), line_height(FOOTER_FONT) + 8 * text_scale
+    speech buttons, a button for every voice (`names`, the first '' for the global voice, which
+    is `current`: its own row, then the rest SETTINGS_COLUMNS to a row) and Done at its right.
+    conky-mouse.py's session-menu file says which session it is for and what is chosen;
+    draw.lua draws it only while that exists."""
+    title_h, label_h = line_height(LABEL_FONT), line_height(TAG_FONT)
     button_h = title_h + 8 * text_scale
-    rows = min(SETTINGS_ROWS, len(names))
-    list_h = rows * item_h + 2 * MENU_PAD
-    height = (2 * CONFIRM_PAD + title_h + 3 * CONFIRM_GAP + 2 * label_h + SETTINGS_LABEL_GAP + 2 * button_h
-              + list_h + CONFIRM_GAP)
-    width = min(right - MARGIN, SETTINGS_W)
+    voice_rows = 1 + -(-(len(names) - 1) // SETTINGS_COLUMNS)
+    grid_h = voice_rows * button_h + (voice_rows - 1) * CONFIRM_GAP
+    height = (2 * CONFIRM_PAD + title_h + 3 * CONFIRM_GAP + 2 * (label_h + SETTINGS_LABEL_GAP) + 2 * button_h
+              + grid_h)
+    width = min(right - MARGIN, SETTINGS_W * text_scale)
     x0 = (MARGIN + right - width) / 2
     x1 = x0 + width
     top = max(MARGIN, list_top + list_height / 2 - height / 2)
     inner0, inner1 = x0 + CONFIRM_PAD, x1 - CONFIRM_PAD
+    column_w = (inner1 - inner0 - (SETTINGS_COLUMNS - 1) * CONFIRM_GAP) / SETTINGS_COLUMNS
+
+    def row_of(y, count=SETTINGS_COLUMNS, first=0, span=1):
+        """The boxes of `count` buttons on the row from y, from column `first`, each `span` wide."""
+        w = span * column_w + (span - 1) * CONFIRM_GAP
+        return [[inner0 + (first + i * span) * (column_w + CONFIRM_GAP), y,
+                 inner0 + (first + i * span) * (column_w + CONFIRM_GAP) + w, y + button_h] for i in range(count)]
+
     y = top + CONFIRM_PAD
     title_cy = y + title_h / 2
     y += title_h + CONFIRM_GAP
     speech_cy = y + label_h / 2
     y += label_h + SETTINGS_LABEL_GAP
     buttons_cy = y + button_h / 2
-    bw = (inner1 - inner0 - 2 * CONFIRM_GAP) / 3
-    buttons = {key: [inner0 + i * (bw + CONFIRM_GAP), buttons_cy - button_h / 2,
-                     inner0 + i * (bw + CONFIRM_GAP) + bw, buttons_cy + button_h / 2]
-               for i, (key, _) in enumerate(SEGMENTS)}
+    buttons = dict(zip((key for key, _ in SEGMENTS), row_of(y)))
     y += button_h + CONFIRM_GAP
     voice_cy = y + label_h / 2
-    y += label_h
-    list_box = [inner0, y, inner1, y + list_h]
-    y += list_h + CONFIRM_GAP
+    y += label_h + SETTINGS_LABEL_GAP
+    boxes = row_of(y, 1, span=SETTINGS_COLUMNS)                    # the global voice, across the panel
+    rest = len(names) - 1
+    for i in range(rest):
+        if i % SETTINGS_COLUMNS == 0:
+            y += button_h + CONFIRM_GAP
+        boxes.append(row_of(y)[i % SETTINGS_COLUMNS])
+    y += button_h + CONFIRM_GAP
     done_x0 = inner1 - text_width('Done', LABEL_FONT) - 2 * CONFIRM_BUTTON_PAD
     done = [done_x0, y, inner1, y + button_h]
     bottom = y + button_h + CONFIRM_PAD
     flat = [v for key, _ in SEGMENTS for v in (buttons[key][0], buttons[key][2])]
     lines = [f'settings {x0:.2f} {top:.2f} {x1:.2f} {bottom:.2f} {title_cy:.2f} {speech_cy:.2f} {voice_cy:.2f} '
              f'{buttons_cy:.2f} {button_h:.2f} ' + ' '.join(f'{v:.2f}' for v in flat) +
-             f' {list_box[0]:.2f} {list_box[1]:.2f} {list_box[2]:.2f} {list_box[3]:.2f} {item_h:.2f} {rows} '
-             f'{MENU_PAD} {len(names)} {done[0]:.2f} {done[1]:.2f} {done[2]:.2f} {done[3]:.2f}']
-    lines.append(f'item 0 {DEFAULT_VOICE_LABEL} ({voice_label(current)})')
-    lines += [f'item 0 {voice_label(n)}' for n in names[1:]]
+             f' {done[0]:.2f} {done[1]:.2f} {done[2]:.2f} {done[3]:.2f}']
+    labels = [f'{DEFAULT_VOICE_LABEL} ({voice_label(current)})'] + [voice_label(n) for n in names[1:]]
+    lines += [f'item {b[0]:.2f} {b[1]:.2f} {b[2]:.2f} {b[3]:.2f} {label}' for b, label in zip(boxes, labels)]
     r = lambda box: [round(v, 2) for v in box]
     entry = {'box': r([x0, top, x1, bottom]), 'speech': {key: r(box) for key, box in buttons.items()},
-             'list': r(list_box), 'item_h': round(item_h, 2), 'rows': rows, 'pad': MENU_PAD,
-             'names': names, 'done': r(done)}
+             'voices': [r(b) for b in boxes], 'names': names, 'done': r(done)}
     return lines, entry
 
 
