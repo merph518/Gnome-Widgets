@@ -1,5 +1,5 @@
 Source: conky-spotify-nowplaying
-Section: sound
+Section: x11
 Priority: optional
 Maintainer: mfagerstrom <48690419+mfagerstrom@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)

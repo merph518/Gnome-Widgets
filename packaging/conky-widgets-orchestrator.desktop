@@ -4,10 +4,10 @@ Name=Claude Code Orchestrator
 GenericName=Claude Code Orchestrator Widget
 Comment=The managed Claude sessions and what they have replied
 Exec=conky-widgets orchestrator
-Icon=audio-volume-high
+Icon=utilities-terminal
 Terminal=false
 StartupNotify=false
-Categories=AudioVideo;Audio;
+Categories=Utility;
 Keywords=orchestrator;claude;sessions;conky;widget;
 Actions=autostart-on;autostart-off;
 
