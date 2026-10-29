@@ -16,10 +16,8 @@ holds).
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
     0) and the next restores the level from before
-  - an issue number under a session's repository name: a click or tap opens that issue in a
-    new Chrome tab
-  - the pill after a session's name: a click or tap opens, in new Chrome tabs, its pull
-    requests still open with the ready label
+  - an issue or pull request number in a message's header in the terminal: a click or tap
+    opens it in a new Chrome tab
   - a session's name: a click or tap asks "Are you sure?" over the list, and OK ends the
     session (SIGTERM to its process). While the prompt is open this helper holds the pointer
     and the keyboard, so a click anywhere but on OK, Cancel and Escape close it without
