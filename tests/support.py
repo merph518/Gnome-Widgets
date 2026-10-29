@@ -21,7 +21,7 @@ from unittest import mock
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
 sys.path.insert(0, os.path.join(SRC, 'common'))
 sys.path.insert(0, os.path.join(SRC, 'spotify'))
-sys.path.insert(0, os.path.join(SRC, 'speech'))
+sys.path.insert(0, os.path.join(SRC, 'orchestrator'))
 
 HOME = tempfile.mkdtemp(prefix='conky-spotify-nowplaying-test-home-')
 atexit.register(shutil.rmtree, HOME, ignore_errors=True)
@@ -37,17 +37,17 @@ def load_nowplaying():
     return sys.modules['nowplaying']
 
 
-def load_speechqueue():
-    """speechqueue runs `xrdb -query` at import, like nowplaying: answered with nothing."""
-    if 'speechqueue' not in sys.modules:
+def load_orchestrator():
+    """orchestrator runs `xrdb -query` at import, like nowplaying: answered with nothing."""
+    if 'orchestrator' not in sys.modules:
         with mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='')):
-            import speechqueue  # noqa: F401
-    return sys.modules['speechqueue']
+            import orchestrator  # noqa: F401
+    return sys.modules['orchestrator']
 
 
-class SpeechFixture:
+class OrchestratorFixture:
     """A speaking hook's state folder, Claude's sessions folder and a /proc, under `root`,
-    for speechqueue and the speech widget's mouse helper to read. Sessions are added with
+    for orchestrator and the orchestrator widget's mouse helper to read. Sessions are added with
     session(), managed unless managed=False, their replies with feed() and the hook's other files
     with file(); every pid added is alive unless stale=True."""
 
@@ -143,18 +143,18 @@ def load_spotify_mouse():
     return load_conky_mouse().hooks
 
 
-def load_speech_mouse():
-    """The speech widget's part of the mouse helper, loaded as conky-mouse.py loads it, with
+def load_orchestrator_mouse():
+    """The orchestrator widget's part of the mouse helper, loaded as conky-mouse.py loads it, with
     conky-mouse.py (set up for the Spotify widget) as its core."""
-    if 'speech_mouse' not in sys.modules:
+    if 'orchestrator_mouse' not in sys.modules:
         core = load_conky_mouse()
-        sys.path.insert(0, os.path.join(SRC, 'speech'))
-        spec = importlib.util.spec_from_file_location('speech_mouse', os.path.join(SRC, 'speech', 'mouse.py'))
+        sys.path.insert(0, os.path.join(SRC, 'orchestrator'))
+        spec = importlib.util.spec_from_file_location('orchestrator_mouse', os.path.join(SRC, 'orchestrator', 'mouse.py'))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.core = core
-        sys.modules['speech_mouse'] = module
-    return sys.modules['speech_mouse']
+        sys.modules['orchestrator_mouse'] = module
+    return sys.modules['orchestrator_mouse']
 
 
 class TempDirTest(unittest.TestCase):
@@ -171,6 +171,12 @@ class TempDirTest(unittest.TestCase):
             patcher = mock.patch.object(module, name, os.path.join(self.dir, filename))
             patcher.start()
             self.addCleanup(patcher.stop)
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        f.write(text)
 
 
 def read(path):

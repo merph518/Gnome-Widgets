@@ -14,9 +14,9 @@ import os
 
 PATH = os.path.expanduser('~/.config/conky-spotify-nowplaying/size')
 DEFAULTS = (505, 63, 1.0)                  # 63: three lines of lyrics at text scale 1
-# The speech widget's: its second number is the height of its sessions list, not of lyrics.
-SPEECH_PATH = os.path.expanduser('~/.config/conky-widgets/speech/size')
-SPEECH_DEFAULTS = (660, 128, 1.0)          # 128: five sessions at text scale 1
+# The orchestrator widget's: its second number is the height of its sessions list, not of lyrics.
+ORCHESTRATOR_PATH = os.path.expanduser('~/.config/conky-widgets/orchestrator/size')
+ORCHESTRATOR_DEFAULTS = (660, 128, 1.0)    # 128: five sessions at text scale 1
 # The width and height go as far as the monitor allows, which conky-mouse.py works out
 # while dragging; their upper limits here only catch a hand-edited file.
 LIMITS = ((400, 9999), (16, 99999), (0.7, 2.0))
@@ -32,7 +32,7 @@ def clamp(v, low, high):
 
 def defaults_for(path):
     """The defaults of the widget whose size file `path` is."""
-    return SPEECH_DEFAULTS if path and os.path.abspath(path) == SPEECH_PATH else DEFAULTS
+    return ORCHESTRATOR_DEFAULTS if path and os.path.abspath(path) == ORCHESTRATOR_PATH else DEFAULTS
 
 
 def load(path=None, defaults=None):

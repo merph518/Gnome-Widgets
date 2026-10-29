@@ -179,7 +179,7 @@ fixed", is replaced by this:
 A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
 [static-checks.md](../_shared/static-checks.md#then-a-run), as an isolated copy of
 the widgets that belongs to this session, started from the checkout. The copy has its
-own home, so its cache, config, pid file and window position are its own; its speech
+own home, so its cache, config, pid file and window position are its own; its orchestrator
 widget reads fixture Claude sessions and plays no sound; it has no tray icon, no
 Spotify login and so sends no Web API request; and its windows have a class and a
 position of their own, on the built-in display, so a copy never covers the monitor
@@ -194,14 +194,14 @@ worktree has one.
 ```bash
 scripts/isolated-widgets.py start          # both widgets, from this checkout's src/
 scripts/isolated-widgets.py status
-scripts/isolated-widgets.py capture <scratchpad>/widget-after.png spotify   # or speech
+scripts/isolated-widgets.py capture <scratchpad>/widget-after.png spotify   # or orchestrator
 RUN=$(scripts/isolated-widgets.py path)/home/.cache
 grep -iE 'error|critical|traceback|lua' "$RUN/conky-widgets/run.log"
 grep 'api:' "$RUN/conky-spotify-nowplaying/nowplaying.log"      # must print nothing
 scripts/isolated-widgets.py stop           # removes the copy and its files
 ```
 
-`start` takes `spotify` or `speech` to start one widget, `--at X,Y` for the position and
+`start` takes `spotify` or `orchestrator` to start one widget, `--at X,Y` for the position and
 `--installed` to run the installed launcher instead of the checkout's (refused while the
 installed widgets predate the window class suffix), which is how a change to how the program
 finds its files is checked installed, as in `/release` step 4, without touching the user's copy. A visual change takes its before capture from an isolated copy of
@@ -209,7 +209,7 @@ finds its files is checked installed, as in `/release` step 4, without touching 
 `--name`), not from the copy on the desk, and its after capture from this session's copy, read with
 the `Read` tool side by side.
 
-The log should hold nothing but conky's startup chatter. The speech widget shows three
+The log should hold nothing but conky's startup chatter. The orchestrator widget shows three
 fixture sessions (On, Alerts, Off); the Spotify widget shows whatever the Spotify app plays
 now, read through `playerctl`, without a heart (no login). When nothing is playing, say so
 and say what could not be looked at. Stop the copy when the run is done, and say in the

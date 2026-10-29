@@ -1,5 +1,5 @@
-"""The speech widget's part of the mouse helper, loaded by conky-mouse.py when it is started
-as `conky-mouse.py speech`: its name, window class and what a click, tap, drag or wheel step
+"""The orchestrator widget's part of the mouse helper, loaded by conky-mouse.py when it is started
+as `conky-mouse.py orchestrator`: its name, window class and what a click, tap, drag or wheel step
 does.
 
   - an issue or pull request number in a message's header in the terminal: a click or tap
@@ -16,9 +16,9 @@ conky-mouse.py gives this module itself as `core`, for the window handling it sh
 """
 import ctypes, json, os, signal, subprocess, threading, time
 
-NAME = 'conky-widgets/speech'                  # the config and cache folders under ~/.config, ~/.cache
+NAME = 'conky-widgets/orchestrator'            # the config and cache folders under ~/.config, ~/.cache
 # conky.conf's own_window_class, with the suffix a copy beside the user's adds
-WM_CLASS = 'ConkySpeechQueue' + os.environ.get('CSN_CLASS_SUFFIX', '')
+WM_CLASS = 'ConkyOrchestrator' + os.environ.get('CSN_CLASS_SUFFIX', '')
 OUTLINE = 0x5e9cf0                             # the outline a resize shows
 BUTTONS = ()                                   # the controls a click or tap presses: this widget has none of its own
 REGIONS_ORDER = ('minimize', 'close', 'divider')   # the regions a press looks through, in order
@@ -28,7 +28,7 @@ OPEN_AGAIN = 3.0                               # s before a session's box or nam
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 LIST_SCROLL = os.path.join(CACHE, 'list-scroll')   # how many rows the list is scrolled, for draw.lua
 TERMINAL_SCROLL = os.path.join(CACHE, 'terminal-scroll')   # wheel steps over the terminal pane, in all, for draw.lua
-SPLIT = os.path.expanduser(f'~/.config/{NAME}/split')   # the sessions column's share of the width, which speechqueue.py lays the columns out by
+SPLIT = os.path.expanduser(f'~/.config/{NAME}/split')   # the sessions column's share of the width, which orchestrator.py lays the columns out by
 DIVIDER_DRAG = os.path.join(CACHE, 'divider-drag')   # exists while the divider is held, so draw.lua brightens it
 MENU_TIMEOUT = 20.0                            # s an open popup waits before it closes itself
 CLOSE_CONFIRM = os.path.join(CACHE, 'close-confirm')   # "<button under the pointer> <busy>" and the session's name, while the prompt is open
@@ -157,7 +157,7 @@ def open_once(row, kind, now=time.monotonic):
 def move_divider(d, win, regions, s, track):
     """Follow `track` (follow_pointer() or a Touch) while the divider is held, writing the
     share of the width the sessions column takes with the pointer at the middle of the gap,
-    within the limits speechqueue.py gave in regions.json's `divider_drag`; it lays the columns
+    within the limits orchestrator.py gave in regions.json's `divider_drag`; it lays the columns
     out again within a tenth of a second."""
     left, avail, gap, low, high = regions['divider_drag']
     wx, _, _, _ = core.card_of(core.geometry(d, win), s)

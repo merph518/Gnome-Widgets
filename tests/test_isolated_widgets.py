@@ -1,5 +1,5 @@
 """Tests for scripts/isolated-widgets.py: that a copy's files and fixtures stay inside its own
-folder and read as the speech widget reads the real ones, without a display."""
+folder and read as the orchestrator widget reads the real ones, without a display."""
 import importlib.machinery
 import importlib.util
 import os
@@ -72,15 +72,15 @@ class IsolatedTest(support.TempDirTest):
         mon = iso.monitor_of(' 0: +*HDMI-1 5120/700x2880/390+5120+0  HDMI-1\n'
                              ' 1: +eDP-1 3072/290x1920/180+10240+0  eDP-1\n')
         for slot in range(4):
-            for widget in ('spotify', 'speech'):
+            for widget in ('spotify', 'orchestrator'):
                 x, y = iso.position_for(slot, mon, widget)
                 self.assertTrue(mon[0] <= x < mon[0] + mon[2] and mon[1] <= y < mon[1] + mon[3], (slot, widget))
 
-    def test_each_slot_is_further_left_and_the_speech_widget_sits_below_spotify(self):
+    def test_each_slot_is_further_left_and_the_orchestrator_widget_sits_below_spotify(self):
         mon = (0, 0, 3000, 2000)
         s0, s1 = iso.position_for(0, mon, 'spotify'), iso.position_for(1, mon, 'spotify')
         self.assertEqual((s0[0] - s1[0], s1[1] - s0[1]), (iso.SLOT, iso.SLOT))
-        self.assertEqual(iso.position_for(0, mon, 'speech')[1] - s0[1], iso.SPEECH_BELOW)
+        self.assertEqual(iso.position_for(0, mon, 'orchestrator')[1] - s0[1], iso.ORCHESTRATOR_BELOW)
         self.assertEqual(iso.position_for(5, mon, 'spotify', at=(7, 8)), (7, 8))
 
     def test_a_copy_takes_the_first_slot_no_other_copy_holds(self):
@@ -91,9 +91,9 @@ class IsolatedTest(support.TempDirTest):
         self.assertEqual(iso.taken_slots(base, 'c'), {0, 2})
 
     def test_the_fixture_feeds_show_a_recent_reply_an_older_one_and_none(self):
-        speechqueue = support.load_speechqueue()
+        orchestrator = support.load_orchestrator()
         iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
-        state = speechqueue.read_state(self.copy.speak, self.copy.sessions, now=time.time())
+        state = orchestrator.read_state(self.copy.speak, self.copy.sessions, now=time.time())
         rows = {s['name']: s for s in state['sessions']}
         self.assertEqual(sorted(rows), ['Feed widget', 'Retry fix', 'Waiting on tests'])
         self.assertEqual(rows['Feed widget']['age'], '1m')
@@ -106,7 +106,7 @@ class IsolatedTest(support.TempDirTest):
         iso.write_fixtures(self.copy, [os.getpid(), os.getppid(), 1, 2])
         sessions = iso.fixture_sessions(self.copy, [1, 2, 3, 4])
         self.assertEqual([x[-1] for x in sessions], [True, True, True, False])
-        state = support.load_speechqueue().read_state(self.copy.speak, self.copy.sessions)
+        state = support.load_orchestrator().read_state(self.copy.speak, self.copy.sessions)
         self.assertNotIn('Not managed', [s['name'] for s in state['sessions']])
         self.assertTrue(os.path.exists(os.path.join(self.copy.speak, sessions[0][1] + '.managed')))
         self.assertFalse(os.path.exists(os.path.join(self.copy.speak, sessions[3][1] + '.managed')))
@@ -155,7 +155,7 @@ class IsolatedTest(support.TempDirTest):
                 f'     0x2800002 "conky": ("ConkySpotifyNowPlaying{self.copy.suffix}" "x")  1x1+0+0  +0+0\n')
         with mock.patch.object(iso.subprocess, 'run', return_value=mock.Mock(stdout=tree)):
             self.assertEqual(iso.window_of(self.copy, 'spotify'), 0x2800002)
-            self.assertIsNone(iso.window_of(self.copy, 'speech'))
+            self.assertIsNone(iso.window_of(self.copy, 'orchestrator'))
 
     def test_the_installed_widgets_are_refused_until_they_give_a_copy_its_own_class(self):
         iso.write(os.path.join(self.dir, 'old', 'spotify', 'conky.conf'), "own_window_class = 'X'\n")

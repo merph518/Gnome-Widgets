@@ -17,7 +17,7 @@ python3 -m py_compile src/*.py src/*/*.py bin/conky-widgets scripts/*.py
 python3 scripts/catchup_test.py
 python3 -m unittest discover -s tests
 luac5.3 -p src/common/theme.lua src/spotify/draw.lua src/spotify/conky.conf \
-  src/speech/draw.lua src/speech/conky.conf
+  src/orchestrator/draw.lua src/orchestrator/conky.conf
 sh -n build-deb.sh release-ppa.sh debian/postinst
 desktop-file-validate packaging/*.desktop
 test "$(git write-tree --prefix=.claude/att-docs/)" = "$(sed -n 's/^tree=//p' .claude/att-docs.lock)" \
@@ -86,7 +86,7 @@ grep 'api:' "$RUN/conky-spotify-nowplaying/nowplaying.log"    # must print nothi
 scripts/isolated-widgets.py stop
 ```
 
-The copy has its own home, fixture speech sessions and no sound, no tray icon, no
+The copy has its own home, fixture Claude sessions and no sound, no tray icon, no
 Spotify login and window class and position of its own. A session never stops,
 replaces, restarts or captures a copy it did not start: the user's, installed or
 from a checkout, or another session's. `critical` is there for GLib's

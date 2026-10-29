@@ -1,20 +1,20 @@
 [Desktop Entry]
 Type=Application
-Name=Speech
-GenericName=Speech Widget
+Name=Claude Code Orchestrator
+GenericName=Claude Code Orchestrator Widget
 Comment=The managed Claude sessions and what they have replied
-Exec=conky-widgets speech
+Exec=conky-widgets orchestrator
 Icon=audio-volume-high
 Terminal=false
 StartupNotify=false
 Categories=AudioVideo;Audio;
-Keywords=speech;conky;widget;
+Keywords=orchestrator;claude;sessions;conky;widget;
 Actions=autostart-on;autostart-off;
 
 [Desktop Action autostart-on]
 Name=Start at login
-Exec=conky-widgets speech autostart on
+Exec=conky-widgets orchestrator autostart on
 
 [Desktop Action autostart-off]
 Name=Don't start at login
-Exec=conky-widgets speech autostart off
+Exec=conky-widgets orchestrator autostart off

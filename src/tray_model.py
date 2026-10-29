@@ -1,5 +1,5 @@
 """What the tray menu reads and writes, apart from GTK: whether each widget shows, its always
-on top and text size settings, and whether the speech widget collapses when idle.
+on top and text size settings, and whether the orchestrator widget collapses when idle.
 
 Each widget is shown or hidden by its own flag file, hidden in its cache folder, which the
 tray's Show ticks, the widget's own – and × buttons (conky-mouse.py) and the launcher's
@@ -13,8 +13,8 @@ import os, subprocess
 WIDGETS = {
     'spotify': dict(show='Spotify', conf='~/.config/conky-spotify-nowplaying',
                     cache='~/.cache/conky-spotify-nowplaying', autostart='conky-spotify-nowplaying.desktop'),
-    'speech': dict(show='speech', conf='~/.config/conky-widgets/speech',
-                   cache='~/.cache/conky-widgets/speech', autostart='conky-widgets-speech.desktop'),
+    'orchestrator': dict(show='Claude Code Orchestrator', conf='~/.config/conky-widgets/orchestrator',
+                         cache='~/.cache/conky-widgets/orchestrator', autostart='conky-widgets-orchestrator.desktop'),
 }
 LAUNCHER = os.environ.get('CSN_LAUNCHER') or 'conky-widgets'
 UP = os.path.expanduser('~/.cache/conky-widgets/up')     # a file per widget the supervisor runs
@@ -91,7 +91,7 @@ def set_on_top(widget, on):
 
 
 def collapse_file():
-    return os.path.join(conf_dir('speech'), 'collapse-idle')   # 'on': one line while idle
+    return os.path.join(conf_dir('orchestrator'), 'collapse-idle')   # 'on': one line while idle
 
 
 def collapse_idle():

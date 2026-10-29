@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the speech widget's contents: the managed Claude sessions, and what they have replied.
+"""Builds the Claude Code Orchestrator widget's contents: the managed Claude sessions, and what they have replied.
 
 Four times a second this reads, and only reads:
   - the open Claude sessions, from ~/.claude/sessions/<pid>.json (sessions.py), the
@@ -10,7 +10,7 @@ Four times a second this reads, and only reads:
     JSON object a line (session, name, text, markdown, at), written whatever the session's
     speech setting. The .key files beside the session files are never opened.
 
-and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
+and writes, under ~/.cache/conky-widgets/orchestrator/, the files the Spotify widget's
 nowplaying.py writes for its own card:
   - widget.txt   conky's markup: the spacer lines that give conky's window its size
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
@@ -33,16 +33,16 @@ sys.path.insert(0, os.path.join(HERE, '..', 'common'))
 import sessions as sessions_mod  # noqa: E402
 import widget_size as size_file  # noqa: E402
 
-NAME = 'conky-widgets/speech'
+NAME = 'conky-widgets/orchestrator'
 CONF = os.path.expanduser(f'~/.config/{NAME}')
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
 OUT = os.path.join(CACHE, 'widget.txt')
 DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
-LOG = os.path.join(CACHE, 'speechqueue.log')
-INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
-SIZE = size_file.SPEECH_PATH
+LOG = os.path.join(CACHE, 'orchestrator.log')
+INSTANCE_LOCK = os.path.join(CACHE, 'orchestrator.lock')
+SIZE = size_file.ORCHESTRATOR_PATH
 SPLIT = os.path.join(CONF, 'split')               # the sessions column's share of the width, 0 to 1; dragged by the divider
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
@@ -70,7 +70,7 @@ META_MARK = '\x06'                            # in a prompt line, before the spe
 DONE_MARK = '\x05'                            # opens a message's closing line, which draw.lua draws dim behind the CLI's spinner glyph
 TERM_BANNER_LINES = 3                         # the pane's welcome banner: the creature's rows, beside its title and a dim line
 TERM_INDENT = '  '                            # every line's room at the left, where the first line's bullet is drawn
-TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
+TITLE = 'Claude Code Orchestrator'            # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
 TITLE_GAP = 8                                 # the title's end to the minimize button
 HEADER_GAP = 6                                # the title to the card's end when collapsed
@@ -112,7 +112,7 @@ STYLE_MARK = '\x1f'                           # in a draw.txt line, before each 
 _pango = PangoCairo.FontMap.get_default().create_context()
 PangoCairo.context_set_resolution(_pango, 96)
 
-widget_width, list_height, text_scale = size_file.SPEECH_DEFAULTS
+widget_width, list_height, text_scale = size_file.ORCHESTRATOR_DEFAULTS
 
 
 def log(msg):

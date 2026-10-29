@@ -3,7 +3,7 @@
 A bundle of desktop widgets for Linux (GNOME on Wayland), built on Conky. Each widget is a
 card of its own that you can drag, resize and minimize, on any monitor.
 
-There are two: a Spotify "now playing" widget, and a speech widget that lists the managed
+There are two: a Spotify "now playing" widget, and a Claude Code Orchestrator widget that lists the managed
 Claude Code sessions and shows what they have replied. One package, `conky-widgets`, ships both, and one
 top-bar icon serves them.
 
@@ -56,13 +56,13 @@ top-bar icon serves them.
 - One top-bar icon for both widgets with the current track, a Show
   toggle for each widget, a Spotify submenu (Text scaling from 70% to 200%, where the widget
   keeps its size unless larger text wraps a title onto another line; Reset widget size; a
-  Lyrics toggle; Lyrics scrolling, Autoscroll or Static; Always on top), a Speech submenu
+  Lyrics toggle; Lyrics scrolling, Autoscroll or Static; Always on top), a Claude Code Orchestrator submenu
   (the widget's own settings),
   a Start at login toggle and Quit
 
-## Speech widget
+## Claude Code Orchestrator widget
 
-The speech widget lists the Claude Code sessions on this machine that are managed, and shows
+The orchestrator lists the Claude Code sessions on this machine that are managed, and shows
 what they have replied. A session is managed while its `<session id>.managed` marker is in the
 speaking hook's folder, `$XDG_RUNTIME_DIR/speak-attention/`: the hooks of
 [Overmind](https://github.com/merph518/Overmind)'s `voice` plugin write it for a session that
@@ -71,12 +71,12 @@ without the marker is not listed, and one that gains it appears within a second.
 only reads those files, whatever each session's speech setting is, and plays nothing.
 
 The card is laid out as an application: a header across the top with the title,
-**CLAUDE CODE SESSION MANAGEMENT**, and minimize and close at its right, a rule under it, and
+**CLAUDE CODE ORCHESTRATOR**, and minimize and close at its right, a rule under it, and
 under that two columns that run to the card's bottom, the sessions at the left and the terminal
 at the right, the right a shade darker. A thin line divides the columns, as Claude's app
 draws its sidebar's; the pointer turns to the resize cursor over it, and dragging it moves it
 left and right (the sessions column's share of the width is kept in
-`~/.config/conky-widgets/speech/split`; each column keeps a least width).
+`~/.config/conky-widgets/orchestrator/split`; each column keeps a least width).
 
 - **Sessions**: the left column, in one column and in the terminal's look, as the CLI sets its
   session list in monospace: sections as the CLI names a session's state, in bold (**Needs
@@ -149,7 +149,7 @@ name asks to close it, and an issue or pull request number in a message's header
 mouse wheel scrolls the list a row a notch over the list, and the terminal a few lines over the
 terminal; a finger swiped up or down on the list scrolls it too. Taps, dragging, resizing, − and
 × work as they do on the Spotify widget. The widget's size, text scaling, collapsing and always
-on top are in the tray's **Speech** submenu.
+on top are in the tray's **Claude Code Orchestrator** submenu.
 
 ## Install
 
@@ -183,14 +183,14 @@ shows it if it is hidden.
 The – and × buttons at a widget's top right both hide that widget, and only that one. While
 any widget runs there's one icon in the top bar for all of them. Click it to see the current
 track, tick **Show Spotify
-widget** or **Show speech widget** to show or hide each one (ticking one that isn't running
+widget** or **Show Claude Code Orchestrator widget** to show or hide each one (ticking one that isn't running
 starts it), toggle **Start at login** for both, or **Quit**, which stops both. A hidden widget
 keeps running, so it comes back at once and where it was.
 Hidden or shown is remembered: a widget hidden when you quit or log out starts hidden, and
 the icon stays while both are hidden.
 
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
-scrolling and Always on top. The **Speech** submenu holds the speech widget's own Text scaling, Reset widget
+scrolling and Always on top. The **Claude Code Orchestrator** submenu holds the orchestrator's own Text scaling, Reset widget
 size, **Collapse when idle** (off by default: on, the widget shrinks to its title
 while no session is working or waiting on input) and Always on top.
 
@@ -222,8 +222,9 @@ conky-widgets show|hide                 # every running widget
 conky-widgets stop|restart|status       # every widget
 ```
 
-`speech` takes the place of `spotify` for the speech widget, which has an app-grid entry and an
-autostart toggle of its own. One supervisor runs every widget that is started, and `run.log` is
+`orchestrator` takes the place of `spotify` for the Claude Code Orchestrator widget, which has an
+app-grid entry and an autostart toggle of its own (`speech`, its former name, still works, and its
+settings, saved position and size, and start at login move to the new name the first time it runs). One supervisor runs every widget that is started, and `run.log` is
 in `~/.cache/conky-widgets/`. `conky-spotify-nowplaying <command>` still works: it is
 `conky-widgets spotify <command>`.
 
@@ -295,14 +296,14 @@ bin/conky-widgets spotify start
 ```
 
 To run a change beside the copy on your desktop without touching it, start an isolated copy.
-It has a home, cache and config of its own, four fixture Claude sessions for the speech widget (three managed, with replies in their feeds, and one not
+It has a home, cache and config of its own, four fixture Claude sessions for the orchestrator (three managed, with replies in their feeds, and one not
 managed, so the widget does not list it) and no tray icon, no Spotify login (so it sends no Web API request), and its windows
 have a class and a position of their own on your laptop's built-in display (the primary monitor
 when there is none; `--at X,Y` places it elsewhere), so any number run at once, one per checkout:
 
 ```sh
-scripts/isolated-widgets.py start              # both widgets; or: start speech
-scripts/isolated-widgets.py capture out.png speech
+scripts/isolated-widgets.py start              # both widgets; or: start orchestrator
+scripts/isolated-widgets.py capture out.png orchestrator
 scripts/isolated-widgets.py stop               # removes the copy and its files
 ```
 
@@ -335,25 +336,25 @@ registered on Launchpad), followed until Launchpad publishes it.
 
 | File | Role |
 | --- | --- |
-| `bin/conky-widgets` | Launcher: `conky-widgets <spotify\|speech> start/stop, show/hide, autostart, login`; one supervisor for every widget that runs, which restarts their processes if they exit |
-| `scripts/isolated-widgets.py` | Starts, stops and captures an isolated copy of the widgets for one checkout: its own home, fixture speech sessions, no tray, no Spotify login |
+| `bin/conky-widgets` | Launcher: `conky-widgets <spotify\|orchestrator> start/stop, show/hide, autostart, login`; one supervisor for every widget that runs, which restarts their processes if they exit |
+| `scripts/isolated-widgets.py` | Starts, stops and captures an isolated copy of the widgets for one checkout: its own home, fixture Claude sessions, no tray, no Spotify login |
 | `bin/conky-spotify-nowplaying` | The Spotify widget's old launcher, kept as `conky-widgets spotify …` for the app-grid and autostart entries of older versions |
 | `src/spotify/conky.conf` | Conky window setup; renders the text generated by `nowplaying.py`, and sizes the window to it |
 | `src/spotify/nowplaying.py` | Reads Spotify via `playerctl` (MPRIS), fetches art/lyrics/like state, lays the widget out at its size settings, and writes the widget text plus geometry for `draw.lua` and click areas for `conky-mouse.py` |
 | `src/spotify/draw.lua` | Cairo drawing: background, buttons, seek bar and times, lyrics (20 fps) |
-| `src/common/conky-mouse.py` | Started as `conky-mouse.py spotify` or `conky-mouse.py speech`; handles clicks and taps, the mouse wheel and swipes over static lyrics, dragging and resizing (Conky's own mouse hook gets no button presses under XWayland), keeps the window at its saved position and always on top when set, and unmaps it while hidden |
-| `src/speech/conky.conf` | The speech widget's conky window; renders the text generated by `speechqueue.py` |
-| `src/speech/speechqueue.py` | Reads the open managed Claude sessions and their feeds (read only), lays the speech widget out, and writes its text, geometry for its `draw.lua`, click areas and the sessions list |
-| `src/speech/sessions.py` | Lists the open managed Claude sessions from `~/.claude/sessions`, as `speechctl` finds them; a session is managed while its `.managed` marker is in the speaking hook's folder |
-| `src/speech/draw.lua`, `src/speech/mouse.py` | The speech widget's Cairo drawing, and what the divider, the close prompt, the links, the wheel and swipes over its list do for `conky-mouse.py` |
+| `src/common/conky-mouse.py` | Started as `conky-mouse.py spotify` or `conky-mouse.py orchestrator`; handles clicks and taps, the mouse wheel and swipes over static lyrics, dragging and resizing (Conky's own mouse hook gets no button presses under XWayland), keeps the window at its saved position and always on top when set, and unmaps it while hidden |
+| `src/orchestrator/conky.conf` | The orchestrator widget's conky window; renders the text generated by `orchestrator.py` |
+| `src/orchestrator/orchestrator.py` | Reads the open managed Claude sessions and their feeds (read only), lays the orchestrator widget out, and writes its text, geometry for its `draw.lua`, click areas and the sessions list |
+| `src/orchestrator/sessions.py` | Lists the open managed Claude sessions from `~/.claude/sessions`, as `speechctl` finds them; a session is managed while its `.managed` marker is in the speaking hook's folder |
+| `src/orchestrator/draw.lua`, `src/orchestrator/mouse.py` | The orchestrator widget's Cairo drawing, and what the divider, the close prompt, the links, the wheel and swipes over its list do for `conky-mouse.py` |
 | `src/common/theme.lua` | Drawing and colour helpers every widget's `draw.lua` shares: the card and its shadow, the volume slider, and the foreground that follows a fading background |
-| `src/common/widget_size.py` | Reads and writes a widget's size settings: width, lyrics (Spotify) or sessions list (speech) height, text scale |
+| `src/common/widget_size.py` | Reads and writes a widget's size settings: width, lyrics (Spotify) or sessions list (orchestrator) height, text scale |
 | `src/spotify/mouse.py` | What the Spotify widget's controls do for `conky-mouse.py`: the buttons, the seek bar, the volume slider and its mute speaker (Spotify's own volume, through MPRIS), the album art's colour pick, and the wheel over the volume and the wheel and swipes over static lyrics |
 | `src/spotify/lyrics_settings.py` | Reads and writes the lyrics settings: on or off, autoscroll or static |
 | `src/spotify/art_colours.py` | Takes the background colour from the spot clicked on the album art, and keeps it per artwork |
 | `src/spotify/spotify_api.py` | Minimal Spotify Web API client (PKCE login, like/unlike, Liked Songs index, rate-limit backoff) |
 | `src/spotify/spotify_local.py` | Reads the Spotify desktop app's Liked Songs from its LevelDB on disk, read-only, for the heart |
-| `src/tray.py` | The one top-bar (AppIndicator) icon for every widget: current track, Show per widget, Spotify and Speech submenus, start at login, Quit |
+| `src/tray.py` | The one top-bar (AppIndicator) icon for every widget: current track, Show per widget, Spotify and Claude Code Orchestrator submenus, start at login, Quit |
 | `src/tray_model.py` | What the tray reads and writes: each widget's hidden flag and settings files |
 | `debian/`, `packaging/` | Debian packaging (also used for the PPA), desktop entry, icons |
 
