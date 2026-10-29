@@ -80,11 +80,11 @@ left and right (the sessions column's share of the width is kept in
   session list in monospace: sections as the CLI names a session's state, in bold (**Needs
   input** while a question waits to be read, **Working** for busy, waiting and background
   sessions, **Completed** for idle ones), and under each its sessions behind a green dot, or a
-  turning spinner and a bold name while busy, a finished one's name dim. A session takes a line
-  for its name, with its gear at the right (the gear opens the session's settings), a line for
-  its repository and tag, its pull requests and how many lines it has queued, then its issue
-  numbers.
-  The tag is the first of these that holds: **question** (one waits to be read), **busy**,
+  turning spinner and a bold name while busy, a finished one's name dim, the one being read
+  aloud white. A session is one line: its name, then its repository and tag dimmer
+  (nothing for an idle one), the lines it has queued, and its gear at the right (the gear opens
+  the session's settings). A section after the first has a blank line above its title. A click
+  or tap on the name asks to close the session. The tag is the first of these that holds: **question** (one waits to be read), **busy**,
   **waiting: tests** (a test run, such as `unittest`, `pytest`, a `test_*.py` or `*_test.sh`
   script, `npm test` or `playwright test`, runs under it, or its ledger has a GitHub Actions
   run open), **waiting: local ai** (it polls `systemctl --user is-active build-pack-now`, the
@@ -98,33 +98,32 @@ left and right (the sessions column's share of the width is kept in
   chevron, the text behind a white bullet, in monospace, with its markdown formatted (headings,
   **bold**, *italic*, `code` in orange, lists, code blocks and links as their labels) when the
   Overmind hook publishes it in `now.json`'s `markdown` field, else as the plain line, and a dim
-  line, "Read aloud for 7s, done Thursday 9:47 AM", which only the newest message keeps (the next message's arrival removes it). A message is printed when it starts to be
+  line closing it, "Read aloud for 7s, done Thursday 9:47 AM", which every message keeps, its
+  spinner turning orange while the message is read and resting gray after. The speaker's line
+  carries the session's issue and pull request numbers at its right,
+  `[ Issue #123, #125 | PR #124, #126 ]`, each number underlined and a link (below). A message is printed when it starts to be
   read aloud, not when it was received, once (the same words from one session within 30
   seconds, or one clip published again, are one message), and stays: the text scrolls like a
   terminal's, the newest at the bottom, 40 messages kept in
   `~/.cache/conky-widgets/speech/scrollback.json` across restarts. The wheel scrolls back over
   the pane; at the end it follows the newest line again. At the foot the CLI's working line
   turns its spinner and says **Reading aloud…** with the clip's time and length and the
-  queued lines, or **Paused**, and shows nothing while idle. Its colours are Claude's CLI's, and
+  queued lines, or **Paused**, and shows nothing while idle (the messages above keep their own
+  gray spinners). Its colours are Claude's CLI's, and
   fixed
 
 The row of the session being read aloud is brighter, fading in and out over about a third of a
 second as the session starts and stops speaking.
 
-A repository's issue numbers sit under each of its sessions: the issue a session's branch
-names, on a branch named `<type>/issue-<N>-...` as `/implement` names them, and the same for
-any other open session in that repository, in number order, each plain text. They wrap onto more
-lines when they do not fit, and the session grows to hold them. A click or tap on one opens that
-issue in a new Google Chrome tab, and it is underlined under the pointer; a repository with no
-issue shows its name alone.
-
-Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
-ledger, which `/implement` adds after the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv`
-in its scratchpad, as this repository's and the sibling repositories' scripts keep it), the line under its name
-shows, after its tag, **PR #M** or **2 PRs** in orange. A click or tap on it opens, in new Chrome tabs, each of those
-pull requests still open with the **Manual Review Needed** label and from the session's own
-branch, read from GitHub with `gh` at the click; when none is, it opens nothing and notes
-that in `mouse.log`. It is underlined under the pointer.
+A session's issue and pull request numbers head each of its messages in the terminal, at the
+right of the speaker's name, as `[ Issue #123, #125 | PR #124, #126 ]`. The issues are the one a
+session's branch names, on a branch named `<type>/issue-<N>-...` as `/implement` names them,
+and the same for any other open session in that repository, in number order; the pull requests
+are the open rows in the session's `scripts/catchup.py` ledger (which `/implement` adds after
+the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv` in its scratchpad, as this
+repository's and the sibling repositories' scripts keep it). A part with none is left out, and a
+session with neither has no brackets. Each number is underlined, and a click or tap on one opens
+that issue or pull request in a new Google Chrome tab.
 
 A click or tap on a session's name closes the session, but only after it asks. The name is
 underlined under the pointer, and a click dims the list and opens a prompt over it,
@@ -149,8 +148,8 @@ The controls run `speechctl`, the same one the tray menu uses. In the footer, at
 left, three round buttons in a row: the first pauses or resumes, ⏭ after it skips the line
 playing, and ⏩ skips it and the rest of that session's queue. ⏭ and ⏩ are dimmed, and do
 nothing, while no line plays, and grow a little under the pointer, as the pause button does. A
-session's gear opens its settings, an issue number under a session's repository opens that
-issue, its pill its ready pull requests, and its name asks to close it. The
+session's gear opens its settings, an issue or pull request number in a message's header opens
+it, and a session's name asks to close it. The
 volume slider, at the top right left of minimize as in the Spotify widget, drawn and sized like
 it (it shortens, down to 32 px, as the card narrows), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
@@ -177,7 +176,7 @@ Taps, dragging, resizing, − and × work as they do on the Spotify widget.
 
 Each session's **On**, **Alerts** and **Off**, set in its gear's popup, say what is read from it:
 
-- **On**: its replies are read aloud from then on, and it gets a second row with its last line
+- **On**: its replies are read aloud from then on
 - **Alerts** (a new session's default): only its announcements
 - **Off**: nothing; a clip of it that is playing stops
 

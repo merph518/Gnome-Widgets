@@ -73,7 +73,7 @@ end
 
 local function load_sessions(version)
     -- sessions.txt's lines (speechqueue.py's session_line) as {id, speech, speaking, queued,
-    -- flags, name, repo, pill, chips, span, header}, each chip {line, x, width, text}
+    -- flags, name, repo, span, header}
     if version == sessions.version then return end
     local rows = {}
     for line in (read('sessions.txt') or ''):gmatch('[^\n]+') do
@@ -82,15 +82,7 @@ local function load_sessions(version)
         rows[#rows + 1] = {id = f[1] or '', speech = f[2], speaking = f[3] == '1', queued = tonumber(f[4]) or 0,
                            flags = (f[5] or '-') ~= '-' and f[5]:gsub(',', ' ') or '',
                            name = f[6] or '', repo = f[7] or '',
-                           pill = f[8] or '', chips = {},
-                           span = tonumber(f[10]) or 1, header = f[11] or ''}
-        for tok in (f[9] or ''):gmatch('%S+') do
-            local line, x, w, str = tok:match('^(%d+):([%d.]+):([%d.]+):(.+)$')
-            if line then
-                local chips = rows[#rows].chips
-                chips[#chips + 1] = {line = tonumber(line), x = tonumber(x), w = tonumber(w), text = str}
-            end
-        end
+                           span = tonumber(f[8]) or 1, header = f[9] or ''}
     end
     sessions = {version = version, rows = rows}
 end
@@ -302,7 +294,7 @@ local function term_offset(count, shown_lines)
     return said.shown
 end
 
-local BULLET_MARK, PROMPT_MARK, DONE_MARK = 2, 4, 5   -- speechqueue.py's: a line's first byte, for the first line of a message's text, its speaker's name and its closing line
+local BULLET_MARK, PROMPT_MARK, DONE_MARK, META_MARK = 2, 4, 5, '\6'   -- speechqueue.py's: a line's first byte, for the first line of a message's text, its speaker's name and its closing line
 local STYLE_MARK = '\31'                   -- speechqueue.py's: before each run of a styled line, its style letter
 
 local function mono(cr, text, s, bold, italic)
@@ -377,6 +369,53 @@ local function draw_chevron(cr, x, cy, h, alpha)
     cairo_stroke(cr)
 end
 
+local links_written = ''
+
+local function write_links(links)
+    -- the issue and pull request numbers drawn this frame, each "<line> <number> x0 y0 x1 y1" in
+    -- logical px, for mouse.py to find the one under a click; rewritten only when they move
+    local rows = {}
+    for _, l in ipairs(links) do
+        rows[#rows + 1] = string.format('%d %d %.1f %.1f %.1f %.1f', l[1], l[2], l[3], l[4], l[5], l[6])
+    end
+    local out = table.concat(rows, '\n')
+    if out == links_written then return end
+    links_written = out
+    local f = io.open(cache .. 'terminal-links', 'w')
+    if f then f:write(out) f:close() end
+end
+
+local function draw_meta(cr, meta, right, y, line, step, s, text, links)
+    -- the "[ Issue #1, #2 | PR #3 ]" a prompt line carries, right-aligned at `right`: its words
+    -- dim, each number a link, underlined and brighter under the pointer; the numbers' places
+    -- go into `links`
+    local segments, total = {}, 0
+    mono(cr, text, s)
+    for kind, str in meta:gmatch(META_MARK .. '(%a)([^' .. META_MARK .. ']*)') do
+        segments[#segments + 1] = {kind, str, width_of(cr, str)}
+        total = total + segments[#segments][3]
+    end
+    local x, number = right - total, 0
+    for _, seg in ipairs(segments) do
+        local kind, str, w = seg[1], seg[2], seg[3]
+        if kind == 'k' then
+            number = number + 1
+            local on = hovered(x, y - step / 2, x + w, y + step / 2)
+            set(cr, fg, on and 1 or 0.75)
+            show(cr, str, x, y, 'left')
+            cairo_set_line_width(cr, 1 * s)
+            cairo_move_to(cr, x, y + step * 0.34)
+            cairo_line_to(cr, x + w, y + step * 0.34)
+            cairo_stroke(cr)
+            links[#links + 1] = {line, number, x / s, (y - step / 2) / s, (x + w) / s, (y + step / 2) / s}
+        else
+            set(cr, fg, 0.5)
+            show(cr, str, x, y, 'left')
+        end
+        x = x + w
+    end
+end
+
 local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, duration)
     -- the pane as Claude's CLI prints a session, with no frame of its own: its welcome banner
     -- (the creature, then the pane's title and what the widget is holding), then each message
@@ -385,8 +424,7 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     -- the text behind a white bullet, and a dim "✻ Read aloud for 7s · done Thursday 9:47 AM" line.
     -- t[9] lines show at once, the rest above them scrolled by `scrolled` lines and clipped to
     -- where they show. At the foot the CLI's working line: the spinner turning and "Reading
-    -- aloud…" with the clip's time while one plays, or "Paused", and once the speech is done a
-    -- gray spinner at rest and "Idle".
+    -- aloud…" with the clip's time while one plays, or "Paused", and nothing when idle.
     local x0, x1, pad = t[1] * s, t[3] * s, t[5] * s
     local head_cy, first_cy, step, shown, status_cy = t[6] * s, t[7] * s, t[8] * s, t[9], t[10] * s
     local playing, paused, queued = t[11] == 1, t[12] == 1, t[13]
@@ -406,6 +444,7 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     show(cr, queued > 0 and (queued .. (queued == 1 and ' line queued' or ' lines queued')) or 'Nothing queued', tx, head_cy + 2 * step, 'left')
 
     local ytop = first_cy - step / 2
+    local links_now = {}                                   -- the numbers drawn this frame, for mouse.py to hit-test
     cairo_save(cr)
     cairo_rectangle(cr, x0, ytop, x1 - x0, shown * step)
     cairo_clip(cr)
@@ -419,7 +458,9 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
                 cairo_rectangle(cr, x0, y - step / 2, x1 - x0, step)
                 cairo_fill(cr)
                 draw_chevron(cr, left + 0.2 * cw, y, step * 0.5, 0.6)
-                show_line(cr, line, left + 2 * cw, y, s, text, 1)
+                local name, meta = line:match('^([^\6]*)(.*)$')
+                show_line(cr, name, left + 2 * cw, y, s, text, 1)
+                draw_meta(cr, meta, x1 - pad, y, i - 1, step, s, text, links_now)
             elseif kind == DONE_MARK then
                 draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.55, fg)      -- gray, as the CLI's is once its turn is done
                 show_line(cr, line, left + 2 * cw, y, s, text, 0.5)
@@ -436,13 +477,12 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled, pos, durati
     end
     cairo_restore(cr)
 
-    -- the working line stays: the orange spinner turning while a clip plays, then once the
-    -- speech is done a gray one that is not moving, "Idle", as the CLI's rests
+    write_links(links_now)
+    if not (playing or queued > 0) then return end            -- idle: the last message's gray spinner line is the rest
     local working = playing and not paused
-    draw_spark(cr, left + 0.55 * cw, status_cy, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6,
-               (playing or queued > 0) and ORANGE or fg)
-    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or queued > 0 and 'Waiting' or 'Idle'
-    if playing or queued > 0 then set(cr, ORANGE, working and 1 or 0.6) else set(cr, fg, 0.5) end
+    draw_spark(cr, left + 0.55 * cw, status_cy, 5.5 * s, working and pos * 3 or 0, working and 1 or 0.6)
+    local label = playing and (paused and 'Paused' or 'Reading aloud\u{2026}') or 'Waiting'
+    set(cr, ORANGE, working and 1 or 0.6)
     local lw = show(cr, label, left + 2 * cw, status_cy, 'left')
     local detail = {}
     if playing then detail[#detail + 1] = fmt_time(math.min(pos, duration > 0 and duration or pos)) .. ' / ' .. fmt_time(duration) end
@@ -547,53 +587,38 @@ end
 local GREEN = {0.33, 0.78, 0.40}          -- the CLI's dot before a finished item
 
 local function draw_group(cr, r, x0, y, row, c, b, s, text)
-    -- the section's title on a row of its own above the first session listed under it, bold
-    -- as the CLI's section titles are
-    mono(cr, text, s, true)
-    set(cr, fg)
+    -- a section's title on a row of its own above the first session listed under it, as the CLI
+    -- sets its session list: "Working" dim, the others bold and bright
     local x = x0 + b[1] * s
+    if r.header == 'Working' then
+        mono(cr, text, s)
+        set(cr, secondary())
+    else
+        mono(cr, text, s, true)
+        set(cr, fg)
+    end
     show(cr, fit(cr, r.header, c[1] * s - x - 4 * s), x, y + row / 2, 'left')
 end
 
-local function draw_chips(cr, r, x, y, b, s, text)
-    -- the session's issue numbers under its name, wrapped as speechqueue.py laid them; a click
-    -- on one opens that issue. A number is plain dim text, underlined under the pointer
-    local chips_top, pitch, chip_h = b[4] * s, b[5] * s, b[6] * s
-    font(cr, 11, text, s, false, false, true)
-    for _, c in ipairs(r.chips) do
-        local cx, ccy = x + c.x * s, y + chips_top + c.line * pitch + pitch / 2
-        local w = width_of(cr, c.text)
-        if hovered(cx, ccy - chip_h / 2, cx + c.w * s, ccy + chip_h / 2) then
-            set(cr, fg, 0.6)
-            cairo_set_line_width(cr, 1 * s)
-            cairo_move_to(cr, cx, ccy + chip_h * 0.38)
-            cairo_line_to(cr, cx + w, ccy + chip_h * 0.38)
-            cairo_stroke(cr)
-        end
-        set(cr, secondary())
-        show(cr, c.text, cx, ccy, 'left')
-    end
-end
-
 local function draw_row(cr, r, x0, y, row, c, s, text, blk)
-    -- a session's rows, set as the CLI sets its session list, in the terminal's font: its
-    -- section's title above it, in bold, when it is the first listed under that; then its name
-    -- line, indented behind a green dot, or the turning spinner and a bold name while it is busy
-    -- (a finished session's name is dim), with its setting's gear at the right (a click on the
-    -- name asks to close the session); under it the line of its tag (busy / idle / waiting /
-    -- bg / question), the pull requests a click on "PR #n" opens, in the CLI's orange, and how
-    -- many lines it has queued; then its issue numbers. The name is underlined and the pull requests brighten under the pointer.
-    -- Returns how many rows it took.
-    if r.header ~= '' then
-        draw_group(cr, r, x0, y, row, c, blk, s, text)
-        y = y + row
+    -- a session's line, set as the CLI sets its session list, in the terminal's font: behind a
+    -- small green dot, or the turning spinner and a bold name while it is busy, its name dim
+    -- unless it is busy or being read aloud; then dim after it its repository and, for a waiting,
+    -- background or question tag, the tag, and at the right the lines it has queued, before the
+    -- setting's gear (a click on the name asks to close the session). A section's title above it
+    -- when it is the first listed under that, after a blank row unless it is the first section.
+    -- Its issue and pull request numbers are in its messages' headers in the terminal. The name
+    -- is underlined under the pointer. Returns how many rows it took.
+    local head_rows = r.header ~= '' and r.span - 1 or 0
+    if head_rows > 0 then
+        draw_group(cr, r, x0, y + (head_rows - 1) * row, row, c, blk, s, text)
+        y = y + head_rows * row
     end
     local cy = y + row / 2
     draw_gear(cr, c, cy, row, s, r.speech)
     local name_x = x0 + (blk[1] + blk[2]) * s
-    local bullet_x = x0 + blk[1] * s + 5 * s               -- under the repository's name, not indented
+    local bullet_x = x0 + blk[1] * s + 13 * s
     local busy = r.flags == 'busy'
-    local lit = busy or r.speaking or r.speech == 'on'      -- a session in play is bright, the rest dim
     if busy then
         draw_spark(cr, bullet_x, cy, 5 * s, os.clock() * 3, 1, fg)
     else
@@ -602,8 +627,12 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         cairo_arc(cr, bullet_x, cy, 1.8 * s, 0, 2 * math.pi)
         cairo_fill(cr)
     end
+    font(cr, 11, text, s, false, false, true)
+    local queued = r.queued > 0 and r.queued .. ' queued' or ''
+    local queued_w = queued ~= '' and width_of(cr, queued) + 8 * s or 0
+    local right = c[5] * s - queued_w
     mono(cr, text, s, busy)
-    local name = fit(cr, r.name, c[5] * s - name_x)
+    local name = fit(cr, r.name, right - name_x)
     local after = name_x + width_of(cr, name)
     if hovered(name_x - 4 * s, cy - row / 2, after + 4 * s, cy + row / 2) then
         set(cr, fg, 0.6)
@@ -612,35 +641,18 @@ local function draw_row(cr, r, x0, y, row, c, s, text, blk)
         cairo_line_to(cr, after, cy + row * 0.34)
         cairo_stroke(cr)
     end
-    if lit then set(cr, fg) else set(cr, secondary()) end
+    if busy or r.speaking then set(cr, fg) else set(cr, secondary()) end
     show(cr, name, name_x, cy, 'left')
 
-    local my = cy + row                                  -- the tag line
     font(cr, 11, text, s, false, false, true)
-    set(cr, secondary(), 0.8)
-    local x = name_x
-    local pill_w = r.pill ~= '' and width_of(cr, r.pill) + 8 * s or 0
-    local rest = ' \u{b7} ' .. r.flags
-    -- its repository, cut so its tag and the pull requests after it stay whole, then its tag
-    local repo = r.repo ~= '' and fit(cr, r.repo, c[5] * s - name_x - pill_w - width_of(cr, rest)) or ''
-    local tag = (repo ~= '' and repo ~= '\u{2026}') and repo .. rest or r.flags
-    if tag ~= '' then x = x + show(cr, tag, x, my, 'left') + 8 * s end
-    if r.pill ~= '' then
-        local on = hovered(x - 2 * s, my - row / 2, x + width_of(cr, r.pill) + 4 * s, my + row / 2)
-        set(cr, ORANGE, on and 1 or 0.85)
-        local w = show(cr, r.pill, x, my, 'left')
-        if on then
-            cairo_set_line_width(cr, 1 * s)
-            cairo_move_to(cr, x, my + row * 0.34)
-            cairo_line_to(cr, x + w, my + row * 0.34)
-            cairo_stroke(cr)
-        end
-        x = x + w + 8 * s
-        set(cr, secondary(), 0.8)
+    set(cr, secondary(), 0.7)
+    local detail = r.repo
+    if r.flags ~= '' and r.flags ~= 'idle' and r.flags ~= 'busy' then
+        detail = (detail ~= '' and detail .. ' \u{b7} ' or '') .. r.flags
     end
-    if r.queued > 0 and x + width_of(cr, r.queued .. ' queued') < c[5] * s then show(cr, r.queued .. ' queued', x, my, 'left') end
-
-    draw_chips(cr, r, name_x, y, blk, s, text)
+    local dx = after + 12 * s
+    if detail ~= '' and right - dx > 40 * s then show(cr, fit(cr, detail, right - dx), dx, cy, 'left') end
+    if queued ~= '' then show(cr, queued, c[5] * s, cy, 'right') end
     return r.span
 end
 

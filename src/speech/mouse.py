@@ -43,7 +43,6 @@ REGIONS_ORDER = BUTTONS + ('minimize', 'close', 'volume', 'divider')   # the reg
 VOLUME_TOP = 2.0                               # speechctl's loudest volume, the slider's right end
 VOLUME_MUTED = 0.05                            # below this volume the speaker draws its cross (a tenth is the least set)
 HEIGHT_REGION = 'list'                         # the region the second size setting is the height of
-READY_LABEL = 'Manual Review Needed'           # the ready signal's label on a pull request
 BROWSER = 'google-chrome'                      # what a session's box and name open their links in
 OPEN_AGAIN = 3.0                               # s before a session's box or name opens again
 CACHE = os.path.expanduser(f'~/.cache/{NAME}')
@@ -150,61 +149,50 @@ def row_at(regions, s, x, y):
     return None, False
 
 
-def link_at(regions, s, x, y):
-    """(session row, 'issue') when an issue number of its repository is under card-relative
-    (x, y), with the row's 'issue' set to that issue's link, (row, 'prs') when its pill is,
-    (row, 'close') when its name is, else None. An issue number and the pill are there only
-    with something to open."""
-    row, _ = row_at(regions, s, x, y)
-    if not row:
+TERMINAL_LINKS = os.path.join(CACHE, 'terminal-links')   # "<line> <number> x0 y0 x1 y1" for each issue or pull request number draw.lua drew in the terminal
+
+
+def terminal_link_at(regions, s, x, y):
+    """(a row with the 'issue' to open, 'issue') when an issue or pull request number in a
+    message's header in the terminal is under card-relative (x, y), else None. draw.lua writes
+    where it drew each; regions.json's `terminal_links` says what each opens."""
+    if not inside(regions.get('terminal'), s, x, y):
         return None
-    at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
-    for x0, y0, x1, y1, link in row.get('issues', ()):        # on any line of the row's block
-        if x0 * s <= x <= x1 * s and (row['top'] + y0) <= at <= (row['top'] + y1):
-            return dict(row, issue=link), 'issue'
-    line, height = row['top'] + row.get('head', 0), regions['list_scroll'][1]
-    # the name closes the session from its name line, the pill opens its pull requests from the
-    # line under that, and the repository's name above and the lines below are neither
-    for key, kind, first in (('link', 'prs', line + height), ('name', 'close', line)):
-        if row.get(key) and first <= at < first + height and row[key][0] * s <= x <= row[key][1] * s:
-            return row, kind
+    try:
+        with open(TERMINAL_LINKS) as f:
+            rows = [line.split() for line in f.read().splitlines()]
+    except OSError:
+        return None
+    for fields in rows:
+        try:
+            line, number, x0, y0, x1, y1 = int(fields[0]), int(fields[1]), *(float(v) for v in fields[2:6])
+            info = regions['terminal_links'][str(line)][number - 1]
+        except (IndexError, KeyError, ValueError):
+            continue
+        if x0 * s <= x <= x1 * s and y0 * s <= y <= y1 * s:
+            return dict(info), 'issue'
     return None
 
 
-def ready_prs(links, branch, run=subprocess.run):
-    """The pull requests of `links` still open, carrying READY_LABEL and from `branch`, read
-    from GitHub: a session's ledger also waits on other sessions' pull requests that block it.
-    One gh cannot read (not installed, logged out, offline) is not opened, and is logged."""
-    ready = []
-    for link in links:
-        try:
-            out = run(['gh', 'pr', 'view', link, '--json', 'state,labels,headRefName'], capture_output=True,
-                      text=True, timeout=15)
-            pr = json.loads(out.stdout) if out.returncode == 0 else None
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pr = None
-        if pr is None:
-            core.log(f'{link}: gh could not read it, so it is not opened')
-        elif (pr.get('state') == 'OPEN' and READY_LABEL in [l.get('name') for l in pr.get('labels', ())]
-              and branch and pr.get('headRefName') == branch):
-            ready.append(link)
-        else:
-            core.log(f'{link}: not ready ({pr.get("state")}, from {pr.get("headRefName")})')
-    return ready
+def link_at(regions, s, x, y):
+    """(session row, 'close') when the session's name is under card-relative (x, y), else
+    None; or an issue or pull request number in the terminal, terminal_link_at's."""
+    row, _ = row_at(regions, s, x, y)
+    if not row:
+        return terminal_link_at(regions, s, x, y)
+    at = y / s - regions['list'][1] + offset(regions) * regions['list_scroll'][1]
+    line = row['top'] + row.get('head', 0)                   # the name's line: not the section's title above it
+    if row.get('name') and line <= at < line + regions['list_scroll'][1] and row['name'][0] * s <= x <= row['name'][1] * s:
+        return row, 'close'
+    return None
 
 
 def open_links(row, kind, run=subprocess.run, popen=subprocess.Popen):
-    """Opens, each in a new browser tab, a session's issue (`kind` 'issue', a click on an issue
-    number) or its ready pull requests ('prs', a click on its pill). Chrome takes them all at once;
-    without it, xdg-open takes each."""
+    """Opens, in a new browser tab, the issue or pull request (`row['issue']`, the URL) a click
+    on its number in a message's header in the terminal asked for. Chrome takes it; without
+    it, xdg-open does."""
     try:
-        if kind == 'issue':
-            links = [row['issue']]
-        else:
-            links = ready_prs(row.get('prs') or [], row.get('branch') or '', run)
-        if not links:
-            core.log(f'session {row["id"]}: no ready pull request to open')
-            return
+        links = [row['issue']]
         core.log('open: ' + ' '.join(links))
         quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
@@ -225,8 +213,8 @@ opened = {}                                    # click_key(): when a click last 
 
 
 def click_key(row, kind):
-    """What a click opens, for telling a double click from a click on another: a session's pull
-    requests or its close prompt, or one of its issues, each issue number its own."""
+    """What a click opens, for telling a double click from a click on another: a session's close
+    prompt, or an issue or pull request, each number its own."""
     return (row['id'], row.get('issue') if kind == 'issue' else kind)
 
 

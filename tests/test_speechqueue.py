@@ -344,19 +344,12 @@ class Links(Repos):
                          'https://github.com/org/repo/issues/9')
         self.assertEqual(speechqueue.session_branch(top), ('feat/issue-9-x', 'org/repo'))
 
-    def test_the_pill_names_the_ready_pull_requests(self):
-        pr = 'https://github.com/o/r/pull/'
-        self.assertEqual(speechqueue.link_pill([pr + '151']), 'PR #151')
-        self.assertEqual(speechqueue.link_pill([pr + '151', pr + '152']), '2 PRs')
-        self.assertEqual(speechqueue.link_pill([]), '')
-
     def test_the_ledgers_open_pull_requests_are_the_ready_ones(self):
         self.f.session(100, ME, 'One')
         self.pr_ledger(ME, (150, 'done'), (151, 'open'), (152, 'open'))
         s = self.state()['sessions'][0]
         self.assertEqual(s['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151',
                                     'https://github.com/someone/Gnome-Widgets/pull/152'])
-        self.assertEqual(speechqueue.session_line(s).split('\t')[7:], ['2 PRs', '', '1', ''])
 
     def test_the_pill_shows_for_a_ledger_another_repository_keeps(self):
         # ledger.tsv and catchup.tsv, with a branch column after the label
@@ -366,8 +359,7 @@ class Links(Repos):
         self.f.branch_ledger(OTHER, 'catchup.tsv', ('pr:7', 'open'), ('pr:8', 'open'))
         one, two = self.state()['sessions']
         self.assertEqual(one['prs'], ['https://github.com/o/r/pull/152'])
-        self.assertEqual(speechqueue.session_line(one).split('\t')[7], 'PR #152')
-        self.assertEqual(speechqueue.session_line(two).split('\t')[7], '2 PRs')
+        self.assertEqual(two['prs'], ['https://github.com/o/r/pull/7', 'https://github.com/o/r/pull/8'])
         self.assertEqual(one['waiting'], 'merge')
         self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'done'))
         self.assertEqual(self.state()['sessions'][0]['prs'], [])
@@ -378,57 +370,6 @@ class Links(Repos):
         self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'open'), ('pr:153', 'done'))
         self.assertEqual(self.state()['sessions'][0]['prs'],
                          ['https://github.com/someone/Gnome-Widgets/pull/151', 'https://github.com/o/r/pull/152'])
-
-    def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
-        self.f.session(100, ME, 'One')
-        self.f.session(200, OTHER, 'Two')
-        self.pr_ledger(ME, (151, 'open'))
-        with mock.patch.object(speechqueue, 'session_branch',
-                               side_effect=lambda cwd: ('feat/issue-127-repo-box-links', 'someone/Gnome-Widgets')):
-            state = self.state()
-        state['sessions'][1]['issue'] = 'https://github.com/someone/Gnome-Widgets/issues/131'
-        for s in state['sessions']:
-            s['repo'] = 'Gnome-Widgets'
-        speechqueue.repo_issues(state['sessions'])
-        speechqueue.render(state)
-        with open(speechqueue.REGIONS) as f:
-            one, two = json.load(f)['rows']
-        links = ['https://github.com/someone/Gnome-Widgets/issues/127',
-                 'https://github.com/someone/Gnome-Widgets/issues/131']
-        for row in (one, two):                                      # the repository's issues, on each
-            self.assertEqual([chip[4] for chip in row['issues']], links)
-            self.assertLess(row['issues'][0][2], row['issues'][1][0])   # side by side, a gap between
-        self.assertEqual(one['issues'][0][0], speechqueue.name_left())      # under the name, not beside it
-        with open(speechqueue.SESSIONS) as f:
-            lines = [line.split('\t') for line in f.read().splitlines()]
-        self.assertEqual([l[6] for l in lines], ['Gnome-Widgets', 'Gnome-Widgets'])
-        self.assertEqual([l[10] for l in lines], ['Working', 'Completed'])      # each section's title above its first
-        self.assertEqual([l[7] for l in lines], ['PR #151', ''])
-        self.assertEqual([[t.split(':')[3] for t in l[8].split()] for l in lines], [['#127', '#131']] * 2)
-        self.assertEqual(one['prs'], ['https://github.com/someone/Gnome-Widgets/pull/151'])
-        with open(speechqueue.REGIONS) as f:
-            row = json.load(f)['list_scroll'][1]
-        self.assertEqual((one['head'], two['head']), (row, row))   # a row for the section's title over each, in sections of their own
-        self.assertGreaterEqual(one['issues'][0][1], one['head'] + 2 * row)   # the numbers under the name and the tag line
-        self.assertLess(one['link'][0], one['link'][1])            # the pill, after the tag
-        self.assertLess(one['link'][1], one['gear'][0])            # clear of the gear
-        self.assertFalse({'link', 'prs'} & set(two))
-        self.assertEqual([(r['pid'], r['title'], r['busy']) for r in (one, two)],
-                         [(100, 'One', False), (200, 'Two', False)])
-        self.assertLess(two['name'][0], two['name'][1])            # every name is there to click
-        self.assertLess(two['name'][1], two['gear'][0])
-
-    def test_a_session_without_issues_has_no_chips_and_one_row(self):
-        self.f.session(100, ME, 'One')
-        state = self.state()
-        state['sessions'][0]['repo'] = 'Gnome-Widgets'
-        speechqueue.render(state)
-        with open(speechqueue.REGIONS) as f:
-            row = json.load(f)['rows'][0]
-        with open(speechqueue.SESSIONS) as f:
-            line = f.read().splitlines()[0].split('\t')
-        self.assertNotIn('issues', row)
-        self.assertEqual(line[8:], ['', '3', 'Completed'])     # a name, a tag line and the section's title
 
     def test_a_repository_lists_the_issues_of_the_sessions_in_it_in_number_order(self):
         issue = lambda repo, n: f'https://github.com/{repo}/issues/{n}'
@@ -447,46 +388,37 @@ class Links(Repos):
         self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
                          [('Needs input', 'c'), ('Working', 'b'), ('Working', 'd'), ('Working', 'e'),
                           ('Completed', 'a')])
-        self.assertEqual(speechqueue.tag_line(dict(listed[0], repo='Overmind')), 'Overmind \u00b7 idle')
-        self.assertEqual(speechqueue.tag_line(listed[0]), 'idle')
 
-    def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):
-        with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 10 * len(t)):
-            issues = [(f'#{n}', f'link{n}') for n in (127, 131, 133, 5)]
-            chips, lines = speechqueue.block_chips(issues, 110)
-        pad, gap = speechqueue.CHIP_PAD, speechqueue.CHIP_GAP
-        w = 40 + pad
-        self.assertEqual([(c[0], c[1]) for c in chips],
-                         [(0, 0), (1, 0), (2, 0), (2, w + gap)] if w * 2 + gap > 110 else
-                         [(0, 0), (0, w + gap), (1, 0), (1, w + gap)])
-        self.assertEqual(lines, chips[-1][0] + 1)
-        self.assertEqual(speechqueue.block_chips([], 110), ([], 0))
-
-    def test_a_session_takes_the_rows_its_lines_and_issue_numbers_need(self):
+    def test_a_session_is_one_row_and_a_section_adds_its_title_and_a_blank_row_after_the_first(self):
         self.f.session(100, ME, 'One')
         self.f.session(200, OTHER, 'Two')
-        self.f.file(ME + '.replies')
         state = self.state()
-        for s in state['sessions']:
-            s['repo'] = 'Gnome-Widgets'
-        speechqueue.render(state)
-        with open(speechqueue.SESSIONS) as f:
-            spans = [int(line.split('\t')[9]) for line in f.read().splitlines()]
-        self.assertEqual(spans, [3, 2])                             # no issues: name and tag, and the repository's name over the first
-        for s in state['sessions']:
-            s['issues'] = [(f'#{n}', f'link{n}') for n in range(1, 40)]    # far more than a line holds
+        state['sessions'][0].update(busy=True)
         speechqueue.render(state)
         with open(speechqueue.SESSIONS) as f:
             lines = [line.split('\t') for line in f.read().splitlines()]
         with open(speechqueue.REGIONS) as f:
             regions = json.load(f)
-        rows, row = regions['rows'], regions['list_scroll'][1]
-        spans = [int(l[9]) for l in lines]
-        self.assertGreater(min(spans), 2)
-        self.assertEqual([round(r['bottom'] - r['top'], 1) for r in rows], [round(sp * row, 1) for sp in spans])
-        last_line = max(int(t.split(':')[0]) for t in lines[0][8].split())
-        self.assertGreaterEqual(last_line, 1)                       # it wrapped
-        self.assertGreaterEqual(spans[0] * row, rows[0]['issues'][-1][3])    # the last chip is inside the row
+        self.assertEqual([(l[7], l[8]) for l in lines], [('2', 'Working'), ('3', 'Completed')])
+        row = regions['list_scroll'][1]
+        one, two = regions['rows']
+        self.assertEqual((one['head'], two['head']), (row, 2 * row))     # the title; a blank row and the title
+        self.assertEqual((one['bottom'] - one['top'], two['bottom'] - two['top']), (2 * row, 3 * row))
+        self.assertLess(two['name'][0], two['name'][1])                  # every name is there to click
+        self.assertLess(two['name'][1], two['gear'][0])
+        self.assertEqual([(r['pid'], r['title']) for r in (one, two)], [(100, 'One'), (200, 'Two')])
+
+    def test_the_numbers_of_a_sessions_issues_and_pull_requests_head_its_messages(self):
+        sess = dict(id='aaaa', issues=[('#123', 'https://o/r/issues/123'), ('#125', 'https://o/r/issues/125')],
+                    prs=['https://o/r/pull/124', 'https://o/r/pull/126'])
+        segments = speechqueue.meta_segments(sess)
+        self.assertEqual(''.join(t for t, _ in segments), '[ Issue #123, #125 | PR #124, #126 ]')
+        self.assertEqual([info['issue'] for _, info in segments if info],
+                         ['https://o/r/issues/123', 'https://o/r/issues/125', 'https://o/r/pull/124',
+                          'https://o/r/pull/126'])
+        self.assertEqual(''.join(t for t, _ in speechqueue.meta_segments(dict(sess, issues=[]))), '[ PR #124, #126 ]')
+        self.assertEqual(speechqueue.meta_segments(dict(id='aaaa')), [])
+        self.assertEqual(speechqueue.meta_segments(None), [])
 
     def test_the_close_prompt_is_a_panel_over_the_list_with_cancel_before_ok(self):
         self.f.session(100, ME, 'One')
@@ -765,16 +697,16 @@ class TitleAndFooter(Fixture):
         speechqueue.spoken_log(dict(n, clip='c', published=5100.0), 'Name')    # and again a minute on: said again
         self.assertEqual([e['text'] for e in speechqueue._scrollback].count('Same words'), 2)
 
-    def test_only_the_newest_message_keeps_its_closing_line(self):
+    def test_every_message_keeps_its_closing_line(self):
         self.draw(text='First.')
         os.remove(os.path.join(self.f.speak, 'now.json'))
         lines, _, _ = self.draw(text='Second one.')
         os.utime(os.path.join(self.f.speak, 'now.json'), (999.0, 999.0))
         lines, _, _ = self.draw(text='Second one.')
         done = [l for l in lines['line'] if l.startswith(speechqueue.DONE_MARK)]
-        self.assertEqual(len(done), 1)
-        self.assertEqual(lines['line'][-1], done[0])                    # the last line of the pane
-        self.assertEqual(sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line']), 2)
+        prompts = sum(l.startswith(speechqueue.PROMPT_MARK) for l in lines['line'])
+        self.assertEqual((len(done), prompts), (2, 2))
+        self.assertEqual(lines['line'][-1], done[-1])                    # the last line of the pane
 
     def test_the_printed_messages_are_kept_across_a_restart_and_capped(self):
         self.draw(text='Kept across.')
@@ -1029,7 +961,7 @@ class Golden(Fixture):
         self.f.file('paused')
         self.check('paused', self.state())
 
-    def test_repository_names_and_issue_numbers_wrap_inside_the_block(self):
+    def test_issue_numbers_head_the_message_of_their_session(self):
         self.three()
         self.f.now(ME, 'Claude Voice Widget', 'Three issues, then one, then too many for a line.', hook_pid=9001)
         os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))

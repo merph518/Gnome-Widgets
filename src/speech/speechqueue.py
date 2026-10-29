@@ -76,8 +76,11 @@ DUPLICATE_WITHIN = 30                         # s: the same session saying the s
 SCROLLBACK_CHARS = 60000                      # and the most text they hold between them
 BULLET_MARK = '\x02'                          # opens a draw.txt line that is the first of a message, which draw.lua draws a bullet by
 PROMPT_MARK = '\x04'                          # opens a draw.txt line that is a speaker's name, which draw.lua draws as the CLI's prompt: on a grey band behind a chevron
+META_MARK = '\x06'                            # in a prompt line, before the speaker's name and before each issue or pull request number after it, which draw.lua right-aligns
+META_MARK = '\x06'                            # in a prompt line, before the speaker's name's end and before each piece of its issue and pull request list: a style letter (n plain, k a number that is a link), then the text, which draw.lua right-aligns
 DONE_MARK = '\x05'                            # opens a message's closing line, which draw.lua draws dim behind the CLI's spinner glyph
 TERM_BANNER_LINES = 3                         # the pane's welcome banner: its title, and two dim lines beside the creature
+TERM_META_GAP = 2                             # characters between the issue and pull request numbers in a message's prompt line, and from its name
 TERM_INDENT = '  '                            # every line's room at the left, where the first line's bullet is drawn
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
@@ -89,7 +92,7 @@ TERM_MIN = 200                                # the terminal pane's least width
 LINE_GAP = 14                                 # the title's row to the list
 FOOTER_GAP = 12                               # the two columns to the controls' row
 FOOTER_H = 30                                 # the footer row: pause, skip and next
-ROW_SPACING = 2                               # extra space in a session's row
+ROW_SPACING = 4                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
 PAUSE_SIZE = 28                               # the footer's pause/resume circle, and skip and next after it
@@ -112,13 +115,9 @@ VOLUME_MIN = 32                               # its shortest track, as the Spoti
 TITLE_ROOM = 150                              # what the title keeps while the volume's track shortens
 VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
-PILL_PAD = 6                                  # either side of the pill after a session's name
-PILL_GAP = 8                                  # a session's name to its pill
 GROUP_PAD = 10                                # the list's edge to a repository's name
-SESSION_INDENT = 20                           # a repository's name's left to the names of the sessions under it, after their bullets, which are not indented
+SESSION_INDENT = 32                           # a repository's name's left to the names of the sessions under it, after their bullets, which are not indented
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
-CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
-CHIP_GAP = 3                                  # between chips, and between their lines
 SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
@@ -224,14 +223,6 @@ def ledger_prs(rows):
     """The links of the pull requests a session's open ledger rows wait on to merge, which
     /implement records once it has sent the ready signal."""
     return list(dict.fromkeys(f[2] for f in rows if f[1].startswith('pr:') and '/pull/' in f[2]))
-
-
-def link_pill(prs):
-    """The pill after a session's name, naming the ready pull requests a click on it opens; ''
-    without any, when there is no pill."""
-    if not prs:
-        return ''
-    return f"PR #{prs[0].rsplit('/', 1)[-1]}" if len(prs) == 1 else f'{len(prs)} PRs'
 
 
 def first_wait(process, ledger):
@@ -698,15 +689,13 @@ def box(cx, cy, half_w, half_h):
     return [cx - half_w, cy - half_h, cx + half_w, cy + half_h]
 
 
-def session_line(s, chips=(), span=1, header=''):
+def session_line(s, span=1, header=''):
     """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
-    repository's name, the pull requests' pill, its issue chips as line:x:width:text
-    (block_chips'), how many rows it takes, and its section's title when this session is the
-    first listed under it, which draw.lua prints on a row above it."""
+    repository's name, how many rows it takes, and its section's title when this session is
+    the first listed under it, which draw.lua prints on a row above it."""
     return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
                       display_text(s['name']), s.get('repo', ''),
-                      link_pill(s.get('prs')),
-                      ' '.join(f'{line}:{x:g}:{w:g}:{text}' for line, x, w, text, _ in chips), str(span), header))
+                      str(span), header))
 
 
 def row_flags(s):
@@ -928,64 +917,22 @@ def grouped(listed):
     return sorted(listed, key=lambda sess: STATUS_GROUPS.index(status_group(sess)))
 
 
-def tag_line(s, room=None):
-    """The text of a session's line under its name: its repository's name, then its tag. The
-    repository's name is cut to fit `room` px, if given, so the tag stays whole."""
-    repo, tag = s.get('repo') or '', row_flags(s)
-    if not repo:
-        return tag
-    rest = f' \u00b7 {tag}'
-    if room is not None:
-        repo = fit(repo, LIST_TAG_FONT, (room - text_width(rest, LIST_TAG_FONT) * BLOCK_SLACK) / BLOCK_SLACK)
-        if repo in ('', '\u2026'):                          # nothing of it fits: the tag alone
-            return tag
-    return repo + rest
-
-
-def block_chips(issues, width):
-    """[(line, x, width, text, link)] for a session's issue numbers laid left to right, each on
-    the next line when it would pass `width`, and how many lines they take."""
-    chips, x, line = [], 0, 0
-    for text, link in issues:
-        w = text_width(text, LIST_TAG_FONT) + CHIP_PAD
-        if x and x + w > width:
-            line, x = line + 1, 0
-        chips.append((line, x, w, text, link))
-        x += w + CHIP_GAP
-    return chips, line + 1 if chips else 0
-
-
-def block_rows(row):
-    """(chips_top, pitch, chip_h) of a session's issue numbers: their first line's top below the
-    session's name line and the line of its tag, pill and queued count, each `row` high, and
-    each line's pitch and height."""
-    chip_h = line_height(LIST_TAG_FONT) + 2
-    return 2 * row, chip_h + CHIP_GAP, chip_h
-
-
 def name_left():
     """Where a session's name begins along its row, indented under its repository's name."""
     return MARGIN + GROUP_PAD + SESSION_INDENT
 
 
-def name_spans(s, right):
-    """Where a session's name and its pill sit, as draw.lua lays them out: ([left, right] of the
-    name on the name line, which ends at `right`, the gear's left edge; [left, right] of the pill
-    on the line under it, after the session's tag, or None without a pill)."""
+def name_span(s, right):
+    """Where a session's name sits on its name line, as draw.lua lays it out, ending at `right`,
+    the gear's left edge: [left, right], the area a click on it asks to close the session."""
     name_x = name_left()
     name = fit(display_text(s['name']), LIST_FONT, (right - name_x) / BLOCK_SLACK)
-    span = [round(name_x - 4, 2), round(name_x + text_width(name, LIST_FONT) * BLOCK_SLACK + 4, 2)]
-    pill = link_pill(s.get('prs'))
-    if not pill:
-        return span, None
-    pill_w = text_width(pill, LIST_TAG_FONT) * BLOCK_SLACK
-    x0 = name_x + text_width(tag_line(s, right - name_x - pill_w - 8), LIST_TAG_FONT) * BLOCK_SLACK + 8
-    return span, [round(x0 - 2, 2), round(x0 + pill_w + 4, 2)]
+    return [round(name_x - 4, 2), round(name_x + text_width(name, LIST_FONT) * BLOCK_SLACK + 4, 2)]
 
 
 def write_sessions(listed, layout):
     """sessions.txt, rewritten only when it changes; its version is what draw.txt names.
-    `layout` is a (chips, span) for each session."""
+    `layout` is a (span, header) for each session."""
     text = ''.join(session_line(s, *l) + '\n' for s, l in zip(listed, layout))
     version = hashlib.sha1(text.encode()).hexdigest()[:10]
     if _read(SESSIONS) != text:
@@ -1024,14 +971,37 @@ def took(seconds):
     return f'{seconds // 60}m {seconds % 60}s' if seconds >= 60 else f'{seconds}s'
 
 
-def message_lines(entry, width, newest=True):
+def meta_segments(sess):
+    """[(text, what a click on it opens or None)] for the "[ Issue #1, #2 | PR #3 ]" a session's
+    messages carry after the speaker's name: its repository's issue numbers and its pull
+    requests' numbers, each number a link ({'id', 'issue': the URL}). No issue and no pull
+    request, or a session no longer open, gives none."""
+    if not sess:
+        return []
+    groups = []
+    issues = [(text, {'id': sess['id'], 'issue': link}) for text, link in sess.get('issues', ())]
+    prs = [('#' + url.rstrip('/').rsplit('/', 1)[-1], {'id': sess['id'], 'issue': url}) for url in sess.get('prs') or ()]
+    for label, numbers in (('Issue', issues), ('PR', prs)):
+        if numbers:
+            groups.append((label, numbers))
+    if not groups:
+        return []
+    out = [('[ ', None)]
+    for g, (label, numbers) in enumerate(groups):
+        out.append((('' if g == 0 else ' | ') + label + ' ', None))
+        for n, number in enumerate(numbers):
+            out += ([(', ', None)] if n else []) + [number]
+    return out + [(' ]', None)]
+
+
+def message_lines(entry, width, segments=()):
     """draw.txt's lines for one printed message, wrapped to `width`, as the CLI prints a turn: the
-    speaker's name as the prompt, a blank line, the text behind a bullet (its markdown formatted
-    when the hook published it), a blank line, and a closing line with how long it was read and
-    when; only the newest message keeps that closing line, which goes when the next message
-    comes. Kept until the width, the text scale or the message changes, since a scrollback of
-    them is laid out four times a second."""
-    key = (entry['key'], width, text_scale, entry.get('duration'), newest)
+    speaker's name as the prompt with the session's issue and pull request numbers
+    (`segments`, meta_segments') right-aligned on it, a blank line, the text behind a bullet (its
+    markdown formatted when the hook published it), a blank line, and a closing line with how
+    long it was read and when. Kept until the width, the text scale or the message changes,
+    since a scrollback of them is laid out four times a second."""
+    key = (entry['key'], width, text_scale, entry.get('duration'), tuple((t, bool(i)) for t, i in segments))
     if key not in _message_lines:
         if len(_message_lines) > 4 * SCROLLBACK_KEEP:
             _message_lines.clear()
@@ -1045,9 +1015,12 @@ def message_lines(entry, width, newest=True):
         done = 'Read aloud' + (f" for {took(entry['duration'])}" if entry.get('duration') else '')
         if entry.get('at'):
             done += ' \u00b7 done ' + datetime.datetime.fromtimestamp(entry['at']).strftime('%A %-I:%M %p')
-        _message_lines[key] = ([PROMPT_MARK + fit(entry['name'], TERM_FONT, width - 2 * text_width(' ', TERM_FONT)), '']
-                               + body + (['', DONE_MARK + fit(done, TERM_FONT, width - 2 * text_width(' ', TERM_FONT))]
-                                         if newest else []))
+        cw = text_width(' ', TERM_FONT)
+        meta_w = sum(text_width(t, TERM_FONT) for t, _ in segments) + (2 * cw if segments else 0)
+        name = fit(entry['name'], TERM_FONT, width - 2 * cw - meta_w)
+        prompt = PROMPT_MARK + name + ''.join(META_MARK + ('k' if info else 'n') + t for t, info in segments)
+        _message_lines[key] = ([prompt, ''] + body
+                               + ['', DONE_MARK + fit(done, TERM_FONT, width - 2 * cw)])
     return _message_lines[key]
 
 
@@ -1098,7 +1071,7 @@ def render(state, now=None):
         out.gap(HEADER_GAP)
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
-        write_sessions(listed, [((), 1)] * len(listed))
+        write_sessions(listed, [(1, "")] * len(listed))
         return out.end(out.y + MARGIN - 4)
 
     # Sessions: drawn by draw.lua from sessions.txt, scrolled by the wheel when they run longer
@@ -1109,58 +1082,42 @@ def render(state, now=None):
     low, high = split_limits(avail)
     list_right = MARGIN + round(avail * min(max(load_split(), low), high))
     term_left = list_right + COLUMN_GAP
-    # One column: a section for each state the CLI names (needs input, working, completed) with
-    # its sessions under it, a session's name line followed by its repository and tag and its
-    # issue numbers.
+    # One column, set as the CLI sets its session list: a section for each state it names (needs
+    # input, working, completed) with its sessions under it, one line each.
     listed = grouped(listed)
     # The gear at the right of each row, which opens that session's settings: its icon, and
     # the click area round it that runs the row's name line
     gear_x0 = list_right - GEAR_SIZE * text_scale - 2 * GEAR_PAD
-    name_x = name_left()
     queued_right = gear_x0 - 4
-    text_w = max(queued_right - name_x, 40)                    # the issue numbers wrap inside it
     out.gap(LINE_GAP)
     list_top = out.y
     row = line_height(LIST_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
-    chips_top, pitch, chip_h = block_rows(row)
     layout, spans, heads, section = [], [], [], None
     for s in listed:
-        chips, lines = block_chips(s.get('issues', ()), text_w)
         header = status_group(s) if status_group(s) != section else ''
+        # a section's title takes a row, and a blank row above it except for the first section
+        head_rows = (1 if section is None else 2) if header else 0
         section = status_group(s)
-        head = row if header else 0
-        # the name line, its tag line and its issue numbers take as many rows as they need
-        height = head + chips_top + lines * pitch
-        span = max(1, math.ceil(round(height / row, 6)))
-        layout.append((chips, span, header))
+        span = 1 + head_rows                                    # the session's line, one row, and the title above
+        layout.append((span, header))
         spans.append(span)
-        heads.append(head)
+        heads.append(head_rows * row)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
     version = write_sessions(listed, layout)
     seg_h = line_height(LIST_HEAD_FONT) + 4 * text_scale
     draw.append(f'list {MARGIN} {list_right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
     draw.append(f'control {gear_x0:.2f} {list_right} {GEAR_SIZE * text_scale:.2f} {seg_h:.2f} {queued_right:.2f}')
-    draw.append(f'block {GROUP_PAD} {SESSION_INDENT} {text_w:g} {chips_top:.2f} {pitch:.2f} {chip_h:.2f}')
+    draw.append(f'block {GROUP_PAD} {SESSION_INDENT}')
     rows, top = [], 0.0
-    for s, (chips, span, _), head in zip(listed, layout, heads):
+    for s, (span, _), head in zip(listed, layout, heads):
         entry = {'id': s['id'], 'speech': s['speech'], 'voice': s['own_voice'], 'top': round(top, 2),
                  'bottom': round(top + row * span, 2), 'head': round(head, 2),
                  'gear': [round(gear_x0, 2), round(list_right, 2)]}
-        # Each issue number opens its issue and the pill the ready pull requests, each only
-        # with one to open; the name closes the session, once confirmed. An issue's box is
-        # [left, top, right, bottom], its top from the row's
-        name_span, pill_span = name_spans(s, queued_right)
-        entry.update(name=name_span, title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
-        if chips:
-            entry['issues'] = [[round(name_x + x, 2), round(head + chips_top + line * pitch + (pitch - chip_h) / 2, 2),
-                                round(name_x + x + w, 2),
-                                round(head + chips_top + line * pitch + (pitch + chip_h) / 2, 2), link]
-                               for line, x, w, _, link in chips]
-        if s.get('prs'):
-            entry.update(link=pill_span, branch=s.get('branch') or '', prs=s['prs'])
+        # The name closes the session, once confirmed
+        entry.update(name=name_span(s, queued_right), title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, list_right, list_top + list_height]
@@ -1187,11 +1144,16 @@ def render(state, now=None):
     banner_h = (TERM_BANNER_LINES + 1) * line_h                    # the welcome banner and a blank line
     term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h - TERM_STATUS_GAP - line_h) // line_h), 1)
     inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
-    said = []
-    for i, entry in enumerate(spoken):
+    said, links = [], {}
+    open_by_id = {x['id']: x for x in listed}
+    for entry in spoken:
         if said:
             said.append('')                                    # a blank line between messages
-        said.extend(message_lines(entry, inner, i == len(spoken) - 1))
+        segments = meta_segments(open_by_id.get(entry.get('session')))
+        if segments:                                           # what each number in this prompt line opens
+            links[str(len(said))] = [info for _, info in segments if info]
+        said.extend(message_lines(entry, inner, segments))
+    regions['terminal_links'] = links
     queued = sum(s['queued'] for s in listed)
     draw.append(f'terminal {term_left} {box_top:.2f} {right} {bottom:.2f} {TERM_PAD} '
                 f'{box_top + TERM_PAD + line_h / 2:.2f} {box_top + TERM_PAD + banner_h + line_h / 2:.2f} {line_h:.2f} '
