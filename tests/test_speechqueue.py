@@ -462,8 +462,10 @@ class Links(Repos):
         with open(speechqueue.REGIONS) as f:
             regions = json.load(f)
         x0, y0, x1, y1, band = (float(v) for v in table)
-        self.assertEqual((x0, x1), (speechqueue.MARGIN - speechqueue.TABLE_BLEED, regions['list'][2]))
-        self.assertEqual((band, y1), (regions['list'][1], regions['list'][3]))     # the band down to the rows
+        self.assertEqual((x0, x1), (speechqueue.MARGIN, regions['list'][2]))
+        self.assertEqual(band, regions['list'][1])                                 # the band down to the rows
+        self.assertEqual(y1, regions['list'][1] + regions['list_scroll'][1] * 1)   # and the table ends with the one row
+        self.assertLess(y1, regions['list'][3])
         self.assertLess(y0, band)
         self.assertIn('${lua_parse fg head}', text)                                # the headers in the band's colour
         os.remove(os.path.join(self.f.sessions, '100.json'))

@@ -97,7 +97,7 @@ SETTINGS_W = 400                              # the settings popup's width, at m
 SETTINGS_LABEL_GAP = 6                        # under its Speech label, so the buttons sit as far from it as the first voice
 SETTINGS_COLUMNS = 3                          # buttons to a row in it, as many as it has speech settings
 GEAR_SIZE = 14                                # a row's gear icon, right of the row
-GEAR_PAD = 8                                  # click room round the icon, and its gap to the row's text
+GEAR_PAD = 12                                 # click room round the icon, and its gap to the table's edge, as wide as the text's at the left
 DEFAULT_VOICE_LABEL = 'Default'               # the popup's first voice: the global one, as the tray sets it
 VOICES_EVERY = 10.0                           # s between asking speechctl for the voices
 VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
@@ -109,10 +109,9 @@ VOLUME_TOP = 2.0                              # speechctl's loudest volume, the 
 SEGMENTS = (('on', 'On'), ('alerts', 'Alerts'), ('off', 'Off'))   # a session's speech setting, as the popup offers it
 PILL_PAD = 6                                  # either side of the pill after a session's name
 PILL_GAP = 8                                  # a session's name to its pill
-TABLE_BLEED = 8                               # the table's edge, left of the text's margin
 TABLE_HEAD_PAD = 3                            # the header band above its text
-BLOCK_RULE = 2                                # the room left of a repository's name and issue numbers, inside a row's fill
-BLOCK_PAD = 7                                 # and the room after it, before the text
+BLOCK_RULE = 0                                # draw.lua's block line still carries a rule's width: none now
+BLOCK_PAD = 12                                # the table's edge to a repository's name and issue numbers
 BLOCK_MIN = 90                                # the text's least width, however short the names are
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
@@ -123,7 +122,7 @@ SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
 LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
-HEADING_FONT = 'Ubuntu Sans Bold 9'           # the column headers over the sessions
+HEADING_FONT = 'Ubuntu Sans Bold 11'          # the column headers over the sessions: a row's text, bold
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # a repository's name, as draw.lua draws it
 TAG_FONT = 'Ubuntu Sans 9'                    # a row's tag, pill, queued count and issue numbers, as draw.lua draws them
@@ -891,9 +890,6 @@ def render(state, now=None):
     out.text(f"${{lua_parse fg head}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
     out.gap(LIST_GAP)
     list_top = out.y
-    if listed:                                    # the table round the headers and the rows, its header band filled
-        draw.append(f'table {MARGIN - TABLE_BLEED} {heading_top - TABLE_HEAD_PAD:.2f} {right} '
-                    f'{list_top + list_height:.2f} {list_top:.2f}')
     row = line_height(ROW_FONT) + ROW_SPACING * text_scale
     rows_fit = list_height / row
     count = len(listed)
@@ -906,6 +902,9 @@ def render(state, now=None):
         layout.append((chips, span))
         spans.append(span)
     last = max(0, round(sum(spans) - rows_fit + 0.4999))
+    if listed:                                    # the table round the headers and the rows, ending at the last row
+        table_bottom = list_top + min(list_height, sum(spans) * row)
+        draw.append(f'table {MARGIN} {heading_top - TABLE_HEAD_PAD:.2f} {right} {table_bottom:.2f} {list_top:.2f}')
     version = write_sessions(listed, layout)
     seg_h = line_height(SEGMENT_FONT) + 4 * text_scale
     queued_right = gear_x0 - 4

@@ -681,7 +681,7 @@ local function draw_list(cr, l, version, c, blk, s, text, t)
         local y = top + (at - scroll) * row
         if y > top + height then break end
         local h = r.span * row
-        local shade = (i % 2 == 0 and 0.07 or 0) + (glows[r.id] or 0) * 0.2   -- every other row dimmed, as a table's; the one read aloud brighter
+        local shade = (i % 2 == 0 and 0.105 or 0) + (glows[r.id] or 0) * 0.2   -- every other row dimmed, as a table's; the one read aloud brighter
         if shade > 0 then
             set(cr, fg, shade)
             cairo_rectangle(cr, x0 - bleed, y, x1 - x0 + bleed, h)
