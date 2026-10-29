@@ -722,6 +722,11 @@ def block_rows(row):
     return row / 2 + name_h / 2 + 1, chip_h + CHIP_GAP, chip_h
 
 
+def name_left(box_w):
+    """Where a session's name begins along its row, after its block, `box_w` wide."""
+    return MARGIN + box_w + 8
+
+
 def name_spans(s, right, box_w):
     """Where a session's name and its pill sit along its row, as draw.lua lays them out between
     its block, `box_w` wide, and `right` (the queued count's right edge): ([left, right] of the name,
@@ -730,7 +735,7 @@ def name_spans(s, right, box_w):
     pill = link_pill(s.get('prs'))
     if s['queued'] > 0:
         right -= text_width(f"{s['queued']} queued", TAG_FONT) + 10
-    name_x = MARGIN + box_w + 8
+    name_x = name_left(box_w)
     pill_w = text_width(pill, TAG_FONT) + 2 * PILL_PAD + PILL_GAP if pill else 0
     flags_w = text_width(row_flags(s), TAG_FONT) + 8
     name = fit(display_text(s['name']), ROW_FONT, right - name_x - flags_w - pill_w)
@@ -825,13 +830,16 @@ def render(state, now=None):
     xs = [right]
     for _, label in reversed(SEGMENTS):
         xs.insert(0, xs[0] - text_width(label, SEGMENT_FONT) - 2 * SEGMENT_PAD * text_scale)
-    name_x = MARGIN + box_w + 8
+    name_x = name_left(box_w)
     out.gap(LINE_GAP)
     heading_h = line_height(HEADING_FONT, PLAIN_FONT)
     columns = ((MARGIN + BLOCK_RULE + BLOCK_PAD, text_w, 'Identifiers'),
                (name_x, xs[0] - 8 - name_x, 'Session Information'),
                (xs[0], right - xs[0], 'Speech Setting')) if listed else ()
-    heads = ''.join(f"${{goto {SHADOW + x:g}}}{esc(fit(label, HEADING_FONT, width))}" for x, width, label in columns)
+    # a column with no room for even an ellipsis (a narrow card at a large text scale) has no header
+    room = text_width('…', HEADING_FONT)
+    heads = ''.join(f"${{goto {round(SHADOW + x)}}}{esc(fit(label, HEADING_FONT, width))}"
+                    for x, width, label in columns if width >= room)
     out.text(f"${{lua_parse fg text}}${{font {conky_font(HEADING_FONT)}}}{heads}{plain()}", heading_h)
     out.gap(LIST_GAP)
     list_top = out.y

@@ -438,7 +438,7 @@ class Links(Repos):
     def headers(self, state):
         """[(x, label)] of the column headers widget.txt draws over the list, x from the card's left."""
         text = speechqueue.render(state)
-        line = next(l for l in text.splitlines() if 'Ubuntu Sans:bold:size=9' in l)
+        line = next(l for l in text.splitlines() if speechqueue.conky_font(speechqueue.HEADING_FONT) in l)
         return text, [(int(x) - speechqueue.SHADOW, label)
                       for x, label in re.findall(r'\$\{goto (\d+)\}([^$]+)', line)]
 
@@ -452,7 +452,21 @@ class Links(Repos):
         self.assertNotIn('Sessions', text)
         self.assertEqual([label for _, label in heads], ['Identifiers', 'Session Information', 'Speech Setting'])
         self.assertEqual([x for x, _ in heads],
-                         [row['issues'][0][0], row['name'][0] + 4, row['on'][0]])   # the left edge of each column
+                         [row['issues'][0][0], speechqueue.name_left(speechqueue.block_width(state['sessions'])),
+                          row['on'][0]])                             # the left edge of each column
+
+    def test_the_headers_stay_whole_numbers_and_clear_of_each_other_at_any_size(self):
+        self.f.session(100, ME, 'One')
+        for size in ((660, 128, 1.1), (400, 128, 2.0), (9999, 128, 0.7)):
+            with self.subTest(size=size), mock.patch.object(speechqueue.size_file, 'load', return_value=size):
+                state = self.state()
+                state['sessions'][0]['repo'] = 'Gnome-Widgets'
+                text, heads = self.headers(state)
+                self.assertNotRegex(text, r'\$\{goto \d+\.')
+                self.assertIn('Identifiers', [label for _, label in heads])
+                font = speechqueue.HEADING_FONT
+                for (x, label), (nxt, _) in zip(heads, heads[1:]):
+                    self.assertLessEqual(x + speechqueue.text_width(label, font), nxt)   # none runs into the next
 
     def test_the_headers_leave_the_lists_top_where_it_was_and_are_left_out_without_sessions(self):
         self.f.session(100, ME, 'One')
