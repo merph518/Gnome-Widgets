@@ -28,10 +28,11 @@ Every command must exit 0 and print nothing, apart from the test summaries
 
 - The last command fails when the vendored Overmind copy differs from the tree
   `.claude/att-docs.lock` pins, so a hand edit to it shows offline. The same
-  script runs on every pull request as `.github/workflows/overmind-pin.yml`,
-  with `--remote`, which also fetches the pinned tag and fails when the lock no
-  longer matches it. Moving the pin is
-  `scripts/overmind-sync.sh <tag>`, followed by
+  script runs on every pull request as `.github/workflows/overmind-pin.yml`.
+  `scripts/overmind-check.sh --remote` also fetches the pinned tag and fails
+  when the lock no longer matches it; it needs read access to the private
+  Overmind repository, which the workflow's token lacks, so it is run by hand.
+  Moving the pin is `scripts/overmind-sync.sh <tag>`, followed by
   `claude plugin update voice@att-docs`. The tree is read from the index, which
   `overmind-sync.sh` fills, so the check passes before the sync is committed;
   an edit, a deletion or a file added under the copy fails it. Run it from the

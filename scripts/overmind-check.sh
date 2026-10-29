@@ -2,8 +2,9 @@
 # Fail when the vendored Overmind copy in .claude/att-docs differs from the tree
 # .claude/att-docs.lock pins, so a hand edit cannot land.
 # usage: scripts/overmind-check.sh [--remote]
-# --remote also fetches the pinned tag and fails unless it still points at the
-# locked commit and tree, so a lock edited to match a hand edit fails too.
+# --remote also fetches the pinned tag (it needs read access to the Overmind
+# repository) and fails unless it still points at the locked commit and tree,
+# so a lock edited to match a hand edit fails too.
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
