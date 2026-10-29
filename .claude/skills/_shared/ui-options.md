@@ -95,13 +95,10 @@ Right after publishing, ask with `AskUserQuestion`, in the same turn, one
 question a decision on the page (the tool takes up to four):
 
 - The question names the issue, the decision and the page, with its link, so it
-  stands on its own on the phone: in some modes the voice bridge passes on the
-  question alone. The speech hooks read a bare link as "the following link", so
-  it costs a few words aloud.
+  stands on its own.
 - One option per option on the page, with the same names, the recommended one
-  first and marked `(Recommended)`. Read aloud, a question carries at most its
-  option labels, so each label carries the gist on its own ("A: number pill
-  after the title", not "A").
+  first and marked `(Recommended)`. Each label carries the gist on its own ("A:
+  number pill after the title", not "A").
 - Each option's `description` says what it is and its cost in one or two
   sentences, and its `preview` is a few lines of text sketch of the row, for
   whoever answers on a screen. An option whose render failed says so in the
