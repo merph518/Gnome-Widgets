@@ -358,10 +358,11 @@ end
 
 local function draw_block(cr, r, x0, y, row, b, s, text)
     -- the repository's name on the row's first line, cut to the block's width, and under it the
-    -- issue numbers, each in a borderless chip (a tint of the foreground) a click on opens that
-    -- issue, wrapped as speechqueue.py laid them (b is its block line). A rule at the block's left runs the whole height: a thin dim
-    -- one, or while its session is speaking a thicker, lit one with the numbers lit as well.
-    -- A chip is tinted more under the pointer
+    -- issue numbers, each a chip a click on opens that issue, wrapped as speechqueue.py laid
+    -- them (b is its block line). A chip has no border and no fill of its own: it is the card's
+    -- colour until its session is speaking or the pointer is over it, when it takes a tint. A
+    -- rule at the block's left runs the whole height: a thin dim one, or while its session is
+    -- speaking a thicker, lit one with the numbers lit as well
     if r.repo == '' then return end
     local rule, pad, tw = b[1] * s, b[2] * s, b[3] * s
     local chips_top, pitch, chip_h = b[4] * s, b[5] * s, b[6] * s
@@ -381,9 +382,11 @@ local function draw_block(cr, r, x0, y, row, b, s, text)
     for _, c in ipairs(r.chips) do
         local cx, ccy, w = tx + c.x * s, y + chips_top + c.line * pitch + pitch / 2, c.w * s
         local under = hovered(cx, ccy - chip_h / 2, cx + w, ccy + chip_h / 2)
-        set(cr, fg, (r.speaking and 0.25 or 0.12) + (under and 0.13 or 0))
-        rounded_rect(cr, cx, ccy - chip_h / 2, w, chip_h, chip_h / 2)
-        cairo_fill(cr)
+        if r.speaking or under then
+            set(cr, fg, (r.speaking and 0.25 or 0.12) + (under and 0.13 or 0))
+            rounded_rect(cr, cx, ccy - chip_h / 2, w, chip_h, chip_h / 2)
+            cairo_fill(cr)
+        end
         if r.speaking then set(cr, fg) else set(cr, secondary()) end
         show(cr, c.text, cx + w / 2, ccy, 'centre')
     end

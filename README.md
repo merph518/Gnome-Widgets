@@ -84,10 +84,10 @@ an ellipsis when it is longer than the block. Under it are the issue numbers of 
 each in a chip: the issue a session's branch names, on a branch named `<type>/issue-<N>-...` as
 `/implement` names them, and the same for any other open session in that repository, in number
 order. They wrap onto more lines when they do not fit, and the session's row grows to hold them.
-While the session is speaking, the rule is thicker and the chips are lit. Every block is as wide
+While the session is speaking, the rule is thicker and the chips are tinted and lit. Every block is as wide
 as the longest name in the list (between 90 and 170 px), so the names after it still line up. A
 click or tap on a chip opens that issue in a new Google Chrome tab, and the chip is tinted under
-the pointer; a repository with no issue shows its name alone.
+the pointer (a chip is otherwise plain text on the card); a repository with no issue shows its name alone.
 
 Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
 ledger, which `/implement` adds after the ready signal), a white pill after its name reads
