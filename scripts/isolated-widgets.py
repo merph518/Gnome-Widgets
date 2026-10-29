@@ -75,7 +75,7 @@ class Copy:
         self.root = os.path.join(base, name)
         self.home = os.path.join(self.root, 'home')
         self.runtime = os.path.join(self.root, 'run')
-        self.speak = os.path.join(self.runtime, 'speak-attention')
+        self.hook_dir = os.path.join(self.runtime, 'speak-attention')
         self.sessions = os.path.join(self.home, '.claude', 'sessions')
         self.pids = os.path.join(self.root, 'fixture.pids')
         self.slot_file = os.path.join(self.root, 'slot')
@@ -108,7 +108,7 @@ def real_runtime_dir():
 
 def link_runtime(copy, real):
     """The copy's $XDG_RUNTIME_DIR: a link to everything the desktop keeps in `real` (the
-    session bus, the Wayland socket, ...) except the speaking hook's folder, which is the
+    session bus, the Wayland socket, ...) except the hooks' folder, which is the
     copy's own fixture. Links, not copies, so a socket still reaches its server."""
     os.makedirs(copy.runtime, mode=0o700, exist_ok=True)
     try:
@@ -205,9 +205,9 @@ def write_fixtures(copy, pids):
     all, as <id>.feed holds them, and the fourth is not a managed session. The first three carry
     the .managed marker."""
     shutil.rmtree(copy.sessions, ignore_errors=True)
-    shutil.rmtree(copy.speak, ignore_errors=True)
+    shutil.rmtree(copy.hook_dir, ignore_errors=True)
     os.makedirs(copy.sessions)
-    os.makedirs(copy.speak)
+    os.makedirs(copy.hook_dir)
     sessions = fixture_sessions(copy, pids)
     feeds = fixture_feeds(sessions, time.time())
     for pid, sid, name, busy, cwd, managed in sessions:
@@ -215,8 +215,8 @@ def write_fixtures(copy, pids):
             'pid': pid, 'sessionId': sid, 'name': name, 'cwd': cwd, 'kind': 'interactive',
             'status': 'busy' if busy else 'idle', 'messagingSocketPath': f'/nonexistent/{sid}.sock'}))
         if managed:
-            write(os.path.join(copy.speak, f'{sid}.managed'))
-            write(os.path.join(copy.speak, f'{sid}.feed'), ''.join(
+            write(os.path.join(copy.hook_dir, f'{sid}.managed'))
+            write(os.path.join(copy.hook_dir, f'{sid}.feed'), ''.join(
                 json.dumps({'session': sid, 'name': name, 'text': text, 'markdown': markdown or text, 'at': int(at)})
                 + '\n' for at, text, markdown in feeds.get(sid, [])))
 

@@ -2,13 +2,13 @@ scale 1 1
 shadow 16
 window 649.0 671.0 27.0 10
 title 16 27.0 0.09 CLAUDE CODE ORCHESTRATOR
-list 16 334 52.0 23.00 128 017438d0fd 3 2
+list 16 334 52.0 23.00 128 ddff7d981a 3 2
 control 334 324.00
 block 10 32
 confirm 186.00 64.00 506.00 168.00 87.00 104.00 141.00 26.00 361.00 434.00 442.00 492.00 16 52.0 676 180.0
 terminal 358 52.00 676 180.00 10 71.50 147.50 19.00 1 3
 speaker Combined Session Output
-line Claude Voice Widget
+line Feed widget
 line 
 line   Opened the pull request.
 line 
@@ -20,7 +20,7 @@ line   The build is green.
 line 
 line Replied · Wednesday 6:51 PM
 line 
-line Claude Voice Widget
+line Feed widget
 line 
 line   The data layer is in:
 line   orchestrator.py writes the

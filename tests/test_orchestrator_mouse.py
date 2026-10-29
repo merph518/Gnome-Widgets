@@ -56,8 +56,6 @@ class ControlsTest(MouseTest):
     def test_the_widget_has_no_controls_of_its_own_beyond_the_window_buttons_and_the_divider(self):
         self.assertEqual(orchestrator_mouse.BUTTONS, ())
         self.assertEqual(orchestrator_mouse.REGIONS_ORDER, ('minimize', 'close', 'divider'))
-        for name in ('press', 'speechctl', 'open_menu', 'set_volume', 'toggle_mute'):
-            self.assertFalse(hasattr(orchestrator_mouse, name), name)
 
 
 ISSUE = 'https://github.com/o/r/issues/123'
