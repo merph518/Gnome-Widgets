@@ -4,8 +4,8 @@
 --   widget.txt    conky's markup (the column headers), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
---   bubble-scroll how many lines conky-mouse.py has turned the wheel over the speech bubble, in all
---                 (down counts up); the bubble follows the clip again BUBBLE_HOLD seconds after the last
+--   terminal-scroll how many lines conky-mouse.py has turned the wheel over the terminal pane, in
+--                 all (down counts up); the pane follows the newest line again once scrolled back to the end
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
 --   settings-menu present while conky-mouse.py has the settings menu open: the selected row and
 --                 how many rows it is scrolled, as "<selected> <scrolled>", the page's title, then
@@ -49,7 +49,7 @@ local function load_draw()
     -- {key = {numbers...}}, and each line's own text in d.text[key]
     local d = {text = {}, lines = {}}
     for line in (read('draw.txt') or ''):gmatch('[^\n]+') do
-        local key, rest = line:match('^(%S+) (.*)$')    -- one space: a bubble line's own indent is kept
+        local key, rest = line:match('^(%S+) (.*)$')    -- one space: a terminal line's own indent is kept
         if key == 'line' then
             d.lines[#d.lines + 1] = rest
         elseif key then
@@ -749,7 +749,7 @@ local function confirm_state()
 end
 
 local function draw_confirm(cr, c, state, s, text)
-    -- the close prompt: the list dimmed, and over it a panel (as the voice list's) with
+    -- the close prompt: the list dimmed, and over it a panel with
     -- "Close <name>?", a line saying what that does, and Cancel and OK, OK in red
     local x0, top, x1, bottom = c[1] * s, c[2] * s, c[3] * s, c[4] * s
     local title_cy, msg_cy, button_cy, button_h = c[5] * s, c[6] * s, c[7] * s, c[8] * s

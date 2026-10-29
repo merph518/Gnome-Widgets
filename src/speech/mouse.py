@@ -458,7 +458,7 @@ def ungrab(d):
 
 
 def x_events(d, win, s, opcode):
-    """run_settings's and run_confirm's events() reading X's queue. A finger that touches down
+    """run_menu's and run_confirm's events() reading X's queue. A finger that touches down
     is followed from one call to the next: where it lifts after a tap is a press, and a swipe
     is not one."""
     x11, ev = core.x11, core.XEvent()
