@@ -62,7 +62,7 @@ class Fixture(unittest.TestCase):
         """This session with speech on, another on Alerts with a line queued, a third Off."""
         self.f.session(300, ME, 'Claude Voice Widget', status='busy')
         self.f.session(100, OTHER, 'Release 1.2')
-        self.f.session(200, QUIET, 'Docs pass', kind='bg')
+        self.f.session(200, QUIET, 'Docs pass')
         self.f.file(ME + '.replies')
         self.f.file(QUIET + '.muted')
         self.f.queue(OTHER, 'The build is green.')
@@ -76,7 +76,17 @@ class ReadState(Fixture):
         self.assertEqual([x['speech'] for x in s], ['on', 'alerts', 'off'])
         self.assertEqual([x['queued'] for x in s], [0, 1, 0])
         self.assertTrue(s[0]['busy'])
-        self.assertTrue(s[2]['background'])
+
+    def test_background_sessions_are_not_listed(self):
+        self.three()
+        self.f.session(400, '99999999-jobs', 'A job', kind='bg')
+        self.assertEqual([x['id'] for x in self.state()['sessions']], [ME, OTHER, QUIET])
+
+    def test_a_background_session_that_speaks_keeps_its_name_in_the_terminal(self):
+        self.f.session(400, ME, 'A job', kind='bg')
+        self.f.now(ME, 'A job', 'A job says: done.', hook_pid=9001)
+        state = self.state()
+        self.assertEqual((state['sessions'], state['name']), ([], 'A job'))
 
     def test_a_queued_question_is_a_tag_not_a_line(self):
         self.f.session(100, ME, 'One')
@@ -99,7 +109,7 @@ class ReadState(Fixture):
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), ['busy'])                     # working, not waiting
         self.f.ledger(QUIET, ('pr:5', 'open'))
-        self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over bg
+        self.assertEqual(flags(QUIET), ['waiting: merge'])        # one tag: waiting over idle
 
     def test_waiting_on_tests_while_a_test_run_is_under_the_session(self):
         self.three()
@@ -111,7 +121,7 @@ class ReadState(Fixture):
         self.f.ledger(OTHER, ('pr:111', 'open'))
         self.assertEqual(flags(OTHER), 'waiting: tests')          # over waiting on a merge
         self.f.process(210, 200, 'python3', 'scripts/catchup_test.py')
-        self.assertEqual(flags(QUIET), 'waiting: tests')          # over bg
+        self.assertEqual(flags(QUIET), 'waiting: tests')          # over idle
         self.f.process(310, 300, 'npx', 'playwright', 'test')
         self.assertEqual(flags(ME), 'busy')                       # its own turn runs them
 
@@ -156,12 +166,12 @@ class ReadState(Fixture):
         self.three()
         flags = lambda sid: next(speechqueue.session_line(x) for x in self.state()['sessions']
                                  if x['id'] == sid).split('\t')[4]
-        self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'bg'))
+        self.assertEqual((flags(ME), flags(OTHER), flags(QUIET)), ('busy', 'idle', 'idle'))
         self.f.queue(ME, 'Question: Merge it? Options: yes or no.')
         self.f.ledger(ME, ('pr:111', 'open'))
         self.assertEqual(flags(ME), 'question')                   # over busy and waiting
         self.f.queue(QUIET, 'Question: Which one?')
-        self.assertEqual(flags(QUIET), 'question')                # over bg
+        self.assertEqual(flags(QUIET), 'question')                # over idle
 
     def test_the_hooks_speaker_is_dropped_only_at_the_start(self):
         self.assertEqual(speechqueue.without_speaker('Claude Voice Widget session says: PR 110 merged.'), 'PR 110 merged.')
@@ -380,12 +390,10 @@ class Links(Repos):
         self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
 
     def test_the_sessions_are_listed_in_the_sections_the_cli_names_for_their_state(self):
-        listed = [dict(id='a', busy=False, background=False), dict(id='b', busy=True, background=False),
-                  dict(id='c', busy=False, background=False, question=True), dict(id='d', busy=False, background=True),
-                  dict(id='e', busy=False, background=False, waiting='merge')]
+        listed = [dict(id='a', busy=False), dict(id='b', busy=True), dict(id='c', busy=False, question=True),
+                  dict(id='e', busy=False, waiting='merge')]
         self.assertEqual([(speechqueue.status_group(x), x['id']) for x in speechqueue.grouped(listed)],
-                         [('Needs input', 'c'), ('Working', 'b'), ('Working', 'd'), ('Working', 'e'),
-                          ('Completed', 'a')])
+                         [('Needs input', 'c'), ('Working', 'b'), ('Working', 'e'), ('Completed', 'a')])
 
     def test_a_session_is_one_row_and_a_section_adds_its_title_and_a_blank_row_after_the_first(self):
         self.f.session(100, ME, 'One')

@@ -605,6 +605,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
     for s in open_sessions:
+        if s['background']:
+            continue                                            # the jobs started in the background are not listed
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')
@@ -622,7 +624,7 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     name = ''
     if n:
         name = display_text(n.get('name') or '') or next(
-            (s['name'] for s in listed if s['id'] == n.get('session')), '')
+            (s['name'] for s in open_sessions if s['id'] == n.get('session')), '')
     return {
         'now': n, 'name': name, 'text': display_text((n or {}).get('text') or ''),
         'markdown': clean_markdown((n or {}).get('markdown')),
@@ -690,10 +692,10 @@ def session_line(s, span=1, header=''):
 
 def row_flags(s):
     """A session's one tag, the first that holds: a question waiting, then busy, waiting (on
-    tests, a unit, ci or a merge), bg, else idle."""
+    tests, a unit, ci or a merge), else idle."""
     wait = s.get('waiting')
     return next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
-                                (f'waiting: {wait}', wait), ('bg', s['background']),
+                                (f'waiting: {wait}', wait),
                                 ('idle', True)) if on)
 
 
@@ -896,7 +898,7 @@ STATUS_GROUPS = ('Needs input', 'Working', 'Completed')   # the sessions column'
 
 def status_group(s):
     """The section a session is listed under: Needs input while a question waits to be read,
-    Completed while it is idle, else Working, which holds busy, waiting and background."""
+    Completed while it is idle, else Working, which holds busy and waiting ones."""
     tag = row_flags(s)
     return 'Needs input' if tag == 'question' else 'Completed' if tag == 'idle' else 'Working'
 
