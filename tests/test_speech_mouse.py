@@ -3,6 +3,7 @@ wheel step on each region runs, checked against a stub speechctl that records it
 and the wheel and swipes that scroll the session list."""
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from unittest import mock
@@ -548,12 +549,18 @@ class CloseTest(StubSpeechctl):
         speech_mouse.start()
         self.assertFalse(os.path.exists(speech_mouse.CLOSE_CONFIRM))
 
-    def sessions(self, sid='aaaa', pid=4242, running=True):
-        """A sessions folder with Claude Code's file for pid 4242, and a /proc with it running."""
+    def sessions(self, sid='aaaa', pid=4242, running=True, started=8594608):
+        """A sessions folder with Claude Code's file for pid 4242, which says the process started
+        at tick 8594608, and a /proc whose pid 4242 started at tick `started`."""
+        shutil.rmtree(os.path.join(self.dir, 'proc'), ignore_errors=True)
         os.makedirs(os.path.join(self.dir, 'sessions'), exist_ok=True)
         os.makedirs(os.path.join(self.dir, 'proc', '4242' if running else '1'), exist_ok=True)
+        # as the kernel writes it: the name in brackets can hold spaces and brackets
+        stat = f'4242 (claude (x) y) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 1 0 0 20 0 9 0 {started} 1000 100 '
+        with open(os.path.join(self.dir, 'proc', '4242' if running else '1', 'stat'), 'w') as f:
+            f.write(stat)
         with open(os.path.join(self.dir, 'sessions', '4242.json'), 'w') as f:
-            json.dump({'pid': pid, 'sessionId': sid}, f)
+            json.dump({'pid': pid, 'sessionId': sid, 'procStart': '8594608'}, f)
         return dict(sessions_dir=os.path.join(self.dir, 'sessions'), proc_dir=os.path.join(self.dir, 'proc'))
 
     def test_the_session_is_sent_sigterm(self):
@@ -563,12 +570,11 @@ class CloseTest(StubSpeechctl):
         self.assertIn('SIGTERM to session aaaa (Widget Close Session) pid 4242', support.read(conky_mouse.LOG))
 
     def test_a_pid_that_is_no_longer_that_session_is_not_signalled(self):
-        for name, folders in (('another session', self.sessions(sid='cccc')),
-                              ('not running', self.sessions(running=False)),
-                              ('another pid', self.sessions(pid=1))):
+        for name, setup in (('another session', dict(sid='cccc')), ('not running', dict(running=False)),
+                            ('another pid', dict(pid=1)), ('a process that started later', dict(started=9000000))):
             with self.subTest(name):
                 kill = mock.Mock()
-                self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **folders))
+                self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **self.sessions(**setup)))
                 self.assertFalse(kill.called)
         kill = mock.Mock()
         self.assertFalse(speech_mouse.end_session(ROW, kill=kill, sessions_dir=os.path.join(self.dir, 'none'),
@@ -576,6 +582,18 @@ class CloseTest(StubSpeechctl):
         self.assertFalse(speech_mouse.end_session(dict(ROW, id=''), kill=kill, **self.sessions()))
         self.assertFalse(kill.called)
         self.assertIn('close: session aaaa is no longer running as pid 4242', support.read(conky_mouse.LOG))
+
+    def test_the_start_time_is_read_past_a_name_with_spaces_and_brackets(self):
+        folders = self.sessions(started=777)
+        self.assertEqual(speech_mouse.proc_start(4242, folders['proc_dir']), '777')
+
+    def test_a_file_without_a_start_time_signals_nothing(self):
+        folders = self.sessions()
+        with open(os.path.join(folders['sessions_dir'], '4242.json'), 'w') as f:
+            json.dump({'pid': 4242, 'sessionId': 'aaaa'}, f)
+        kill = mock.Mock()
+        self.assertFalse(speech_mouse.end_session(ROW, kill=kill, **folders))
+        self.assertFalse(kill.called)
 
     def test_a_signal_that_fails_is_logged(self):
         kill = mock.Mock(side_effect=PermissionError('denied'))

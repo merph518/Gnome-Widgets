@@ -438,20 +438,28 @@ def run_confirm(prompt, row, events, now=time.monotonic, sleep=time.sleep):
             pass
 
 
+def proc_start(pid, proc_dir='/proc'):
+    """The start time of process `pid` in clock ticks since boot, field 22 of its stat, which
+    Claude Code writes to a session's file as procStart."""
+    with open(os.path.join(proc_dir, str(int(pid)), 'stat'), encoding='utf-8') as f:
+        return f.read().rsplit(')', 1)[1].split()[19]      # after the name, which can hold spaces and ')'
+
+
 def end_session(row, sessions_dir=SESSIONS_DIR, proc_dir='/proc', kill=os.kill):
     """Ends the Claude session `row` by sending its process SIGTERM, which is what closing it
     from outside comes to. Claude Code's file for the pid is read first and has to still name
-    this session, so a pid that has since gone to another process is never signalled. Returns
+    this session, and the process has to have started when the file says it did, so a file
+    that outlived its session while its pid went to another process signals nothing. Returns
     whether the signal was sent."""
     pid, sid = row.get('pid'), row.get('id')
     try:
         with open(os.path.join(sessions_dir, f'{int(pid)}.json'), encoding='utf-8') as f:
             entry = json.load(f)
         named = isinstance(entry, dict) and int(entry.get('pid')) == int(pid) and str(entry.get('sessionId')) == sid
-        alive = os.path.exists(os.path.join(proc_dir, str(int(pid))))
-    except (OSError, ValueError, TypeError):
-        named = alive = False
-    if not (named and alive and sid):
+        same = named and str(entry.get('procStart')) == proc_start(pid, proc_dir)
+    except (OSError, ValueError, TypeError, IndexError):
+        same = False
+    if not (same and sid):
         core.log(f'close: session {sid} is no longer running as pid {pid}')
         return False
     try:
