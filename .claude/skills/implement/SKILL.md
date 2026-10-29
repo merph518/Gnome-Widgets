@@ -173,7 +173,7 @@ copy that was running is still up.
 
 ```bash
 pgrep -af 'nowplaying.py'               # which copy runs, if any: note it
-scripts/capture-widget.py <scratchpad>/widget-before.png <spotify|speech>   # visual changes only, unless ui-options.md took it
+scripts/capture-widget.py <scratchpad>/widget-before.png <widget>   # visual changes only
 bin/conky-widgets spotify stop
 : > ~/.cache/conky-widgets/run.log
 bin/conky-widgets spotify start
@@ -183,8 +183,10 @@ grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 
 The processes should run from this worktree's `src/`, and the log should hold
 nothing but the harmless `libayatana-appindicator is deprecated` warning.
-Anything that changes how the widget looks gets a capture after the change
-(`scripts/capture-widget.py <scratchpad>/widget-after.png`), read with the
+`<widget>` is `speech` or `spotify`, the one the change draws; the script
+falls back to `spotify` without it. Anything that changes how the widget looks
+gets a capture after the change
+(`scripts/capture-widget.py <scratchpad>/widget-after.png <widget>`), read with the
 `Read` tool next to the before capture and, when the layout was put to the
 user per [ui-options.md](../_shared/ui-options.md), the mockup of the option
 picked. When nothing is playing, say so and say
@@ -208,7 +210,9 @@ The general skill's second gate is void. Its first gate is the Section 6 run
 above. The title is `<summary> (#<N>)`, with no type prefix. The body carries
 `Closes #<N>`, what changed and why, a test plan that says what was actually
 run and what was not, `Judgment calls` (each decision the issue left open, what
-was chosen, what it beat and what decided it; none reads "none"), any open pull
+was chosen, what it beat and what decided it; none reads "none"), `UI choices`
+when a look was put to the user per [ui-options.md](../_shared/ui-options.md)
+(the page and the option picked), any open pull
 request touching the same files, by number, and the `Self review` and
 `Settled decisions` sections the review fills in. Push with
 `git push -u origin HEAD` and open it non-draft with the body passed as a file.
@@ -272,7 +276,9 @@ leave the branch alone.
 
 ## Added gates
 
-None beyond `<static-checks>` before every push.
+`<static-checks>` before every push, and a layout, control or look the issue
+leaves open put to the user per [ui-options.md](../_shared/ui-options.md)
+before any drawing code.
 
 ## Repository notes
 
