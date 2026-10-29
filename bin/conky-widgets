@@ -50,7 +50,7 @@ WIDGETS = {
     'orchestrator': dict(
         title='Claude Code Orchestrator', comment='The managed Claude sessions and what they have replied',
         conf='~/.config/conky-widgets/orchestrator', cache='~/.cache/conky-widgets/orchestrator',
-        autostart='conky-widgets-orchestrator.desktop', icon='audio-volume-high',
+        autostart='conky-widgets-orchestrator.desktop', icon='utilities-terminal',
         contents='orchestrator.py', legacy_pidfile=False),
 }
 # The orchestrator was the speech widget: the command that still names it, and the folders and

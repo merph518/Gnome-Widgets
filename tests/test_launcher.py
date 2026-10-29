@@ -233,6 +233,12 @@ class CommandsTest(LauncherTest):
         self.assertFalse(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-widgets-orchestrator.desktop')))
         self.assertTrue(os.path.exists(os.path.join(self.dir, 'autostart', 'conky-spotify-nowplaying.desktop')))
 
+    def test_the_orchestrator_is_not_presented_as_an_audio_app(self):
+        packaged = support.read(os.path.join(os.path.dirname(BINS), 'packaging', 'conky-widgets-orchestrator.desktop'))
+        self.assertIn('Icon=%s\n' % launcher.WIDGETS['orchestrator']['icon'], packaged)
+        self.assertNotIn('audio', packaged.lower())
+        self.assertIn('Categories=Utility;\n', packaged)
+
     def test_speech_is_the_orchestrator_under_its_former_name(self):
         self.run_main('speech', 'start')
         self.assertEqual(launcher.wanted(), ['orchestrator'])
