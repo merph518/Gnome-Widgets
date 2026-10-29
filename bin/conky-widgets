@@ -48,7 +48,7 @@ WIDGETS = {
         autostart='conky-spotify-nowplaying.desktop', icon='conky-spotify-nowplaying',
         contents='nowplaying.py', legacy_pidfile=True),
     'speech': dict(
-        title='Speech', comment='What Claude sessions are reading aloud, and what is queued',
+        title='Speech', comment='The managed Claude sessions and what they have replied',
         conf='~/.config/conky-widgets/speech', cache='~/.cache/conky-widgets/speech',
         autostart='conky-widgets-speech.desktop', icon='audio-volume-high',
         contents='speechqueue.py', legacy_pidfile=False),

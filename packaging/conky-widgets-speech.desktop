@@ -2,7 +2,7 @@
 Type=Application
 Name=Speech
 GenericName=Speech Widget
-Comment=What Claude sessions are reading aloud, and what is queued
+Comment=The managed Claude sessions and what they have replied
 Exec=conky-widgets speech
 Icon=audio-volume-high
 Terminal=false

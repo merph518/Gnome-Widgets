@@ -1,16 +1,12 @@
-"""What the tray menu reads and writes, apart from GTK: whether each widget shows, and the
-speech settings and voices and the speechctl that the speech widget's own menu uses.
+"""What the tray menu reads and writes, apart from GTK: whether each widget shows, its always
+on top and text size settings, and whether the speech widget collapses when idle.
 
 Each widget is shown or hidden by its own flag file, hidden in its cache folder, which the
 tray's Show ticks, the widget's own – and × buttons (conky-mouse.py) and the launcher's
 show/hide all write. A Show tick is ticked while that widget runs and has no flag, so the
 ticks follow the flags whichever of the three changed them.
-
-The speech settings are read from settings.json in the speaking hook's folder,
-$XDG_RUNTIME_DIR/speak-attention/, for the voice, volume and pace. The commands go through speechctl, from ~/.config/conky-widgets/speech/speechctl when that
-file names one, otherwise from PATH.
 """
-import fcntl, json, os, shutil, subprocess, tempfile
+import os, subprocess
 
 # Each widget's name in its Show item, its config and cache folders as the launcher keeps
 # them, and its autostart entry.
@@ -23,13 +19,7 @@ WIDGETS = {
 LAUNCHER = os.environ.get('CSN_LAUNCHER') or 'conky-widgets'
 UP = os.path.expanduser('~/.cache/conky-widgets/up')     # a file per widget the supervisor runs
 AUTOSTART_DIR = os.path.expanduser('~/.config/autostart')
-SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
-SPEECHCTL = os.path.expanduser('~/.config/conky-widgets/speech/speechctl')   # a path to speechctl
-DEFAULT_VOLUME = 1.2                                      # what speech plays at with no setting
-DEFAULT_VOICE = 'en_US-amy-medium'                        # and the voice it uses (speechctl's)
 SCALES = (0.7, 0.85, 1.0, 1.25, 1.5, 1.75, 2.0)          # the Text scaling menu's presets
-PACES = (0.6, 0.7, 0.85, 1.0, 1.2, 1.4)                  # the Pace menu's presets: Piper's length scale, lower is faster
-DEFAULT_PACE = 0.85                                       # what speech speaks at with no setting
 
 
 def conf_dir(widget):
@@ -121,86 +111,3 @@ def set_collapse_idle(on):
 
 def starts_at_login():
     return any(os.path.exists(autostart_file(w)) for w in WIDGETS)
-
-
-def _json(path):
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def speech_settings():
-    """(voice, volume) from settings.json; DEFAULT_VOICE and DEFAULT_VOLUME when it has none."""
-    settings = _json(os.path.join(SPEAK, 'settings.json'))
-    try:
-        volume = float(settings.get('volume', DEFAULT_VOLUME))
-    except (TypeError, ValueError):
-        volume = DEFAULT_VOLUME
-    return str(settings.get('voice') or DEFAULT_VOICE), volume
-
-
-def speech_pace():
-    """The pace from settings.json, else SPEAK_PIPER_LENGTH as the hook reads it, else DEFAULT_PACE."""
-    for value in (_json(os.path.join(SPEAK, 'settings.json')).get('pace'), os.environ.get('SPEAK_PIPER_LENGTH')):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_PACE
-
-
-def set_speech_pace(pace):
-    """Writes the pace into settings.json, which the hook reads before each clip. speechctl
-    has no command for it, so this does what its settings writes do: under the lock the hook
-    shares, replacing the file whole."""
-    os.makedirs(SPEAK, exist_ok=True)
-    with open(os.path.join(SPEAK, 'settings.lock'), 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        settings = _json(os.path.join(SPEAK, 'settings.json'))
-        settings['pace'] = pace
-        fd, tmp = tempfile.mkstemp(dir=SPEAK, prefix='.tmp.')
-        with os.fdopen(fd, 'w') as f:
-            json.dump(settings, f)
-        os.replace(tmp, os.path.join(SPEAK, 'settings.json'))
-
-
-def speechctl():
-    """The speechctl to run: the one SPEECHCTL names when it is there, else PATH's; None
-    when there is none."""
-    try:
-        with open(SPEECHCTL) as f:
-            path = os.path.expanduser(f.read().strip())
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-    except OSError:
-        pass
-    return shutil.which('speechctl')
-
-
-def voices():
-    """The voices `speechctl voices` lists, one a line, the name its first word after the *
-    that marks the current voice."""
-    ctl = speechctl()
-    if not ctl:
-        return []
-    try:
-        out = subprocess.run([ctl, 'voices'], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    names = [line.split() for line in out.splitlines()]
-    return [words[1] if words[0] == '*' and len(words) > 1 else words[0] for words in names if words]
-
-
-def run_speechctl(*args):
-    """Runs speechctl with `args`, without waiting; False when there is no speechctl."""
-    ctl = speechctl()
-    if not ctl:
-        return False
-    try:
-        subprocess.Popen([ctl, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return False
-    return True

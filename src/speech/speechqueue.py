@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
-"""Builds the speech widget's contents: what is being read aloud and what waits behind it.
+"""Builds the speech widget's contents: the managed Claude sessions, and what they have replied.
 
 Four times a second this reads, and only reads:
   - the open Claude sessions, from ~/.claude/sessions/<pid>.json (sessions.py), the
     processes under each in /proc (a test run, or a wait on a systemd unit) and its
     catchup.py ledgers
-  - the speaking hook's state in $XDG_RUNTIME_DIR/speak-attention/: now.json while a clip
-    plays, <session>.queue (a line per block still to read), <session>.name, <session>.replies
-    (speech on), <session>.muted (speech off) and <session>.voice (the voice that session is read
-    in, absent for the global one), the paused flag and settings.json (voice, volume). The .key
-    files beside the session files are never opened.
+  - the speaking hook's folder, $XDG_RUNTIME_DIR/speak-attention/: <session>.managed marks a
+    managed session (sessions.py lists only those) and <session>.feed holds its replies, one
+    JSON object a line (session, name, text, markdown, at), written whatever the session's
+    speech setting. The .key files beside the session files are never opened.
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the spacer lines that give conky's window its size, which
-                 stays the same while lines play
+  - widget.txt   conky's markup: the spacer lines that give conky's window its size
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
-                 buttons, the sessions list, the terminal pane with the line being
-                 read, the clip's clock and the footer
+                 sessions list and the terminal pane with the replies
   - regions.json click areas for conky-mouse.py, in the same coordinates
   - sessions.txt the sessions list, a line per session, rewritten only when it changes
 
-Each session has a speech setting, read from its files the way speechctl reads it: On while
-<id>.replies exists (its replies are read aloud), Off while <id>.muted exists (nothing
-plays), Alerts only with neither (only its announcements play). Sessions with speech on sort
-first, then by process id, so the ones being read aloud are at the top.
+Each session's row ends with the age of its last reply, and carries that reply's line under
+it while the reply is newer than LAST_LINE_WITHIN. The terminal pane prints the replies of
+the listed sessions, oldest first.
 """
-import datetime, fcntl, glob, hashlib, json, math, os, re, subprocess, sys, tempfile, threading, time, unicodedata, wave
+import datetime, fcntl, glob, hashlib, json, math, os, re, subprocess, sys, tempfile, time, unicodedata
 import gi
 gi.require_version('Pango', '1.0')
 gi.require_version('PangoCairo', '1.0')
@@ -36,8 +32,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'common'))
 import sessions as sessions_mod  # noqa: E402
 import widget_size as size_file  # noqa: E402
-sys.path.insert(0, os.path.join(HERE, '..'))
-import tray_model  # noqa: E402
 
 NAME = 'conky-widgets/speech'
 CONF = os.path.expanduser(f'~/.config/{NAME}')
@@ -46,7 +40,6 @@ OUT = os.path.join(CACHE, 'widget.txt')
 DRAW = os.path.join(CACHE, 'draw.txt')
 REGIONS = os.path.join(CACHE, 'regions.json')
 SESSIONS = os.path.join(CACHE, 'sessions.txt')
-SCROLLBACK = os.path.join(CACHE, 'scrollback.json')   # [{key, name, markdown, text}]: what the terminal pane has printed, oldest first
 LOG = os.path.join(CACHE, 'speechqueue.log')
 INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
@@ -63,64 +56,47 @@ UNIT_WAIT = re.compile(r'systemctl --user is-active (?:-q |--quiet )?([\w@.-]+)'
 UNITS = {'build-pack-now': 'local ai'}          # build-test-pack's local model pipeline
 TEST_FILE = re.compile(r'(test_[\w.-]*|[\w.-]*_test)\.(py|sh)$')   # test_x.py, x_test.sh
 SPEAK = os.path.join(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', 'speak-attention')
-DEFAULT_VOICE = 'en_US-amy-medium'                # speechctl's, with no setting
-DEFAULT_VOLUME = 1.2
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
 TERM_PAD = 10                                 # the terminal pane's border to its text, on every side
 TERM_TITLE = 'Combined Session Output'        # on the pane's border, whichever session is read
-TERM_STATUS_GAP = 4                           # the text to the status line under it
-SCROLLBACK_KEEP = 40                          # the messages the pane keeps to scroll back through
-DUPLICATE_WITHIN = 30                         # s: the same session saying the same words again is one message, not two
+SCROLLBACK_KEEP = 40                          # the replies the pane keeps to scroll back through
 SCROLLBACK_CHARS = 60000                      # and the most text they hold between them
+LAST_LINE_WITHIN = 600                        # s: a session's last reply is a line under its row while it is newer than this
 BULLET_MARK = '\x02'                          # opens a draw.txt line that is the first of a message, which draw.lua draws a bullet by
 PROMPT_MARK = '\x04'                          # opens a draw.txt line that is a speaker's name, which draw.lua draws as the CLI's prompt: on a grey band behind a chevron
 META_MARK = '\x06'                            # in a prompt line, before the speaker's name's end and before each piece of its issue and pull request list: a style letter (n plain, k a number that is a link), then the text, which draw.lua right-aligns
 DONE_MARK = '\x05'                            # opens a message's closing line, which draw.lua draws dim behind the CLI's spinner glyph
-TERM_BANNER_LINES = 3                         # the pane's welcome banner: its title, and two dim lines beside the creature
+TERM_BANNER_LINES = 3                         # the pane's welcome banner: the creature's rows, beside its title and a dim line
 TERM_INDENT = '  '                            # every line's room at the left, where the first line's bullet is drawn
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
+TITLE_GAP = 8                                 # the title's end to the minimize button
 HEADER_GAP = 6                                # the title to the card's end when collapsed
 COLUMN_GAP = 24                               # the sessions column to the terminal pane, the divider centred in it
 SPLIT_DEFAULT = 0.5                           # the sessions column's share of the width inside the gap, with no setting
 LIST_MIN = 260                                # the sessions column's least width, so a row keeps its name
 TERM_MIN = 200                                # the terminal pane's least width
 LINE_GAP = 14                                 # the title's row to the list
-FOOTER_GAP = 12                               # the two columns to the controls' row
-FOOTER_H = 30                                 # the controls' row: pause, skip, next, the volume and the gear
 ROW_SPACING = 4                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
 WINDOW_BUTTON_PITCH = 22
-PAUSE_SIZE = 28                               # the footer's pause/resume circle, and skip and next after it
-FOOTER_BUTTON_GAP = 8                         # between the footer's round buttons
 CONFIRM_W = 320                               # the close prompt's width, at most
 CONFIRM_PAD = 14                              # round its contents
 CONFIRM_GAP = 8                               # between its lines, and its two buttons
 CONFIRM_BUTTON_PAD = 14                       # either side of a button's label
-GEAR_SIZE = 14                                # the gear icon
-GEAR_PAD = 12                                 # click room round the gear icon
-MENU_VALUE_AT = 0.5                           # where the settings menu's values start, as a share of the card's width
-VOLUME_AFTER_BUTTONS = 24                     # from the footer's last button to the volume's speaker
-VOICES_EVERY = 10.0                           # s between asking speechctl for the voices
-VOLUME_WIDTH = 80                             # the volume slider's track, right of its speaker
-VOLUME_ICON = 16                              # the speaker and its waves, left of the track
-VOLUME_GAP = 8                                # speaker to track
-VOLUME_MIN = 32                               # its shortest track, as the Spotify widget's
-VOLUME_TOP = 2.0                              # speechctl's loudest volume, the track's right end
 GROUP_PAD = 10                                # the list's edge to a repository's name
 SESSION_INDENT = 32                           # a repository's name's left to the names of the sessions under it, after their bullets, which are not indented
 BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
-SPEAKER = re.compile(r'^[^:]{1,120}? session says:\s*')   # the hook's "<name> session says:"
 SPACER_FONT = 'Ubuntu Sans 1'
 SPACER_HEIGHT = 2                             # what conky adds for that spacer line (measured)
 PLAIN_FONT = 'Ubuntu Sans 13'                 # between runs of text; see plain()
-LABEL_FONT = 'Ubuntu Sans Bold 11'            # "<name> says:", "Speech idle"
+LABEL_FONT = 'Ubuntu Sans Bold 11'            # the title, and the close prompt's title and buttons
 ROW_FONT = 'Ubuntu Sans 11'                   # a session's row, as draw.lua draws it
 SEGMENT_FONT = 'Ubuntu Sans Bold 9'           # a repository's name, as draw.lua draws it
 LIST_FONT = 'Ubuntu Mono 12'                  # the sessions column's text, as the terminal's, as draw.lua draws it: a session's name
-LIST_TAG_FONT = 'Ubuntu Mono 11'              # its repository and queued count
+LIST_TAG_FONT = 'Ubuntu Mono 11'              # its repository and the age of its last reply
 LIST_HEAD_FONT = 'Ubuntu Mono Bold 12'        # a repository's name
 TAG_FONT = 'Ubuntu Sans 9'                    # the close prompt's lines, as draw.lua draws them
 TERM_FONT = 'Ubuntu Mono 12'                  # the terminal pane's text, as draw.lua draws it
@@ -172,12 +148,6 @@ def display_text(text):
     as one space."""
     text = ''.join(c for c in str(text) if unicodedata.category(c) != 'Cf')
     return ' '.join(text.split())
-
-
-def without_speaker(text):
-    """text without the "<name> session says:" the voice hook opens a clip with, for a row that already
-    sits under the session's name."""
-    return SPEAKER.sub('', text, count=1) or text
 
 
 def ledger_fields(f):
@@ -357,7 +327,7 @@ class Markup:
         return '\n'.join(self.lines)   # no trailing newline: it would add an empty line
 
 
-# The speaking hook's state ---------------------------------------------------------------
+# The files it reads ---------------------------------------------------------------------
 
 def _read(path):
     try:
@@ -367,67 +337,74 @@ def _read(path):
         return None
 
 
-def _json(path):
+_feeds = {}
+
+
+def feed_entries(path):
+    """The replies in a session's <id>.feed, oldest first, as {key, session, name, markdown, text,
+    at}: one JSON object a line, as the hook appends them. A line that is not an object with a
+    time, or that holds nothing to print, is skipped, as is a last line still being written. Kept
+    until the file changes, since the sessions' feeds are read four times a second."""
     try:
-        data = json.loads(_read(path) or '')
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def pid_alive(pid, proc_dir='/proc'):
-    """A stopped process is alive, an exited (zombie) one is not."""
-    try:
-        with open(os.path.join(proc_dir, str(int(pid)), 'stat')) as f:
-            return f.read().rsplit(') ', 1)[1].split()[0] != 'Z'
-    except (OSError, IndexError, TypeError, ValueError):
-        return False
-
-
-def now_playing(speak, proc_dir='/proc'):
-    """now.json while the hook that wrote it is still there, with its mtime as `published`;
-    None when nothing plays. A file a killed hook left behind is not removed here: this only
-    reads."""
-    path = os.path.join(speak, 'now.json')
-    n = _json(path)
-    if not n or not pid_alive(n.get('hook_pid'), proc_dir):
-        return None
-    try:
-        n['published'] = os.stat(path).st_mtime
+        st = os.stat(path)
     except OSError:
-        return None
-    return n
+        _feeds.pop(path, None)
+        return []
+    stamp = (st.st_mtime_ns, st.st_size)
+    if _feeds.get(path, (None,))[0] != stamp:
+        entries = []
+        for line in (_read(path) or '').splitlines():
+            try:
+                e = json.loads(line)
+                at = float(e['at'])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not math.isfinite(at):
+                continue
+            text, markdown = display_text(e.get('text') or ''), clean_markdown(e.get('markdown'))
+            if text or markdown:
+                entries.append({'key': hashlib.sha1(line.encode()).hexdigest(), 'session': str(e.get('session') or ''),
+                                'name': display_text(e.get('name') or ''), 'markdown': markdown, 'text': text,
+                                'at': at})
+        _feeds[path] = (stamp, entries)
+    return _feeds[path][1]
 
 
-def clip_duration(speak, n):
-    """The clip's length in seconds, from the WAV Piper rendered for it (<hook pid>.wav),
-    once it plays; None when that is not known (Speech Dispatcher, or still rendering)."""
-    if n.get('engine') != 'piper' or n.get('player_pid') is None:
-        return None
-    try:
-        with wave.open(os.path.join(speak, f"{int(n['hook_pid'])}.wav"), 'rb') as w:
-            rate = w.getframerate()
-            return w.getnframes() / rate if rate else None
-    except (OSError, EOFError, wave.Error, TypeError, ValueError):
-        return None
+def feed(speak, listed):
+    """The replies the terminal pane prints: those of the listed sessions, each under the name the
+    list gives it, the newest SCROLLBACK_KEEP of them within SCROLLBACK_CHARS of text, oldest
+    first."""
+    entries = []
+    for s in listed:
+        entries += [dict(e, session=s['id'], name=s['name']) for e in feed_entries(os.path.join(speak, s['id'] + '.feed'))]
+    entries.sort(key=lambda e: e['at'])
+    entries = entries[-SCROLLBACK_KEEP:]
+    while len(entries) > 1 and sum(len(e['markdown']) + len(e['text']) for e in entries) > SCROLLBACK_CHARS:
+        del entries[0]
+    return entries
 
 
-def queue_lines(path):
-    text = _read(path) or ''
-    return [line for line in text.split('\n') if line.strip()]
+def age_text(seconds):
+    """How long ago a reply was, as the row's right end says it: now, 1m, 25m, 3h, 2d."""
+    seconds = max(seconds, 0)
+    for span, unit in ((86400, 'd'), (3600, 'h'), (60, 'm')):
+        if seconds >= span:
+            return f'{int(seconds // span)}{unit}'
+    return 'now'
 
 
-def speech_setting(speak, sid):
-    # a session with both markers is read aloud, so it reports on (as speechctl does)
-    if os.path.exists(os.path.join(speak, sid + '.replies')):
-        return 'on'
-    return 'off' if os.path.exists(os.path.join(speak, sid + '.muted')) else 'alerts'
-
-
-def session_voice(speak, sid):
-    """The voice <id>.voice names for a session ('' for the global one), kept beside its
-    .replies and .muted markers; the file holds a voice's name and is gone for the default."""
-    return (_read(os.path.join(speak, sid + '.voice')) or '').strip()
+def last_replies(speak, listed, now):
+    """Gives each session the age of its last reply ('' with none) and, while that reply is newer
+    than LAST_LINE_WITHIN, its line for the row to carry under it. Read from the session's own
+    feed, not the pane's, which a busier session can push a quiet one's replies out of."""
+    for s in listed:
+        own = feed_entries(os.path.join(speak, s['id'] + '.feed'))
+        e = max(own, key=lambda r: r['at'], default=None)
+        s['age'], s['last'] = '', ''
+        if e:
+            s['age'] = age_text(now - e['at'])
+            if now - e['at'] < LAST_LINE_WITHIN:
+                s['last'] = display_text(e['text'] or e['markdown'])
 
 
 def git_paths(cwd):
@@ -516,143 +493,27 @@ def repo_issues(listed):
                        for n in sorted(found.get(s['github'], ()))]
 
 
-_voices = {'names': [], 'asked': None, 'busy': False}
-
-
-def installed_voices(now=None):
-    """The voices `speechctl voices` lists, asked for in a thread of its own at most every
-    VOICES_EVERY seconds, since speechctl can be slow; what the last answer was until the next
-    one lands. A failed ask leaves the list as it was."""
-    now = time.monotonic() if now is None else now
-    asked = _voices['asked']
-    if not _voices['busy'] and (asked is None or now - asked >= VOICES_EVERY):
-        _voices['busy'], _voices['asked'] = True, now
-
-        def ask():
-            try:
-                names = tray_model.voices()
-                if names:
-                    _voices['names'] = names
-            finally:
-                _voices['busy'] = False
-        threading.Thread(target=ask, daemon=True).start()
-    return _voices['names']
-
-
-_scrollback = None
-
-
-def spoken_log(n, name, duration=None):
-    """The messages the terminal pane has printed, oldest first, kept in SCROLLBACK across
-    restarts. A message is added once, when its clip starts playing, not when the hook
-    published it, so the pane prints what is being read aloud. A clip is known by its id, not by
-    now.json's mtime, which the hook moves when it publishes the same clip again; and the same
-    words from one session within DUPLICATE_WITHIN seconds of the last print are the same
-    message, not a second one."""
-    global _scrollback
-    if _scrollback is None:
-        try:
-            saved = json.loads(_read(SCROLLBACK) or '')
-        except ValueError:
-            saved = None
-        _scrollback = [e for e in saved if isinstance(e, dict) and e.get('key')] if isinstance(saved, list) else []
-    if n:
-        text, markdown = display_text(n.get('text') or ''), clean_markdown(n.get('markdown'))
-        key = f"{n.get('session')}|{n.get('clip') or n.get('published')}|{text[:40]}"
-        at = n.get('published') or time.time()
-        last = _scrollback[-1] if _scrollback else {}
-        again = (last.get('key') == key or
-                 (last.get('session') == n.get('session') and last.get('text') == text and
-                  last.get('markdown') == markdown and abs(at - (last.get('at') or 0)) <= DUPLICATE_WITHIN))
-        if not again:
-            _scrollback.append({'key': key, 'session': n.get('session'), 'at': at, 'name': name or 'A session',
-                                'markdown': markdown, 'text': text})
-            while len(_scrollback) > SCROLLBACK_KEEP or (
-                    len(_scrollback) > 1 and sum(len(e['markdown']) + len(e['text']) for e in _scrollback) > SCROLLBACK_CHARS):
-                del _scrollback[0]
-            try:
-                write_atomic(SCROLLBACK, json.dumps(_scrollback))
-            except OSError:
-                pass
-        cur = _scrollback[-1]
-        if duration and not cur.get('duration'):            # its length is known once the clip has rendered
-            cur['duration'] = duration
-            try:
-                write_atomic(SCROLLBACK, json.dumps(_scrollback))
-            except OSError:
-                pass
-    return _scrollback
-
-
-def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
+def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None, now=None):
     """Everything the widget shows, from the files alone."""
     speak = speak or SPEAK
     proc = proc_dir or '/proc'
-    n = now_playing(speak, proc)
-    settings = _json(os.path.join(speak, 'settings.json')) or {}
-    voice = str(settings.get('voice') or '')
-    if not voice:
-        model = os.environ.get('SPEAK_PIPER_MODEL', '')
-        voice = os.path.basename(model)[:-len('.onnx')] if model.endswith('.onnx') else DEFAULT_VOICE
-    try:
-        volume = float(settings.get('volume', DEFAULT_VOLUME))
-    except (TypeError, ValueError):
-        volume = DEFAULT_VOLUME
+    now = time.time() if now is None else now
     listed = []
     open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir, speak)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
     for s in open_sessions:
         if s['spare']:
             continue                                            # a background job kept ready, with no work yet, is not listed
-        lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
-        # A session blocked on input in the CLI, or with a question waiting to be read out, is under Needs input
-        question = s['needs_input'] or (bool(lines) and display_text(lines[0]).lower().startswith('question:'))
         ledger = ledger_rows(s['id'], ledgers)
-        git = session_branch(s['cwd'])
-        listed.append(dict(s, speech=speech_setting(speak, s['id']), own_voice=session_voice(speak, s['id']),
-                           queued=len(lines),
-                           question=question,
+        branch = session_branch(s['cwd'])
+        listed.append(dict(s, question=s['needs_input'],        # a session blocked on input in the CLI is under Needs input
                            waiting=first_wait(waits.get(s['pid']), waiting_on(ledger)),
-                           issue=session_issue(*git), branch=git[0], prs=ledger_prs(ledger),
-                           repo=session_repo(s['cwd']), github=git[1],
-                           speaking=bool(n and n.get('session') == s['id'])))
-    listed.sort(key=lambda s: (s['speech'] != 'on', s['pid']))
+                           issue=session_issue(*branch), branch=branch[0], prs=ledger_prs(ledger),
+                           repo=session_repo(s['cwd']), github=branch[1]))
     repo_issues(listed)
-    name = ''
-    if n:
-        name = display_text(n.get('name') or '') or next(
-            (s['name'] for s in open_sessions if s['id'] == n.get('session')), '')
-    return {
-        'now': n, 'name': name, 'text': display_text((n or {}).get('text') or ''),
-        'markdown': clean_markdown((n or {}).get('markdown')),
-        'duration': clip_duration(speak, n) if n else None,
-        'paused': os.path.exists(os.path.join(speak, 'paused')),
-        'voice': voice, 'volume': round(volume, 1), 'sessions': listed,
-    }
-
-
-class Clock:
-    """How far into the current clip playback is: from when the hook published the player's
-    pid (now.json's mtime), less the time spent paused, which speechqueue sees four times a
-    second."""
-
-    def __init__(self):
-        self.clip, self.paused_for, self.last = None, 0.0, None
-
-    def elapsed(self, n, paused, now):
-        if not n or n.get('player_pid') is None:
-            self.clip, self.paused_for, self.last = None, 0.0, None
-            return 0.0
-        key = (n.get('clip'), n.get('published'))
-        if key != self.clip:
-            self.clip, self.paused_for, self.last = key, 0.0, None
-        if paused and self.last is not None:
-            self.paused_for += now - self.last
-        self.last = now
-        return max(now - n['published'] - self.paused_for, 0.0)
-
-
-clock = Clock()
+    replies = feed(speak, listed)
+    last_replies(speak, listed, now)
+    return {'sessions': listed, 'feed': replies}
 
 
 # Layout ----------------------------------------------------------------------------------
@@ -679,13 +540,13 @@ def box(cx, cy, half_w, half_h):
 
 
 def session_line(s, span=1, header=''):
-    """sessions.txt's line for a session: id, speech, speaking, queued, flags, name, its
+    """sessions.txt's line for a session: id, the age of its last reply, flags, name, its
     repository's name, how many rows it takes, its section's title when this session is the
-    first listed under it, which draw.lua prints on a row above it, and the "In review" label
-    of a session with a pull request open, which draw.lua prints in place of the repository."""
-    return '\t'.join((s['id'], s['speech'], str(int(s['speaking'])), str(s['queued']), row_flags(s),
-                      display_text(s['name']), s.get('repo', ''),
-                      str(span), header, review_label(s)))
+    first listed under it, which draw.lua prints on a row above it, the "In review" label
+    of a session with a pull request open, which draw.lua prints in place of the repository,
+    and the line of its last reply, which draw.lua prints on a row under its name."""
+    return '\t'.join((s['id'], s.get('age', ''), row_flags(s), display_text(s['name']), s.get('repo', ''),
+                      str(span), header, review_label(s), s.get('last', '')))
 
 
 def row_flags(s):
@@ -971,12 +832,6 @@ def split_limits(avail):
 _message_lines = {}
 
 
-def took(seconds):
-    """`seconds` as the CLI says how long it worked: 7s, 1m 5s."""
-    seconds = max(round(seconds), 0)
-    return f'{seconds // 60}m {seconds % 60}s' if seconds >= 60 else f'{seconds}s'
-
-
 def meta_segments(sess):
     """[(text, what a click on it opens or None)] for the "[ Issue #1, #2 | PR #3 ]" a session's
     messages carry after the speaker's name: its repository's issue numbers and its pull
@@ -1004,24 +859,24 @@ def message_lines(entry, width, segments=(), header=True):
     """draw.txt's lines for one printed message, wrapped to `width`, as the CLI prints a turn: the
     speaker's name as the prompt with the session's issue and pull request numbers
     (`segments`, meta_segments') right-aligned on it, a blank line, the text behind a bullet (its
-    markdown formatted when the hook published it), a blank line, and a closing line with how
-    long it was read and when. The prompt line and the blank after it are left out when `header`
+    markdown formatted when the hook published it), a blank line, and a closing line with when
+    it was replied. The prompt line and the blank after it are left out when `header`
     is false, for a message from the session the one before it was from. Kept until the width, the text scale or the message changes,
     since a scrollback of them is laid out four times a second."""
-    key = (entry['key'], width, text_scale, entry.get('duration'), header, tuple((t, bool(i)) for t, i in segments))
+    key = (entry['key'], entry['name'], width, text_scale, header, tuple((t, bool(i)) for t, i in segments))
     if key not in _message_lines:
         if len(_message_lines) > 4 * SCROLLBACK_KEEP:
             _message_lines.clear()
         if entry.get('markdown'):
             body = [line for line, _ in markdown_lines(entry['markdown'], width)]
         else:
-            body = [TERM_INDENT + l for l in wrap_lines(without_speaker(entry.get('text') or ''), TERM_FONT,
+            body = [TERM_INDENT + l for l in wrap_lines(entry.get('text') or '', TERM_FONT,
                                                          width - text_width(TERM_INDENT, TERM_FONT))]
         if body:
             body[0] = BULLET_MARK + body[0]
-        done = 'Read aloud' + (f" for {took(entry['duration'])}" if entry.get('duration') else '')
+        done = 'Replied'
         if entry.get('at'):
-            done += ' \u00b7 done ' + datetime.datetime.fromtimestamp(entry['at']).strftime('%A %-I:%M %p')
+            done += ' \u00b7 ' + datetime.datetime.fromtimestamp(entry['at']).strftime('%A %-I:%M %p')
         cw = text_width(' ', TERM_FONT)
         meta_w = sum(text_width(t, TERM_FONT) for t, _ in segments) + (2 * cw if segments else 0)
         name = fit(entry['name'], TERM_FONT, width - 2 * cw - meta_w)
@@ -1031,15 +886,14 @@ def message_lines(entry, width, segments=(), header=True):
     return _message_lines[key]
 
 
-def render(state, now=None):
+def render(state):
     """widget.txt's markup for `state` (read_state's); writes draw.txt, regions.json and
     sessions.txt beside it."""
     global widget_width, list_height, text_scale
     widget_width, list_height, text_scale = size_file.load(SIZE)
-    now = time.time() if now is None else now
-    n, paused, listed = state['now'], state['paused'], state['sessions']
+    listed = state['sessions']
     right = MARGIN + widget_width
-    idle = not n and not any(s['queued'] for s in listed)
+    idle = not any(s['busy'] or s['question'] for s in listed)
 
     # The top row: the widget's title, then minimize and close at the top right. The title is
     # drawn by draw.lua, which spaces its letters; the row is a gap here.
@@ -1047,11 +901,10 @@ def render(state, now=None):
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
-    text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - VOLUME_GAP
+    text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - TITLE_GAP
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
-    spoken = spoken_log(n, re.sub(r' session$', '', state['name'] or '', flags=re.I), state['duration'])
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -1081,7 +934,7 @@ def render(state, now=None):
     # One column, set as the CLI sets its session list: a section for each state it names (needs
     # input, working, completed) with its sessions under it, one line each.
     listed = grouped(listed)
-    queued_right = list_right - GROUP_PAD                      # where the lines a session has queued end
+    row_right = list_right - GROUP_PAD                         # where a row ends, with the age of its last reply
     out.gap(LINE_GAP)
     list_top = out.y
     row = line_height(LIST_FONT) + ROW_SPACING * text_scale
@@ -1093,7 +946,7 @@ def render(state, now=None):
         # a section's title takes a row, and a blank row above it except for the first section
         head_rows = (1 if section is None else 2) if header else 0
         section = status_group(s)
-        span = 1 + head_rows                                    # the session's line, one row, and the title above
+        span = 1 + head_rows + bool(s['last'])                  # the session's line, one row, the title above and its last reply under
         layout.append((span, header))
         spans.append(span)
         heads.append(head_rows * row)
@@ -1101,14 +954,13 @@ def render(state, now=None):
     version = write_sessions(listed, layout)
     draw.append(f'list {MARGIN} {list_right} {list_top} {row:.2f} {list_height} {version} {count} '
                 f'{last}')
-    draw.append(f'control {list_right} {queued_right:.2f}')
+    draw.append(f'control {list_right} {row_right:.2f}')
     draw.append(f'block {GROUP_PAD} {SESSION_INDENT}')
     rows, top = [], 0.0
     for s, (span, _), head in zip(listed, layout, heads):
-        entry = {'id': s['id'], 'speech': s['speech'], 'voice': s['own_voice'], 'top': round(top, 2),
-                 'bottom': round(top + row * span, 2), 'head': round(head, 2)}
+        entry = {'id': s['id'], 'top': round(top, 2), 'bottom': round(top + row * span, 2), 'head': round(head, 2)}
         # The name closes the session, once confirmed
-        entry.update(name=name_span(s, queued_right), title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
+        entry.update(name=name_span(s, row_right), title=display_text(s['name']), pid=s['pid'], busy=bool(s['busy']))
         rows.append(entry)
         top += row * span
     regions['list'] = [MARGIN, list_top, list_right, list_top + list_height]
@@ -1122,20 +974,19 @@ def render(state, now=None):
     prompt_line, regions['confirm'] = close_prompt(right, list_top, list_height)
     draw.append(prompt_line)
     # The terminal pane, as Claude's CLI prints a reply: a bordered box with a static title on its
-    # border, the line being read aloud inside it behind a bullet (its markdown formatted, in
-    # monospace; as many lines show as the column holds and draw.lua scrolls the rest with the
-    # clip), and a status line at the foot of the box. It is as tall as the sessions column.
-    # draw.lua draws it from these lines.
+    # border, the replies of the listed sessions inside it, each behind a bullet (its markdown
+    # formatted, in monospace; as many lines show as the column holds and draw.lua scrolls the
+    # rest). It is as tall as the sessions column. draw.lua draws it from these lines.
     line_h = line_height(TERM_FONT)
     box_top = list_top
-    bottom = list_top + list_height + FOOTER_GAP + FOOTER_H        # the terminal runs beside the controls too
+    bottom = list_top + list_height
     banner_h = (TERM_BANNER_LINES + 1) * line_h                    # the welcome banner and a blank line
-    term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h - TERM_STATUS_GAP - line_h) // line_h), 1)
+    term_lines = max(int((bottom - box_top - 2 * TERM_PAD - banner_h) // line_h), 1)
     inner = (right - term_left - 2 * TERM_PAD) / BLOCK_SLACK    # draw.lua's text runs wider
     said, links = [], {}
     open_by_id = {x['id']: x for x in listed}
     previous = None
-    for entry in spoken:
+    for entry in state['feed']:
         if said:
             said.append('')                                    # a blank line between messages
         header = entry.get('session') != previous              # the speaker's name only when the speaker changes
@@ -1145,71 +996,21 @@ def render(state, now=None):
             links[str(len(said))] = [info for _, info in segments if info]
         said.extend(message_lines(entry, inner, segments, header))
     regions['terminal_links'] = links
-    queued = sum(s['queued'] for s in listed)
     draw.append(f'terminal {term_left} {box_top:.2f} {right} {bottom:.2f} {TERM_PAD} '
                 f'{box_top + TERM_PAD + line_h / 2:.2f} {box_top + TERM_PAD + banner_h + line_h / 2:.2f} {line_h:.2f} '
-                f'{term_lines} {bottom - TERM_PAD - line_h / 2:.2f} {int(bool(n))} {int(paused)} {queued} '
-                f'{count} {sum(1 for x in listed if x["speech"] == "on")}')
+                f'{term_lines} {count}')
     draw.append(f'speaker {fit(TERM_TITLE, LABEL_FONT, right - term_left - 40)}')
     draw.extend(f'line {line}' for line in said)
     regions['terminal'] = [term_left, round(box_top, 2), right, round(bottom, 2)]
     regions['terminal_scroll'] = max(len(said) - term_lines, 0)       # lines past what it shows
     out.gap(list_height)
-
-    # The controls, in a row at the very bottom of the sessions column: pause or resume, skip and
-    # next, the volume and the gear. Skip and next are drawn dimmed, and are not click areas,
-    # while no clip plays.
-    out.gap(FOOTER_GAP)
-    footer_h = FOOTER_H
-    fy = out.y + footer_h / 2
-    pause_cx = MARGIN + GROUP_PAD + PAUSE_SIZE / 2
-    skip_cx = pause_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
-    next_cx = skip_cx + PAUSE_SIZE + FOOTER_BUTTON_GAP
-    # The clip's clock, which draw.lua prints in the pane's status line: the current line's
-    # while its length is known (0:00 while Piper still renders it).
-    duration, running, elapsed = state['duration'] or 0, False, 0.0
-    if n:
-        elapsed = clock.elapsed(n, paused, now)
-        running = bool(duration) and not paused
-        elapsed = min(elapsed, duration)
-    draw.append(f'clock {time.monotonic():.3f} {elapsed:.3f} {duration:.3f} {int(running)}')
-    draw.append(f'footer {pause_cx} {fy} {PAUSE_SIZE} {int(paused)}')
-    draw.append(f'buttons {skip_cx} {next_cx} {fy} {PAUSE_SIZE} {int(bool(n))}')
-    half = PAUSE_SIZE / 2 + 4
-    regions['pause'] = box(pause_cx, fy, half, half)
-    if n:
-        regions['skip'] = box(skip_cx, fy, half, half)
-        regions['next'] = box(next_cx, fy, half, half)
-    # The volume, as the Spotify widget has it, beside the buttons: the speaker and its slider,
-    # the track giving up room, down to VOLUME_MIN, to the gear at the far right.
-    gear_size = GEAR_SIZE * text_scale
-    gear_x1 = list_right - GROUP_PAD
-    gear_x0 = gear_x1 - gear_size - 2 * GEAR_PAD
-    vol_icon = next_cx + PAUSE_SIZE / 2 + VOLUME_AFTER_BUTTONS
-    vol_x0 = vol_icon + VOLUME_ICON + VOLUME_GAP
-    vol_x1 = vol_x0 + min(VOLUME_WIDTH, max(VOLUME_MIN, gear_x0 - GEAR_PAD - vol_x0))
-    level = min(max(state['volume'] / VOLUME_TOP, 0.0), 1.0)
-    draw.append(f'volume {vol_x0} {vol_x1} {fy} {level:.4f} {vol_icon} {VOLUME_ICON}')
-    regions.update({
-        'volume_icon': [vol_icon - 4, fy - 10, vol_x0 - 6, fy + 10],   # a click mutes; the wheel reaches it too
-        'volume': [vol_x0 - 6, fy - 10, vol_x1 + 6, fy + 10],
-        'volume_wheel': [vol_icon - 4, fy - 10, vol_x1 + 6, fy + 10],
-        'volume_bar': [vol_x0, vol_x1],
-    })
-    # The gear at the column's right, which opens the settings menu
-    draw.append(f'gear {(gear_x0 + gear_x1) / 2:.2f} {fy:.2f} {gear_size:.2f}')
-    regions['gear'] = [round(gear_x0, 2), round(fy - footer_h / 2, 2), round(gear_x1, 2), round(fy + footer_h / 2, 2)]
-    out.gap(footer_h)
     card_h = out.y + MARGIN - 4
-    # The application's chrome: the header runs the card's width with a rule under it, the divider
-    # runs from that rule to the card's bottom, and a rule over the controls runs from the card's
-    # left edge to the divider.
-    rule_top, rule_controls = list_top - LINE_GAP / 2, list_top + list_height + FOOTER_GAP / 2
+    # The application's chrome: the header runs the card's width with a rule under it, and the
+    # divider runs from that rule to the card's bottom.
+    rule_top = list_top - LINE_GAP / 2
     draw.append(f'divider {divider_x:.2f} {rule_top:.2f} {card_h:.2f}')
-    draw.append(f'rules {rule_top:.2f} {rule_controls:.2f}')
+    draw.append(f'rules {rule_top:.2f}')
     regions['divider'] = [list_right + 2, round(rule_top, 2), term_left - 2, round(card_h, 2)]
-    menu_line, regions['menu'] = settings_menu(rule_top, card_h, right + MARGIN, state.get('voices') or [])
-    draw.append(menu_line)
     write_atomic(DRAW, '\n'.join(draw) + '\n')
     write_atomic(REGIONS, json.dumps(regions))
     return out.end(card_h)
@@ -1245,27 +1046,6 @@ def close_prompt(right, list_top, list_height):
     return line, entry
 
 
-def settings_menu(top, bottom, right, voices):
-    """(draw.txt's line, regions.json's entry) for the settings menu a click on the footer's gear
-    opens: the card from `top` to `bottom` and `right`, a title line, rows of the CLI's list
-    font from the line under it down, and the hint line at the foot. The pages and what is
-    selected come from mouse.py's settings-menu file; draw.lua draws it only while that exists.
-    `voices` are the installed voices, which the voice pages list."""
-    row = line_height(LIST_FONT) + ROW_SPACING * text_scale
-    pad = GROUP_PAD * text_scale
-    title_cy = top + pad + row / 2
-    first = top + pad + row * 1.5
-    hint_cy = bottom - pad - row / 2
-    visible = max(int((hint_cy - row / 2 - first) // row), 1)
-    value_x = MARGIN + (right - MARGIN) * MENU_VALUE_AT
-    line = (f'menu {MARGIN} {top:.2f} {right} {bottom:.2f} {title_cy:.2f} {first:.2f} {row:.2f} {visible} '
-            f'{hint_cy:.2f} {value_x:.2f} {pad:.2f}')
-    entry = {'box': [MARGIN, round(top, 2), right, round(bottom, 2)],
-             'title': [round(title_cy - row / 2, 2), round(title_cy + row / 2, 2)],
-             'first': round(first, 2), 'row': round(row, 2), 'visible': visible, 'voices': list(voices)}
-    return line, entry
-
-
 def message(text):
     """A line of text in place of the widget, for when render() itself fails."""
     write_atomic(DRAW, f'scale {SCALE} {text_scale:g}\nshadow {SHADOW}\n')
@@ -1296,9 +1076,7 @@ def main():
     last_error = None
     while True:
         try:
-            state = read_state()
-            state['voices'] = installed_voices()
-            text = render(state)
+            text = render(read_state())
             last_error = None
         except Exception as e:
             if str(e) != last_error:

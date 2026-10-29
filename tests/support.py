@@ -11,13 +11,11 @@ import io
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 import urllib.error
-import wave
 from unittest import mock
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src')
@@ -50,8 +48,8 @@ def load_speechqueue():
 class SpeechFixture:
     """A speaking hook's state folder, Claude's sessions folder and a /proc, under `root`,
     for speechqueue and the speech widget's mouse helper to read. Sessions are added with
-    session(), managed unless managed=False, the hook's files with the other methods; every pid added is alive unless
-    stale=True."""
+    session(), managed unless managed=False, their replies with feed() and the hook's other files
+    with file(); every pid added is alive unless stale=True."""
 
     def __init__(self, root):
         self.speak = os.path.join(root, 'speak-attention')
@@ -96,16 +94,11 @@ class SpeechFixture:
         with open(os.path.join(self.speak, name), 'w') as f:
             f.write(text)
 
-    def queue(self, sid, *lines):
-        self.file(f'{sid}.queue', ''.join(line + '\n' for line in lines))
-
-    def now(self, sid, name, text, hook_pid=9001, player_pid=9002, engine='piper', clip='1', markdown=None):
-        self.alive(hook_pid)
-        data = {'session': sid, 'name': name, 'text': text, 'started': 0, 'clip': clip,
-                'hook_pid': hook_pid, 'player_pid': player_pid, 'engine': engine}
-        if markdown is not None:
-            data['markdown'] = markdown
-        self.file('now.json', json.dumps(data))
+    def feed(self, sid, at, text, markdown=None, name='A session'):
+        """Appends a reply to session `sid`'s feed as the hook writes it: a JSON line."""
+        with open(os.path.join(self.speak, f'{sid}.feed'), 'a') as f:
+            f.write(json.dumps({'session': sid, 'name': name, 'text': text,
+                                'markdown': text if markdown is None else markdown, 'at': at}) + '\n')
 
     def ledger(self, sid, *rows, project='-home-user-project'):
         """Session `sid`'s catchup.py ledger under ledgers/, a (key, state) per row."""
@@ -132,20 +125,6 @@ class SpeechFixture:
             f.writelines(f'spec {i}\tbranch\t{i}\thttps://github.com/o/r/actions/runs/{i}/job/1'
                          f'\t{state}\t\tlabel\n' for i, state in enumerate(states))
 
-    def settings(self, **values):
-        self.file('settings.json', json.dumps(values))
-
-    def pause(self):
-        self.file('paused')
-
-    def wav(self, hook_pid, seconds, rate=22050):
-        with wave.open(os.path.join(self.speak, f'{hook_pid}.wav'), 'wb') as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(rate)
-            w.writeframes(b'\0\0' * round(seconds * rate))
-
-
 def load_conky_mouse():
     """conky-mouse.py has a hyphen in its name, and loads libX11 at import: load it by
     path, with a stand-in for the library, set up for the Spotify widget."""
@@ -162,16 +141,6 @@ def load_conky_mouse():
 def load_spotify_mouse():
     """The Spotify widget's part of the mouse helper, which conky-mouse.py loads."""
     return load_conky_mouse().hooks
-
-
-def stub_speechctl(folder):
-    """A speechctl in `folder` that appends its arguments, a line a run, to the file it
-    returns beside its own path: (speechctl, calls)."""
-    ctl, calls = os.path.join(folder, 'speechctl'), os.path.join(folder, 'speechctl-calls')
-    with open(ctl, 'w') as f:
-        f.write(f'#!/bin/sh\necho "$*" >> {calls}\n')
-    os.chmod(ctl, os.stat(ctl).st_mode | stat.S_IXUSR)
-    return ctl, calls
 
 
 def load_speech_mouse():
