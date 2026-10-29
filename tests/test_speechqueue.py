@@ -391,12 +391,12 @@ class Links(Repos):
         self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'done'))
         self.assertEqual(self.state()['sessions'][0]['prs'], [])
 
-    def test_the_pill_stays_while_a_ledger_of_either_layout_holds_the_row(self):
+    def test_one_pill_counts_the_open_rows_of_both_layouts(self):
         self.f.session(100, ME, 'One')
         self.pr_ledger(ME, (151, 'open'))
-        self.f.branch_ledger(ME, 'ledger.tsv', ('run-ignored', 'done'))
+        self.f.branch_ledger(ME, 'ledger.tsv', ('pr:152', 'open'), ('pr:153', 'done'))
         self.assertEqual(self.state()['sessions'][0]['prs'],
-                         ['https://github.com/someone/Gnome-Widgets/pull/151'])
+                         ['https://github.com/someone/Gnome-Widgets/pull/151', 'https://github.com/o/r/pull/152'])
 
     def test_each_issue_opens_its_issue_the_pill_the_pull_requests_and_the_name_closes_the_session(self):
         self.f.session(100, ME, 'One')

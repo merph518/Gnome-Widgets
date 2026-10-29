@@ -52,7 +52,8 @@ INSTANCE_LOCK = os.path.join(CACHE, 'speechqueue.lock')
 SIZE = size_file.SPEECH_PATH
 COLLAPSE = os.path.join(CONF, 'collapse-idle')    # 'on': a single line while nothing is said
 # Claude's per-session temp folders, where a session's scripts/catchup.py ledger is
-# <project>/<session id>/scratchpad/ledger: a row a line, label, key, link and state, tab apart
+# <project>/<session id>/scratchpad/<a LEDGER_FILES name>: a row a line, tab apart, as
+# ledger_fields reads it
 LEDGERS = os.path.join(tempfile.gettempdir(), f'claude-{os.getuid()}')
 LEDGER_FILES = ('ledger', 'ledger.tsv', 'catchup.tsv')   # a session's ledger in its scratchpad
 WAITS = (('run:', 'tests'), ('lp:', 'ci'), ('pr:', 'merge'))   # an open row's key, and the wait
