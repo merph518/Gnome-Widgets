@@ -63,11 +63,25 @@ of them, so the rules that use them are void, per the first override below.
 ### What does not apply
 
 The two non-negotiable gates about dispatched test runs and deviation records,
-all of Section 6, Section 8, and every rule elsewhere that names a dispatch, a
-spec, a title filter, a baseline, a deviation record, a skip ledger, an
-investigation log, a shared test environment, test accounts or a pull request
-check job are void here. The runtime verification is the widget run in Section 6
-below, and the static checks in `<static-checks>` stand in for `<pr-checks>`.
+all of Section 6 except "Failures already on the default branch get fixed",
+Section 8, and every rule elsewhere that names a dispatch, a spec, a title
+filter, a baseline, a deviation record, a skip ledger, an investigation log, a
+shared test environment, test accounts or a pull request check job are void
+here. The runtime verification is the widget run in Section 6 below, and the
+static checks in `<static-checks>` stand in for `<pr-checks>`.
+
+"Failures already on the default branch get fixed" applies to the static checks
+and the widget run: a check that fails because of something already on `main` is
+fixed on this branch, kept to what turns the check green, without a question
+(`<sampling-note>` and baselines in it are void). The exception is a cause in a
+file another open pull request changes, with nothing fixing it there: put the
+failure on that pull request's issue and ask with `AskUserQuestion` whether to
+fix it here or wait; a fix that merges comes in through the mergeability check
+in `<mergeability-note>`, which stands in for `<branch-age-note>`. In place of
+the fix cycle budget, a failure two fix attempts do not turn green is put to
+the user with `AskUserQuestion`, not parked. Each fix is named under
+`Pre-existing failures fixed` in the pull request body and in the Section 9
+report.
 
 The first gate still holds in these terms: no pull request is opened before the
 Section 6 run is done, except for a change to documentation, skills or
@@ -148,8 +162,8 @@ never run, and observed-value constraints. The repository's own constraints:
 - Match the code around the change: its comment density, naming and idiom.
 - A layout, control or look the issue leaves open is put to the user per
   [ui-options.md](../_shared/ui-options.md) before any drawing code. This adds
-  a fourth stop to the general skill's third gate: such a choice is asked, not
-  settled as a judgment call.
+  a stop to the general skill's third gate: such a choice is asked, not settled
+  as a judgment call.
 - A new file the installed program reads at runtime is listed in
   `debian/install`, and a new runtime dependency is in `debian/control`
   (installed with apt, as every dependency is on this machine).
@@ -159,7 +173,8 @@ never run, and observed-value constraints. The repository's own constraints:
 ### Section 5 and Section 6: Check it and run it
 
 Section 5 is `<static-checks>`, including the build it asks for when packaging
-could break. Section 6 is replaced by this:
+could break. Section 6, apart from "Failures already on the default branch get
+fixed", is replaced by this:
 
 A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
 [static-checks.md](../_shared/static-checks.md#then-a-run), as an isolated copy of
@@ -213,9 +228,9 @@ above. The title is `<summary> (#<N>)`, with no type prefix. The body carries
 run and what was not, `Judgment calls` (each decision the issue left open, what
 was chosen, what it beat and what decided it; none reads "none"), `UI choices`
 when a look was put to the user per [ui-options.md](../_shared/ui-options.md)
-(the page and the option picked), any open pull
-request touching the same files, by number, and the `Self review` and
-`Settled decisions` sections the review fills in. Push with
+(the page and the option picked), `Pre-existing failures fixed` (each, or
+"none"), any open pull request touching the same files, by number, and the
+`Self review` and `Settled decisions` sections the review fills in. Push with
 `git push -u origin HEAD` and open it non-draft with the body passed as a file.
 
 Bind the pull request to the session's PR bar: call `mcp__ccd_pr__get_status`
@@ -236,7 +251,8 @@ ends, per [self-review.md](../_shared/self-review.md#when-it-ends).
 
 Void the paragraphs on skips, the skip ledger and deviations. Report instead
 what was run and what it showed, anything not verified, the judgment calls
-one line each, and, after a run from
+one line each, each pre-existing failure fixed, apart from the issue's own
+changes, and, after a run from
 the checkout, that the isolated copy was stopped. End with the ready
 signal from `<ready-signal>`, which also puts the `Manual Review Needed` label
 on the pull request. Then record the pull request with

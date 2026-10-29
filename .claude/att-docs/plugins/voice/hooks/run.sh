@@ -9,6 +9,23 @@
 # register these scripts keeps them, and this runner steps aside so a hook never fires
 # twice.
 here=$(dirname "$(readlink -f "$0")")
+
+# The running bridge names the voice plugin folder it runs from in voice-bridge/plugin. Claude
+# Code refreshes its installed copy of this plugin only when the version changes, so the
+# runner hands the hook to that folder's runner instead, and the hooks run the same code as
+# the bridge. With no bridge folder named, or one without a runner, the installed copy runs.
+# The file and the runner it names must be this user's own, since without XDG_RUNTIME_DIR
+# the folder sits in /tmp, where anyone could write one.
+pointer=${XDG_RUNTIME_DIR:-/tmp}/voice-bridge/plugin
+if [[ -z ${VOICE_HOOKS_LIVE:-} && -f $pointer && -O $pointer ]]; then
+  live=$(head -n 1 "$pointer" 2>/dev/null)
+  [[ -n $live ]] && live=$(readlink -f "$live")
+  if [[ -n $live && $live != "$(readlink -f "$here/..")" && -f $live/hooks/run.sh
+    && -O $live/hooks/run.sh && -d $live/skills/voice-bridge-hooks ]]; then
+    VOICE_HOOKS_LIVE=1 exec bash "$live/hooks/run.sh" "$@"
+  fi
+fi
+
 skill=$(cd "$here/../skills/voice-bridge-hooks" && pwd) || exit 0
 script=${1:?usage: run.sh <script> [args...]}
 shift

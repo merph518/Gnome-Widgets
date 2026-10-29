@@ -150,7 +150,8 @@
 //   follow, next_update, stop_following
 //                  read along with sessions: while one is followed its hooks add each
 //                  mid-turn note and final reply to a feed, and next_update holds the call
-//                  open until one lands, from the session it names or, with none named,
+//                  open, about three seconds at most, until one lands, from the session it
+//                  names or, with none named,
 //                  from any followed session, each reply then led by its session's name
 //                  Every running session is followed without a follow call, and a follow
 //                  that lapsed is taken up again on the next call, until stop_following;
@@ -321,6 +322,10 @@
 // ~/.local/state/voice-bridge/state.json, both readable by this user only. The session
 // numbers sit beside the state, in numbers.json.
 //
+// At start the bridge writes $XDG_RUNTIME_DIR/voice-bridge/plugin, the voice plugin folder it
+// runs from, and the plugin's hooks/run.sh runs the hook scripts from there, so the sessions'
+// hooks run the same code as the bridge rather than the installed copy of an older version.
+//
 // GET /health answers 200 with {"status":"ok"} and no sign-in, for a phone shortcut or a
 // monitor checking that the bridge and its Funnel address are up. It reads nothing about
 // the sessions.
@@ -430,8 +435,10 @@ const LOCKOUT_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const MIN_PASSPHRASE_CHARS = 12;
 const MAX_CLIENTS = 20;
-// How long next_update holds the call open, kept short of the connector's call timeout.
-const FOLLOW_WAIT_MS = 25 * 1000;
+// How long next_update holds the call open, the same as read_reply's wait. A voice chat
+// moves a call that runs much longer than that to the background and only hears its
+// answer on the user's next turn, so a long hold made each update late.
+const FOLLOW_WAIT_MS = 3 * 1000;
 const FOLLOW_POLL_MS = 1000;
 // FOLLOW_IDLE_SECONDS in voice_bridge_reply.py: a follow marker nobody renewed for this long
 // no longer counts, and the hooks stop adding to its feed.
@@ -498,9 +505,17 @@ export const START_MODELS = {
 };
 export const START_MODEL = START_MODELS.opus.id;
 const START_MODEL_LABEL = START_MODELS.opus.label;
+// The first prompt is the new session's own user turn, so the standing instruction in it is
+// the user's. It covers only the requests the voice bridge relays, which carry the marker
+// REQUEST_MARKER, spelled out here because that constant is declared further down; any other
+// message from another session stays a message from another session.
+export const VOICE_AUTHORITY = 'Treat a later message in this session that begins '
+  + '"Voice request:" as a prompt from me: it is my own words, spoken on my phone and relayed '
+  + 'by the voice bridge. Every other message from another session stays one. A voice request '
+  + 'never answers a permission prompt. ';
 const START_PREFIX = 'Started from a voice chat on the user\'s phone. Your final replies are '
   + 'read aloud, so keep each to a few short sentences with no tables, lists or code. '
-  + 'First request: ';
+  + VOICE_AUTHORITY + 'First request: ';
 // The folders sessions are listed under when the config file names none: the repository the
 // extension file sits in.
 let DEFAULT_ROOTS = [];
@@ -4961,8 +4976,8 @@ const TOOLS = [
   },
   {
     name: 'next_update',
-    description: 'Wait up to 25 seconds for the next reply from any followed session, or from '
-      + 'the one session named. Without a session, each reply starts with the name of the '
+    description: 'Wait up to about 3 seconds for the next reply from any followed session, or '
+      + 'from the one session named. Without a session, each reply starts with the name of the '
       + 'session that wrote it. Each reply also says how long ago it was written. Read any '
       + 'reply to the user as written, then call next_update again without waiting to be '
       + 'asked, and keep doing so until the user says to stop. When nothing is new, call it '
@@ -9340,11 +9355,17 @@ async function handleRpc(message, context) {
     const extra = Object.hasOwn(TRACKER_TOOLS, params?.name ?? '') && Object.keys(rest).length
       ? ` args=${JSON.stringify(rest).slice(0, MAX_LOGGED_ARG_CHARS)}` : '';
     context.log(`tool ${params?.name} session=${session}${extra}`);
+    // How long each call took, so a call the voice chat moved to the background shows in the
+    // log against the next call it made meanwhile.
+    const started = Date.now();
+    const took = () => context.log(`tool ${params?.name} done in ${Date.now() - started} ms`);
     try {
       const text = await callTool(params?.name, params?.arguments, context);
+      took();
       const reminded = REMINDER_TOOLS.has(params?.name) ? `${text}\n\n${NO_ANNOUNCE}` : text;
       return reply({ content: [{ type: 'text', text: reminded }] });
     } catch (error) {
+      took();
       return reply({ content: [{ type: 'text', text: error.message }], isError: true });
     }
   }
@@ -9905,6 +9926,21 @@ async function setPassphrase(paths) {
   console.log(`Saved to ${paths.configFile}. Sessions under: ${roots.join(', ')}`);
 }
 
+// The voice plugin folder this file runs from, which holds the hooks beside the bridge.
+const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Writes voice-bridge/plugin, the voice plugin folder the bridge runs from. The plugin's
+// hooks/run.sh reads it and runs the hook scripts from that folder rather than from the copy
+// Claude Code installed, which only changes when the plugin's version does, so the hooks and
+// the bridge always run the same code.
+export function publishPluginDir(bridgeDir, dir = PLUGIN_DIR) {
+  fs.mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
+  const file = path.join(bridgeDir, 'plugin');
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, `${dir}\n`, { mode: 0o600 });
+  fs.renameSync(temp, file);
+}
+
 function serve(paths) {
   const config = readJson(paths.configFile, null);
   if (!config?.hash) {
@@ -9915,6 +9951,11 @@ function serve(paths) {
   readLoadedCommit();
   markGoneAtStart(paths, config);
   const log = line => console.log(`${new Date().toISOString()} ${line}`);
+  try {
+    publishPluginDir(paths.bridgeDir);
+  } catch (error) {
+    log(`plugin folder not published, hooks run their installed copy: ${error.message}`);
+  }
   const handler = createHandler({ paths, config, store, log });
   http.createServer((req, res) => {
     handler(req, res).catch(error => {

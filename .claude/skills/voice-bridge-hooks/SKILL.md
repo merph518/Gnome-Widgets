@@ -24,9 +24,11 @@ the vendored copy pinned by `.claude/att-docs.lock`; never edit it here.
 | `<ledger-module>` | None. `scripts/catchup.py` keeps `label,key,link,state,tally` rows, not the run and branch rows the plugin's `transcript.py` reads, so `ledgerModule` and `scriptsDir` are left out of `extension.json` and a blocked session is not reported as waiting |
 | `<bridge>` | The voice plugin's `voice-bridge.mjs`, run from the `~/Code/Overmind` checkout with `--config` naming this repository's `extension.json` |
 
-The plugin runs from the plugin cache, so a pin move is followed by
-`claude plugin update voice@att-docs`. A change to the bridge itself goes to the
-Overmind repository.
+The plugin runs from the plugin cache, except that its hook runner hands each
+hook to the voice plugin folder the running bridge names, so the scripts follow
+the `~/Code/Overmind` checkout. `hooks.json` still comes from the cache, so a pin
+move that changes it is followed by `claude plugin update voice@att-docs`. A
+change to the bridge itself goes to the Overmind repository.
 
 ## Overrides
 

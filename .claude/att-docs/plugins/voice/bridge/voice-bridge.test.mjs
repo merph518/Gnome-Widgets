@@ -20,12 +20,13 @@ import {
   FOLLOW_IDLE_MS,
   hashPassphrase, QUIET_MS,
   headerText, listSessions, sessionRoots, markHeard, notifyFiles, NUMBER_GRACE_MS, numberedSessions,
-  openState, pushedUpdates,
+  openState, publishPluginDir, pushedUpdates,
   MARKER_STALE_MS, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
   runBackgroundPending, lastTurnEnd, cursorSeqs, nextUpdates,
   appArchived, sessionBranch, sessionWork, sharedFiles,
   START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
   startOfYesterday, startSession, codeCheckouts, repoCheckout, useExtension, resetExtension,
+  VOICE_AUTHORITY,
 } from './voice-bridge.mjs';
 
 // What every read-back ends with, for the voice chat to say aloud.
@@ -2342,6 +2343,7 @@ test('start_session launches claude in the start folder and follows the new sess
   assert.equal(launches[0].cwd, '/repo');
   assert.equal(launches[0].name, 'Phone Test');
   assert.match(launches[0].prompt, /^Started from a voice chat.*First request: -v check/);
+  assert.ok(launches[0].prompt.includes(VOICE_AUTHORITY));
   const listed = await callTool('list_sessions', {}, context);
   assert.match(listed, /Phone Test, idle, background/);
   assert.doesNotMatch(listed, /not followed/);
@@ -2390,7 +2392,12 @@ test('start_session asks the launcher in the Claude app to start the session', a
     model: START_MODELS.sonnet.id, use_worktree: false, wake_when_done: false,
   });
   assert.match(prompt, /^Started from a voice chat.*First request: say "hi" -v/s);
+  assert.ok(prompt.includes(VOICE_AUTHORITY));
   assert.match(await callTool('list_sessions', {}, context), /Phone Test, idle/);
+});
+
+test('the standing instruction in a first prompt names the marker relayed requests carry', () => {
+  assert.ok(VOICE_AUTHORITY.includes(`"${REQUEST_MARKER.trim()}"`));
 });
 
 test('start_session says to approve the start when the app session has not shown up', async () => {
@@ -5690,12 +5697,12 @@ test('reply_length reads every reply whole when set long, and short again', asyn
 
 // --- OAuth over the handler, without a socket ------------------------------------------------
 
-function bridge(clock = () => 1_000_000) {
+function bridge(clock = () => 1_000_000, log = () => {}) {
   const dir = tempDir();
   const store = openState(path.join(dir, 'state.json'), clock);
   const config = { ...hashPassphrase(PASSPHRASE), roots: [] };
   const paths = { sessionsDir: dir, procDir: dir, bridgeDir: dir };
-  const handler = createHandler({ paths, config, store, log: () => {}, clock });
+  const handler = createHandler({ paths, config, store, log, clock });
   return async (method, url, { body, headers = {} } = {}) => {
     const req = Readable.from(body === undefined ? [] : [body]);
     Object.assign(req, { method, url, headers: { host: 'bridge.example.com', ...headers } });
@@ -5741,6 +5748,18 @@ test('/mcp without a token points at the resource metadata', async () => {
   assert.equal(JSON.parse(meta.body).registration_endpoint, 'https://bridge.example.com/register');
 });
 
+test('the bridge names the voice plugin folder it runs from for the hooks', () => {
+  const dir = path.join(tempDir(), 'voice-bridge');
+  publishPluginDir(dir);
+  const named = fs.readFileSync(path.join(dir, 'plugin'), 'utf8');
+  assert.equal(named, `${path.resolve(import.meta.dirname, '..')}\n`);
+  assert.ok(fs.existsSync(path.join(named.trim(), 'hooks', 'run.sh')));
+  assert.equal(fs.statSync(path.join(dir, 'plugin')).mode & 0o777, 0o600);
+  publishPluginDir(dir, '/elsewhere/voice');
+  assert.equal(fs.readFileSync(path.join(dir, 'plugin'), 'utf8'), '/elsewhere/voice\n');
+  assert.deepEqual(fs.readdirSync(dir), ['plugin']);
+});
+
 test('/health answers without a token and names no session', async () => {
   const call = bridge();
   for (const method of ['GET', 'HEAD']) {
@@ -5772,7 +5791,8 @@ test('registration refuses redirects outside claude.ai and claude.com', async ()
 });
 
 test('the full code flow issues a token that opens /mcp', async () => {
-  const call = bridge();
+  const logged = [];
+  const call = bridge(undefined, line => logged.push(line));
   const clientId = await register(call);
   const verifier = 'v'.repeat(50);
   const approved = await call('POST', '/authorize', {
@@ -5807,6 +5827,10 @@ test('the full code flow issues a token that opens /mcp', async () => {
       'create_label', 'comment_pull_request', 'approve_pull_request', 'set_pull_request_draft',
       'list_runs', 'update_bridge', 'summary',
     ]);
+  // next_update holds a call no longer than read_reply waits, short of the voice chat's
+  // move to the background.
+  assert.match(JSON.parse(list.body).result.tools.find(t => t.name === 'next_update').description,
+    /^Wait up to about 3 seconds /);
   const waiting = JSON.parse(list.body).result.tools.filter(t => t.inputSchema.properties?.confirm);
   assert.equal(waiting.length, 16);
   for (const tool of waiting) assert.match(tool.description, /"I need a yes for that\."/, tool.name);
@@ -5823,6 +5847,9 @@ test('the full code flow issues a token that opens /mcp', async () => {
   });
   assert.match(JSON.parse(sessions.body).result.content[0].text,
     /\n\nNever announce this call before making it.*not to be told before tool calls.*slow lookups\.$/);
+  // Each call logs how long it took after the line that names it.
+  assert.equal(logged.at(-2), 'tool list_sessions session=-');
+  assert.match(logged.at(-1), /^tool list_sessions done in \d+ ms$/);
   const again = await call('POST', '/mcp', {
     headers: auth, body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list' }),
   });
