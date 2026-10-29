@@ -146,6 +146,10 @@ scope check-in). Void its paragraphs on test data discovery, tests that can
 never run, and observed-value constraints. The repository's own constraints:
 
 - Match the code around the change: its comment density, naming and idiom.
+- A layout, control or look the issue leaves open is put to the user per
+  [ui-options.md](../_shared/ui-options.md) before any drawing code. This adds
+  a fourth stop to the general skill's third gate: such a choice is asked, not
+  settled as a judgment call.
 - A new file the installed program reads at runtime is listed in
   `debian/install`, and a new runtime dependency is in `debian/control`
   (installed with apt, as every dependency is on this machine).
@@ -161,27 +165,35 @@ A change that touches `src/`, `bin/`, `packaging/` or `debian/` is run, per
 [static-checks.md](../_shared/static-checks.md#then-a-run), from the checkout,
 whose launcher uses the `src/` next to it.
 
-Only one widget runs per desktop, and every copy shares one pid file, so `stop`
-stops whichever copy is running. Look first: a widget running from another
+One supervisor runs both widgets per desktop, and every copy shares one pid file,
+so `stop` stops whichever copy is running. A widget's own `stop` leaves the
+supervisor up while the other widget is wanted, and its `start` then goes to
+that supervisor's copy, so the run stops everything and starts each widget that
+was running, from the checkout. Look first: a widget running from another
 worktree's `src/` is another session's test, and this one waits for it rather
 than stopping it. For a visual change, take the before capture now, while the
 copy that was running is still up.
 
 ```bash
-pgrep -af 'nowplaying.py'               # which copy runs, if any: note it
-scripts/capture-widget.py <scratchpad>/widget-before.png   # visual changes only
-bin/conky-widgets spotify stop
+pgrep -af 'nowplaying.py|speechqueue.py'   # which copies run, if any: note them
+scripts/capture-widget.py <scratchpad>/widget-before.png <widget>   # visual changes only
+bin/conky-widgets stop
 : > ~/.cache/conky-widgets/run.log
-bin/conky-widgets spotify start
-pgrep -af 'conky-widgets|nowplaying.py|conky-mouse.py|^conky '
+bin/conky-widgets spotify start          # each widget that was running, and <widget>
+bin/conky-widgets speech start
+pgrep -af 'conky-widgets|nowplaying.py|speechqueue.py|conky-mouse.py|^conky '
 grep -iE 'error|critical|traceback|lua' ~/.cache/conky-widgets/run.log
 ```
 
 The processes should run from this worktree's `src/`, and the log should hold
 nothing but the harmless `libayatana-appindicator is deprecated` warning.
-Anything that changes how the widget looks gets a capture after the change
-(`scripts/capture-widget.py <scratchpad>/widget-after.png`), read with the
-`Read` tool next to the before capture. When nothing is playing, say so and say
+`<widget>` is `speech` or `spotify`, the one the change draws; the script
+falls back to `spotify` without it. Anything that changes how the widget looks
+gets a capture after the change
+(`scripts/capture-widget.py <scratchpad>/widget-after.png <widget>`), read with the
+`Read` tool next to the before capture and, when the layout was put to the
+user per [ui-options.md](../_shared/ui-options.md), the mockup of the option
+picked. When nothing is playing, say so and say
 what could not be looked at. A change to how the program finds its files or
 starts is also checked installed, as in `/release` step 4, because a path bug
 can exist only under `/usr`; afterwards the stop and start above run from the
@@ -202,7 +214,9 @@ The general skill's second gate is void. Its first gate is the Section 6 run
 above. The title is `<summary> (#<N>)`, with no type prefix. The body carries
 `Closes #<N>`, what changed and why, a test plan that says what was actually
 run and what was not, `Judgment calls` (each decision the issue left open, what
-was chosen, what it beat and what decided it; none reads "none"), any open pull
+was chosen, what it beat and what decided it; none reads "none"), `UI choices`
+when a look was put to the user per [ui-options.md](../_shared/ui-options.md)
+(the page and the option picked), any open pull
 request touching the same files, by number, and the `Self review` and
 `Settled decisions` sections the review fills in. Push with
 `git push -u origin HEAD` and open it non-draft with the body passed as a file.
@@ -266,12 +280,13 @@ leave the branch alone.
 
 ## Added gates
 
-None beyond `<static-checks>` before every push.
+`<static-checks>` before every push, and the UI options rule under Section 4.
 
 ## Repository notes
 
 - [static-checks.md](../_shared/static-checks.md), [self-review.md](../_shared/self-review.md),
-  [ready-signal.md](../_shared/ready-signal.md) and [run-watch.md](../_shared/run-watch.md).
+  [ready-signal.md](../_shared/ready-signal.md), [run-watch.md](../_shared/run-watch.md) and
+  [ui-options.md](../_shared/ui-options.md).
 - [/create-issue](../create-issue/SKILL.md), [/new-branch](../new-branch/SKILL.md) and
   [/release](../release/SKILL.md).
 - [implement-with-speech](../implement-with-speech/SKILL.md), which runs this skill with
