@@ -367,7 +367,8 @@ bin/conky-widgets spotify start
 To run a change beside the copy on your desktop without touching it, start an isolated copy.
 It has a home, cache and config of its own, three fixture Claude sessions for the speech widget
 and no sound, no tray icon, no Spotify login (so it sends no Web API request), and its windows
-have a class and a position of their own, so any number run at once, one per checkout:
+have a class and a position of their own on your laptop's built-in display (the primary monitor
+when there is none; `--at X,Y` places it elsewhere), so any number run at once, one per checkout:
 
 ```sh
 scripts/isolated-widgets.py start              # both widgets; or: start speech

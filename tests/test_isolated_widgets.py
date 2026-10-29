@@ -51,11 +51,32 @@ class IsolatedTest(support.TempDirTest):
         self.assertTrue(os.path.islink(os.path.join(self.copy.runtime, 'bus')))
         self.assertTrue(os.path.realpath(self.copy.runtime).startswith(self.dir))
 
-    def test_the_primary_monitor_is_the_starred_one(self):
-        listing = ('Monitors: 2\n 0: +HDMI-1 1920/527x1080/296+1920+0  HDMI-1\n'
+    def test_the_built_in_display_is_where_a_copy_goes_else_the_primary_monitor_else_the_first(self):
+        starred = ('Monitors: 2\n 0: +HDMI-1 1920/527x1080/296+1920+0  HDMI-1\n'
                    ' 1: +*DP-1 2560/600x1440/340+0+10  DP-1\n')
-        self.assertEqual(iso.monitor_of(listing), (0, 10, 2560, 1440))
+        self.assertEqual(iso.monitor_of(starred), (0, 10, 2560, 1440))
+        unstarred = starred.replace('+*DP-1', '+DP-1')
+        self.assertEqual(iso.monitor_of(unstarred), (1920, 0, 1920, 1080))
         self.assertEqual(iso.monitor_of(''), (0, 0, 1920, 1080))
+        for name in ('eDP-1', 'LVDS-1', 'DSI-1', 'eDP-1-1'):
+            with self.subTest(name):
+                listing = (' 0: +*HDMI-1 5120/700x2880/390+5120+0  HDMI-1\n'
+                           ' 1: +DP-1 5120/600x2880/340+0+0  DP-1\n'
+                           f' 2: +{name} 3072/290x1920/180+10240+0  {name}\n')
+                self.assertEqual(iso.monitor_of(listing), (10240, 0, 3072, 1920))
+
+    def test_a_monitor_that_only_has_edp_in_its_name_is_not_the_built_in_display(self):
+        listing = (' 0: +*HDMI-1 1920/527x1080/296+0+0  HDMI-1\n'
+                   ' 1: +MEDP-1 2560/600x1440/340+1920+0  MEDP-1\n')
+        self.assertEqual(iso.monitor_of(listing), (0, 0, 1920, 1080))
+
+    def test_a_copy_stays_inside_the_built_in_display_for_the_first_slots(self):
+        mon = iso.monitor_of(' 0: +*HDMI-1 5120/700x2880/390+5120+0  HDMI-1\n'
+                             ' 1: +eDP-1 3072/290x1920/180+10240+0  eDP-1\n')
+        for slot in range(4):
+            for widget in ('spotify', 'speech'):
+                x, y = iso.position_for(slot, mon, widget)
+                self.assertTrue(mon[0] <= x < mon[0] + mon[2] and mon[1] <= y < mon[1] + mon[3], (slot, widget))
 
     def test_each_slot_is_further_left_and_the_speech_widget_sits_below_spotify(self):
         mon = (0, 0, 3000, 2000)
