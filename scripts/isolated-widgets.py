@@ -194,8 +194,12 @@ def fixture_feeds(sessions, now):
     ago (its row shows only the age) and the third has not replied."""
     return {sessions[0][1]: [(now - 2400, 'Opened the pull request for the feed. Tests pass locally.', ''),
                              (now - 60, 'The feed lists replies from managed sessions only. Next I am removing the '
-                                  'playback controls.', 'The feed lists replies from **managed** sessions only.\n\n'
-                                  'Next I am removing the playback controls.')],
+                                  'playback controls.', 'The feed lists **managed** sessions only.\n\n'
+                                  '| Part | State | Tests |\n|---|---|---|\n| Feed | done | 12 |\n'
+                                  '| Pane | removing | 3 |\n\n'
+                                  '- Feed\n  - managed only\n- Controls\n\n'
+                                  '> Playback stays in Spotify.\n\n---\n\n'
+                                  '```python\nfeed = managed()\nprint(feed)\n```')],
             sessions[1][1]: [(now - 1500, 'Started the test run. Twelve of forty files are done, no failures so far.', '')]}
 
 

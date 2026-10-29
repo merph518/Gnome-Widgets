@@ -278,20 +278,68 @@ local function term_offset(count, shown_lines)
     return said.shown
 end
 
-local BULLET_MARK, PROMPT_MARK, DONE_MARK, META_MARK = 2, 4, 5, '\6'   -- orchestrator.py's: a line's first byte, for the first line of a message's text, its speaker's name and its closing line
+local BULLET_MARK, PROMPT_MARK, DONE_MARK, BAND_MARK, META_MARK = 2, 4, 5, 7, '\6'   -- orchestrator.py's: a line's leading bytes, for the first line of a message's text, its speaker's name, its closing line and a code block's line (which follows a bullet when it is the message's first); META_MARK sits inside a name line
 local STYLE_MARK = '\31'                   -- orchestrator.py's: before each run of a styled line, its style letter
 
 local function mono(cr, text, s, bold, italic)
     font(cr, 12, text, s, bold, italic, true)
 end
 
-local function show_line(cr, line, x, cy, s, text, alpha)
+local BOX = {['\u{2500}'] = {0, 0, 1, 1}, ['\u{2502}'] = {1, 1, 0, 0}, ['\u{250c}'] = {0, 1, 0, 1},
+             ['\u{2510}'] = {0, 1, 1, 0}, ['\u{2514}'] = {1, 0, 0, 1}, ['\u{2518}'] = {1, 0, 1, 0},
+             ['\u{251c}'] = {1, 1, 0, 1}, ['\u{2524}'] = {1, 1, 1, 0}, ['\u{252c}'] = {0, 1, 1, 1},
+             ['\u{2534}'] = {1, 0, 1, 1}, ['\u{253c}'] = {1, 1, 1, 1}}   -- which arms (up, down, left, right) a box-drawing character has
+
+local function draw_box_cell(cr, c, x, cy, cw, step, s, alpha)
+    -- a box-drawing character as strokes over its whole cell: the font's glyphs stop short of the
+    -- line spacing, which leaves gaps between rows, so the arms run from the cell's edges to its centre
+    local arms = BOX[c]
+    local w = math.max(1, math.floor(s + 0.5))
+    local mx, my = math.floor(x + cw / 2) + w % 2 / 2, math.floor(cy) + w % 2 / 2
+    cairo_set_line_width(cr, w)
+    set(cr, fg, alpha)
+    cairo_new_path(cr)
+    if arms[1] == 1 then cairo_move_to(cr, mx, cy - step / 2); cairo_line_to(cr, mx, my) end
+    if arms[2] == 1 then cairo_move_to(cr, mx, my); cairo_line_to(cr, mx, cy + step / 2) end
+    if arms[3] == 1 then cairo_move_to(cr, x, my); cairo_line_to(cr, mx, my) end
+    if arms[4] == 1 then cairo_move_to(cr, mx, my); cairo_line_to(cr, x + cw, my) end
+    cairo_stroke(cr)
+end
+
+local function show_dim(cr, run, x, base, cy, cw, step, s, alpha)
+    -- a dim run: its box-drawing characters as strokes, the rest as text; returns where it ends
+    local plain = ''
+    local function flush()
+        if plain ~= '' then
+            set(cr, fg, alpha * 0.4)
+            cairo_move_to(cr, x, base)
+            cairo_show_text(cr, plain)
+            x = x + width_of(cr, plain)
+            plain = ''
+        end
+    end
+    for _, code in utf8.codes(run) do
+        local c = utf8.char(code)
+        if BOX[c] then
+            flush()
+            draw_box_cell(cr, c, x, cy, cw, step, s, alpha * 0.4)
+            x = x + cw
+        else
+            plain = plain .. c
+        end
+    end
+    flush()
+    return x
+end
+
+local function show_line(cr, line, x, cy, s, text, alpha, step)
     -- a terminal line: plain text, or runs each led by STYLE_MARK and a style letter (n normal,
-    -- b bold, i italic, x both, c code in the CLI's orange) drawn one after another on the
+    -- b bold, i italic, x both, c code in the CLI's orange, d dim) drawn one after another on the
     -- baseline the normal font gives; returns where it ends
     mono(cr, text, s)
     cairo_font_extents(cr, fext)
     local base = cy + (fext.ascent - fext.descent) / 2
+    local cw = width_of(cr, ' ')
     if not line:find(STYLE_MARK, 1, true) then
         set(cr, fg, alpha)
         cairo_move_to(cr, x, base)
@@ -300,10 +348,14 @@ local function show_line(cr, line, x, cy, s, text, alpha)
     end
     for style, run in line:gmatch(STYLE_MARK .. '(%a)([^' .. STYLE_MARK .. ']*)') do
         mono(cr, text, s, style == 'b' or style == 'x', style == 'i' or style == 'x')
-        if style == 'c' then set(cr, ORANGE, alpha) else set(cr, fg, alpha) end
-        cairo_move_to(cr, x, base)
-        cairo_show_text(cr, run)
-        x = x + width_of(cr, run)
+        if style == 'd' then
+            x = show_dim(cr, run, x, base, cy, cw, step, s, alpha)
+        else
+            if style == 'c' then set(cr, ORANGE, alpha) else set(cr, fg, alpha) end
+            cairo_move_to(cr, x, base)
+            cairo_show_text(cr, run)
+            x = x + width_of(cr, run)
+        end
     end
     return x
 end
@@ -424,21 +476,27 @@ local function draw_terminal(cr, t, title, lines, s, text, scrolled)
     for i, line in ipairs(lines) do
         local y = first_cy + (i - 1 - scrolled) * step
         if y > first_cy - step and y < first_cy + shown * step then
-            local kind = line:byte(1)
+            local kind, banded = line:byte(1), false
             if kind == BULLET_MARK or kind == PROMPT_MARK or kind == DONE_MARK then line = line:sub(2) end
+            if line:byte(1) == BAND_MARK then line, banded = line:sub(2), true end
+            if banded then
+                set(cr, fg, 0.07)                           -- the code block's lighter band, edge to edge
+                cairo_rectangle(cr, x0, y - step / 2, x1 - x0, step)
+                cairo_fill(cr)
+            end
             if kind == PROMPT_MARK then
                 set(cr, fg, 0.14)                           -- the prompt's grey band, edge to edge
                 cairo_rectangle(cr, x0, y - step / 2, x1 - x0, step)
                 cairo_fill(cr)
                 draw_chevron(cr, left + 0.2 * cw, y, step * 0.5, 0.6)
                 local name, meta = line:match('^([^\6]*)(.*)$')
-                show_line(cr, name, left + 2 * cw, y, s, text, 1)
+                show_line(cr, name, left + 2 * cw, y, s, text, 1, step)
                 draw_meta(cr, meta, x1 - pad, y, i - 1, step, s, text, links_now)
             elseif kind == DONE_MARK then
                 draw_spark(cr, left + 0.55 * cw, y, 4.2 * s, 0, 0.55, fg)      -- gray, as the CLI's is once its turn is done
-                show_line(cr, line, left + 2 * cw, y, s, text, 0.5)
+                show_line(cr, line, left + 2 * cw, y, s, text, 0.5, step)
             else
-                show_line(cr, line, left, y, s, text, 1)
+                show_line(cr, line, left, y, s, text, 1, step)
                 if kind == BULLET_MARK then
                     set(cr, fg)
                     cairo_new_path(cr)

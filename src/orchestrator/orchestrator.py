@@ -67,6 +67,7 @@ LAST_LINE_WITHIN = 600                        # s: a session's last reply is a l
 BULLET_MARK = '\x02'                          # opens a draw.txt line that is the first of a message, which draw.lua draws a bullet by
 PROMPT_MARK = '\x04'                          # opens a draw.txt line that is a speaker's name, which draw.lua draws as the CLI's prompt: on a grey band behind a chevron
 META_MARK = '\x06'                            # in a prompt line, before the speaker's name's end and before each piece of its issue and pull request list: a style letter (n plain, k a number that is a link), then the text, which draw.lua right-aligns
+BAND_MARK = '\x07'                            # opens a draw.txt line of a fenced code block (after BULLET_MARK when it is a message's first), which draw.lua sets on a lighter band across the pane
 DONE_MARK = '\x05'                            # opens a message's closing line, which draw.lua draws dim behind the CLI's spinner glyph
 TERM_BANNER_LINES = 3                         # the pane's welcome banner: the creature's rows, beside its title and a dim line
 TERM_INDENT = '  '                            # every line's room at the left, where the first line's bullet is drawn
@@ -103,7 +104,7 @@ TERM_FONT = 'Ubuntu Mono 12'                  # the terminal pane's text, as dra
 TERM_BOLD_FONT = 'Ubuntu Mono Bold 12'
 TERM_ITALIC_FONT = 'Ubuntu Mono Italic 12'
 TERM_BOLD_ITALIC_FONT = 'Ubuntu Mono Bold Italic 12'
-STYLE_FONTS = {'': TERM_FONT, 'b': TERM_BOLD_FONT, 'i': TERM_ITALIC_FONT, 'x': TERM_BOLD_ITALIC_FONT, 'c': TERM_FONT}
+STYLE_FONTS = {'': TERM_FONT, 'b': TERM_BOLD_FONT, 'i': TERM_ITALIC_FONT, 'x': TERM_BOLD_ITALIC_FONT, 'c': TERM_FONT, 'd': TERM_FONT}
 TEXT_FONTS = {PLAIN_FONT, LABEL_FONT, ROW_FONT, SEGMENT_FONT, TAG_FONT, LIST_FONT, LIST_TAG_FONT, LIST_HEAD_FONT,
               TERM_FONT, TERM_BOLD_FONT, TERM_ITALIC_FONT, TERM_BOLD_ITALIC_FONT}
 MARKDOWN_MAX = 6000                           # the most of a line's markdown the terminal pane reads
@@ -628,32 +629,52 @@ BULLET = re.compile(r'^(\s*)([-*+]|\d+[.)])\s+(.*)$')
 
 def markdown_blocks(markdown):
     """[(kind, marker, runs)] for the blocks of `markdown`: 'p' a paragraph, 'h' a heading (its
-    runs bold), 'li' a list item (its bullet or number the marker) and 'code' a line of a fenced
-    block (one run, kept as written). Consecutive lines of a paragraph join; a table rule or a
-    horizontal rule is dropped."""
-    blocks, para, fenced = [], [], False
+    runs bold), 'li' a list item (its bullet or number the marker, led by two spaces a level), 'q'
+    a line of a block quote, 'tbl' a table (its runs the rows of cell texts, the separator row
+    left out), 'hr' a horizontal rule, 'tag' a fence's language tag (one dim run) and 'code' a line
+    of a fenced block (one run, kept as written). Consecutive lines of a paragraph join."""
+    blocks, para, fenced, table = [], [], False, []
 
     def flush():
         if para:
             blocks.append(('p', '', inline_runs(' '.join(para))))
             para.clear()
+        if table:
+            rows = [[c.strip() for c in r.strip().strip('|').split('|')] for r in table
+                    if not re.fullmatch(r'\s*\|?[\s:|-]+\|[\s:|-]*', r)]
+            blocks.append(('tbl', '', rows))
+            table.clear()
     for line in markdown.split('\n'):
         if line.strip().startswith('```'):
             flush()
             fenced = not fenced
+            if fenced and line.strip()[3:].strip():
+                blocks.append(('tag', '', [(line.strip()[3:].strip(), 'd')]))
         elif fenced:
             blocks.append(('code', '', [(line.rstrip(), 'c')]))
-        elif not line.strip() or re.fullmatch(r'\s*([-*_]\s*){3,}|\s*\|?[\s:|-]+\|[\s:|-]*', line):
+        elif line.strip().startswith('|') and line.count('|') >= 2:
+            if para:
+                flush()
+            table.append(line)
+        elif not line.strip():
             flush()
+        elif re.fullmatch(r'\s*([-*_]\s*){3,}', line):
+            flush()
+            blocks.append(('hr', '', []))
         elif re.match(r'\s*#{1,6}\s', line):
             flush()
             blocks.append(('h', '', [(t, 'x' if st in ('i', 'x') else 'b') for t, st in
                                     inline_runs(re.sub(r'^\s*#{1,6}\s+|\s+#+\s*$', '', line))]))
         elif m := BULLET.match(line):
             flush()
-            blocks.append(('li', '\u2022' if m.group(2) in '-*+' else m.group(2), inline_runs(m.group(3))))
+            level = len(m.group(1).expandtabs(2)) // 2
+            bullet = ('\u2022' if level == 0 else '\u2219') if m.group(2) in '-*+' else m.group(2)
+            blocks.append(('li', '  ' * level + bullet, inline_runs(m.group(3))))
+        elif re.match(r'\s*>', line):
+            flush()
+            blocks.append(('q', '', inline_runs(re.sub(r'^\s*>\s?', '', line).strip())))
         else:
-            para.append(re.sub(r'^\s*>\s?', '', line).strip())
+            para.append(line.strip())
     flush()
     return blocks
 
@@ -711,21 +732,63 @@ def wrap_runs(runs, width, first='', rest=''):
 
 def markdown_lines(markdown, width, indent=TERM_INDENT):
     """[(draw.txt text, pixel width)] for the visual lines of `markdown` wrapped to `width`, each
-    opening with `indent`: a list item's lines hang under its first word, and a blank line sits
-    between a paragraph or heading and what follows it. A line with only plain text is its text;
-    one with styled runs has STYLE_MARK, a style letter and the text before each run."""
+    opening with `indent`: a list item's lines hang under its first word, a quote's lines follow
+    a dim bar, a table is drawn in box characters with its widest columns cut with an ellipsis
+    when it is wider than the pane, a rule is a dim line across it, a code line is cut at the
+    pane's edge and opens with BAND_MARK, and a blank line sits between blocks. A line with only
+    plain text is its text; one with styled runs has STYLE_MARK, a style letter and the text
+    before each run."""
     out, prev = [], None
+    cw = text_width(' ', TERM_FONT)
+    chars = int((width - text_width(indent, TERM_FONT)) / cw)
+
+    def cut(text, n):
+        return text if len(text) <= n else text[:max(n - 1, 0)] + '\u2026'
     for kind, marker, runs in markdown_blocks(markdown):
-        if prev and (kind != 'li' or prev != 'li') and not (kind == 'code' and prev == 'code'):
+        if prev and (kind != 'li' or prev != 'li') and not (kind in ('code', 'tag') and prev in ('code', 'tag')):
             out.append([(indent, '')] if indent else [])
         prev = kind
-        first = indent + (marker + ' ' if kind == 'li' else '  ' if kind == 'code' else '')
-        rest = ' ' * max(round(text_width(first, TERM_FONT) / max(text_width(' ', TERM_FONT), 1)), 0)
-        if kind == 'code':
-            out += wrap_runs([(runs[0][0] or ' ', 'c')], width, first, rest)
+        if kind == 'tbl':
+            cols = max(len(r) for r in runs)
+            rows = [[''.join(t for t, _ in inline_runs(c)) for c in r] + [''] * (cols - len(r)) for r in runs]
+            ws = [max(len(r[i]) for r in rows) for i in range(cols)]
+            while sum(ws) + 3 * cols + 1 > chars and max(ws) > 2:      # too wide: the widest column is cut
+                ws[ws.index(max(ws))] -= 1
+
+            def rule(l, m, r):
+                return [(indent, ''), (l + m.join('\u2500' * (w + 2) for w in ws) + r, 'd')]
+
+            def row(cells, style):
+                line = [(indent, ''), ('\u2502', 'd')]
+                for c, w in zip(cells, ws):
+                    c = cut(c, w)
+                    line += [(' ' + c + ' ' * (w - len(c) + 1), style), ('\u2502', 'd')]
+                return line
+            out.append(rule('\u250c', '\u252c', '\u2510'))
+            out.append(row(rows[0], 'b'))
+            if len(rows) > 1:
+                out.append(rule('\u251c', '\u253c', '\u2524'))
+            out += [row(r, '') for r in rows[1:]]
+            out.append(rule('\u2514', '\u2534', '\u2518'))
+        elif kind == 'hr':
+            out.append([(indent, ''), ('\u2500' * (chars - 2), 'd')])
+        elif kind == 'tag':
+            out.append([(BAND_MARK, ''), (indent + '  ', ''), runs[0]])
+        elif kind == 'q':
+            for line in wrap_runs(runs, width - text_width(indent + '\u2502 ', TERM_FONT)):
+                out.append([(indent, ''), ('\u2502 ', 'd')] + line)
+        elif kind == 'code':
+            out.append([(BAND_MARK, ''), (indent + '  ', ''), (cut(runs[0][0], chars - 2), 'c')])
         else:
+            first = indent + (marker + ' ' if kind == 'li' else '')
+            rest = ' ' * max(round(text_width(first, TERM_FONT) / max(text_width(' ', TERM_FONT), 1)), 0)
             out += wrap_runs(runs, width, first, rest)
-    return [(encode_runs(r), sum(text_width(t, STYLE_FONTS[st]) for t, st in tidy_runs(r))) for r in out]
+    res = []
+    for r in out:
+        band = bool(r) and r[0] == (BAND_MARK, '')
+        r = r[1:] if band else r
+        res.append(((BAND_MARK if band else '') + encode_runs(r), sum(text_width(t, STYLE_FONTS[st]) for t, st in tidy_runs(r))))
+    return res
 
 
 def tidy_runs(runs):
