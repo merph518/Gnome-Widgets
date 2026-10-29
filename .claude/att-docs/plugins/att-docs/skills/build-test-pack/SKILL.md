@@ -170,13 +170,31 @@ rules). A stale export leaves a `warn` status line with the document's number;
 the session offers `<update-skill>` for it and does not stop the job. A document
 that states no revision date is not checked.
 
+`retired-rule-missing` is the same kind of warning, raised at the start of Phase 2
+for each Included document: its text has struck-through (`~~...~~`) text that
+states something, outside code, and no rule citing it is in its rule export. Each
+span is one of three. A fragment is part of a sentence (it does not end in `.`,
+`!`, `?` or `:`, inside the tildes or just after them, and does not fill its line, list item or table cell), such as
+`~~90~~ 120 days` or `~~not~~`; it is a wording or value change and never
+warns. A restated sentence is a whole sentence followed in its paragraph by a
+live sentence holding two thirds of its significant words (four letters or
+more, common words left out); it never warns either. Any other span is a
+removal, and a retired rule cites it when the rule's `source_page` is the span's
+page (the nearest `page-N` marker above it), a range or list holding that page,
+or the heading above the span. A live sentence that says something else beside
+a struck one does not cite it. The warning
+leaves a `warn` status line with the document's number and a `Job Intake`
+limitation saying removed behavior may be missing; the job goes on. The session
+offers `<update-skill>` for it.
+
 The rules are derived from the document in Phase 2 only when the job or the
 config opts in, with `--allow-derived-rules` or `allowDerivedRules` in the
 config, off by default. Use it only when the user chooses to go ahead without
 extracted rules; Job Intake then records the limitation. A retired rule stays in
 the pack with a summary that starts "Retired:", and Phase 3 classifies it like
 any other rule: Direct Change only when the change description concerns that
-removal, Not Impacted otherwise.
+removal, Not Impacted otherwise. Phase 6 gives every retired Direct Change rule a
+card that verifies the behavior is gone.
 
 ### Before a job is run or queued
 
@@ -243,8 +261,9 @@ before it kept as they passed, so a fix made after a failure costs only the
 phases left. Without `--resume` a job starts over from intake.
 
 Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
-(issues, coverage rows, assumptions), `phase9-senior` (the senior review and
-tester notes), `phase9-confidence`, and `phase9-revalidate` (the rebuild and
+(issues, coverage rows, assumptions, the fix rounds), `phase9-confidence` (the
+overall level and each field of the assessment, one call per field), `phase9-senior`
+(the senior review and tester notes, written last), and `phase9-revalidate` (the rebuild and
 the revalidation). Each call thinks through one part of the review, and a job
 resumed in Phase 9 keeps the steps that passed.
 
@@ -683,6 +702,7 @@ the phase that fills them:
 | `testerNotes` | 9 | `{ testData, execution, regressionTargets, breakIt, screenshots, sqlValidation, knownRisks, cautions }` |
 | `confidence` | 9 | `{ overall, coverage, remainingRisks, assumptions, regressionScope, breakItScope, manualReview }`; overall is `High`, `Medium` or `Low` |
 | `limitations` | any | `{ "<sheet name>": "<why it is not complete>" }` |
+| `revalidation` | 9 | `{ passed, remaining[] }`, set only when revalidation fails; the builder shows `<validation-sheet>` as FAIL with `remaining`, and still writes the workbook |
 | `improvementNotes` | 10 | `{ gap, impact, recommendation, component }` |
 
 The builder works out the rest: the `<dashboard-sheet>` counts and coverage
@@ -733,7 +753,13 @@ assumptions.
 
 **Phase 4, Impact Analysis.** Modules, windows, business functions, upstream and
 downstream effects, data, security and roles, batch, notices, reports and
-interfaces. This fills `executiveSummary` and the risk on each rule.
+interfaces. This fills `executiveSummary` and the risk on each rule. Every Direct
+Change, Indirect Impact and Regression rule is rated from the impact analysis,
+with the master's `risk_level` as its starting value; a Not Impacted rule keeps
+the master's, or is rated when the master gave none. A suite pack has no change
+to rate against, so it keeps the approved risks and rates only a rule with none.
+Code then raises any Direct Change rule below the first configured risk level,
+High by default, to that level and lists each one it raised in detail.log.
 
 **Phase 5, Testing Objective Selection.** Decide all `<objective-count>`
 objectives, each with a reason. None is left out.
@@ -778,7 +804,44 @@ more; if it is still open, an assumption names it, and any of its rules with no
 card get a `Missing` coverage row. A rule only an existing test covers gets a
 `Missing` row whose gap names that test and says to confirm and reuse it.
 
-An applicable objective that no card serves gets one targeted pass. For an
+A retired rule Phase 3 classified Direct Change is marked in the scenario and
+card prompts as removed: its card verifies the behavior is gone, and the
+Expected Result, final step included, says it is absent (for a removed warning,
+that the warning and its Yes and No buttons do not appear); the Expected Result
+check reads such a rule as removed and passes a card that states the absence.
+When no scenario names and no card cites
+such a rule once its document's cards are written, code adds a scenario for it
+and asks for the card, twice at most; a rule still without a card reads
+`Missing` and the `<coverage-sheet>` limitation names it.
+
+Then check each card's Expected Result: one call per batch of up to eight
+cards is shown each card, with its steps, and the rules it cites with their
+source wording (the summary, and the master's description when it adds to
+it), and answers `follows` or `does not follow` for every card with a reason.
+The prompt gives a default for conflicting rules: a rule that blocks an action
+outranks one that allows it, so the action stays blocked, unless a cited rule
+says it is an exception to the block or overrides it; Reset restores the saved
+value, never the edited one. A card that follows its rules but whose final step
+words the result differently (see Phase 8 for what counts as agreeing) is kept,
+and code copies the card's Expected Result into that final step; only a card
+that does not follow is redone. A call too big for its room is split, and a card
+too big alone is asked again with rule summaries only; if that is still too
+big, the card is kept and an assumption says it was not checked.
+
+A card that fails is designed again once through a card call for its scenario
+alone, told the reason and the Expected Result that failed, and checked again.
+If it still fails, or the redesign returns no card, the card is removed. When
+the redesign answers with a `skipped` entry for the scenario, the scenario is
+settled with that skip and its reason; otherwise it is settled as removed. An
+assumption names the card and gives the reason, and each of its rules no other
+card covers gets a `Missing` coverage row whose gap gives the reason (a rule an
+existing test covers keeps its row naming that test). This runs before the
+objective passes below, so a removed card never counts toward an objective, and
+before Phase 7, so no set holds it. The Phase 6 status line adds `redesigned`
+and `removed`, as numbers.
+
+An applicable objective that no card serves gets one targeted pass. Cards that
+pass adds are checked the same way. For an
 ordinary objective, the model is shown the cards written and names those that
 serve it; the objective is added to them, no card is written, and the objective
 is marked not applicable if none is named. For `<break-objective>`, a break-only
@@ -810,7 +873,7 @@ supplied stays the literal `<Build Name>` and is recorded as a limitation.
 ```
 
 It prints one line per worksheet with its validation status and writes the
-workbook only when no sheet is FAIL. A FAIL names the defect: a card naming a
+workbook only when no sheet is FAIL, except the `revalidation` FAIL on `<validation-sheet>` that Phase 9 sets. A FAIL names the defect: a card naming a
 rule the pack does not hold, a repeated rule or test case ID, a test case ID off
 the pattern, an objective with no true-or-false decision or one that disagrees
 with the test sets, a rule marked covered that no card covers or marked
@@ -822,19 +885,78 @@ test sets out of run order, an executive summary confidence that disagrees with
 the overall one, missing intake inputs with no `<intake-sheet>` limitation, and
 a Direct Change rule no card covers unless a `<coverage-sheet>` limitation names
 its rule ID. A design step that names no rules traces the card's rules no other
-step names. `<validation-sheet>` itself reads PASS WITH LIMITATIONS when any
-sheet does. Fix the pack and run it again. A sheet that cannot be completed gets
-a `limitations` entry saying why, and validates PASS WITH LIMITATIONS. The
+step names. Before each build the pipeline also compares every card's Expected
+Result with its final step's expected result, and reports a mismatch as a failed
+`Test Card Expected Results` sheet beside the builder's own. The repair call
+sees the card in full, and the problem tells it to keep the card's Expected
+Result and change the final step's expected result to say the same. A repair
+that changes a card's Expected Result is checked against the rules again with
+the same verification call; if the card does not follow, the change is undone,
+the final step included, and an assumption says so. The card is never removed
+at this phase. The two agree when they are equal once case and
+punctuation are set aside, or when one holds the other as whole words and the
+longer side adds no negation (`no`, `not`, `never`, `cannot`, `without`, `none`,
+`nothing`, `n't`) and no condition (`unless`, `until`, `only`, `except`); a
+blank on either side is a mismatch. The check lives in the pipeline, not in the
+builder, so it runs the same whichever builder is configured. Card design asks
+for the same words in both places. The pipeline also checks the pack against
+itself on every build, for whichever builder is configured. Four problems fail
+the sheet beside the builder's own and go to the repair call: a Covered row with
+a blank Gap or Recommendation; a card that cites a rule the Rule-to-Test Matrix
+does not list; an Objective Matrix row that lists a card its test sets do not
+hold; and a High-risk Not Impacted rule with no regression card and no reason in
+its Coverage Matrix gap (text the pipeline wrote because the review gave none
+is not a reason). A problem the builder already failed for the same card or rule
+is not reported twice. Three more are only written to `detail.log` as a warning
+line, because the builder lays those cells out itself and a repair cannot change
+them: a Dashboard count that differs from its sheet (the label belongs to the
+builder, and only a label that says impacted is read as leaving out Not
+Impacted rules), a Rule-to-Test set column that leaves out a set one of its
+cards is in, and a confidence level that differs across the Executive Summary,
+Dashboard and Confidence Assessment. Before the builder runs, code settles what
+it can: the summary's confidence is set to the overall one, and a Covered row
+the review left blank reads "Not reviewed; coverage rests on the card mapping"
+with the card IDs, and "Confirm in review that the cards exercise this rule."
+A High-risk Not Impacted rule is never filled that way. `<validation-sheet>` itself reads PASS WITH
+LIMITATIONS when any sheet does. Fix the pack and run it again. A sheet that
+cannot be completed gets a `limitations` entry saying why, and validates PASS
+WITH LIMITATIONS. The
 `<upload-sheet>` test name is the test case ID alone, as `<workbook-standard>`
 gives it; the title travels in `<cards-sheet>`.
 
-**Phase 9, Quality Review.** Run `<validation-procedure>` against the pack, list
-issues and fixes, apply them to the pack, rebuild, then run
-`<revalidation-procedure>`. Fill `seniorReview`, `testerNotes`, `confidence` and
-`coverage` before the final build. `<procedure>` stops on Low confidence at the
-Project Understanding Gate, before anything is built. A Low rating here is
-allowed, but only with a `limitations` entry for `<confidence-sheet>` saying
-what holds it down, and `executiveSummary.confidence` has to match it.
+**Phase 9, Quality Review.** Build the workbook, read it back as text (every
+card, step and Expected Result, and the other sheets), and run
+`<validation-procedure>` against that text, in parts when it is longer than one
+call holds. A workbook read in parts opens each part with an index of the rules
+that part shows and the cards that cite them, and each part judges a rule's
+coverage from that index. When the builder writes no workbook for the review's
+draft, the review reads the pack summary instead and a `warn` status line says so; the
+senior review and the confidence calls read that summary too whenever the
+workbook needs more than one part. List issues and fixes. A fix names the card or
+rule to change and what to change it to; one that is blank, a placeholder such as
+N/A, or names no card in the pack is not applied. Each other one goes
+through the Phase 8 repair, which may change cards only here: the pack's coverage
+rows and limitations stay as they were. The pack is rebuilt, and the checklist
+reads the rebuilt workbook again, for at most two rounds. When the rules came
+from document text because the rule export held none, checklist item OPS-009 runs
+limited for those documents' rules and an assumption names them. Write the
+`confidence` fields from the finished workbook, the overall level first and then each
+field in a call of its own that sees the fields already written, and the `seniorReview`
+and `testerNotes` last, with the confidence assessment in view. A field that repeats
+another field's text, or cites a card or rule ID of an ID family the pack uses that the
+workbook does not hold, is asked for once more with what was wrong; a second refusal stops
+the job with `gate:review-field-unsupported`. Then run `<revalidation-procedure>` over the
+rebuilt workbook. Fill `seniorReview`, `testerNotes`, `confidence` and `coverage` before
+the final build. `<procedure>` stops on Low confidence at the Project Understanding Gate,
+before anything is built. A Low rating here is allowed, but only with a
+`limitations` entry for `<confidence-sheet>` saying what holds it down, and
+`executiveSummary.confidence` has to match it. If revalidation does not pass,
+`revalidation` holds what remains, `<validation-sheet>` reads FAIL with those
+items, and the job stops with `gate:revalidation-failed`. Phase 10 and the
+final build still run, so the workbook is written with the FAIL for the
+reviewer; the report lists the job as failed. The queue does not retry such a
+job, because a resume would skip every phase and build the same pack again; fix
+the cause and queue it again, without `--resume`.
 
 **Phase 10, Repository Improvement Notes.** Record what the reference material,
 this skill, or the repository's sources lacked during the run in
@@ -882,6 +1004,102 @@ The pack file is read from `<pack-source>`. `<upload-script>` does the work:
 
 Moving the tests and sets out of the staging folders is the reviewer's job in
 `<test-tool>`. Test runs and results stay out.
+
+## Comparing a pack with a reference pack
+
+`<pipeline> compare` scores a built pack against a reference pack, the rule
+export and the converted document. It needs no job config and no model unless
+`--model` is given:
+
+```bash
+<pipeline> compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> \
+  [--out <dir>] [--standard <md>] [--model --config <pipeline-config>]
+```
+
+- `--rules` is a rule export (`{ doc, prefix, rules }` or a folder export's
+  `{ exports }`) or a Business Rules workbook with the export's nine columns.
+- `--doc` is the converted document. Text written `~~like this~~` is read as
+  retired; the page anchors place each line.
+- `--standard` adds the workbook standard's worksheets and listed columns to
+  the format check.
+- `--out` is where `compare.json` (the scorecard) and `compare.md` (the report)
+  are written. It defaults to the pack's folder, and an earlier `compare.json`
+  or `compare.md` there is overwritten.
+
+The report has three parts, and the reference is checked for truth the same way
+as the pack:
+
+- **Format**: the sheet inventory and order, the title, subtitle and header
+  rows, the header names, the test case ID shape, and the ALM step style
+  (step names, where Expected Result and rule references sit). The score is the
+  share of the reference's format checks the pack matches.
+- **Truth**: each rule row is matched to an approved rule by ID, else by the
+  words it shares with the rule's summary, name or quoted text (a Dice share of
+  at least 0.4). A row of several statements is also split at commas, semicolons
+  and "and", each statement is matched to its best rule, and the row maps to
+  every rule a statement picked. A row that says clearly more than another rule
+  does is also mapped to that rule when it holds all that rule's less common
+  words. A row that matches no rule must match struck-through text
+  (a retired rule) or it is not in the source. An approved rule whose quoted
+  text sits mostly in struck-through text, and less in live text, counts as
+  retired by the document even when the export says active; the pack must
+  record each one. A rule row that is not marked retired but uses wording found
+  only in struck-through text (a word used more than once there and never in
+  live text) is reported as untrue, with the document line; a negation such as
+  "no warning" or "without the retired prompt" excuses the words in its own
+  clause. Also reported: rule IDs a card cites that no Impact Analysis row,
+  matrix or approved rule holds; risk and page that differ from the approved
+  rule; and each card's Expected Result against the Expected Result of its last
+  ALM step, flagged when one expects the change to go through and the other
+  expects it stopped, or when they share almost no words.
+- **Floor**: each reference card is matched to the pack cards that test the
+  same scenario. A card's scenario is the controls it presses (names found in
+  the document and the rules: capitalized terms after "select" or "click", and
+  the names listed before "buttons"), the verbs its steps open with (search,
+  export, save and the like), the words it uses, what it rules out ("no
+  substantiated ... allegation"), and whether it involves another one of the
+  same thing. A word counts for more the fewer cards use it, and only words the
+  document and rules use count toward a match. Two cards can stand for each
+  other unless one rules out something the other runs on, or only one involves
+  another one. The rules the two cards cite count as much as the wording: cards
+  that cite the same rules and read alike match, and citing different rules
+  never lowers a score. A reference card that no compatible pack card shares an
+  action with is listed as unmatched, or as a reference error when its own text
+  uses retired wording. A card matched by several pack cards is covered when
+  they hold, together, at least half of its features; otherwise it is partly
+  covered, and the report names the pack cards combined. Pack cards with the
+  same actions and the same wording as the first card of a group, or the same
+  cited rules as any card in it, are counted as repeats. The report gives the sets and
+  cards per set, and whether the Full Coverage set holds every
+  requirement-derived card.
+
+Consistency checks that need no source also run on both workbooks: Dashboard
+counts against the sheets, the confidence level on the Dashboard, Executive
+Summary and Confidence Assessment, matrix rows citing a card the pack lacks or
+the row's sets do not hold, and Objective Matrix rows listing a card their set
+lacks. A check whose column is missing is reported as not checked, with the
+column named, not as zero problems.
+
+With `--model`, which also needs `--config` for the endpoint, the report adds
+two questions the word checks cannot settle: whether each card's Expected
+Result follows from the rules it cites, and whether an unmatched reference card
+is the same scenario as the nearest pack card. Without `--model` the report
+says they were not run and no model is called.
+
+**Limits.** The thresholds were set against one reference and pack pair and
+have not been checked on others: 0.4 Dice for matching a rule row to a rule,
+half of a rule's words in struck text for a retired rule, 0.7 for a clause of a
+merged row matching a rule, 0.95 and 0.5 for the extra rules a merged row
+covers, 0.3 for a pack card testing a reference card's scenario, 0.7 for two
+cards being the same test by wording alone, half of a card's features for
+covered rather than partly covered, and 0.1 Dice between an Expected Result and
+its last step. Two cards that differ only by one more kind of case (a child with
+two allegation types against one) can still be counted as repeats. Treat a
+count from the report as a guide to read the lists behind it, not as a grade.
+
+The console prints only counts and the output names. Exit codes: 0 the
+comparison was written, 1 it failed while running, 2 bad arguments or an input
+that could not be read.
 
 ## What stays out
 

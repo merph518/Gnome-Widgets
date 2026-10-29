@@ -137,14 +137,11 @@ prints `{ "folder": ..., "exports": [...] }`: one export per document
      written as the behavior it described, with a `change_summary` that starts
      "Retired:". A span the export already holds as `retired`, a span that only
      corrects wording, and a span the live text repeats unchanged get no row.
-     Approval inserts a `new` row as active, and `qa.new` counts these rows. Until
-     the store honors the "Retired:" marker, name every such row under
-     `manual_review_items`. After approval, and before anyone uploads a workbook,
-     the reviewer sets each one's `status` to `retired` with a direct update of
-     `<master-table>`, which `<br-command>` has no action for and which does not
-     record the batch that changed the row. The reviewer then exports the document
-     again with `<br-command> workbook --doc "<path>"`, so the removed behavior is not uploaded as a
-     live rule. The review states how many such rows the batch holds.
+     The rule store reads the "Retired:" marker on a `new` row: approval inserts it
+     with `status` `retired`, counted as `new_retired` rather than `new`, and the
+     workbook leaves it off the rules sheet, so the removed behavior is never uploaded
+     as a live rule. `qa.new` counts these rows. The review states how many such rows
+     the batch holds.
    - `new`: behavior the export does not hold. IDs continue from
      `next_seq` in the export, in order, with no gap. One row is one
      independently testable behavior; a compound statement is split.
@@ -193,7 +190,9 @@ prints `{ "folder": ..., "exports": [...] }`: one export per document
    differs from the export, a `modified` row that does not, an active rule left
    unclassified, a new or modified value longer than the `<rule-tool>` field it
    fills (`<field-limits>`), a new or modified `source_page` that is not a page
-   number or range, or an anchor that does not end with it. Fix the file until
+   number or range, an anchor that does not end with it, a "Retired:" summary on
+   a `modified` or `unchanged` row, or a summary that opens like the marker but is
+   not exactly "Retired:". Fix the file until
    it prints no problems. The same check runs again when the file is staged.
 6. **Second pass.** Read the document once more against the rows: no numbered
    rule, table row, cue, release condition, or calculation skipped. Anything
@@ -290,7 +289,8 @@ and the pull request shows the import file whole.
 
 `review` rejects the named rows. `approve` applies every row not rejected in
 one transaction: a modified row updates the `<master-table>` row in place, a
-new row is inserted with no `<rule-tool>` id, a retired row sets `status` to
+new row is inserted with no `<rule-tool>` id, as `retired` when its `change_summary`
+starts "Retired:" and active otherwise; a retired row sets `status` to
 `retired`, an unchanged row changes nothing, and the batch records when it was
 decided. `reject` closes the batch with nothing applied. An approval is not
 undone; a correction is another import.

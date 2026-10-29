@@ -40,7 +40,7 @@ function countStatuses(stdout) {
 
 /** The phases in the order a job runs them; a checkpoint names the last one passed. */
 export const PHASES = ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6',
-  'phase7', 'phase8', 'phase9-checklist', 'phase9-senior', 'phase9-confidence',
+  'phase7', 'phase8', 'phase9-checklist', 'phase9-confidence', 'phase9-senior',
   'phase9-revalidate', 'phase10'];
 
 // What a run builds for itself from the config; everything else on ctx is the job's state.
@@ -130,6 +130,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
   };
   const packName = fill(job.suite ? config.suitePackFile : config.packFile, job);
   const packPath = path.join(outDir, packName);
+  let written = null;
   try {
     await step('intake', () => P.intake(ctx));
     await step('phase1', () => P.phase1(ctx));
@@ -156,11 +157,13 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
     await step('phase9-checklist', async () => {
       const counts = await P.phase9Checklist(ctx, pack);
       ctx.reviewIssues = counts.issues;
-      return counts;
+      const fixes = await P.phase9Fix(ctx, pack);
+      return { ...counts, fixRounds: fixes.rounds };
     });
-    await step('phase9-senior', () => P.phase9SeniorReview(ctx, pack));
     await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
+    await step('phase9-senior', () => P.phase9SeniorReview(ctx, pack));
     await step('phase9-revalidate', async () => {
+      delete pack.revalidation;
       await P.phase8(ctx, pack, 'rebuild');
       const again = await P.revalidate(ctx, pack);
       return { revalidated: again.passed, remaining: again.remaining };
@@ -175,8 +178,23 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
     const result = spawnSync(argv[0], argv.slice(1), { cwd: config.root, encoding: 'utf8' });
     logs.detail('builder final', `${result.stdout}\n${result.stderr}`);
     const counts = countStatuses(result.stdout);
-    if (result.status !== 0) throw new P.GateError('phase8', 'builder-final-fail', { sheets: counts.fail });
+    // A pack whose revalidation failed builds with Workbook Validation FAIL, and the
+    // workbook is written so the reviewer can see what remains; any other FAIL is a build failure.
+    const failLines = result.stdout.split('\n').filter((line) => line.startsWith('FAIL'));
+    const revalidationFailed = pack.revalidation?.passed === false;
+    const onlyValidation = failLines.length > 0
+      && failLines.every((line) => /Workbook Validation\s*$/.test(line));
+    if (result.status !== 0 && !(revalidationFailed && onlyValidation)) {
+      throw new P.GateError('phase8', 'builder-final-fail', { sheets: counts.fail });
+    }
     const workbook = fs.readdirSync(outDir).find((name) => name.endsWith('.xlsx')) ?? null;
+    if (revalidationFailed) {
+      // A workbook that does not show the FAIL is removed rather than left reading PASS.
+      if (workbook && !onlyValidation) fs.rmSync(path.join(outDir, workbook));
+      else if (workbook) written = path.join(outDir, workbook);
+      phase = 'phase9-revalidate';
+      throw new P.GateError('phase9', 'revalidation-failed', { remaining: pack.revalidation.remaining.length });
+    }
     const summary = { job: id, phase: 'done', event: 'pass', ms: now() - started,
       calls: ctx.calls, promptTokens: ctx.tokens.prompt, outputTokens: ctx.tokens.output,
       sheetsPass: counts.pass, sheetsLimited: counts.limited, repairs: ctx.repairs };
@@ -194,6 +212,6 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
       fs.writeFileSync(path.join(outDir, 'work', 'partial-pack.json'),
         `${JSON.stringify(ctx.pack, null, 1)}\n`);
     }
-    return { ok: false, id, outDir, phase, reason, ms: now() - started };
+    return { ok: false, id, outDir, phase, reason, ms: now() - started, packPath, workbook: written };
   }
 }

@@ -1,5 +1,6 @@
 {
-  "name": "att-documentation-automation",
+  "name": "overmind",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "dependencies": {

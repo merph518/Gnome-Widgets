@@ -36,6 +36,7 @@ This repository is private and for my own use.
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
 | `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
+| `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and the voice bridge relayed |
 
@@ -59,8 +60,8 @@ their registration under `docs/runners/`, and the tester hand-off plan under
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, `general` holds the workflow skills that serve any repository (implementing
 issues), and `voice` holds the voice bridge hooks and the skill that answers a relayed
-request. `voice` is its own group so it can be installed at user scope without adding
-a second copy of `implement`. Further groups sit beside them and
+request. All three install at user scope; `voice` is still its own group because its
+subject is different. Further groups sit beside them and
 follow the same layout and the same extension contract. A group's `hooks/hooks.json`
 registers hooks when the plugin is installed.
 
@@ -77,6 +78,27 @@ before any call.
 
 The scripts need `python3`, `bash`, and Node with this repository's `package.json`
 dependencies installed. `convert-docs` also needs `pandoc`.
+
+## Tests
+
+Run everything with one command:
+
+```sh
+npm ci && bash scripts/test-all.sh
+```
+
+It finds and runs every `*.test.mjs` (with `node --test`), `*_test.py` (with
+`python3`) and `*_test.sh` (with `bash`) file, keeps going after a failure, prints one
+line per file and a summary, and exits non-zero if anything failed. It then runs
+`scripts/validate.py`, which checks that every `plugin.json` and `marketplace.json`
+parses, every `SKILL.md` has a `name` and a `description`, relative Markdown links
+resolve, and every Python, JavaScript and shell file passes a syntax check. Pass
+`--tests-only` or `--checks-only` to run just one half.
+
+The `test-all` check in `.github/workflows/ci.yml` runs this same command on every pull
+request and on each push to `main`. `shellcheck` also runs when it is installed, but
+its findings are advisory and never fail the run. The runners need `node`, `python3`,
+`jq` and `bash`.
 
 ## How a repository uses it
 
@@ -101,22 +123,70 @@ The repository name is read from the lock, so a move or rename of this repositor
 changes one line there. A lock that still names an earlier location needs that line
 updated before its next sync.
 
-A repository that does not vendor installs the plugin instead:
+A machine installs all three plugins at user scope, so every session on it has the
+skills, including a session in this repository. The marketplace is pinned to a release
+tag with `#<tag>` after the repository name. This pins it the way `att-docs.lock` pins a
+vendored copy:
 
 ```
-/plugin marketplace add merph518/Overmind
-/plugin install att-docs@att-docs
-/plugin install general@att-docs
+claude plugin marketplace add merph518/Overmind#<tag>
+claude plugin install att-docs@att-docs --scope user
+claude plugin install general@att-docs --scope user
+claude plugin install voice@att-docs --scope user
 ```
 
-The `voice` plugin registers the voice bridge hooks. Installed at user scope
-(`claude plugin install voice@att-docs --scope user`), it gives a session in any
-repository the reply relay, spoken replies and attention announcements, with no hook
-entries in the repository. A repository adds its own values with an extension file at
+The pin moves by hand. To move it, remove the marketplace (which uninstalls its
+plugins), add it again with the new tag, and install the three plugins again:
+
+```
+claude plugin marketplace remove att-docs
+claude plugin marketplace add merph518/Overmind#<new tag>
+claude plugin install att-docs@att-docs --scope user
+claude plugin install general@att-docs --scope user
+claude plugin install voice@att-docs --scope user
+```
+
+Adding the marketplace again without removing it keeps the old tag, and
+`claude plugin marketplace update` stays on the tag it was added with.
+
+A repository that vendors this one should turn the `att-docs` and `general` plugins off
+in its own `.claude/settings.json`, so their skills don't load a second time, possibly at a
+different version from the vendored copy. Add this block:
+
+```json
+{
+  "enabledPlugins": {
+    "att-docs@att-docs": false,
+    "general@att-docs": false
+  }
+}
+```
+
+A project setting overrides the user setting. `voice` stays on, because its hooks are
+what give the repository's sessions the reply relay and spoken replies. A repository
+that also extends a `voice` skill loads both: the plugin's copy carries the `voice:`
+prefix, and the extension keeps the plain name.
+
+See [Install and manage plugins](https://code.claude.com/docs/en/discover-plugins)
+for the install scopes and the `#ref` form.
+
+The `voice` plugin registers the voice bridge hooks. Installed at user scope, it gives a
+session in any repository the reply relay, spoken replies and attention announcements,
+with no hook entries in the repository. A repository adds its own values with an extension file at
 `.claude/skills/voice-bridge-hooks/extension.json`. See the `voice-bridge-hooks`
 skill's Wiring section. A session can also be read in a voice of its own: the speech widget
 saves the choice as `<session id>.voice` in the hook's state folder, and the hook speaks that
 session's lines in it, falling back to the global voice when the name is not installed.
+
+Every `send` through the voice bridge reaches a session as `Voice request: `, then a fixed
+header, then the phone voice chat's wording of what the user said. The header is a claim, not
+proof: it says the bridge posted the message from the user's phone, explains why Claude
+Code labels it as from another session, and says the message is not the user's confirmation,
+approves no permission prompt and grants no escalation. A consumer needs the `voice` plugin
+installed and kept current with `claude plugin update voice@att-docs` after a version bump.
+`update_bridge` moves the bridge checkout and its hooks, but the skill loads from the plugin
+install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
+`.claude/att-docs/` is not loaded as a skill.
 
 The `general` plugin also registers four repo hooks: a gate that refuses a pull request
 body whose Testing section a repository's checker cannot parse, a reminder to record a
@@ -222,5 +292,35 @@ caller.
 
 ## Releases
 
-A release is a tag, `vMAJOR.MINOR.PATCH`. A repository pins one tag. Changes to the
-extension contract bump the minor version while the version is below 1.0.
+A release is a tag, `vMAJOR.MINOR.PATCH`. A repository pins one tag.
+
+Nobody tags by hand. The release workflow (`.github/workflows/release.yml`) runs
+release-please on every push to `main`. release-please keeps one release pull request
+open that collects the commits merged since the last tag, with the changelog and the
+next version. Merging that pull request is the release: the workflow tags the merge
+and publishes the GitHub release with its changelog.
+
+The version comes from the commit subjects on `main`, written as conventional commits.
+While the version is below 1.0:
+
+- `fix:` and `feat:` bump the patch version.
+- A breaking change to the extension contract (`feat!:`, or a `BREAKING CHANGE:` footer)
+  bumps the minor version. A consumer moving its pin across a minor version checks its
+  extension.
+- Other types, such as `chore:`, `docs:` and `test:`, are left out of the changelog and
+  bump nothing on their own.
+
+A squash merge makes the pull request title the commit, so the title is what counts.
+With a merge commit, each commit on the branch counts, and a subject that is not a
+conventional commit is left out.
+
+`.release-please-manifest.json` holds the current version. Each release also writes it
+into the three `plugin.json` files, so every plugin carries the repository's version.
+
+The workflow takes its token from the automation GitHub App, because a pull request
+opened with the workflow's own token starts no checks. It skips until the repository
+variable `AUTOMATION_APP_CLIENT_ID` and the secret `AUTOMATION_APP_PRIVATE_KEY` are set.
+
+## License
+
+Overmind is released under the MIT License. See [LICENSE](LICENSE). A vendored copy keeps the LICENSE file.

@@ -5,11 +5,15 @@
 //
 // It checks enough to exercise the pipeline's gates and repairs: card IDs and
 // rules, objectives against sets, coverage against cards, and blank review
-// sheets. A card titled REJECT fails, so a test can drive a repair.
+// sheets. A card titled REJECT fails, so a test can drive a repair. It writes a
+// small workbook of the sheets a review reads. A pack whose revalidation.passed
+// is false shows Workbook Validation as FAIL with what remains, and the
+// workbook is written all the same.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { xlsx } from './xlsx-write.mjs';
 
 export const SHEET_ORDER = ['Dashboard', 'Job Intake', 'Executive Summary', 'Impact Analysis',
   'Objective Matrix', 'Test Cards Markdown', 'Test Lab Markdown', 'Coverage Matrix', 'Assumptions',
@@ -35,6 +39,8 @@ export function ruleCoverage(pack) {
         ? 'Not Applicable' : 'Missing') };
   });
 }
+
+const workbooks = new WeakMap();
 
 export function buildPack(pack) {
   const key = pack.suite || pack.issue;
@@ -83,6 +89,9 @@ export function buildPack(pack) {
   if (!list(pack.assumptions).length && blank(pack.limitations?.Assumptions)) {
     add('Assumptions', 'fields are blank and no limitation says why');
   }
+  if (pack.revalidation?.passed === false) {
+    add('Workbook Validation', `Revalidation failed: ${list(pack.revalidation.remaining).join('; ')}`);
+  }
   const validation = SHEET_ORDER.map((sheet) => {
     const found = problems.get(sheet);
     const status = found.length ? 'FAIL' : blank(pack.limitations?.[sheet]) ? 'PASS'
@@ -90,6 +99,21 @@ export function buildPack(pack) {
     return [sheet, 'Yes', 'Yes', status, found.join('\n')];
   });
   const fileName = pack.suite ? `${pack.suite}_Suite_Pack.xlsx` : `ISSUE${pack.issue}_Pack.xlsx`;
+  // The sheets of the workbook the command line writes; `buildPack` leaves its own `sheets`
+  // empty so the pipeline's cross-checks of builder sheets against the pack have nothing to compare.
+  workbooks.set(validation, [
+    { name: 'Impact Analysis', rows: [['Rule ID', 'Rule Name', 'Impact Classification'],
+      ...list(pack.rules).map((r) => [r.id, r.name, r.impact])] },
+    { name: 'Test Cards Markdown', rows: [['Test Case ID', 'Test Case Title', 'Expected Result', 'Rules Covered'],
+      ...list(pack.testCards).map((c) => [c.id, c.title, c.expected, list(c.rules).join(', ')])] },
+    { name: 'ALM Upload', rows: [['Test Name', 'Step Name', 'Description', 'Expected Result'],
+      ...list(pack.testCards).flatMap((c) => list(c.steps).map((st, i) =>
+        [`${c.id} ${c.title}`, `Step ${i + 1}`, st.description, st.expected]))] },
+    { name: 'Coverage Matrix', rows: [['Rule ID', 'Status'],
+      ...ruleCoverage(pack).map((r) => [r.rule.id, r.status])] },
+    { name: 'Workbook Validation', rows: [['Sheet', 'Status', 'Notes'],
+      ...validation.map(([sheet, , , status, notes]) => [sheet, status, notes])] },
+  ]);
   return { fileName, sheets: [], validation, failed: validation.filter((r) => r[3] === 'FAIL') };
 }
 
@@ -101,6 +125,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   for (const [sheet, , , status] of built.validation) console.log(`${status.padEnd(22)} ${sheet}`);
+  // A revalidation FAIL is shown on the validation sheet and does not stop the workbook.
+  if (built.failed.some(([sheet]) => sheet !== 'Workbook Validation')) process.exit(1);
+  fs.writeFileSync(path.join(outDir, built.fileName), xlsx(workbooks.get(built.validation)));
   if (built.failed.length) process.exit(1);
-  fs.writeFileSync(path.join(outDir, built.fileName), 'stub workbook\n');
 }

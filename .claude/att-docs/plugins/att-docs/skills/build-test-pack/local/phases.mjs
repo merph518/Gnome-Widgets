@@ -8,7 +8,10 @@ import { spawnSync } from 'node:child_process';
 import { estimateTokens, ModelError } from './model.mjs';
 import { fill, globFiles } from './config.mjs';
 import * as S from './schemas.mjs';
-import { revisedDate, rulesStale, shapeProblems } from './rules.mjs';
+import { revisedDate, rulesStale, shapeProblems, uncitedStruck } from './rules.mjs';
+import { readSheet } from './pack.mjs';
+import { readXlsx } from './xlsx.mjs';
+import { checkPack } from './pack-checks.mjs';
 
 export class GateError extends Error {
   constructor(phase, code, counts = {}) {
@@ -501,13 +504,47 @@ function refreshRules(ctx) {
 }
 
 const RETIRED_SUMMARY = 'Retired: this rule was removed from the master.';
+const isRetired = (rule) => String(rule.summary ?? '').startsWith('Retired:');
+
+/**
+ * Warns for each Included document whose text has struck-through behavior that
+ * no retired rule of its export cites (a fragment edit or a restated sentence
+ * needs none), and records a limitation
+ * under Job Intake. It runs at the start of Phase 2, once inclusion is decided
+ * and the rules have been read again, so it judges the rules the pack uses. It
+ * is a warning, never a stop: the status line names the document by number, the
+ * detail log says where the spans sit.
+ */
+function warnUnretired(ctx) {
+  const named = [];
+  for (const doc of ctx.documents) {
+    if (doc.inclusion !== 'Included' || !doc.text) continue;
+    const spans = uncitedStruck(doc.text, doc.rules);
+    if (!spans.length) continue;
+    ctx.logs.status({ job: ctx.job.id, phase: 'phase2', event: 'warn', reason: 'retired-rule-missing',
+      document: doc.number });
+    ctx.logs.detail(`document ${doc.number} has struck-through text no retired rule cites`,
+      spans.map((s) => (s.page === null ? `heading "${s.heading ?? 'none'}"` : `page ${s.page}`))
+        .join('\n'));
+    named.push(doc.name);
+  }
+  if (!named.length) return;
+  const text = `Struck-through text in ${named.join(', ')} has no rule citing it,`
+    + ' so removed behavior may be missing from the pack. Extract or update the rules for each of them.';
+  ctx.pack.limitations ??= {};
+  const held = ctx.pack.limitations['Job Intake'] ?? '';
+  if (!held.includes(text)) ctx.pack.limitations['Job Intake'] = `${held} ${text}`.trim();
+}
 
 export async function phase2(ctx) {
   const { pack, ref } = ctx;
   const risks = ctx.riskLevels;
   const rules = [];
   let derived = 0;
-  if (!ctx.job.suite) refreshRules(ctx);
+  if (!ctx.job.suite) {
+    refreshRules(ctx);
+    warnUnretired(ctx);
+  }
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included')) {
     if (doc.rules.length) {
       for (const rule of doc.rules) {
@@ -537,6 +574,7 @@ export async function phase2(ctx) {
       });
       for (const row of answer.rules) {
         derived += 1;
+        ctx.derivedDocuments = [...new Set([...list(ctx.derivedDocuments), doc.name])];
         const page = String(row.sourcePage || 'N/A');
         rules.push({
           id: `${doc.key} ${page === 'N/A' ? '' : `p${page} `}${row.statement}`,
@@ -636,13 +674,24 @@ export async function phase4(ctx) {
   });
   pack.executiveSummary = { ...answer.executiveSummary, confidence: '' };
 
-  const unrated = pack.rules.filter((rule) => !rule.risk);
-  const groups = batches(unrated, ruleLine, room(ctx, false, refs) - fixed, 60);
+  // Every impacted rule is rated from the impact analysis, with the master's risk as its
+  // starting value; a rule the change does not touch keeps the master's, or is rated when
+  // the master gave none.
+  // A suite has no change to rate against, so it keeps the approved risks and rates only the gaps.
+  const toRate = pack.rules.filter((rule) => !rule.risk
+    || (!ctx.job.suite && rule.impact !== 'Not Impacted'));
+  const rateLine = (rule) => `${ruleLine(rule)} | ${rule.impact} | master risk: ${rule.risk ?? 'none'}`;
+  const rateFixed = estimateTokens(ctx.description + JSON.stringify(pack.executiveSummary)) + 2000;
+  const groups = batches(toRate, rateLine, room(ctx, false, refs) - rateFixed, 60);
   for (const [i, group] of groups.entries()) {
     const rated = await ask(ctx, {
       phase: 'phase4', step: `risk-${i + 1}`, reasoning: false, refs,
-      task: 'Give each rule its risk level from the impact analysis.',
-      inputs: [['Change description', ctx.description], ['Rules', asLines(group.map(ruleLine))]],
+      task: 'Give each rule its risk level from the impact analysis. A rule\'s master risk is'
+        + ' where to start; keep it unless the impact analysis says the change makes it higher'
+        + ' or lower.',
+      inputs: [['Change description', ctx.description],
+        ['Impact analysis', JSON.stringify(pack.executiveSummary)],
+        ['Rules', asLines(group.map(rateLine))]],
       schema: S.riskSchema(group.map((rule) => rule.id), ctx.riskLevels),
     });
     const byId = new Map(rated.rules.map((row) => [row.id, row.risk]));
@@ -651,7 +700,16 @@ export async function phase4(ctx) {
       rule.risk = byId.get(rule.id);
     }
   }
-  return { impacted: impacted.length, rated: unrated.length };
+  // A rule the change itself alters is never rated below the top level, the first of the
+  // configured risk levels.
+  const top = ctx.riskLevels[0];
+  const raised = pack.rules.filter((rule) => rule.impact === 'Direct Change' && rule.risk !== top);
+  if (raised.length) {
+    ctx.logs.detail('phase4 raised risk', raised.map((rule) => `${rule.id}: ${rule.risk} to ${top}`)
+      .join('\n'));
+    for (const rule of raised) rule.risk = top;
+  }
+  return { impacted: impacted.length, rated: toRate.length, raised: raised.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +770,14 @@ async function documentText(ctx, doc, refs, carried) {
   return estimateTokens(doc.text) <= budget ? doc.text : digestDocument(ctx, doc);
 }
 
+/** A retired rule the change concerns: its card verifies the removed behavior is gone. */
+const removedBehavior = (rule) => rule.impact === 'Direct Change' && isRetired(rule);
+const REMOVED_SCENARIO = ' A rule whose summary starts with "Retired:" was removed: list a scenario'
+  + ' that checks its behavior is gone.';
+const REMOVED_CARD = ' A rule whose summary starts with "Retired:" was removed: its card verifies'
+  + ' the behavior is gone, and its expected result, final step included, says the behavior is'
+  + ' absent, such as a warning and its buttons not appearing.';
+
 /** True when the pack has a BREAK IT set that its cards can fill. */
 const breakItOn = (ctx) => !ctx.job.suite && ctx.breakItObjective != null
   && cardObjectives(ctx).includes(ctx.breakItObjective);
@@ -759,7 +825,8 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
           + ' record' + (required.includes('break') ? '; break tries to break the change with bad'
           + ' input, a wrong order, a boundary or a repeated action' : '') + '. Under kindChecks,'
           + ' say for each of those kinds what its scenario tests, or why the document supports'
-          + ' none.') + ' Never list a scenario already listed.',
+          + ' none.') + (group.some(removedBehavior) ? REMOVED_SCENARIO : '')
+        + ' Never list a scenario already listed.',
       inputs: [['Change description', ctx.description], ['Document', doc.name], ['Rules', lines],
         ['Scenarios listed so far', listed],
         ['Document text', await documentText(ctx, doc, refs, lines + listed)]],
@@ -799,7 +866,8 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
  * One card call. `focus` are the scenarios it is asked for; it may cover any
  * scenario in `open` (those with no card, reuse or skip yet), and no other.
  */
-async function designBatch(ctx, doc, { focus, open, written }, objectives, index, extra = '') {
+async function designBatch(ctx, doc, { focus, open, written }, objectives, index, extra = '',
+  name = 'cards') {
   const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
   const byId = new Map(ctx.pack.rules.map((rule) => [rule.id, rule]));
   const group = [...new Set(open.flatMap((s) => s.rules))].map((id) => byId.get(id));
@@ -810,15 +878,17 @@ async function designBatch(ctx, doc, { focus, open, written }, objectives, index
   const existing = ctx.existingTests ?? '';
   const docText = await documentText(ctx, doc, refs, [lines, scenarios, cards, existing].join('\n'));
   return ask(ctx, {
-    phase: 'phase6', step: `cards-d${doc.number}-${index}`, reasoning: false, refs,
+    phase: 'phase6', step: `${name}-d${doc.number}-${index}`, reasoning: false, refs,
     task: `Design reusable test cards for these scenarios: ${focus.map((s) => s.id).join(', ')}.`
       + ' Write one card per scenario, only for scenarios no card written so far covers, and name'
       + ' on each card the scenario it covers. Focus items and steps are actions; expected'
-      + ' results are observable business behavior. Name on each card and each step only the'
+      + ' results are observable business behavior. A card\'s expected result is its final'
+      + ' step\'s expected result, in the same words. Name on each card and each step only the'
       + ' rules it checks. Mark cards that come from quality thinking rather than a stated rule'
       + ' as Quality. A scenario an existing test already covers, or that no card can cover, is'
       + ' named in skipped with how (reused or gap) and the reason; reused names the test. A'
-      + ` rule no card can cover goes in uncovered with its gap.${extra}`,
+      + ` rule no card can cover goes in uncovered with its gap.`
+      + `${group.some(removedBehavior) ? REMOVED_CARD : ''}${extra}`,
     inputs: [['Change description', ctx.description], ['Document', doc.name],
       ['Scenarios', scenarios], ['Rules', lines], ['Cards written so far', cards],
       ['Document text', docText], ['Existing tests', existing]],
@@ -931,6 +1001,29 @@ async function designDocument(ctx, doc, rules, objectives, { designed, only } = 
     await take(left, only ? `${only}-${i + 1}b` : `${i + 1}b`,
       ' Every scenario listed needs a card or a skipped entry.');
   }
+  // A retired Direct Change rule is tested by a card that verifies its behavior is gone. One
+  // no card cites and no scenario names, whatever the inventory listed, gets a scenario of its own.
+  const cited = () => new Set(state.cards.flatMap((card) => card.rules));
+  // A scenario settled by a card that does not cite the rule leaves the rule owed a scenario.
+  const named = () => new Set(state.scenarios.filter((s) => s.settled?.how !== 'card')
+    .flatMap((s) => s.rules));
+  const removed = only ? [] : rules.filter((rule) => removedBehavior(rule) && !cited().has(rule.id)
+    && !named().has(rule.id));
+  if (removed.length) {
+    const made = removed.map((rule, i) => ({ id: `S${state.scenarios.length + i + 1}`, kind: 'decision',
+      rules: [rule.id], population: 'a record the removed behavior used to apply to',
+      action: `check that the behavior of ${rule.id} is gone`,
+      outcome: 'The removed behavior is absent' }));
+    state.scenarios.push(...made);
+    mine.push(...made);
+    for (const s of made) byScenario.set(s.id, s);
+    await take(made, 'removed');
+    const left = made.filter((s) => !settled(s));
+    if (left.length) {
+      count.retried += 1;
+      await take(left, 'removedb', ' Every scenario listed needs a card or a skipped entry.');
+    }
+  }
   for (const s of mine.filter((x) => !settled(x))) {
     count.unsettled += 1;
     state.assumptions.push({
@@ -950,9 +1043,7 @@ async function designDocument(ctx, doc, rules, objectives, { designed, only } = 
     const named = state.scenarios.filter((s) => s.rules.includes(rule.id));
     const reused = named.find((s) => s.settled?.how === 'reused');
     const skipped = named.find((s) => s.settled?.how === 'gap');
-    rows.set(rule.id, reused ? { ruleId: rule.id, status: 'Missing',
-      gap: `Covered only by the existing test ${noStop(reused.settled.reason)}; confirm it and reuse it.`,
-      recommendation: 'Confirm the existing test covers this rule and reuse it, or design a card.' }
+    rows.set(rule.id, reused ? reuseRow(rule.id, reused.settled.reason)
       : { ruleId: rule.id, status: 'Missing',
         gap: skipped ? `No card can cover this rule: ${noStop(skipped.settled.reason)}.`
           : 'The local design pass wrote no card for this rule.',
@@ -962,19 +1053,246 @@ async function designDocument(ctx, doc, rules, objectives, { designed, only } = 
   return { designed: state, ...count };
 }
 
+// Words that reverse or narrow a result. Extra words like these on one side of a
+// containment make it a different result: "saved" is not "not saved".
+const REVERSING = new Set(['no', 'not', 'never', 'cannot', 'without', 'none', 'nothing', 'unless',
+  'until', 'only', 'except']);
+// A negated contraction, which `norm` splits into "isn t".
+const contractions = (text) => (text.match(/n t(?= |$)/g) ?? []).length;
+
+/**
+ * Whether a card's Expected Result and its final step's say the same: equal
+ * once case and punctuation are set aside, or one holds the other whole words
+ * and all with no word of the longer side that negates or conditions it
+ * (no, not, never, cannot, without, none, nothing, n't, unless, until, only,
+ * except). Anything else is a mismatch, and so is a blank on either side.
+ */
+export function resultsAgree(card) {
+  const last = list(card.steps).at(-1);
+  if (!last) return true;
+  const [a, b] = [norm(card.expected), norm(last.expected)];
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (!` ${long} `.includes(` ${short} `)) return false;
+  const extra = long.split(' ');
+  for (const word of short.split(' ')) extra.splice(extra.indexOf(word), 1);
+  return !extra.some((word) => REVERSING.has(word)) && contractions(long) === contractions(short);
+}
+
+/** The cards whose Expected Result disagrees with their final step's, one line each. */
+export const expectedProblems = (pack) => list(pack.testCards).filter((card) => !resultsAgree(card))
+  .map((card) => `${card.id} Expected Result "${noStop(card.expected ?? '')}" does not agree with`
+    + ` its final step's "${noStop(list(card.steps).at(-1).expected ?? '')}". Keep the card's`
+    + ' Expected Result and change that step\'s expected result to say the same.');
+
+// The sheet name a mismatch is reported under; the builder has no such sheet.
+const EXPECTED_SHEET = 'Test Card Expected Results';
+
+const VERIFY_CARDS = 8;
+const VERIFY_RULE = 'precedence: when two rules conflict, a rule that blocks an action outranks one that'
+  + ' allows it, so the action stays blocked, unless a cited rule says it is an exception to the block'
+  + ' or overrides it; Reset restores the saved value, never the edited one.';
+
+/** A rule's source wording: its summary, and the master's full description when that adds to it. */
+function ruleWording(ctx, rule, short) {
+  const raw = short ? null : ctx.documents.flatMap((doc) => list(doc.rules))
+    .find((row) => (row.rule_id ?? row.id) === rule.id);
+  const parts = [rule.summary, raw?.description].filter((text) => !blank(text));
+  if (isRetired(rule)) parts.unshift('removed: the card must show this no longer happens');
+  return [...new Set(parts)].join(' / ');
+}
+
+const cardView = (card) => [`Title: ${card.title}`, `Expected Result: ${card.expected}`,
+  ...list(card.steps).map((step, i) => `Step ${i + 1}: ${step.description} => ${step.expected}`
+    + ` (rules ${list(step.rules).join(', ')})`)].join('\n');
+
+/**
+ * Asks, per card, whether its Expected Result follows from the rules it cites
+ * as their source wording states them. Cards go in batches that fit the
+ * room. A batch that is too big is split; a card too big alone is asked again
+ * with rule summaries only, and if that is too big too it is left unverified.
+ * Returns `failed` (the reason for each card that does not follow, by card)
+ * and `unverified` (the cards no call could hold).
+ */
+async function verifyCards(ctx, cards, step) {
+  const failed = new Map();
+  const unverified = [];
+  if (!cards.length) return { failed, unverified };
+  const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
+  const byId = new Map(ctx.pack.rules.map((rule) => [rule.id, rule]));
+  const wording = (card, short) => list(card.rules).map((id) => byId.get(id)).filter(Boolean)
+    .map((rule) => `- ${rule.id} | ${rule.name} | page ${rule.sourcePage}: ${ruleWording(ctx, rule, short)}`);
+  const cost = (card) => `${cardView(card)}\n${asLines(wording(card))}`;
+  const run = async (group, name, short) => {
+    const labeled = group.map((card, n) => ({ card, label: `C${n + 1}` }));
+    let answer;
+    try {
+      answer = await ask(ctx, {
+        phase: 'phase6', step: name, reasoning: false, refs,
+        task: 'For each card, decide whether its Expected Result follows from the rules the card'
+          + ' cites, read as their source wording states them, and from nothing else. Apply this'
+          + ` ${VERIFY_RULE} Answer "does not follow" when the Expected Result contradicts a rule,`
+          + ' rests on an allowance that a block overrides, restores a value other than the saved one,'
+          + ' or states what no cited rule supports; say in the reason what the rules require instead.'
+          + ' A rule marked removed was taken out: a card citing it follows when its Expected Result'
+          + ' states the behavior is absent, and does not follow when it expects the behavior.',
+        inputs: [['Cards', labeled.map(({ card, label }) => `### ${label}\n${cardView(card)}`).join('\n\n')],
+          ['Rules and their source wording',
+            asLines([...new Set(group.flatMap((card) => wording(card, short)))])]],
+        schema: S.verificationSchema(labeled.map((row) => row.label)),
+      });
+    } catch (error) {
+      if (!(error instanceof ModelError) || error.code !== 'too-big') throw error;
+      if (group.length > 1) {
+        ctx.logs.status({ job: ctx.job.id, phase: 'phase6', step: name, event: 'split', cards: group.length });
+        for (const [n, card] of group.entries()) await run([card], `${name}s${n + 1}`, short);
+      } else if (!short) await run(group, `${name}short`, true);
+      else unverified.push(group[0]);
+      return;
+    }
+    const verdicts = new Map(answer.cards.map((row) => [row.card, row]));
+    for (const { card, label } of labeled) {
+      const row = verdicts.get(label);
+      if (row?.verdict === 'does not follow') failed.set(card, row.why);
+    }
+  };
+  for (const [i, group] of batches(cards, cost, room(ctx, false, refs) - 1500, VERIFY_CARDS).entries()) {
+    await run(group, `${step}-${i + 1}`, false);
+  }
+  return { failed, unverified };
+}
+
+const reuseRow = (ruleId, reason) => ({ ruleId, status: 'Missing',
+  gap: `Covered only by the existing test ${noStop(reason)}; confirm it and reuse it.`,
+  recommendation: 'Confirm the existing test covers this rule and reuse it, or design a card.' });
+
+/**
+ * Takes a card out of a document's design. Its scenario is settled as removed,
+ * or by the `skip` a redesign answered with. An assumption says why, and each
+ * of its rules no other card covers gets a Missing row: the existing reuse row
+ * when an existing test covers it, else one with the reason.
+ */
+function removeCard(state, card, why, skip) {
+  state.cards = state.cards.filter((c) => c !== card);
+  const scenario = state.scenarios.find((s) => s.id === card.scenario);
+  const given = skip && !blank(skip.reason) ? skip.reason : why;
+  if (scenario) scenario.settled = skip ? { how: skip.how, reason: given } : { how: 'removed', reason: why };
+  const reason = noStop(blank(given) ? 'its Expected Result does not follow from the rules' : given);
+  state.assumptions.push({
+    assumption: `The card "${card.title}" was removed${scenario ? ` for scenario ${scenario.id}` : ''}:`
+      + (skip ? ' its Expected Result did not follow from its rules, and the redesign wrote no card for it.'
+        : ' its Expected Result did not follow from its rules after one redesign.'),
+    why: `${reason}.`, impact: `Rules ${card.rules.join(', ')} lose this card.`,
+    clarification: 'Design a card for them by hand, checking its Expected Result against the rules.' });
+  const covered = new Set(state.cards.flatMap((c) => c.rules));
+  const lost = card.rules.filter((id) => !covered.has(id));
+  const rowFor = (ruleId) => {
+    const reused = state.scenarios.find((s) => s.settled?.how === 'reused' && s.rules.includes(ruleId));
+    const kept = state.uncovered.find((row) => row.ruleId === ruleId);
+    if (reused) return kept ?? reuseRow(ruleId, reused.settled.reason);
+    return { ruleId, status: 'Missing',
+      gap: skip?.how === 'gap' ? `No card can cover this rule: ${reason}.`
+        : `The card for this rule was removed: ${reason}.`,
+      recommendation: 'Design a card for this rule by hand, checking its Expected Result against the rules.' };
+  };
+  state.uncovered = [...state.uncovered.filter((row) => !lost.includes(row.ruleId)), ...lost.map(rowFor)];
+}
+
+/**
+ * Verifies the cards of a document that are not yet `verified`. A card that
+ * does not follow is designed again once, told why, and verified again; if it still fails, or no
+ * card comes back, it is removed. A card no call could hold is kept with an
+ * assumption saying it was not verified. Returns the counts.
+ */
+async function verifyDocument(ctx, doc, objectives, verified, tag = '') {
+  const count = { redesigned: 0, removed: 0 };
+  const state = ctx.designed[doc.key];
+  const pending = state.cards.filter((card) => !verified.has(card));
+  const note = (card) => {
+    verified.add(card);
+    state.assumptions.push({
+      assumption: `The card "${card.title}" was not checked against its rules.`,
+      why: 'Its steps and rules are too large for one verification call.',
+      impact: `Its Expected Result for rules ${card.rules.join(', ')} is unchecked.`,
+      clarification: 'Check its Expected Result against the rules by hand.' });
+  };
+  // A card that follows its rules but whose final step words the result differently has
+  // its final step set to the card's Expected Result; only a card that does not follow is redone.
+  const align = (card) => {
+    const last = list(card.steps).at(-1);
+    if (last && !resultsAgree(card)) last.expected = card.expected;
+  };
+  const first = await verifyCards(ctx, pending, `verify-d${doc.number}${tag}`);
+  first.unverified.forEach(note);
+  for (const card of pending) {
+    if (first.failed.has(card)) continue;
+    verified.add(card);
+    if (!first.unverified.includes(card)) align(card);
+  }
+  const byId = new Map(ctx.pack.rules.map((rule) => [rule.id, rule]));
+  const redone = [];
+  for (const [card, why] of first.failed) {
+    const scenario = state.scenarios.find((s) => s.id === card.scenario);
+    if (!scenario) {
+      removeCard(state, card, why);
+      count.removed += 1;
+      continue;
+    }
+    count.redesigned += 1;
+    const others = state.cards.filter((c) => c !== card);
+    const answer = await designBatch(ctx, doc, { focus: [scenario], open: [scenario], written: others },
+      objectives, scenario.id,
+      ` An earlier card for scenario ${scenario.id} was rejected because its Expected Result does`
+      + ` not follow from its rules: ${noStop(why)}. Its Expected Result was "${noStop(card.expected)}". Write the card again for`
+      + ` ${scenario.id} only, with an Expected Result that follows from the rules, repeated`
+      + ` as the final step's expected result, applying this ${VERIFY_RULE}`, 'redo');
+    const fresh = answer.cards.find((c) => c.scenario === scenario.id);
+    const tidy = fresh && tidyCard(fresh, new Set(scenario.rules.filter((id) => byId.has(id))));
+    if (!tidy?.rules.length) {
+      const skip = (answer.skipped ?? []).find((row) => row.scenario === scenario.id);
+      removeCard(state, card, why, skip);
+      count.removed += 1;
+      continue;
+    }
+    const next = { ...tidy, key: card.key, breakIt: card.breakIt };
+    state.cards[state.cards.indexOf(card)] = next;
+    redone.push([card, next, why]);
+  }
+  const again = await verifyCards(ctx, redone.map(([, next]) => next), `reverify-d${doc.number}${tag}`);
+  again.unverified.forEach(note);
+  for (const [, next, why] of redone) {
+    if (again.failed.has(next)) {
+      removeCard(state, next, again.failed.get(next) || why);
+      count.removed += 1;
+    } else {
+      verified.add(next);
+      if (!again.unverified.includes(next)) align(next);
+    }
+  }
+  return count;
+}
+
 export async function phase6(ctx) {
   const { pack, job } = ctx;
   const objectives = cardObjectives(ctx);
   if (!objectives.length) throw new GateError('phase6', 'no-applicable-objective');
   ctx.designed = {};
-  const total = { retried: 0, duplicates: 0, unsettled: 0, scenarios: 0 };
+  const total = { retried: 0, duplicates: 0, unsettled: 0, scenarios: 0, redesigned: 0, removed: 0 };
   const add = (done) => {
-    for (const key of ['retried', 'duplicates', 'unsettled']) total[key] += done[key];
+    for (const key of ['retried', 'duplicates', 'unsettled', 'redesigned', 'removed']) {
+      total[key] += done[key] ?? 0;
+    }
   };
+  // Cards whose Expected Result has been checked against their rules. A card is
+  // checked before the objective passes below, so a removal never leaves an
+  // objective served by a card that is gone.
+  const verified = new Set();
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included')) {
     const done = await designDocument(ctx, doc, docRules(ctx, doc), objectives);
     ctx.designed[doc.key] = done.designed;
     add(done);
+    add(await verifyDocument(ctx, doc, objectives, verified));
   }
 
   if (!job.suite) {
@@ -1000,6 +1318,7 @@ export async function phase6(ctx) {
           const done = await designDocument(ctx, doc, docRules(ctx, doc), objectives,
             { designed: ctx.designed[doc.key], only: 'break' });
           add(done);
+          add(await verifyDocument(ctx, doc, objectives, verified, '-break'));
           if (served()) {
             const gone = `${doc.name}: no break scenario was listed.`;
             done.designed.assumptions = done.designed.assumptions
@@ -1169,21 +1488,42 @@ export function reconcile(ctx, pack) {
     }
   }
   const ruleIds = new Set(list(pack.rules).map((rule) => rule.id));
+  const reviewed = new Set(list(pack.coverage).map((row) => row.ruleId));
   const seen = new Set();
   const claims = ['Covered', 'Partially Covered', 'Weakly Covered'];
+  // A High-risk Not Impacted rule needs a regression card or a stated reason, which only a
+  // person or the repair call can give, so its blanks are left for the Phase 8 check.
+  const highRisk = new Set(list(pack.rules).filter((rule) => rule.impact === 'Not Impacted'
+    && String(rule.risk).toLowerCase() === 'high').map((rule) => rule.id));
+  const mapping = (id) => `Not reviewed; coverage rests on the card mapping (${list(pack.testCards)
+    .filter((card) => list(card.rules).includes(id)).map((card) => card.id).join(', ')}).`;
+  const confirm = 'Confirm in review that the cards exercise this rule.';
   pack.coverage = list(pack.coverage).filter((row) => {
     if (!ruleIds.has(row.ruleId) || seen.has(row.ruleId)) return false;
     const cards = covered.get(row.ruleId);
-    if (cards && !claims.includes(row.status)) return false;
+    // A review row that denies coverage a card gives is kept when it says why, so the builder
+    // fails it and the repair call reads the review's own words.
+    if (cards && !claims.includes(row.status) && blank(row.gap)) return false;
     if (!cards && claims.includes(row.status)) return false;
     if (row.status === 'Covered' && cards && !cards.requirement) row.status = 'Weakly Covered';
     seen.add(row.ruleId);
     return true;
   }).map((row) => ({ ...row,
     strength: blank(row.strength) ? (row.status === 'Partially Covered' ? 'Partial' : 'Weak') : row.strength,
-    gap: blank(row.gap) && row.status !== 'Covered' ? 'Not stated by the review.' : row.gap,
-    recommendation: blank(row.recommendation) && row.status !== 'Covered'
-      ? 'Review this rule\'s coverage by hand.' : row.recommendation }));
+    gap: blank(row.gap) && !(row.status === 'Covered' && highRisk.has(row.ruleId))
+      ? (row.status === 'Covered' ? mapping(row.ruleId) : 'Not stated by the review.') : row.gap,
+    recommendation: blank(row.recommendation) && !(row.status === 'Covered' && highRisk.has(row.ruleId))
+      ? (row.status === 'Covered' ? confirm : 'Review this rule\'s coverage by hand.')
+      : row.recommendation }));
+  // A rule with a requirement card and no review row at all reads Covered, as the builder would
+  // have it, and says that no one reviewed it.
+  for (const rule of list(pack.rules)) {
+    if (!covered.get(rule.id)?.requirement || seen.has(rule.id) || reviewed.has(rule.id)
+      || highRisk.has(rule.id)) continue;
+    pack.coverage.push({ ruleId: rule.id, status: 'Covered', strength: 'Strong',
+      gap: mapping(rule.id), recommendation: confirm });
+    seen.add(rule.id);
+  }
   for (const rule of list(pack.rules)) {
     if (covered.has(rule.id) || seen.has(rule.id) || rule.impact === 'Not Impacted') continue;
     pack.coverage.push({ ruleId: rule.id, status: 'Missing', strength: 'None',
@@ -1220,7 +1560,15 @@ export async function phase8(ctx, pack, label = 'build', deferred = []) {
     reconcile(ctx, pack);
     const whole = builder.buildPack(pack);
     if (whole.stop) throw new GateError('phase8', 'builder-stop');
-    const built = { ...whole, failed: whole.failed.filter(([sheet]) => !deferred.includes(sheet)) };
+    // The pipeline's own check of each card's Expected Result against its final step,
+    // reported beside the builder's sheets so the repair call reads it the same way.
+    const mismatched = expectedProblems(pack);
+    // The pipeline's own checks of the pack against itself, run for any builder.
+    const { failed: checked, warnings } = checkPack(pack, whole);
+    for (const { code, text } of warnings) ctx.logs.detail(`builder warning ${code} ${label} ${attempt}`, text);
+    const built = { ...whole, failed: [...whole.failed.filter(([sheet]) => !deferred.includes(sheet)),
+      ...checked.filter(([sheet]) => !deferred.includes(sheet)),
+      ...(mismatched.length ? [[EXPECTED_SHEET, 'Yes', 'Yes', 'FAIL', mismatched.join('\n')]] : [])] };
     const failed = built.failed.length;
     const statuses = built.validation.map((row) => row[3]);
     ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'builder', attempt,
@@ -1257,6 +1605,7 @@ async function repair(ctx, pack, built, step) {
     schema: S.repairSchema({ cardIds: cards.map((card) => card.id), ids: ruleIds, objectives,
       derivations: ctx.builder.DERIVATIONS, statuses: ctx.builder.COVERAGE_STATUSES, sheets }),
   });
+  const before = new Map(cards.map((card) => [card.id, card.expected]));
   for (const fixed of answer.cards) {
     const card = pack.testCards.find((c) => c.id === fixed.id);
     if (!card) continue;
@@ -1264,6 +1613,21 @@ async function repair(ctx, pack, built, step) {
       .find((rule) => rule.id === id)?.module === card.module)));
     if (tidy.rules.length) Object.assign(card, { ...tidy, id: card.id, module: card.module,
       sourceDocument: card.sourceDocument });
+  }
+  // A repair that changed a card's Expected Result is checked against the rules again; one
+  // that does not follow is undone, final step included.
+  const changed = cards.filter((card) => card.expected !== before.get(card.id));
+  const { failed } = await verifyCards(ctx, changed, `recheck-${step}`);
+  for (const card of failed.keys()) {
+    const kept = before.get(card.id);
+    card.expected = kept;
+    const last = list(card.steps).at(-1);
+    if (last) last.expected = kept;
+    pack.assumptions ??= [];
+    pack.assumptions.push({
+      assumption: `The repair of card ${card.id} changed its Expected Result, and the change was undone.`,
+      why: `${noStop(failed.get(card))}.`, impact: 'The card keeps the Expected Result checked in Phase 6.',
+      clarification: 'Check the card by hand if the builder still reports it.' });
   }
   const rows = new Map(list(pack.coverage).map((row) => [row.ruleId, row]));
   for (const row of answer.coverage) rows.set(row.ruleId, row);
@@ -1293,19 +1657,132 @@ function packView(ctx, pack, detail) {
       `- ${row.objective}: ${row.applicable ? 'Applicable' : 'Not Applicable'}`))]];
 }
 
+/** Fix rounds the review runs between the checklist and the revalidation. */
+const REVIEW_FIX_ROUNDS = 2;
+/** The sheet name the review's findings are reported under to the repair call. */
+const REVIEW_SHEET = 'Quality Review';
+
 /**
- * The references and pack view every review call reads, with the description
- * and any earlier review answers, compacted to fit or refused as too big.
+ * The pack with the sheets Phase 9 has not filled yet standing in, so the
+ * builder writes a workbook for the review to read.
+ */
+function draftPack(ctx, pack) {
+  const draft = reconcile(ctx, structuredClone(pack));
+  delete draft.revalidation;
+  // A field the review has not written is blank, or an empty object a suite merge leaves.
+  const standIn = (current, schema, over = {}) => ({
+    ...Object.fromEntries(Object.keys(schema.properties).map((key) => [key, 'Pending review.'])),
+    ...Object.fromEntries(Object.entries(current ?? {}).filter(([, value]) => !blank(value))),
+    ...over });
+  draft.seniorReview = standIn(draft.seniorReview, S.seniorReviewSchema.properties.seniorReview);
+  draft.testerNotes = standIn(draft.testerNotes, S.seniorReviewSchema.properties.testerNotes);
+  draft.confidence = standIn(draft.confidence,
+    { properties: Object.fromEntries(['overall', ...CONFIDENCE_FIELDS.map(([field]) => field)].map((key) => [key, 0])) },
+    ctx.builder.CONFIDENCE_LEVELS.includes(draft.confidence?.overall) ? {}
+      : { overall: ctx.builder.CONFIDENCE_LEVELS[1] ?? ctx.builder.CONFIDENCE_LEVELS[0] });
+  if (draft.executiveSummary) draft.executiveSummary.confidence ||= draft.confidence.overall;
+  return draft;
+}
+
+/** The workbook the builder writes for the pack as it stands, read back as sheets. */
+function builtSheets(ctx, pack) {
+  const dir = path.join(ctx.config.output, ctx.job.id, 'work', 'review');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'draft-pack.json');
+  fs.writeFileSync(file, JSON.stringify(draftPack(ctx, pack)));
+  runCommand(ctx, ctx.config.builder.command, { pack: file, out: dir });
+  const book = fs.readdirSync(dir).find((name) => name.endsWith('.xlsx'));
+  if (!book) throw new GateError('phase9', 'review-workbook-missing');
+  return readXlsx(path.join(dir, book)).map(readSheet);
+}
+
+/**
+ * The built workbook as text, one row to a line, in pieces that each fit
+ * `tokens`. The sheets Phase 9 writes itself and the validation sheet are left out.
+ */
+function workbookPieces(ctx, pack, tokens) {
+  const skip = new Set([...REVIEW_SHEETS, 'Workbook Validation']);
+  const lines = builtSheets(ctx, pack).filter((sheet) => !skip.has(sheet.name)).flatMap((sheet) => [
+    ...(sheet.title ? [`[${sheet.name}] ${sheet.title.text}`] : []),
+    ...sheet.rows.map((row) => `[${sheet.name} row ${row.n}] ${Object.entries(row.cells)
+      .filter(([, value]) => value).map(([header, value]) => `${header}: ${value}`).join(' | ')}`),
+  ]).flatMap((line) => splitText(line, tokens));
+  return batches(lines, (line) => line, tokens).map((group) => group.join('\n'));
+}
+
+/** Room for the workbook text in one review call, after the description and `extra`. */
+const reviewBudget = (ctx, refs, extra) => room(ctx, true, refs) - estimateTokens(ctx.description)
+  - 2000 - estimateTokens(extra.map(([, text]) => text).join('\n'));
+
+/** Every rule with its impact and the cards that cite it, one line each. */
+function rulesIndex(pack) {
+  return list(pack.rules).map((rule) => {
+    const cards = list(pack.testCards).filter((card) => list(card.rules).includes(rule.id))
+      .map((card) => card.id);
+    return { id: rule.id, line: `- ${rule.id} | ${rule.impact} | cards: ${cards.join(', ') || 'none'}` };
+  });
+}
+
+/**
+ * What the review calls read: one view per piece of the built workbook. A
+ * workbook in several parts opens each part with an index of the rules that part
+ * shows and the cards that cite them, so a part that shows a rule but not its
+ * cards can still see them; the index takes at most a third of the room. A
+ * builder that writes no workbook for the draft leaves the review the
+ * `packView` summary, labeled as such, in parts that fit.
+ */
+function reviewViews(ctx, pack, refs, extra = []) {
+  const budget = reviewBudget(ctx, refs, extra);
+  if (budget < 1000) throw new GateError('phase9', 'pack-too-big-to-review');
+  const piecesFor = (tokens) => {
+    try {
+      return { label: 'Built workbook', pieces: workbookPieces(ctx, pack, tokens) };
+    } catch (error) {
+      if (!(error instanceof GateError) || error.code !== 'review-workbook-missing') throw error;
+      ctx.logs.status({ job: ctx.job.id, phase: 'phase9', event: 'warn', reason: error.code });
+      return { label: 'Pack summary (no workbook was built to read)',
+        pieces: splitText(packView(ctx, pack, true).map(([name, text]) => `${name}:\n${text}`)
+          .join('\n\n'), tokens) };
+    }
+  };
+  let { label, pieces } = piecesFor(budget);
+  const index = rulesIndex(pack);
+  const cap = Math.floor(budget / 3);
+  if (pieces.length > 1) ({ label, pieces } = piecesFor(budget - cap));
+  if (!pieces.length) throw new GateError('phase9', 'review-workbook-empty');
+  if (pieces.length === 1) return [[[label, pieces[0]]]];
+  return pieces.map((text, i) => {
+    const lines = [];
+    let used = 0;
+    for (const row of index.filter((rule) => text.includes(rule.id))) {
+      used += estimateTokens(row.line);
+      if (used > cap) break;
+      lines.push(row.line);
+    }
+    return [...(lines.length ? [['Rules in this part and the cards that cite them', asLines(lines)]] : []),
+      [`${label}, part ${i + 1} of ${pieces.length}`, text]];
+  });
+}
+
+/**
+ * The references and workbook text every single-answer review call reads, with
+ * the description and any earlier review answers. A workbook too long for one
+ * call is summarized by `packView` for these calls; the checklist and the
+ * revalidation read it in parts.
  */
 function reviewInputs(ctx, pack, extra = []) {
   const { ref } = ctx;
   const refs = [...ref.core, ref.docs.validation, ...ref.chapters('9')];
-  const budget = room(ctx, true, refs) - estimateTokens(ctx.description) - 2000
-    - estimateTokens(extra.map(([, text]) => text).join('\n'));
-  const size = (view) => estimateTokens(view.map(([, text]) => text).join('\n'));
-  let view = packView(ctx, pack, true);
-  if (size(view) > budget) view = packView(ctx, pack, false);
-  if (size(view) > budget) throw new GateError('phase9', 'pack-too-big-to-review');
+  const views = reviewViews(ctx, pack, refs, extra);
+  let view = views[0];
+  if (views.length > 1) {
+    const budget = reviewBudget(ctx, refs, extra);
+    const size = (rows) => estimateTokens(rows.map(([, text]) => text).join('\n'));
+    view = packView(ctx, pack, true);
+    if (size(view) > budget) view = packView(ctx, pack, false);
+    if (size(view) > budget) throw new GateError('phase9', 'pack-too-big-to-review');
+  }
   return { refs, inputs: [['Change description', ctx.description], ...view, ...extra] };
 }
 
@@ -1313,75 +1790,287 @@ const issueText = (ctx) => list(ctx.reviewFindings)
   .map((row) => `- ${row.issue} (fix: ${row.fix})`).join('\n');
 
 /**
- * Phase 9 runs as three calls, each a checkpoint of its own, so no one call
- * thinks through the whole review. The first runs the checklist: issues, the
- * coverage rows for rules not plainly Covered, and assumptions.
+ * Phase 9 runs as four steps, each a checkpoint of its own, so no one call
+ * thinks through the whole review. The first runs the checklist over the built
+ * workbook, in parts when it is long: issues, the coverage rows for rules not
+ * plainly Covered, and assumptions. `again` is a check after a fix round, which
+ * replaces the issues and keeps the rest.
  */
-export async function phase9Checklist(ctx, pack) {
-  const answer = await ask(ctx, {
-    phase: 'phase9', step: 'checklist', reasoning: true, ...reviewInputs(ctx, pack),
-    task: 'Run the Validation checklist against this pack. List each issue and its fix.'
-      + ' Give a coverage row for every rule that is not plainly Covered, with its strength,'
-      + ' gap and recommendation. Add the assumptions the pack still needs.',
-    schema: S.checklistSchema({ statuses: ctx.builder.COVERAGE_STATUSES }),
-  });
-  ctx.private('phase9-issues.json', answer.issues);
-  ctx.reviewFindings = answer.issues;
-  pack.assumptions = [...list(pack.assumptions), ...answer.assumptions];
+export async function phase9Checklist(ctx, pack, { again = false } = {}) {
+  const refs = [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')];
+  const views = reviewViews(ctx, pack, refs);
+  // Rules taken from document text leave the checklist no matrix export to check them against.
+  const limited = ctx.derived > 0;
+  const noExport = !ctx.config.inputs.ruleExport;
+  const derivedFrom = list(ctx.derivedDocuments).join(', ') || 'some documents';
+  const answers = [];
+  for (const [i, view] of views.entries()) {
+    answers.push(await ask(ctx, {
+      phase: 'phase9', step: again ? 'checklist-again' : 'checklist', reasoning: true, refs,
+      inputs: [['Change description', ctx.description], ...view],
+      task: 'Run the Validation checklist against this pack. List each issue and its fix. A fix'
+        + ' names the card or rule to change and what to change it to; leave it blank for an'
+        + ' issue no change to the pack can settle. Give a coverage row for every rule that is'
+        + ' not plainly Covered, with its strength, gap and recommendation. Add the assumptions'
+        + ' the pack still needs.'
+        + (views.length > 1 ? ` The workbook comes in ${views.length} parts; this is part`
+          + ` ${i + 1}. Report what this part shows, and judge a rule's coverage only from the`
+          + ' cards the rules index lists for it when this part shows them.' : '')
+        + (limited ? (noExport
+          ? ' The rules were derived from document text because no Requirements Matrix export'
+            + ' was available, so run checklist item OPS-009 as limited and say so.'
+          : ` The rule export held no rules for ${derivedFrom}, so their rules were derived from`
+            + ' the document text; run checklist item OPS-009 as limited for those rules and say'
+            + ' so.') : ''),
+      schema: S.checklistSchema({ statuses: ctx.builder.COVERAGE_STATUSES }),
+    }));
+  }
+  const issues = answers.flatMap((answer) => answer.issues);
+  ctx.private(again ? 'phase9-issues-again.json' : 'phase9-issues.json', issues);
+  ctx.reviewFindings = issues;
+  if (again) return { issues: issues.length, coverageRows: 0 };
+  pack.assumptions = [...list(pack.assumptions), ...answers.flatMap((answer) => answer.assumptions),
+    ...(limited ? [{ assumption: noExport
+      ? 'Checklist item OPS-009 ran limited: no Requirements Matrix export was available.'
+      : `Checklist item OPS-009 ran limited for the rules of ${derivedFrom}: the rule export held`
+        + ' none for them.',
+    why: 'The rules were derived from document text, so there is no matrix to check them against.',
+    impact: 'The matrix check covers only the rules in this pack.',
+    clarification: noExport ? 'Export the Requirements Matrix and run the check again.'
+      : 'Extract the rules for these documents and run the check again.' }] : [])];
   const ruleIds = new Set(list(pack.rules).map((rule) => rule.id));
-  const reviewRows = answer.coverage.filter((row) => ruleIds.has(row.ruleId)
-    && row.status !== 'Covered');
+  const reviewRows = answers.flatMap((answer) => answer.coverage).filter((row) =>
+    ruleIds.has(row.ruleId) && row.status !== 'Covered');
   const rows = new Map(list(pack.coverage).map((row) => [row.ruleId, row]));
   for (const row of reviewRows) rows.set(row.ruleId, row);
   pack.coverage = [...rows.values()];
   pack.reviewCoverage = reviewRows;
-  return { issues: answer.issues.length, coverageRows: reviewRows.length };
+  return { issues: issues.length, coverageRows: reviewRows.length };
 }
 
-/** The senior review questions and the tester notes, with the checklist's issues in view. */
-export async function phase9SeniorReview(ctx, pack) {
-  const answer = await ask(ctx, {
-    phase: 'phase9', step: 'senior', reasoning: true,
-    ...reviewInputs(ctx, pack, [['Checklist issues', issueText(ctx)]]),
-    task: 'Answer the senior review questions for this pack and write the tester notes.',
-    schema: S.seniorReviewSchema,
-  });
-  pack.seniorReview = answer.seniorReview;
-  pack.testerNotes = answer.testerNotes;
-  if (ctx.reuse.length) {
-    pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
+/**
+ * The fix loop between the checklist and the revalidation. Each finding with a
+ * fix goes through `repair`, the pack is rebuilt, and the checklist reads the
+ * rebuilt workbook again; at most two rounds. Findings left after the last
+ * round stay in `ctx.reviewFindings` for the later calls.
+ */
+export async function phase9Fix(ctx, pack) {
+  ctx.appliedFixes ??= [];
+  let rounds = 0;
+  while (rounds < REVIEW_FIX_ROUNDS) {
+    const findings = list(ctx.reviewFindings).filter((row) => fixable(pack, row));
+    if (!findings.length) break;
+    rounds += 1;
+    // The review's findings change cards only: coverage rows and limitations stay as the
+    // pack had them, so a false finding cannot downgrade a rule or add a limitation.
+    const kept = structuredClone({ coverage: pack.coverage, limitations: pack.limitations });
+    for (const [n, group] of fixGroups(ctx, pack, findings).entries()) {
+      const text = group.map((row) => `- ${row.issue}\n  Fix: ${row.fix}`).join('\n');
+      await repair(ctx, pack, { failed: [[REVIEW_SHEET, 'Yes', 'Yes', 'FAIL', text]], validation: [] },
+        `review-${rounds}-g${n + 1}`);
+    }
+    Object.assign(pack, kept);
+    await phase8(ctx, pack, `review-${rounds}`, REVIEW_SHEETS);
+    for (const row of findings) {
+      const line = `- ${row.issue} (fix: ${row.fix})`;
+      if (!ctx.appliedFixes.includes(line)) ctx.appliedFixes.push(line);
+    }
+    await phase9Checklist(ctx, pack, { again: true });
   }
-  return {};
+  return { rounds };
 }
 
-/** The confidence assessment, after the checklist and the senior review. */
+/** A fix the review can hand to repair: not a placeholder, and it names a card the pack holds. */
+function fixable(pack, row) {
+  if (blank(row.fix) || /^\W*(n\/?a|none|nothing|no change|not applicable|no fix)\b/i.test(row.fix)) {
+    return false;
+  }
+  const text = `${row.issue} ${row.fix}`;
+  return list(pack.testCards).some((card) => text.includes(card.id));
+}
+
+/** The findings in groups whose named cards fit one repair call. */
+function fixGroups(ctx, pack, findings) {
+  const budget = Math.max(1000, room(ctx, false, [ctx.ref.docs.workbookStandard]) - 3000);
+  const cost = (row) => estimateTokens(`${row.issue} ${row.fix}`) + list(pack.testCards)
+    .filter((card) => `${row.issue} ${row.fix}`.includes(card.id))
+    .reduce((n, card) => n + estimateTokens(JSON.stringify(card)) + estimateTokens(asLines(
+      list(pack.rules).filter((rule) => list(card.rules).includes(rule.id)).map(ruleLine))), 0);
+  const groups = [];
+  let size = 0;
+  for (const row of findings) {
+    if (!groups.length || size + cost(row) > budget) {
+      groups.push([]);
+      size = 0;
+    }
+    groups.at(-1).push(row);
+    size += cost(row);
+  }
+  return groups;
+}
+
+/**
+ * The prose fields of the review sheets, as { name, text } rows: the Confidence
+ * Assessment fields, the senior review answers and the tester notes.
+ */
+function reviewProse(pack) {
+  const text = (value) => (Array.isArray(value) ? value.join(' ') : String(value ?? '')).trim();
+  return [['Confidence Assessment', pack.confidence], ['Senior Tester Review', pack.seniorReview],
+    ['Tester Notes', pack.testerNotes]].flatMap(([sheet, fields]) => Object.entries(fields ?? {})
+    .filter(([field]) => field !== 'overall')
+    .map(([field, value]) => ({ name: `${sheet} ${field}`, text: text(value) })));
+}
+
+// A short answer such as "Not applicable." or "None." is the right answer for more than one
+// field, so only a text this long counts as one field repeating another.
+const TWIN_MIN_CHARS = 40;
+const sameText = (a, b) => {
+  const flat = (text) => text.toLowerCase().split(/\s+/).join(' ');
+  return flat(a).length >= TWIN_MIN_CHARS && flat(a) === flat(b);
+};
+
+/** The card and rule IDs a text cites that the pack does not hold, among the ID families it uses. */
+function unknownIds(pack, text) {
+  const known = new Set([...list(pack.testCards), ...list(pack.rules)].map((item) => item.id));
+  const families = [...new Set([...known].map((id) => id.replace(/\d+$/, '')).filter((f) => f && f.endsWith('-')))];
+  if (!families.length) return [];
+  const escaped = families.map((family) => family.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const cited = String(text).match(new RegExp(`(?<![A-Za-z0-9.-])(?:${escaped.join('|')})\\d+`, 'g')) ?? [];
+  return [...new Set(cited.filter((id) => !known.has(id)))];
+}
+
+/** What is wrong with one new field's text, or '': it repeats a field already written, or cites what the workbook lacks. */
+function fieldProblem(pack, text, earlier) {
+  if (!String(text ?? '').trim()) return 'it is blank';
+  const twin = earlier.find((row) => row.text && sameText(row.text, String(text)));
+  if (twin) return `it repeats the text of ${twin.name}; say something specific to this field`;
+  const unknown = unknownIds(pack, text);
+  if (unknown.length) return `it cites ${unknown.join(', ')}, which the workbook does not hold`;
+  return '';
+}
+
+/** One confidence field, asked for on its own over the finished workbook; a refused text is asked for once more. */
+async function writeConfidenceField(ctx, pack, field, task, extra) {
+  let refusal = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const earlier = reviewProse(pack);
+    // The fields already written ride in `extra`, so the workbook is sized with them in view.
+    const input = reviewInputs(ctx, pack, [...extra,
+      ['Fields already written', asLines(earlier.map((row) => `- ${row.name}: ${row.text}`))]]);
+    const answer = await ask(ctx, {
+      phase: 'phase9', step: `confidence-${field}`, reasoning: true,
+      ...input,
+      task: `${task}${refusal}`,
+      schema: S.confidenceFieldSchema(field),
+    });
+    const problem = fieldProblem(pack, answer[field], earlier);
+    if (!problem) return String(answer[field]).trim();
+    refusal = ` Your last answer for this field was refused: ${problem}.`;
+  }
+  throw new GateError('phase9', 'review-field-unsupported');
+}
+
+/** What each Confidence Assessment field says, in the order they are written. */
+const CONFIDENCE_FIELDS = [
+  ['coverage', 'State how well the cards cover the rules, from the Coverage Matrix of this workbook: how many rules are covered, partly covered or missing, and which ones.'],
+  ['remainingRisks', 'Name the risks that remain after these cards, each tied to a rule or card in the workbook.'],
+  ['assumptions', 'Summarize the assumptions this pack rests on, from its Assumptions sheet.'],
+  ['regressionScope', 'Say what regression coverage the pack gives: which rules and sets guard behavior the change does not touch.'],
+  ['breakItScope', 'Say what break-it coverage the pack gives, from its break-it cards, and what it does not try.'],
+  ['manualReview', 'Say what a person must still check by hand, and why the pack cannot.'],
+];
+
+/**
+ * The confidence assessment, written from the finished workbook after the checklist and
+ * the fix rounds: the overall level first, then each field in a call of its own, each shown
+ * the fields already written so no two say the same thing.
+ */
 export async function phase9Confidence(ctx, pack) {
-  const answer = await ask(ctx, {
-    phase: 'phase9', step: 'confidence', reasoning: true,
-    ...reviewInputs(ctx, pack, [['Checklist issues', issueText(ctx)]]),
-    task: 'Assess confidence in this pack. When overall confidence is Low, say what holds it'
-      + ' down.',
-    schema: S.confidenceSchema({ confidence: ctx.builder.CONFIDENCE_LEVELS }),
+  const extra = [['Checklist issues', issueText(ctx)]];
+  const overall = await ask(ctx, {
+    phase: 'phase9', step: 'confidence-overall', reasoning: true, ...reviewInputs(ctx, pack, extra),
+    task: 'Rate overall confidence in this pack. When it is Low, say what holds it down.',
+    schema: S.confidenceOverallSchema({ confidence: ctx.builder.CONFIDENCE_LEVELS }),
   });
-  pack.confidence = answer.confidence;
+  pack.confidence = { overall: overall.overall };
+  for (const [field, task] of CONFIDENCE_FIELDS) {
+    pack.confidence[field] = await writeConfidenceField(ctx, pack, field, task, extra);
+  }
   pack.limitations ??= {};
-  if (answer.confidence.overall === 'Low') {
-    pack.limitations['Confidence Assessment'] = answer.lowConfidenceReason
+  if (overall.overall === 'Low') {
+    pack.limitations['Confidence Assessment'] = overall.lowConfidenceReason
       || 'Overall confidence is Low.';
   }
-  return { confidence: answer.confidence.overall };
+  return { confidence: overall.overall };
 }
 
+/**
+ * The senior review questions and the tester notes, written last, with the checklist's
+ * issues and the confidence assessment in view. An answer with a field that repeats another
+ * or cites a card or rule the workbook lacks is asked for once more with what was wrong.
+ */
+export async function phase9SeniorReview(ctx, pack) {
+  const input = reviewInputs(ctx, pack, [['Checklist issues', issueText(ctx)],
+    ['Confidence assessment', JSON.stringify(pack.confidence)]]);
+  let refusal = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const answer = await ask(ctx, {
+      phase: 'phase9', step: 'senior', reasoning: true, ...input,
+      task: `Answer the senior review questions for this pack and write the tester notes. Each`
+        + ` field says something of its own and names only cards and rules in the workbook.${refusal}`,
+      schema: S.seniorReviewSchema,
+    });
+    const earlier = reviewProse({ confidence: pack.confidence });
+    const fields = [...Object.entries(answer.seniorReview).map(([f, t]) => [`Senior Tester Review ${f}`, t]),
+      ...Object.entries(answer.testerNotes).map(([f, t]) => [`Tester Notes ${f}`, t])];
+    const problems = [];
+    for (const [name, text] of fields) {
+      const problem = fieldProblem(pack, Array.isArray(text) ? text.join(' ') : text, earlier);
+      if (problem) problems.push(`${name}: ${problem}`);
+      else earlier.push({ name, text: String(Array.isArray(text) ? text.join(' ') : text).trim() });
+    }
+    if (!problems.length) {
+      pack.seniorReview = answer.seniorReview;
+      pack.testerNotes = answer.testerNotes;
+      if (ctx.reuse.length) {
+        pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
+      }
+      return {};
+    }
+    refusal = ` Your last answer was refused: ${problems.join('; ')}.`;
+  }
+  throw new GateError('phase9', 'review-field-unsupported');
+}
+
+/**
+ * Revalidation over the rebuilt workbook, in parts when it is long. A pack that
+ * does not pass carries `revalidation` with what remains, which the builder
+ * shows on its validation sheet as FAIL.
+ */
 export async function revalidate(ctx, pack) {
-  const answer = await ask(ctx, {
-    phase: 'phase9', step: 'revalidation', reasoning: true,
-    refs: [...ctx.ref.core, ctx.ref.docs.revalidation],
-    task: 'Revalidate the pack after the review\'s fixes: does it now pass, and what remains?',
-    inputs: [['Change description', ctx.description], ...packView(ctx, pack, false)],
-    schema: S.revalidationSchema,
-  });
-  ctx.private('phase9-revalidation.json', answer);
-  return { passed: answer.passed, remaining: answer.remaining.length };
+  const refs = [...ctx.ref.core, ctx.ref.docs.revalidation];
+  const fixes = [['Fixes the review attempted (judge the workbook, not the attempt)',
+    list(ctx.appliedFixes).join('\n')]];
+  const views = reviewViews(ctx, pack, refs, fixes);
+  let passed = true;
+  const remaining = [];
+  for (const view of views) {
+    const answer = await ask(ctx, {
+      phase: 'phase9', step: 'revalidation', reasoning: true, refs,
+      task: 'Revalidate the pack after the review\'s fixes: does it now pass, and what remains?'
+        + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
+          + ' shows, and a rule\'s coverage from the cards the rules index lists for it.' : ''),
+      inputs: [['Change description', ctx.description], ...fixes, ...view],
+      schema: S.revalidationSchema,
+    });
+    passed &&= answer.passed;
+    remaining.push(...answer.remaining);
+  }
+  ctx.private('phase9-revalidation.json', { passed, remaining });
+  if (passed) delete pack.revalidation;
+  else pack.revalidation = { passed: false,
+    remaining: remaining.length ? remaining : ['Revalidation did not pass.'] };
+  return { passed, remaining: remaining.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,6 +2088,7 @@ export async function phase10(ctx, pack) {
       `Objectives dropped for want of a card: ${ctx.droppedObjectives}`,
       `Rules with no card: ${list(pack.coverage).filter((r) => r.status === 'Missing').length}`,
       `Review issues found: ${ctx.reviewIssues}`,
+      `Revalidation: ${pack.revalidation ? `failed, ${pack.revalidation.remaining.length} item(s) remain` : 'passed'}`,
     ].join('\n')]],
     schema: S.improvementSchema,
   });
