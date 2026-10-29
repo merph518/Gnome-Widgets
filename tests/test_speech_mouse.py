@@ -382,16 +382,21 @@ class SessionVoiceTest(StubSpeechctl):
         with mock.patch.object(speech_mouse, 'declare'), \
                 mock.patch.object(speech_mouse, 'grab', return_value=(True, False)) as grab, \
                 mock.patch.object(speech_mouse, 'ungrab') as ungrab, \
+                mock.patch.object(speech_mouse, 'focus_window', return_value=(True, False)) as focus, \
+                mock.patch.object(speech_mouse, 'set_accepts_input') as accepts, \
                 mock.patch.object(speech_mouse, 'x_events'), \
                 mock.patch.object(speech_mouse, 'run_menu') as run, \
                 mock.patch.object(conky_mouse, 'touch_opcode', return_value=None):
             speech_mouse.open_menu('d', 'win', 1, regions)
+        self.focus, self.accepts = focus, accepts
         return grab, ungrab, run
 
     def test_opening_holds_the_pointer_and_always_lets_it_go(self):
         grab, ungrab, run = self.open()
         self.assertTrue(grab.called and ungrab.called and run.called)
-        self.assertIn('keyboard not held', support.read(conky_mouse.LOG))
+        self.assertIn('keyboard not held, focus taken', support.read(conky_mouse.LOG))
+        self.focus.assert_called_once_with('d', 'win')                 # the focus conky's window never accepts
+        self.accepts.assert_called_once_with('d', 'win', False)        # and given back as it was
         model = run.call_args.args[0]
         self.assertEqual([x['id'] for x in model.sessions], ['aaaa', 'bbbb'])
         self.assertEqual(model.voices, VOICES[1:])
@@ -399,6 +404,17 @@ class SessionVoiceTest(StubSpeechctl):
     def test_without_a_menu_in_the_regions_nothing_opens(self):
         grab, ungrab, run = self.open({k: v for k, v in REGIONS.items() if k != 'menu'})
         self.assertFalse(grab.called or run.called)
+
+    def test_focus_is_asked_for_from_the_window_manager_and_taken(self):
+        x11 = conky_mouse.x11
+        x11.reset_mock()
+        x11.XDefaultRootWindow.return_value = 77
+        speech_mouse.focus_window('d', 555, sleep=lambda _: None)
+        names = [c[0] for c in x11.method_calls]
+        self.assertLess(names.index('XSetWMHints'), names.index('XSendEvent'))   # accept input first
+        self.assertLess(names.index('XSendEvent'), names.index('XSetInputFocus'))
+        self.assertEqual(x11.XSendEvent.call_args.args[1], 77)                   # to the root window, as a pager does
+        self.assertEqual(x11.XSetInputFocus.call_args.args[1], 555)
 
     def test_the_gear_opens_the_menu(self):
         with mock.patch.object(speech_mouse, 'open_menu') as opened, \
@@ -637,6 +653,8 @@ class CloseTest(StubSpeechctl):
         with mock.patch.object(speech_mouse, 'declare'), \
                 mock.patch.object(speech_mouse, 'grab', return_value=(True, True)), \
                 mock.patch.object(speech_mouse, 'ungrab') as ungrab, \
+                mock.patch.object(speech_mouse, 'focus_window', return_value=(True, False)), \
+                mock.patch.object(speech_mouse, 'set_accepts_input'), \
                 mock.patch.object(speech_mouse, 'x_events'), \
                 mock.patch.object(speech_mouse, 'run_confirm', return_value=answer), \
                 mock.patch.object(speech_mouse, 'end_session') as end, \

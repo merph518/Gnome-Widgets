@@ -11,7 +11,8 @@ holds).
     <id>.voice beside the session's other speech files (a voice's name, absent for the global
     one). Up and Down or the pointer select a row, Enter, Space or a click change it, Left,
     Backspace or a click on the title go back a page, and Escape closes the menu, as does 20
-    seconds without an event. While it is open this helper holds the pointer and the keyboard
+    seconds without an event. While it is open this helper holds the pointer and the keyboard and
+    takes the keyboard focus, which conky's window never accepts, giving it back on closing
   - the volume slider: a click, tap or drag along it runs `speechctl volume <level>` where it
     is let go, a tenth at a time from 0 to 2.0; a click or tap on its speaker mutes it (volume
     0) and the next restores the level from before
@@ -381,6 +382,60 @@ def declare(x11):
     x11.XKeysymToKeycode.restype = ctypes.c_ubyte
 
 
+class XWMHints(ctypes.Structure):
+    _fields_ = [('flags', ctypes.c_long), ('input', ctypes.c_int), ('initial_state', ctypes.c_int),
+                ('icon_pixmap', ctypes.c_ulong), ('icon_window', ctypes.c_ulong), ('icon_x', ctypes.c_int),
+                ('icon_y', ctypes.c_int), ('icon_mask', ctypes.c_ulong), ('window_group', ctypes.c_ulong)]
+
+
+INPUT_HINT, REVERT_TO_PARENT = 1, 2
+
+
+def set_accepts_input(d, win, accepts):
+    """Sets whether the window accepts keyboard focus (WM_HINTS' input), which conky leaves
+    False, so the window manager never gives the widget a key. Returns the value it had, or
+    None when the window has no hints to change."""
+    x11 = core.x11
+    x11.XGetWMHints.restype = ctypes.POINTER(XWMHints)
+    x11.XGetWMHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    x11.XSetWMHints.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XWMHints)]
+    x11.XFree.argtypes = [ctypes.c_void_p]
+    hints = x11.XGetWMHints(d, win)
+    if not hints:
+        return None
+    try:
+        before = bool(hints.contents.flags & INPUT_HINT and hints.contents.input)
+        hints.contents.flags |= INPUT_HINT
+        hints.contents.input = int(accepts)
+        x11.XSetWMHints(d, win, hints)
+    finally:
+        x11.XFree(hints)
+    x11.XFlush(d)
+    return before
+
+
+def focus_window(d, win, sleep=time.sleep):
+    """Asks for keyboard focus on `win` for the open menu: lets it accept input, asks the window
+    manager to activate it (_NET_ACTIVE_WINDOW, as a pager does) and sets the focus itself.
+    Returns (whether the window has the focus now, what accepted input before) so the caller
+    can put the hint back."""
+    x11 = core.x11
+    before = set_accepts_input(d, win, True)
+    root = x11.XDefaultRootWindow(d)
+    ev = core.XClientMessageEvent(type=core.CLIENT_MESSAGE, window=win, format=32,
+                                  message_type=x11.XInternAtom(d, b'_NET_ACTIVE_WINDOW', False))
+    ev.data[:] = [2, 0, 0, 0, 0]
+    x11.XSendEvent(d, root, False, core.SUBSTRUCTURE_REDIRECT_MASK | core.SUBSTRUCTURE_NOTIFY_MASK, ctypes.byref(ev))
+    x11.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    x11.XSetInputFocus(d, win, REVERT_TO_PARENT, 0)
+    x11.XFlush(d)
+    sleep(0.1)
+    x11.XGetInputFocus.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int)]
+    focus, revert = ctypes.c_ulong(), ctypes.c_int()
+    x11.XGetInputFocus(d, ctypes.byref(focus), ctypes.byref(revert))
+    return focus.value == win, before
+
+
 def grab(d, win):
     """Holds the pointer and the keyboard on `win` for the open list, so every click and key
     reaches it and none goes to the window under the pointer. Returns whether each was
@@ -478,14 +533,16 @@ def open_menu(d, win, s, regions):
         return
     declare(core.x11)
     pointer, keyboard = grab(d, win)
+    focused, accepted = focus_window(d, win)
     core.log(f'settings menu: pointer {"held" if pointer else "not held"}, '
-             f'keyboard {"held" if keyboard else "not held"}')
+             f'keyboard {"held" if keyboard else "not held"}, focus {"taken" if focused else "not taken"}')
     model = menu.Menu(regions.get('rows', ()), region['voices'],
                       menu.Settings(set_session_voice=set_session_voice, set_session_speech=set_session_speech))
     try:
         run_menu(model, core.load_regions, x_events(d, win, s, core.touch_opcode(d)))
     finally:
         ungrab(d)
+        set_accepts_input(d, win, bool(accepted))
     core.log('settings menu closed')
 
 
@@ -577,12 +634,14 @@ def close_session(d, win, s, regions, row):
         return
     declare(core.x11)
     pointer, keyboard = grab(d, win)
+    focused, accepted = focus_window(d, win)
     core.log(f'close prompt for {row["id"]}: pointer {"held" if pointer else "not held"}, '
-             f'keyboard {"held" if keyboard else "not held"}')
+             f'keyboard {"held" if keyboard else "not held"}, focus {"taken" if focused else "not taken"}')
     try:
         ok = run_confirm(prompt, row, x_events(d, win, s, core.touch_opcode(d)))
     finally:
         ungrab(d)
+        set_accepts_input(d, win, bool(accepted))
     core.log('close prompt: ' + ('OK' if ok else 'not confirmed'))
     if ok:
         end_session(row)
