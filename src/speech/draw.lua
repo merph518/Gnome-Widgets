@@ -387,7 +387,7 @@ end
 
 local function draw_meta(cr, meta, right, y, line, step, s, text, links)
     -- the "[ Issue #1, #2 | PR #3 ]" a prompt line carries, right-aligned at `right`: its words
-    -- dim, each number a link, underlined and brighter under the pointer; the numbers' places
+    -- dim, each number a link, bold and brighter under the pointer; the numbers' places
     -- go into `links`
     local segments, total = {}, 0
     mono(cr, text, s)
@@ -401,12 +401,10 @@ local function draw_meta(cr, meta, right, y, line, step, s, text, links)
         if kind == 'k' then
             number = number + 1
             local on = hovered(x, y - step / 2, x + w, y + step / 2)
-            set(cr, fg, on and 1 or 0.75)
+            set(cr, fg, on and 1 or 0.85)
+            mono(cr, text, s, true)
             show(cr, str, x, y, 'left')
-            cairo_set_line_width(cr, 1 * s)
-            cairo_move_to(cr, x, y + step * 0.34)
-            cairo_line_to(cr, x + w, y + step * 0.34)
-            cairo_stroke(cr)
+            mono(cr, text, s)
             links[#links + 1] = {line, number, x / s, (y - step / 2) / s, (x + w) / s, (y + step / 2) / s}
         else
             set(cr, fg, 0.5)

@@ -101,7 +101,7 @@ left and right (the sessions column's share of the width is kept in
   line closing it, "Read aloud for 7s, done Thursday 9:47 AM", which every message keeps, its
   spinner turning orange while the message is read and resting gray after. The speaker's line
   carries the session's issue and pull request numbers at its right,
-  `[ Issue #123, #125 | PR #124, #126 ]`, each number underlined and a link (below). A message is printed when it starts to be
+  `[ Issue #123, #125 | PR #124, #126 ]`, each number a bold link (below). A message is printed when it starts to be
   read aloud, not when it was received, once (the same words from one session within 30
   seconds, or one clip published again, are one message), and stays: the text scrolls like a
   terminal's, the newest at the bottom, 40 messages kept in
@@ -122,7 +122,7 @@ and the same for any other open session in that repository, in number order; the
 are the open rows in the session's `scripts/catchup.py` ledger (which `/implement` adds after
 the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv` in its scratchpad, as this
 repository's and the sibling repositories' scripts keep it). A part with none is left out, and a
-session with neither has no brackets. Each number is underlined, and a click or tap on one opens
+session with neither has no brackets. Each number is bold, and a click or tap on one opens
 that issue or pull request in a new Google Chrome tab.
 
 A click or tap on a session's name closes the session, but only after it asks. The name is
