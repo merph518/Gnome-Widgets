@@ -80,10 +80,12 @@ itself.
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
-- A footer with, from the top: who is speaking ("<name> says:", beside a speech bubble that
-  holds three dots while a clip plays, is plain while paused and dimmer while idle) and a
-  progress bar with the line's elapsed time and length; then pause / resume, skip and next,
-  the volume and a drop down for the voice
+- A footer with, from the top: the speaker's avatar (the icon Claude Desktop installs, or the
+  image `~/.config/conky-widgets/speech/avatar.png` when it is there, else a spark drawn on an
+  orange circle; dimmed while paused or idle) and a speech bubble pointing at it, which holds the speaker's name and
+  up to three lines of the line being read aloud, three lines tall whatever the line holds, and
+  keeping the last line read while nothing plays; a progress bar with the line's elapsed time
+  and length; then pause / resume, skip and next, the volume and a drop down for the voice
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
@@ -264,7 +266,7 @@ the icon stays while both are hidden.
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
 scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
 **Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
-size, **Collapse when idle** (off by default: on, the widget shrinks to its title and the says line
+size, **Collapse when idle** (off by default: on, the widget shrinks to its title and the avatar
 while nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
 [Speech widget](#speech-widget)); without one they're greyed out.
 

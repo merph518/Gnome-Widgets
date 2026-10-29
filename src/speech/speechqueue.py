@@ -12,10 +12,11 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the sessions' column headers, the says line ("<name> says:") and spacer
+  - widget.txt   conky's markup: the sessions' column headers and spacer
                  lines that give conky's window its size, which stays the same while lines play
   - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
-                 buttons, the sessions list, the progress of the current line and the footer
+                 buttons, the sessions list, the speaker's avatar and the bubble with the line
+                 being read, the progress of the current line and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
   - sessions.txt the sessions list, a line per session, rewritten only when it changes
 
@@ -67,16 +68,23 @@ DEFAULT_VOLUME = 1.2
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
-BUBBLE_W = 22                                 # the speech bubble left of the says line
-BUBBLE_INSET = 3                              # the bubble's gap from the card's margin, which leaves 7 px before the text
-ICON_W = BUBBLE_W + 10                        # the bubble and the gap after it, to the says line's text
+AVATAR_D = 36                                 # the speaker's avatar, left of the bubble
+# The avatar's image, the first of these that is there: one the user puts in the widget's own folder,
+# else the icon Claude Desktop installs. Without either, draw.lua draws a spark.
+AVATAR_IMAGES = (os.path.join(CONF, 'avatar.png'), '/usr/share/icons/hicolor/256x256/apps/claude-desktop.png')
+AVATAR_GAP = 12                               # the avatar to the bubble, which its tail points across
+BUBBLE_PAD_X = 12                             # the bubble's edge to its text
+BUBBLE_PAD_Y = 8
+BUBBLE_NAME_GAP = 2                           # the speaker's name to the text under it
+BUBBLE_LINES = 3                              # lines of the text read aloud the bubble holds, always
+BUBBLE_TEXT_MAX = 400                         # characters of the line read aloud that are laid out
 TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
 TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
-HEADER_GAP = 6                                # the title to the says line when collapsed, the says line to the progress bar's row
+HEADER_GAP = 6                                # the title to the avatar when collapsed, the bubble to the progress bar's row
 LINE_GAP = 14                                 # the title's row to the column headers
 PROGRESS_H = 14                               # the progress bar's row
 LIST_GAP = 0                                  # the column headers to the list
-FOOTER_GAP = 8                                # list to the says line, and the progress bar's row to the controls
+FOOTER_GAP = 8                                # list to the bubble, and the progress bar's row to the controls
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
@@ -566,15 +574,15 @@ def last_lines(n, live):
 _heard = None
 
 
-def last_heard(n, name, duration):
-    """{'name', 'duration'} of the last clip played, kept in HEARD across restarts, so the
-    header and the progress bar stay as the last line left them while nothing plays."""
+def last_heard(n, name, duration, text=''):
+    """{'name', 'duration', 'text'} of the last clip played, kept in HEARD across restarts, so
+    the bubble and the progress bar stay as the last line left them while nothing plays."""
     global _heard
     if _heard is None:
         saved = _json(HEARD)
         _heard = saved if isinstance(saved, dict) else {}
     if n:
-        heard = {'name': name or 'A session', 'duration': duration or 0}
+        heard = {'name': name or 'A session', 'duration': duration or 0, 'text': text}
         if heard != _heard:
             _heard = heard
             try:
@@ -622,7 +630,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
         name = display_text(n.get('name') or '') or next(
             (s['name'] for s in listed if s['id'] == n.get('session')), '')
     return {
-        'now': n, 'name': name, 'duration': clip_duration(speak, n) if n else None,
+        'now': n, 'name': name, 'text': display_text((n or {}).get('text') or ''),
+        'duration': clip_duration(speak, n) if n else None,
         'paused': os.path.exists(os.path.join(speak, 'paused')),
         'voice': voice, 'volume': round(volume, 1), 'sessions': listed,
     }
@@ -694,6 +703,32 @@ def row_flags(s):
     return next(f for f, on in (('question', s.get('question')), ('busy', s['busy']),
                                 (f'waiting: {wait}', wait), ('bg', s['background']),
                                 ('idle', True)) if on)
+
+
+_wrapped = {}
+
+
+def wrap_lines(text, font, width, lines):
+    """`text` broken at spaces into at most `lines` lines of `font` that fit `width`, the last cut
+    with an ellipsis when more follows it and any line cut the same way when one word is wider
+    than `width`."""
+    key = (text, font, width, lines, text_scale)
+    if key not in _wrapped:
+        if len(_wrapped) > 32:
+            _wrapped.clear()
+        words, out, line, i = text.split(), [], '', 0
+        while i < len(words) and len(out) < lines - 1:
+            trial = f'{line} {words[i]}'.strip()
+            if line and text_width(trial, font) > width:
+                out.append(fit(line, font, width))
+                line = ''
+                continue
+            line, i = trial, i + 1
+        last = ' '.join(([line] if line else []) + words[i:])
+        if last:
+            out.append(fit(last, font, width))
+        _wrapped[key] = out
+    return _wrapped[key]
 
 
 def block_width(listed):
@@ -784,13 +819,8 @@ def render(state, now=None):
     em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
     title = TITLE.upper()
     title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
-    heard = last_heard(n, state['name'], state['duration'])
-    if paused and not n:
-        said = 'Speech paused'
-    elif heard.get('name'):
-        said = fit(f"{heard['name']} says:", LABEL_FONT, (right - MARGIN - ICON_W) / BLOCK_SLACK)
-    else:
-        said = 'Speech idle'                     # nothing played since the cache was cleared
+    heard = last_heard(n, state['name'], state['duration'],
+                       without_speaker(state.get('text') or '')[:BUBBLE_TEXT_MAX])
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -803,16 +833,16 @@ def render(state, now=None):
     out = Markup(MARGIN)
     out.gap(header_h)
 
-    def says():
-        """The says line, "<name> says:" or the idle or paused line, with its speech bubble at its
-        left. draw.lua draws both from the line's geometry, so they share one centre; the row
-        is a gap here."""
-        draw.append(f'says {MARGIN + BUBBLE_INSET + BUBBLE_W / 2} {out.y + header_h / 2} {MARGIN + ICON_W} {int(bool(n))} {said}')
-        out.gap(header_h)
+    avatar = next((path for path in AVATAR_IMAGES if os.path.isfile(path)), '')
+
+    def avatar_at(top):
+        """The speaker's avatar, at the card's left from `top`, drawn by draw.lua from its image."""
+        draw.append(f'avatar {MARGIN + AVATAR_D / 2} {top + AVATAR_D / 2} {AVATAR_D} {avatar}'.rstrip())
 
     if idle and collapse_idle():
         out.gap(HEADER_GAP)
-        says()
+        avatar_at(out.y)
+        out.gap(AVATAR_D)
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
         write_sessions(listed, [((), 1)] * len(listed))
@@ -894,7 +924,29 @@ def render(state, now=None):
     # click areas, while no clip plays. The open list is drawn above the controls, over the
     # progress bar and the sessions, when conky-mouse.py has it open.
     out.gap(FOOTER_GAP)
-    says()
+    # The speaker's avatar, level with the bubble's bottom, and the line being read aloud in a
+    # bubble whose tail points at it:
+    # the speaker's name, then up to BUBBLE_LINES lines of the text. The bubble is as tall
+    # whatever the line holds, so the card's size does not change as lines play. While
+    # nothing plays it keeps the last line read, dimmed. draw.lua draws it from these lines.
+    name_h, line_h = line_height(SEGMENT_FONT), line_height(ROW_FONT)
+    bubble_h = 2 * BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + BUBBLE_LINES * line_h
+    bubble_x0 = MARGIN + AVATAR_D + AVATAR_GAP
+    inner = (right - bubble_x0 - 2 * BUBBLE_PAD_X) / BLOCK_SLACK    # draw.lua's text runs wider
+    top = out.y
+    if paused and not n:
+        speaker, said = 'Speech paused', ''
+    else:
+        speaker = re.sub(r' session$', '', heard.get('name') or '', flags=re.I) or 'Speech idle'   # the hook's "<name> session"
+        said = heard.get('text') or ''
+    avatar_at(top + bubble_h - AVATAR_D)                      # level with the bubble's bottom
+    draw.append(f'bubble {bubble_x0} {top} {right} {top + bubble_h} {BUBBLE_PAD_X} '
+                f'{top + BUBBLE_PAD_Y + name_h / 2:.2f} '
+                f'{top + BUBBLE_PAD_Y + name_h + BUBBLE_NAME_GAP + line_h / 2:.2f} {line_h:.2f} {int(bool(n))} '
+                f'{top + bubble_h - AVATAR_D / 2:.2f}')
+    draw.append(f'speaker {fit(speaker, SEGMENT_FONT, inner)}')
+    draw.extend(f'line {line}' for line in wrap_lines(said, ROW_FONT, inner, BUBBLE_LINES))
+    out.gap(max(bubble_h, AVATAR_D))
     out.gap(HEADER_GAP)
     # The progress bar, always there: the current line's while its length is known (0:00 while
     # Piper still renders it), else the last line's, left full where it finished.

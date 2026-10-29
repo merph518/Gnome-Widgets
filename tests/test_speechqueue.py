@@ -41,7 +41,7 @@ class Fixture(unittest.TestCase):
         for name, value in (('COLLAPSE', os.path.join(self.root, 'collapse-idle')),
                             ('LAST', os.path.join(self.root, 'last-lines.json')), ('_last', None),
                             ('HEARD', os.path.join(self.root, 'last-heard.json')), ('_heard', None),
-                            ('LEDGERS', self.f.ledgers),
+                            ('LEDGERS', self.f.ledgers), ('AVATAR_IMAGES', ()),
                             ('SCALE', 1), ('clock', speechqueue.Clock())):
             p = mock.patch.object(speechqueue, name, value)
             p.start()
@@ -702,41 +702,103 @@ VOICES = ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
 
 
 class TitleAndFooter(Fixture):
-    """The widget's title along the top, and the says line and progress bar above the controls."""
+    """The widget's title along the top, and the speaker's avatar, the bubble and the progress bar
+    above the controls."""
+    LONG = ('Pull request 148 now has the new title and footer layout, and the bubble is nudged 3 px toward '
+            'the text. The widget at the top of the card is titled in capitals with letter spacing, with '
+            'minimize and close at the right. The says line and the progress bar now sit above the controls.')
 
-    def draw(self, size=None):
+    def draw(self, size=None, text=None, quiet=False):
         self.three()
+        if quiet:
+            self.f.file(OTHER + '.queue', '')                       # nothing queued: idle
+        if text:
+            self.f.now(ME, 'Claude Voice Widget', 'Claude Voice Widget session says: ' + text, hook_pid=9001)
+            os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+            self.f.wav(9001, 6.0)
         with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
-            speechqueue.render(self.state())
+            widget = speechqueue.render(self.state(), now=1000.0)
         with open(speechqueue.DRAW) as f:
-            lines = {l.split()[0]: l.split(None, 1)[1] for l in f.read().splitlines()}
+            raw = f.read().splitlines()
+        lines = {l.split()[0]: l.split(None, 1)[1] for l in raw if ' ' in l}
+        lines['line'] = [l.split(None, 1)[1] for l in raw if l.startswith('line ')]
         with open(speechqueue.REGIONS) as f:
-            return lines, json.load(f)
+            return lines, json.load(f), widget
 
     def test_the_title_is_along_the_top_level_with_minimize_and_close(self):
-        lines, regions = self.draw()
+        lines, regions, _ = self.draw()
         x, cy, track, text = lines['title'].split(None, 3)
         self.assertEqual(text, 'CLAUDE CODE SESSION MANAGEMENT')
         self.assertEqual((float(x), float(track)), (speechqueue.MARGIN, speechqueue.TITLE_TRACK))
         self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
         self.assertLess(float(cy), regions['list'][1])                # above the column headers and the list
 
-    def test_the_says_line_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
-        lines, regions = self.draw()
-        bubble_y = float(lines['says'].split()[1])
+    def test_the_avatar_and_bubble_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
+        lines, regions, _ = self.draw(text=self.LONG)
+        avatar_y = float(lines['avatar'].split()[1])
+        x0, y0, x1, y1 = (float(v) for v in lines['bubble'].split()[:4])
         progress_y = float(lines['progress'].split()[2])
         controls_y = float(lines['footer'].split()[1])
-        self.assertLess(regions['list'][3], bubble_y)
-        self.assertLess(bubble_y, progress_y)
+        self.assertLess(regions['list'][3], y0)
+        self.assertLess(y0, avatar_y)                                  # the avatar is level with the bubble's bottom
+        self.assertLess(avatar_y, y1)
+        self.assertLess(y1, progress_y)
         self.assertLess(progress_y, controls_y)
 
-    def test_the_bubble_leaves_a_gap_before_the_says_text(self):
-        lines, _ = self.draw()
-        bubble_x, _, text_x, strong, text = lines['says'].split(None, 4)
-        gap = float(text_x) - (float(bubble_x) + speechqueue.BUBBLE_W / 2)
-        self.assertEqual(gap, speechqueue.ICON_W - speechqueue.BUBBLE_INSET - speechqueue.BUBBLE_W)
-        self.assertGreaterEqual(gap, 6)                          # clear of the text, but close to it
-        self.assertEqual(text, 'Speech idle')
+    def test_the_bubble_points_across_a_gap_at_the_avatar_and_holds_the_speaker_and_three_lines(self):
+        lines, _, _ = self.draw(text=self.LONG)
+        ax, ay, d = (float(v) for v in lines['avatar'].split())
+        x0, y0, x1, y1, pad = (float(v) for v in lines['bubble'].split()[:5])
+        self.assertEqual(x0 - (ax + d / 2), speechqueue.AVATAR_GAP)
+        self.assertEqual(ay + d / 2, y1)                                # level with the bubble's bottom
+        self.assertEqual(float(lines['bubble'].split()[9]), ay)         # and the tail points at its middle
+        self.assertGreaterEqual(speechqueue.AVATAR_GAP, 8)
+        self.assertEqual(lines['speaker'], 'Claude Voice Widget')
+        self.assertEqual(len(lines['line']), speechqueue.BUBBLE_LINES)
+        self.assertTrue(lines['line'][-1].endswith('\u2026'))           # more follows the third line
+        self.assertTrue(lines['line'][0].startswith('Pull request 148 now has'))
+        for line in lines['line']:
+            self.assertLess(pad + speechqueue.text_width(line, speechqueue.ROW_FONT) * speechqueue.BLOCK_SLACK, x1 - x0)
+
+    def test_the_avatar_is_the_first_image_there_is_and_without_one_the_line_names_none(self):
+        mine = os.path.join(self.root, 'avatar.png')
+        icon = os.path.join(self.root, 'icon.png')
+        for path in (mine, icon):
+            with open(path, 'wb') as f:
+                f.write(b'\x89PNG')
+        for images, want in (((mine, icon), mine), ((os.path.join(self.root, 'none.png'), icon), icon), ((), None)):
+            with mock.patch.object(speechqueue, 'AVATAR_IMAGES', images):
+                lines, _, _ = self.draw()
+            fields = lines['avatar'].split(None, 3)
+            self.assertEqual(fields[3] if len(fields) > 3 else None, want)
+
+    def test_the_speaker_is_named_without_the_hooks_session_suffix(self):
+        self.three()
+        self.f.now(ME, 'Table Headers session', 'Checks pass.', hook_pid=9001)
+        os.utime(os.path.join(self.f.speak, 'now.json'), (998.0, 998.0))
+        self.f.wav(9001, 6.0)
+        speechqueue.render(self.state(), now=1000.0)
+        with open(speechqueue.DRAW) as f:
+            self.assertIn('speaker Table Headers', f.read().splitlines())
+
+    def test_the_bubble_and_the_card_are_as_tall_whatever_the_line_holds(self):
+        long_lines, _, long_widget = self.draw(text=self.LONG)
+        short_lines, _, short_widget = self.draw(text='Done.')
+        self.assertEqual(short_lines['line'], ['Done.'])
+        self.assertEqual(short_lines['bubble'].split()[:4], long_lines['bubble'].split()[:4])
+        self.assertEqual(short_widget, long_widget)                     # conky's window does not resize
+
+    def test_after_a_line_the_bubble_keeps_it_and_nothing_heard_says_speech_idle(self):
+        lines, _, _ = self.draw()
+        self.assertEqual((lines['speaker'], lines['line']), ('Speech idle', []))
+        self.assertEqual(lines['bubble'].split()[8], '0')               # not the text of a clip playing
+
+    def test_a_collapsed_card_is_the_title_and_the_avatar(self):
+        with open(speechqueue.COLLAPSE, 'w') as f:
+            f.write('on')
+        lines, _, _ = self.draw(quiet=True)
+        self.assertEqual(sorted(k for k in lines if k in ('title', 'avatar', 'bubble', 'speaker', 'progress', 'list')),
+                         ['avatar', 'title'])
 
     def test_the_open_voice_list_stays_below_the_column_headers(self):
         self.three()
@@ -746,7 +808,7 @@ class TitleAndFooter(Fixture):
         self.assertGreaterEqual(regions['menu']['box'][1], regions['list'][1])
 
     def test_a_narrow_card_at_a_large_scale_cuts_the_title_to_what_clears_minimize(self):
-        lines, regions = self.draw((400, 128, 2.0))
+        lines, regions, _ = self.draw((400, 128, 2.0))
         text = lines['title'].split(None, 3)[3]
         self.assertTrue(text.endswith('\u2026') and len(text) < len('CLAUDE CODE SESSION MANAGEMENT'))
         spaced = speechqueue.text_width(text, speechqueue.LABEL_FONT) + len(text) * speechqueue.TITLE_TRACK * 2.0 * 11 * 96 / 72
@@ -944,9 +1006,8 @@ class Golden(Fixture):
         speechqueue.render(self.state(), now=1010.0)
         with open(speechqueue.DRAW) as f:
             lines = f.read().splitlines()
-        says = next(l for l in lines if l.startswith('says '))
-        self.assertTrue(says.endswith(' Claude Voice Widget says:'))
-        self.assertNotIn('Speech idle', says)
+        self.assertIn('speaker Claude Voice Widget', lines)
+        self.assertIn('line Done.', lines)                            # the last line read stays in the bubble
         progress = next(l for l in lines if l.startswith('progress ')).split()
         self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 

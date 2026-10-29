@@ -1,7 +1,7 @@
 -- Cairo drawing for the speech widget, fed by speechqueue.py:
 --   draw.txt      geometry (logical px, from the card's top left); its scale line is the
 --                 display's scale and the text scale, its shadow line the margin round the card
---   widget.txt    conky's markup (the column headers and the says line), shown through conky_widget
+--   widget.txt    conky's markup (the column headers), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
@@ -47,10 +47,12 @@ end
 local function load_draw()
     -- {key = {numbers...}}, and each line's own text in d.text[key] for the ones that end in a
     -- label ("Voice: amy"); d.items is the voice list's lines, each {current, label}
-    local d = {text = {}, items = {}}
+    local d = {text = {}, items = {}, lines = {}}
     for line in (read('draw.txt') or ''):gmatch('[^\n]+') do
         local key, rest = line:match('^(%S+)%s+(.*)$')
-        if key == 'item' then
+        if key == 'line' then
+            d.lines[#d.lines + 1] = rest
+        elseif key == 'item' then
             local current, label = rest:match('^(%d)%s+(.*)$')
             d.items[#d.items + 1] = {current = current == '1', label = label or ''}
         elseif key then
@@ -271,31 +273,76 @@ local function draw_title(cr, t, label, s, text)
     end
 end
 
-local function draw_says(cr, h, label, s, text, state)
-    -- the says line, both parts centred on y = h[2]: the speech bubble, centred on x = h[1],
-    -- with three dots in it while a clip plays, plain while paused and dimmer while idle, and
-    -- its text from x = h[3], in the foreground while a clip is current (h[4] is 1) and
-    -- otherwise in the text's colour
-    local cx, cy, u = h[1] * s, h[2] * s, s
-    set(cr, fg, state == 'playing' and 1 or state == 'paused' and 0.66 or 0.4)
+local ORANGE = {0.851, 0.467, 0.341}      -- the drawn avatar's circle
+local SPARK = {1, 0.74, 0.92, 0.78, 1, 0.74, 0.92, 0.78, 1, 0.74, 0.92, 0.78}   -- ray lengths, as shares of the longest
+local avatars = {}                        -- png path -> its surface, or false when it can't be read
+
+local function avatar_image(path)
+    local img = avatars[path]
+    if img == nil then
+        img = cairo_image_surface_create_from_png(path)
+        if cairo_surface_status(img) ~= 0 then
+            cairo_surface_destroy(img)
+            img = false
+        end
+        avatars[path] = img
+    end
+    return img
+end
+
+local function draw_avatar(cr, a, path, s, state)
+    -- the speaker's avatar, dimmed while paused and more so while idle: the image at a[4], or
+    -- without one a spark of white rays on an orange circle
+    local cx, cy, r = a[1] * s, a[2] * s, a[3] / 2 * s
+    local alpha = state == 'playing' and 1 or state == 'paused' and 0.66 or 0.4
+    local img = path ~= '' and avatar_image(path)
+    if img then
+        local k = 2 * r / cairo_image_surface_get_width(img)
+        cairo_save(cr)
+        cairo_translate(cr, cx - r, cy - r)
+        cairo_scale(cr, k, k)
+        cairo_set_source_surface(cr, img, 0, 0)
+        cairo_paint_with_alpha(cr, alpha)
+        cairo_restore(cr)
+        return
+    end
+    cairo_set_source_rgba(cr, ORANGE[1], ORANGE[2], ORANGE[3], alpha)
+    cairo_new_path(cr)
+    cairo_arc(cr, cx, cy, r, 0, 2 * math.pi)
+    cairo_fill(cr)
+    cairo_set_source_rgba(cr, 1, 1, 1, alpha)
+    for i, share in ipairs(SPARK) do
+        local angle = (i - 1) * math.pi / 6 - math.pi / 2
+        local x0, y0 = cx + 0.12 * r * math.cos(angle), cy + 0.12 * r * math.sin(angle)
+        local x1, y1 = cx + 0.62 * r * share * math.cos(angle), cy + 0.62 * r * share * math.sin(angle)
+        rounded_line(cr, x0, y0, x1, y1, 0.15 * r)
+    end
+end
+
+local function draw_bubble(cr, b, name, lines, s, text)
+    -- the line being read aloud in a bubble whose tail points left at the avatar: the box
+    -- x = b[1]..b[3], y = b[2]..b[4], the name centred on y = b[6] and the lines from b[7],
+    -- b[8] apart, all from x + b[5]; in the foreground while a clip is current (b[9] is 1),
+    -- else in the text's colour; the tail's tip is level with y = b[10]
+    local x0, y0, x1, y1, pad = b[1] * s, b[2] * s, b[3] * s, b[4] * s, b[5] * s
+    set(cr, fg, 0.14)
     -- one path for the body and its tail, which reaches into it, so no seam shows between them
-    rounded_rect(cr, cx - 11 * u, cy - 9 * u, 22 * u, 14 * u, 5 * u)
-    cairo_move_to(cr, cx - 8 * u, cy + 3 * u)
-    cairo_line_to(cr, cx - 2 * u, cy + 3 * u)
-    cairo_line_to(cr, cx - 8 * u, cy + 9 * u)
+    rounded_rect(cr, x0, y0, x1 - x0, y1 - y0, 12 * s)
+    local tip = b[10] * s
+    cairo_move_to(cr, x0 + 1 * s, tip + 8 * s)
+    cairo_line_to(cr, x0 - 9 * s, tip)
+    cairo_line_to(cr, x0 + 1 * s, tip - 8 * s)
     cairo_close_path(cr)
     cairo_fill(cr)
-    if state == 'playing' then
-        cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
-        for _, dx in ipairs({-4.5, 0, 4.5}) do
-            cairo_new_sub_path(cr)
-            cairo_arc(cr, cx + dx * u, cy - 2 * u, 1.7 * u, 0, 2 * math.pi)
-            cairo_fill(cr)
-        end
+    local strong = b[9] == 1
+    font(cr, 9, text, s, true)
+    set(cr, strong and fg or secondary())
+    show(cr, name, x0 + pad, b[6] * s, 'left')
+    font(cr, 11, text, s)
+    set(cr, strong and fg or secondary(), strong and 1 or 0.85)
+    for i, line in ipairs(lines) do
+        show(cr, line, x0 + pad, (b[7] + (i - 1) * b[8]) * s, 'left')
     end
-    font(cr, 11, text, s, true)
-    set(cr, h[4] == 1 and fg or secondary())
-    show(cr, label, h[3] * s, cy, 'left')
 end
 
 local function round_button(cr, cx, cy, size, active)
@@ -698,7 +745,8 @@ function conky_draw_widget()
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
         if d.title then draw_title(cr, d.title, label_after(d.text.title, 3), s, text) end
-        if d.says then draw_says(cr, d.says, label_after(d.text.says, 4), s, text, d.state and d.state[1] or 'idle') end
+        if d.avatar then draw_avatar(cr, d.avatar, label_after(d.text.avatar, 3), s, d.state and d.state[1] or 'idle') end
+        if d.bubble then draw_bubble(cr, d.bubble, d.text.speaker or '', d.lines, s, text) end
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end
