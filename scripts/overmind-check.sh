@@ -20,6 +20,11 @@ fail() {
   exit 1
 }
 
+case "${1:-}" in
+  ""|--remote) ;;
+  *) echo "usage: scripts/overmind-check.sh [--remote]" >&2; exit 2 ;;
+esac
+
 [ -f "$LOCK" ] || fail "$LOCK is missing"
 
 # The tree is read from the index, which overmind-sync.sh fills, so the check

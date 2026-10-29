@@ -7,8 +7,10 @@ three minute floor are written out. A skill that needs any of them points
 here rather than restating them.
 
 Ported from PlaywrightTesting's `run-watch.md`, less the GitHub Actions run
-tallies: this repository has no workflows. What a session waits on here is a
-Launchpad build, a pull request merge, or a blocking issue.
+tallies: this repository's only workflow is the Overmind pin check, which
+finishes in seconds and is read once with `gh pr checks <number>` before the
+ready signal. What a session waits on here is a Launchpad build, a pull request
+merge, or a blocking issue.
 
 ## Record it in a ledger
 
