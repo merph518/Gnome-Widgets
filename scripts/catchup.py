@@ -4,8 +4,9 @@
 A session records each thing it waits on in a ledger, one line per row, and reads
 them all back through this script instead of watching each one. Ported from the
 PlaywrightTesting repository's scripts/catchup.py, less its GitHub Actions run
-tallies: this repository has no workflows, so what a session waits on here is a
-Launchpad build, a pull request merge, or a blocking issue.
+tallies: this repository's only workflow, the Overmind pin check, finishes in
+seconds and is not tracked, so what a session waits on here is a Launchpad
+build, a pull request merge, or a blocking issue.
 
 usage:
   scripts/catchup.py add-lp <ledger> <version> [label]  wait for Launchpad to build and
