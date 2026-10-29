@@ -12,10 +12,10 @@ Four times a second this reads, and only reads:
 
 and writes, under ~/.cache/conky-widgets/speech/, the files the Spotify widget's
 nowplaying.py writes for its own card:
-  - widget.txt   conky's markup: the header ("<name> says:"), the sessions' column headers and spacer
+  - widget.txt   conky's markup: the sessions' column headers, the says line ("<name> says:") and spacer
                  lines that give conky's window its size, which stays the same while lines play
-  - draw.txt     geometry for draw.lua (logical px, from the card's top left): the buttons,
-                 the progress of the current line, the sessions list and the footer
+  - draw.txt     geometry for draw.lua (logical px, from the card's top left): the title, the
+                 buttons, the sessions list, the progress of the current line and the footer
   - regions.json click areas for conky-mouse.py, in the same coordinates
   - sessions.txt the sessions list, a line per session, rewritten only when it changes
 
@@ -67,12 +67,15 @@ DEFAULT_VOLUME = 1.2
 
 SHADOW = size_file.SHADOW
 MARGIN = 16                                   # around the contents
-ICON_W = 24                                   # the speaker icon left of the header text
-HEADER_GAP = 6                                # header to the progress bar's row
-LINE_GAP = 14                                 # the progress bar's row to the column headers
+BUBBLE_W = 22                                 # the speech bubble left of the says line
+ICON_W = BUBBLE_W + 10                        # the bubble and the gap after it, to the says line's text
+TITLE = 'Claude Code Session Management'      # the widget's name, drawn in capitals along the top
+TITLE_TRACK = 0.09                            # the title's letter spacing, in ems
+HEADER_GAP = 6                                # the title to the says line when collapsed, the says line to the progress bar's row
+LINE_GAP = 14                                 # the title's row to the column headers
 PROGRESS_H = 14                               # the progress bar's row
 LIST_GAP = 0                                  # the column headers to the list
-FOOTER_GAP = 8                                # list to the footer
+FOOTER_GAP = 8                                # list to the says line, and the progress bar's row to the controls
 FOOTER_H = 30                                 # the footer row: pause, volume and voice
 ROW_SPACING = 6                               # extra space in a session's row
 WINDOW_BUTTON_SIZE = 10                       # minimize / close, as the Spotify widget's
@@ -770,20 +773,23 @@ def render(state, now=None):
     right = MARGIN + widget_width
     idle = not n and not any(s['queued'] for s in listed)
 
-    # The top row: the speaker and "<name> says:" or the idle or paused line, then minimize and
-    # close at the top right.
+    # The top row: the widget's title, then minimize and close at the top right. The title is
+    # drawn by draw.lua, which spaces its letters; the row is a gap here.
     close_cx = right - WINDOW_BUTTON_SIZE / 2
     min_cx = close_cx - WINDOW_BUTTON_PITCH
     header_h = line_height(LABEL_FONT, PLAIN_FONT)
     cy = MARGIN + header_h / 2
     text_right = min_cx - WINDOW_BUTTON_PITCH / 2 - 8
+    em = font_description(LABEL_FONT).get_size() / Pango.SCALE * 96 / 72      # px
+    title = TITLE.upper()
+    title = fit(title, LABEL_FONT, (text_right - MARGIN - TITLE_TRACK * em * len(title)) / BLOCK_SLACK)
     heard = last_heard(n, state['name'], state['duration'])
     if paused and not n:
-        label = 'Speech paused'
+        said = 'Speech paused'
     elif heard.get('name'):
-        label = fit(f"{heard['name']} says:", LABEL_FONT, text_right - MARGIN - ICON_W)
+        said = fit(f"{heard['name']} says:", LABEL_FONT, (right - MARGIN - ICON_W) / BLOCK_SLACK)
     else:
-        label = 'Speech idle'                     # nothing played since the cache was cleared
+        said = 'Speech idle'                     # nothing played since the cache was cleared
     half = WINDOW_BUTTON_PITCH / 2
     regions = {
         'minimize': box(min_cx, cy, half, half),
@@ -792,32 +798,24 @@ def render(state, now=None):
     draw = [f'scale {SCALE} {text_scale:g}', f'shadow {SHADOW}',
             f'window {min_cx} {close_cx} {cy} {WINDOW_BUTTON_SIZE}',
             f"state {'paused' if paused else 'playing' if n else 'idle'}",
-            f'header {MARGIN + ICON_W / 2 - 4} {cy}']
-    g = f'${{goto {SHADOW + MARGIN + ICON_W}}}'
+            f'title {MARGIN} {cy} {TITLE_TRACK} {title}']
     out = Markup(MARGIN)
-    out.text(f"{g}${{lua_parse fg {'title' if n else 'text'}}}${{font {conky_font(LABEL_FONT)}}}{esc(label)}{plain()}",
-             header_h)
+    out.gap(header_h)
+
+    def says():
+        """The says line, "<name> says:" or the idle or paused line, with its speech bubble at its
+        left. draw.lua draws both from the line's geometry, so they share one centre; the row
+        is a gap here."""
+        draw.append(f'says {MARGIN + BUBBLE_W / 2} {out.y + header_h / 2} {MARGIN + ICON_W} {int(bool(n))} {said}')
+        out.gap(header_h)
 
     if idle and collapse_idle():
+        out.gap(HEADER_GAP)
+        says()
         write_atomic(DRAW, '\n'.join(draw) + '\n')
         write_atomic(REGIONS, json.dumps(regions))
         write_sessions(listed, [((), 1)] * len(listed))
         return out.end(out.y + MARGIN - 4)
-
-    # The progress bar, always there: the current line's while its length is known (0:00 while
-    # Piper still renders it), else the last line's, left full where it finished.
-    out.gap(HEADER_GAP)
-    progress_top = out.y
-    duration, running = state['duration'] or 0, False
-    if n:
-        elapsed = clock.elapsed(n, paused, now)
-        running = bool(duration) and not paused
-        elapsed = min(elapsed, duration)
-    else:
-        duration = elapsed = float(heard.get('duration') or 0)
-    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
-                f'{elapsed:.3f} {duration:.3f} {int(running)}')
-    out.gap(PROGRESS_H)
 
     # Sessions: a row each, drawn by draw.lua from sessions.txt, scrolled by the wheel when
     # they run longer than the list's height. A session with speech on always takes two rows,
@@ -890,9 +888,25 @@ def render(state, now=None):
     draw.append(prompt_line)
     out.gap(list_height)
 
-    # The footer: pause or resume, skip and next, the volume slider, the voice drop down. Skip
-    # and next are drawn dimmed, and are not click areas, while no clip plays. The open list is
-    # drawn above the footer, over the progress bar and the sessions, when conky-mouse.py has it open.
+    # The footer: the says line, the progress bar, then the controls: pause or resume, skip and
+    # next, the volume slider, the voice drop down. Skip and next are drawn dimmed, and are not
+    # click areas, while no clip plays. The open list is drawn above the controls, over the
+    # progress bar and the sessions, when conky-mouse.py has it open.
+    out.gap(FOOTER_GAP)
+    says()
+    out.gap(HEADER_GAP)
+    # The progress bar, always there: the current line's while its length is known (0:00 while
+    # Piper still renders it), else the last line's, left full where it finished.
+    duration, running = state['duration'] or 0, False
+    if n:
+        elapsed = clock.elapsed(n, paused, now)
+        running = bool(duration) and not paused
+        elapsed = min(elapsed, duration)
+    else:
+        duration = elapsed = float(heard.get('duration') or 0)
+    draw.append(f'progress {MARGIN} {right} {out.y + PROGRESS_H / 2} {time.monotonic():.3f} '
+                f'{elapsed:.3f} {duration:.3f} {int(running)}')
+    out.gap(PROGRESS_H)
     footer_top = out.y
     out.gap(FOOTER_GAP)
     drop_h = max(DROPDOWN_H, line_height(FOOTER_FONT) + 6)   # taller with the text scale
@@ -930,7 +944,7 @@ def render(state, now=None):
     names = state.get('voices') or []
     if names:
         menu_lines, menu = voice_menu(names, state['voice'], right, footer_top - MENU_GAP + FOOTER_GAP,
-                                      progress_top)
+                                      list_top)
         draw.extend(menu_lines)
         regions['menu'] = menu
     out.gap(footer_h)

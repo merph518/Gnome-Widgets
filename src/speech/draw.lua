@@ -1,7 +1,7 @@
 -- Cairo drawing for the speech widget, fed by speechqueue.py:
 --   draw.txt      geometry (logical px, from the card's top left); its scale line is the
 --                 display's scale and the text scale, its shadow line the margin round the card
---   widget.txt    conky's markup (the header and the sessions' column headers), shown through conky_widget
+--   widget.txt    conky's markup (the column headers and the says line), shown through conky_widget
 --   sessions.txt  the sessions list, a line per session, reread when draw.txt names a new version
 --   list-scroll   how many rows conky-mouse.py has scrolled the list down; 0 until it has
 --   volume-preview  the volume under the pointer while conky-mouse.py drags the volume slider
@@ -256,27 +256,46 @@ local function draw_window_buttons(cr, w, s)
     rounded_line(cr, close_cx - h, cy + h, close_cx + h, cy - h, 2 * s)
 end
 
-local function draw_speaker(cr, h, s, state)
-    -- the speaker left of the header: two sound waves while a clip plays, none while paused,
-    -- and the text's colour while idle
+local function draw_title(cr, t, label, s, text)
+    -- the widget's name, from x = t[1] and centred on y = t[2], with t[3] em between letters
+    local x, cy = t[1] * s, t[2] * s
+    font(cr, 11, text, s, true)
+    set(cr, fg)
+    local track = t[3] * 11 * text * 96 / 72 * s
+    cairo_font_extents(cr, fext)
+    for _, c in utf8.codes(label) do
+        local ch = utf8.char(c)
+        cairo_move_to(cr, x, cy + (fext.ascent - fext.descent) / 2)
+        cairo_show_text(cr, ch)
+        x = x + width_of(cr, ch) + track
+    end
+end
+
+local function draw_says(cr, h, label, s, text, state)
+    -- the says line, both parts centred on y = h[2]: the speech bubble, centred on x = h[1],
+    -- with three dots in it while a clip plays, plain while paused and dimmer while idle, and
+    -- its text from x = h[3], in the foreground while a clip is current (h[4] is 1) and
+    -- otherwise in the text's colour
     local cx, cy, u = h[1] * s, h[2] * s, s
-    set(cr, state == 'idle' and secondary() or fg)
-    cairo_move_to(cr, cx - 9 * u, cy - 3 * u)
-    cairo_line_to(cr, cx - 5 * u, cy - 3 * u)
-    cairo_line_to(cr, cx, cy - 7 * u)
-    cairo_line_to(cr, cx, cy + 7 * u)
-    cairo_line_to(cr, cx - 5 * u, cy + 3 * u)
-    cairo_line_to(cr, cx - 9 * u, cy + 3 * u)
+    set(cr, fg, state == 'playing' and 1 or state == 'paused' and 0.66 or 0.4)
+    -- one path for the body and its tail, which reaches into it, so no seam shows between them
+    rounded_rect(cr, cx - 11 * u, cy - 9 * u, 22 * u, 14 * u, 5 * u)
+    cairo_move_to(cr, cx - 8 * u, cy + 3 * u)
+    cairo_line_to(cr, cx - 2 * u, cy + 3 * u)
+    cairo_line_to(cr, cx - 8 * u, cy + 9 * u)
     cairo_close_path(cr)
     cairo_fill(cr)
-    if state ~= 'playing' then return end
-    cairo_set_line_width(cr, 1.6 * u)
-    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
-    for _, r in ipairs({4, 8}) do
-        cairo_new_sub_path(cr)
-        cairo_arc(cr, cx + 1 * u, cy, r * u, -math.pi / 4, math.pi / 4)
-        cairo_stroke(cr)
+    if state == 'playing' then
+        cairo_set_source_rgb(cr, bg[1], bg[2], bg[3])
+        for _, dx in ipairs({-4.5, 0, 4.5}) do
+            cairo_new_sub_path(cr)
+            cairo_arc(cr, cx + dx * u, cy - 2 * u, 1.7 * u, 0, 2 * math.pi)
+            cairo_fill(cr)
+        end
     end
+    font(cr, 11, text, s, true)
+    set(cr, h[4] == 1 and fg or secondary())
+    show(cr, label, h[3] * s, cy, 'left')
 end
 
 local function round_button(cr, cx, cy, size, active)
@@ -678,7 +697,8 @@ function conky_draw_widget()
     with_cairo(function(cr)
         cairo_translate(cr, margin, margin)        -- onto the card
         if d.window then draw_window_buttons(cr, d.window, s) end
-        if d.header then draw_speaker(cr, d.header, s, d.state and d.state[1] or 'idle') end
+        if d.title then draw_title(cr, d.title, label_after(d.text.title, 3), s, text) end
+        if d.says then draw_says(cr, d.says, label_after(d.text.says, 4), s, text, d.state and d.state[1] or 'idle') end
         if p then draw_progress(cr, p, s, text, clock.pos) end
         if d.list and d.control and d.block then draw_list(cr, d.list, d.text.list:match('^' .. ('%S+%s+'):rep(5) .. '(%S+)'), d.control, d.block, s, text) else scroll = nil end
         if d.footer then draw_footer(cr, d.footer, s) end

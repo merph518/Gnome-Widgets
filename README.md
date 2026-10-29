@@ -67,8 +67,7 @@ through the voice hooks of [Overmind](https://github.com/merph518/Overmind)'s `v
 (`/implement-with-speech`), and controls it. It reads the hooks' state and never speaks
 itself.
 
-- A header with who is speaking ("<name> says:") and a progress bar with the line's elapsed
-  time and length
+- A title along the top, **CLAUDE CODE SESSION MANAGEMENT**, with minimize and close at its right
 - **Sessions**: every open Claude session, the ones with speech on first, under three
   column headers: **Identifiers** (the repository's label and its issue numbers),
   **Session Information** (the name, one tag, how many lines it has queued and the last
@@ -81,7 +80,10 @@ itself.
   **waiting: merge** (its `scripts/catchup.py` ledger has a Launchpad build or a pull request
   open; a skill's own ledger such as `scratchpad/sweep/ledger.tsv` counts too), **bg** (it
   runs in the background), else **idle**
-- A footer with pause / resume, the volume and a drop down for the voice
+- A footer with, from the top: who is speaking ("<name> says:", beside a speech bubble that
+  holds three dots while a clip plays, is plain while paused and dimmer while idle) and a
+  progress bar with the line's elapsed time and length; then pause / resume, skip and next,
+  the volume and a drop down for the voice
 
 Each session in the speech widget's list starts with its repository's whole name, named after
 its GitHub origin remote (or its folder, without one), in bold with a rule at its left. Under it are the issue numbers of that repository,
@@ -262,8 +264,8 @@ the icon stays while both are hidden.
 The **Spotify** submenu holds that widget's Text scaling, Reset widget size, Lyrics, Lyrics
 scrolling and Always on top. The **Speech** submenu holds **Pause** / **Resume**, **Skip**,
 **Clear queue**, **Voice**, **Volume**, and the speech widget's own Text scaling, Reset widget
-size, **Collapse when idle** (off by default: on, the widget shrinks to its top line while
-nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
+size, **Collapse when idle** (off by default: on, the widget shrinks to its title and the says line
+while nothing is said or queued) and Always on top. Its speech controls run `speechctl` (see
 [Speech widget](#speech-widget)); without one they're greyed out.
 
 Two of the Spotify settings are about lyrics, and both are remembered:

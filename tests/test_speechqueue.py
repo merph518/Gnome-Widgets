@@ -701,6 +701,56 @@ VOICES = ['en_GB-alan-medium', 'en_GB-jenny_dioco-medium', 'en_US-amy-medium',
           'en_US-libritts-high', 'en_US-ryan-high']
 
 
+class TitleAndFooter(Fixture):
+    """The widget's title along the top, and the says line and progress bar above the controls."""
+
+    def draw(self, size=None):
+        self.three()
+        with mock.patch.object(speechqueue.size_file, 'load', return_value=size or (660, 128, 1.0)):
+            speechqueue.render(self.state())
+        with open(speechqueue.DRAW) as f:
+            lines = {l.split()[0]: l.split(None, 1)[1] for l in f.read().splitlines()}
+        with open(speechqueue.REGIONS) as f:
+            return lines, json.load(f)
+
+    def test_the_title_is_along_the_top_level_with_minimize_and_close(self):
+        lines, regions = self.draw()
+        x, cy, track, text = lines['title'].split(None, 3)
+        self.assertEqual(text, 'CLAUDE CODE SESSION MANAGEMENT')
+        self.assertEqual((float(x), float(track)), (speechqueue.MARGIN, speechqueue.TITLE_TRACK))
+        self.assertEqual(float(cy), (regions['minimize'][1] + regions['minimize'][3]) / 2)
+        self.assertLess(float(cy), regions['list'][1])                # above the column headers and the list
+
+    def test_the_says_line_and_the_progress_bar_sit_between_the_list_and_the_controls(self):
+        lines, regions = self.draw()
+        bubble_y = float(lines['says'].split()[1])
+        progress_y = float(lines['progress'].split()[2])
+        controls_y = float(lines['footer'].split()[1])
+        self.assertLess(regions['list'][3], bubble_y)
+        self.assertLess(bubble_y, progress_y)
+        self.assertLess(progress_y, controls_y)
+
+    def test_the_bubble_leaves_a_gap_before_the_says_text(self):
+        lines, _ = self.draw()
+        bubble_x, _, text_x, strong, text = lines['says'].split(None, 4)
+        self.assertGreaterEqual(float(text_x) - (float(bubble_x) + speechqueue.BUBBLE_W / 2), 8)
+        self.assertEqual(text, 'Speech idle')
+
+    def test_the_open_voice_list_stays_below_the_column_headers(self):
+        self.three()
+        speechqueue.render(dict(self.state(), voices=VOICES * 4))
+        with open(speechqueue.REGIONS) as f:
+            regions = json.load(f)
+        self.assertGreaterEqual(regions['menu']['box'][1], regions['list'][1])
+
+    def test_a_narrow_card_at_a_large_scale_cuts_the_title_to_what_clears_minimize(self):
+        lines, regions = self.draw((400, 128, 2.0))
+        text = lines['title'].split(None, 3)[3]
+        self.assertTrue(text.endswith('\u2026') and len(text) < len('CLAUDE CODE SESSION MANAGEMENT'))
+        spaced = speechqueue.text_width(text, speechqueue.LABEL_FONT) + len(text) * speechqueue.TITLE_TRACK * 2.0 * 11 * 96 / 72
+        self.assertLess(speechqueue.MARGIN + spaced, regions['minimize'][0])
+
+
 class VoiceDropDown(Fixture):
     def render(self, voices, voice='en_GB-jenny_dioco-medium'):
         self.three()
@@ -889,11 +939,13 @@ class Golden(Fixture):
         speechqueue.render(self.state(), now=1000.0)
         os.remove(os.path.join(self.f.speak, 'now.json'))
         self.f.file(OTHER + '.queue', '')
-        text = speechqueue.render(self.state(), now=1010.0)
-        self.assertIn('Claude Voice Widget says:', text)
-        self.assertNotIn('Speech idle', text)
+        speechqueue.render(self.state(), now=1010.0)
         with open(speechqueue.DRAW) as f:
-            progress = next(l for l in f if l.startswith('progress ')).split()
+            lines = f.read().splitlines()
+        says = next(l for l in lines if l.startswith('says '))
+        self.assertTrue(says.endswith(' Claude Voice Widget says:'))
+        self.assertNotIn('Speech idle', says)
+        progress = next(l for l in lines if l.startswith('progress ')).split()
         self.assertEqual(progress[5:], ['6.000', '6.000', '0'])
 
     def test_paused(self):
