@@ -93,7 +93,8 @@ click or tap on a chip opens that issue in a new Google Chrome tab, and the chip
 the pointer (a chip is otherwise plain text on the card); a repository with no issue shows its name alone.
 
 Once a session has pull requests waiting on the user (open rows in its `scripts/catchup.py`
-ledger, which `/implement` adds after the ready signal), a white pill after its name reads
+ledger, which `/implement` adds after the ready signal; a `ledger`, `ledger.tsv` or `catchup.tsv`
+in its scratchpad, as this repository's and the sibling repositories' scripts keep it), a white pill after its name reads
 **PR #M** or **2 PRs**. A click or tap on the pill opens, in new Chrome tabs, each of those
 pull requests still open with the **Manual Review Needed** label and from the session's own
 branch, read from GitHub with `gh` at the click; when none is, it opens nothing and notes
