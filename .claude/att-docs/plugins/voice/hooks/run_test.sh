@@ -8,6 +8,9 @@ trap 'rm -rf "$work"' EXIT
 fail=0
 export HOME=$work/nohome
 mkdir -p "$HOME"
+# A running bridge's voice-bridge/plugin would hand every call to the real runner.
+export XDG_RUNTIME_DIR=$work/runtime
+unset VOICE_HOOKS_LIVE
 
 mkdir -p "$work/plugin/hooks" "$work/plugin/skills/voice-bridge-hooks"
 cp "$here/run.sh" "$work/plugin/hooks/run.sh"
@@ -65,5 +68,35 @@ check "steps aside for user-scope settings" "" \
 printf '%s\n' 'import sys; sys.exit(3)' >"$work/plugin/skills/voice-bridge-hooks/fail.py"
 CLAUDE_PROJECT_DIR=$work/bare "$run" fail.py </dev/null
 check "the script's exit code passes through" 3 $?
+
+# The bridge's plugin folder: a second copy whose probe says which copy ran.
+mkdir -p "$work/live/hooks" "$work/live/skills/voice-bridge-hooks" "$XDG_RUNTIME_DIR/voice-bridge"
+cp "$here/run.sh" "$work/live/hooks/run.sh"
+printf '{}\n' >"$work/live/skills/voice-bridge-hooks/defaults.json"
+printf '%s\n' 'import sys; print("live", *sys.argv[1:], sys.stdin.read().strip())' \
+  >"$work/live/skills/voice-bridge-hooks/probe.py"
+live_defaults="$work/live/skills/voice-bridge-hooks/defaults.json"
+pointer=$XDG_RUNTIME_DIR/voice-bridge/plugin
+printf '%s\n' "$work/live" >"$pointer"
+check "the bridge's plugin folder runs the hook" "live --config $live_defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/bare "$run" probe.py x <<<payload)"
+check "the bridge's runner runs its own copy" "live --config $live_defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/bare "$work/live/hooks/run.sh" probe.py x <<<payload)"
+check "the bridge's runner still steps aside" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/hooked "$run" probe.py x <<<payload)"
+
+printf '%s\n' "$work/plugin" >"$pointer"
+check "a folder naming this copy runs it" "py --config $defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/bare "$run" probe.py x <<<payload)"
+
+printf '%s\n' "$work/gone" >"$pointer"
+check "a folder that is gone leaves the installed copy" "py --config $defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/bare "$run" probe.py x <<<payload)"
+
+mkdir -p "$work/norunner/skills/voice-bridge-hooks"
+printf '%s\n' "$work/norunner" >"$pointer"
+check "a folder with no runner leaves the installed copy" "py --config $defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/bare "$run" probe.py x <<<payload)"
+rm -f "$pointer"
 
 exit $fail

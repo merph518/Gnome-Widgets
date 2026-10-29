@@ -148,8 +148,15 @@ so no hook fires twice. A repository moves to the plugin by deleting its voice e
 and keeping its extension file.
 
 Hook changes load when a session starts, so a session open during the switch keeps the
-hooks it started with. The plugin runs from the plugin cache, not from a vendored copy,
-so a pin move in a repository is followed by `claude plugin update voice@att-docs`. The plugin holds only this skill and
+hooks it started with. Claude Code installs the plugin into its plugin cache and refreshes
+that copy only when the plugin's version changes, so the cached scripts fall behind the
+bridge between version bumps. To keep them in step, the running bridge writes the voice
+plugin folder it runs from to `$XDG_RUNTIME_DIR/voice-bridge/plugin`, and the cached
+`run.sh` hands every hook to the `run.sh` in that folder when it has one. The scripts then
+run from the bridge's own checkout, which `update_bridge` moves forward. With no bridge
+running, or a folder named there that has no runner, the cached copy runs. `hooks.json`,
+which says which hook events fire, still comes from the cache, so a change to it waits for
+a version bump and `claude plugin update voice@att-docs`. The plugin holds only this skill and
 `voice-request`, so a session lists this skill once more as `voice:voice-bridge-hooks`
 beside a repository's extension of it, and no copy of `implement`.
 
