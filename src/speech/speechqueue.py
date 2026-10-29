@@ -605,8 +605,8 @@ def read_state(speak=None, sessions_dir=None, proc_dir=None, ledgers=None):
     open_sessions = sessions_mod.list_sessions(sessions_dir, proc_dir)
     waits = process_waits({s['pid'] for s in open_sessions}, proc)
     for s in open_sessions:
-        if s['background'] and not s['remote']:
-            continue                                            # jobs started in the background are not listed, unless on remote control
+        if s['spare']:
+            continue                                            # a background job kept ready, with no work yet, is not listed
         lines = queue_lines(os.path.join(speak, s['id'] + '.queue'))
         # A question waiting to be read out shows as a "question" tag on the row
         question = bool(lines) and display_text(lines[0]).lower().startswith('question:')

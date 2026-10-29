@@ -28,7 +28,7 @@ def _read_json(path):
 
 
 def list_sessions(sessions_dir=None, proc_dir=None):
-    """[{id, name, busy, background, remote, pid, cwd}] for every live session, in pid order."""
+    """[{id, name, busy, background, spare, pid, cwd}] for every live session, in pid order."""
     sessions_dir = sessions_dir or SESSIONS_DIR
     proc_dir = proc_dir or PROC_DIR
     try:
@@ -58,7 +58,7 @@ def list_sessions(sessions_dir=None, proc_dir=None):
             'name': str(entry.get('name') or '').strip() or os.path.basename(cwd),
             'busy': entry.get('status') == 'busy',
             'background': entry.get('kind') == 'bg',
-            'remote': bool(entry.get('bridgeSessionId')),        # on remote control, whatever its kind says
+            'spare': bool(entry.get('spare')),                   # a background job kept ready, with no work yet
             'pid': pid,
             'cwd': cwd,
         })

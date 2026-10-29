@@ -77,21 +77,16 @@ class ReadState(Fixture):
         self.assertEqual([x['queued'] for x in s], [0, 1, 0])
         self.assertTrue(s[0]['busy'])
 
-    def test_background_sessions_are_not_listed(self):
+    def test_a_background_session_is_listed_and_a_spare_one_is_not(self):
         self.three()
-        self.f.session(400, '99999999-jobs', 'A job', kind='bg')
-        self.assertEqual([x['id'] for x in self.state()['sessions']], [ME, OTHER, QUIET])
-
-    def test_a_background_session_on_remote_control_is_listed_like_any_other(self):
-        self.three()
-        self.f.session(400, '99999999-jobs', 'Bridge Update', kind='bg', bridge='session_01abc')
-        self.f.session(500, '88888888-jobs', 'Not on it', kind='bg', bridge=None)
+        self.f.session(400, '99999999-jobs', 'Bridge Update', kind='bg')
+        self.f.session(500, '88888888-jobs', '88888888', kind='bg', spare=True)
         got = self.state()['sessions']
         self.assertEqual([x['id'] for x in got], [ME, OTHER, QUIET, '99999999-jobs'])
-        self.assertEqual(got[-1]['remote'], True)
+        self.assertEqual([x['spare'] for x in got], [False] * 4)
 
-    def test_a_background_session_that_speaks_keeps_its_name_in_the_terminal(self):
-        self.f.session(400, ME, 'A job', kind='bg')
+    def test_a_spare_session_that_speaks_keeps_its_name_in_the_terminal(self):
+        self.f.session(400, ME, 'A job', kind='bg', spare=True)
         self.f.now(ME, 'A job', 'A job says: done.', hook_pid=9001)
         state = self.state()
         self.assertEqual((state['sessions'], state['name']), ([], 'A job'))
