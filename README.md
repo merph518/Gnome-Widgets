@@ -132,7 +132,8 @@ nothing, while no line plays, and grow a little under the pointer, as the pause 
 **Voice:** drop down picks the voice, a session's **On**, **Alerts** and **Off** set how it
 is read, a session's box opens its issue, its pill its ready pull requests, and its name
 asks to close it. The
-volume slider, drawn like the Spotify widget's, sets the speech volume where you click, tap
+volume slider, drawn and sized like the Spotify widget's (it shortens, down to 32 px, before the
+voice drop down's label is cut), sets the speech volume where you click, tap
 or let go of a drag, from 0 at its left to 2.0 at its right, a tenth at a time; its speaker
 shows a cross when muted, one wave below 1.0 and two from 1.0 up, and it follows changes made
 from the tray or the keyboard. The mouse wheel turns the volume a tenth a notch over the
