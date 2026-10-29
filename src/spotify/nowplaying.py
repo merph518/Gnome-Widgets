@@ -425,7 +425,7 @@ def fetch_liked(track_id):
 
 def _lrclib(path, **params):
     req = urllib.request.Request(f'https://lrclib.net/api/{path}?' + urllib.parse.urlencode(params),
-                                 headers={'User-Agent': 'conky-spotify-nowplaying (https://github.com/merph518/conky-widgets)'})
+                                 headers={'User-Agent': 'conky-spotify-nowplaying (https://github.com/merph518/Gnome-Widgets)'})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.load(r)

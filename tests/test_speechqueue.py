@@ -6,6 +6,7 @@ case. After a change to the layout that is meant, write them again with
 and read the diff before committing it.
 """
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -456,13 +457,13 @@ class Links(Repos):
                          [['#7', '#31']] * 4 + [['#2'], []])
         self.assertEqual(listed[0]['issues'][0][1], issue('o/a', 7))
 
-    def test_the_block_is_as_wide_as_the_longest_name_within_its_limits(self):
+    def test_the_block_is_as_wide_as_the_longest_name_and_never_below_its_least(self):
         width = lambda *names: speechqueue.block_width([dict(repo=n) for n in names])
         chrome = speechqueue.BLOCK_RULE + speechqueue.BLOCK_PAD
         with mock.patch.object(speechqueue, 'text_width', side_effect=lambda t, f: 5 * len(t)):
             self.assertEqual(width('ab', 'cd'), chrome + speechqueue.BLOCK_MIN)
-            self.assertEqual(width('a' * 30, 'b'), chrome + 150)
-            self.assertEqual(width('a' * 100), chrome + speechqueue.BLOCK_MAX)
+            self.assertEqual(width('a' * 30, 'b'), chrome + math.ceil(150 * speechqueue.BLOCK_SLACK))
+            self.assertEqual(width('a' * 100), chrome + math.ceil(500 * speechqueue.BLOCK_SLACK))
             self.assertEqual(width(), chrome + speechqueue.BLOCK_MIN)
 
     def test_the_issue_numbers_wrap_onto_the_next_line_when_they_pass_the_width(self):

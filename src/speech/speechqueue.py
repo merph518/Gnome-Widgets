@@ -102,7 +102,8 @@ PILL_PAD = 6                                  # either side of the pill after a 
 PILL_GAP = 8                                  # a session's name to its pill
 BLOCK_RULE = 2                                # the rule left of a repository's name and issue numbers
 BLOCK_PAD = 7                                 # that rule to the text
-BLOCK_MIN, BLOCK_MAX = 90, 170                # the text's width, whatever the names are
+BLOCK_MIN = 90                                # the text's least width, however short the names are
+BLOCK_SLACK = 1.04                            # draw.lua's cairo text runs wider than Pango's, which kerns
 CHIP_PAD = 5                                  # left of an issue number, which has nothing right of it
 CHIP_GAP = 3                                  # between chips, and between their lines
 NOTHING_SAID = 'Nothing read aloud yet'       # an On session's second row before its first line
@@ -694,9 +695,10 @@ def row_flags(s):
 def block_width(listed):
     """The width of a repository's name and issue numbers, one for every row so the names after
     it line up, as draw.lua draws it: the rule, then text as wide as the longest repository
-    name listed, within BLOCK_MIN and BLOCK_MAX. Longer names are cut with an ellipsis."""
-    names = [text_width(s['repo'], SEGMENT_FONT) for s in listed if s.get('repo')]
-    return BLOCK_RULE + BLOCK_PAD + min(max(max(names, default=0), BLOCK_MIN), BLOCK_MAX)
+    name listed, and at least BLOCK_MIN, so no name is cut. BLOCK_SLACK widens the longest name
+    to what draw.lua measures, so it is not cut either."""
+    names = [math.ceil(text_width(s['repo'], SEGMENT_FONT) * BLOCK_SLACK) for s in listed if s.get('repo')]
+    return BLOCK_RULE + BLOCK_PAD + max(max(names, default=0), BLOCK_MIN)
 
 
 def block_chips(issues, width):
