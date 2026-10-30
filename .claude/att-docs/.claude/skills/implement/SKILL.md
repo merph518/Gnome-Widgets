@@ -9,6 +9,20 @@ description: >-
 
 # Implement
 
+## Applies to every pull request
+
+This procedure is the standard for every pull request here, including documentation,
+script and skill changes that start from no issue and sessions that were never asked to
+implement one. `CLAUDE.md` at the root says so for every session.
+
+A change with no issue skips the steps that need one: reading and claiming it, `issue-<N>`
+in the branch name, `(#<N>)` in the title, `Closes #<N>`, the `Blocked` label on the
+issue, and closing it after the merge. Name the branch `<type>/<slug>`, and treat the
+folders from the `<ownership-unit>` row that hold the files the change touches as the
+ownership unit when reading the board. The worktree (Section 3), the non-draft pull
+request, the self review loop, and the `Manual Review Needed` label (Section 7) hold for
+every pull request.
+
 ## Base
 
 Read [the general skill](../../../plugins/general/skills/implement/SKILL.md), which lives in this repository rather than in a vendored copy, first and follow it, except where this file overrides it.
@@ -63,12 +77,29 @@ reply text: the user does not see it there.**
 | `<self-review>` | Under Overrides, Section 7 |
 | `<ready-signal>` | Under Overrides, Section 7, Ready signal. A pull request reported ready carries `Manual Review Needed`, read back |
 | `<skip-ledger>` | Not applicable here, because there is no skip ledger |
-| `<instructions-file>` | None: Overmind has no `CLAUDE.md`. The `README.md` is the standing reference |
-| `<post-merge-checks>` | None |
+| `<instructions-file>` | `CLAUDE.md` at the root, for the rule that every pull request follows this procedure. `README.md` for the layout and the extension contract |
+| `<post-merge-checks>` | The post-merge pin, under Added gates. It runs after the merge, not before the pull request is ready |
 | `<pairing>` | None |
 | `<merge-cleanup>` | Nothing runs automatically. Removing the worktree after the merge, with `git worktree remove` from the main checkout, is the user's |
 
 ## Overrides
+
+### Models
+
+Each step has one model:
+
+| Step | Model |
+| --- | --- |
+| Planning and design advice, before any code is written | Opus |
+| Writing the code and its tests | Sonnet |
+| Reviewing every change, including the last fix | Opus |
+| Fixing review findings | Sonnet |
+
+Before coding, spawn an Opus agent with the issue or task and the files it touches, and
+ask it for the plan and design advice: the approach, the files to change, and the risks.
+Sonnet implements from that advice and records in the pull request body, under Judgment
+calls, any place it departed from it. A fix for a review finding is written by Sonnet, then
+reviewed by Opus.
 
 ### Section 2, labels
 
@@ -172,7 +203,8 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   `gh api -X PATCH repos/merph518/Overmind/pulls/<n> -F "body=@<file>"`.
 - Mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. Resolve a conflict by
   merging `origin/main` into the branch, never by rebase plus force-push.
-- Self review: Sonnet implements and Opus reviews every change, including the final fix.
+- Self review: Sonnet implements and fixes, and Opus reviews every change, including the
+  final fix (see Models above).
   Spawn an Opus review agent on the diff, and run the `code-review` skill on the pull
   request number. Fix real findings and review again, for at most three passes. The
   fixes from the last pass still get an Opus review before the pull request is marked
@@ -230,6 +262,58 @@ confirm the names and labels with
 and before opening the pull request run `grep -rn runs-on .github/workflows` and check
 every line against this rule. Only one session edits the workflows at a time: read the
 open pull requests' files first, per Section 3.
+
+### Post-merge pin
+
+A pull request that changes functionality ends with a pin cut and a pin-bump pull
+request in every repository that pins Overmind. The step runs after the merge, from the
+wait in `<run-watch>`, for a pull request with or without an issue, and the work is not
+done until it finishes or is skipped.
+
+- **Skip** a pull request whose diff is only documentation (`README.md`, `docs/`, other
+  Markdown that no skill reads) or only tests. A change to a `SKILL.md`, a script, a
+  hook, the bridge, a workflow, or a `plugin.json` changes functionality. Say in the
+  final report that the step was skipped and why.
+- **Cut the pin.** A pin is a release tag, and this session never tags. First read the
+  newest tag with `git ls-remote --tags --sort=-v:refname origin 'v*'`, taking the first
+  line that does not end in `^{}` and never using `gh release view`, because a tag can
+  exist without a GitHub release. Keep it as the tag from before the merge. Then read
+  the release workflow's run on the merge commit
+  (`gh run list --workflow release.yml --commit <merge sha> --json conclusion,status,url`),
+  waiting until that run appears and has finished or shows `skipped`. A `cancelled` run
+  is reported to the user with its link: stop there, open no bump pull request, and take
+  neither branch below. For any other result, take the branch that fits:
+  - The workflow ran. Look for the open release pull request with
+    `gh pr list --state open --head release-please--branches--main --json number,title`.
+    When it lists this pull request in its changelog, ask the user through
+    `AskUserQuestion` to merge it, because this skill never merges. When there is none,
+    or it does not list this pull request, because the change merged as a type
+    release-please ignores (it reads only `feat`, `fix` and `perf`), report that no pin
+    was cut and why, and open no bump pull request. A failed run is reported the same
+    way, with the run's link.
+  - The workflow is skipped. The tag is cut by hand, an exception to the README's rule
+    that holds only while the workflow is off, and any release pull request left open is
+    ignored: ask the user through `AskUserQuestion` to cut it.
+
+  After the user was asked to merge the release pull request or to cut the tag, open no
+  bump pull request until the newest tag is above the one from before the merge.
+- **Find every repository that pins Overmind.** List the owner's repositories with
+  `gh repo list merph518 --no-archived --limit 100 --json name --jq '.[].name'` (raise the
+  limit when it returns 100 names) and keep each one whose lock names Overmind:
+  `gh api repos/merph518/<name>/contents/.claude/att-docs.lock -H "Accept: application/vnd.github.raw"`
+  has a `repo=` line naming `merph518/Overmind` or an earlier location of it. A 404 means
+  the repository does not pin Overmind. Read the list fresh each time.
+- **Open one pin-bump pull request per repository.** This session cannot write outside
+  its own worktree, so each bump is handed to a session started in that repository, or to
+  the user. That session runs its own implement procedure, including its self review
+  loop, an Opus review, and the ready label: `scripts/overmind-sync.sh <new tag>`, then
+  `scripts/overmind-check.sh`, a `chore:` commit, and a pull request that names the tag
+  and the Overmind pull request. When the new tag crosses a minor version, it checks
+  its extension first, per the README's Releases section. Nothing merges and nothing
+  pushes to a repository's `main`.
+- **Report** the tag and each repository with its bump pull request number or the
+  session it was handed to. A repository whose sync or check fails is reported with the
+  failing command, and the others still go ahead.
 
 ### Releases
 
