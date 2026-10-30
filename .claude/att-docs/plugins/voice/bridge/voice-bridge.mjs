@@ -2004,30 +2004,16 @@ function settleOffers(sessions, bridgeDir, cursor) {
   }
 }
 
-// Merges each session's replies, already in feed order, into one list by when they were
-// written, keeping every session's own order. An entry with no real time stamp goes with the
-// nearest stamped entry in its own feed, the one before it, else the one after it, and a
-// feed with no stamp at all reads as newest.
-function oldestFirst(lists) {
+// Groups each session's replies, already in feed order, a session at a time, the sessions
+// ordered by the time of their first reply with a real time stamp. A session with no stamp at
+// all goes last.
+function bySessionOldestFirst(lists) {
   const keyed = lists.map(list => {
-    const keys = list.map(({ at }) => (at >= EARLIEST_RUN_TIME ? at : NaN));
-    for (let i = 1; i < keys.length; i++) if (Number.isNaN(keys[i])) keys[i] = keys[i - 1];
-    for (let i = keys.length - 2; i >= 0; i--) if (Number.isNaN(keys[i])) keys[i] = keys[i + 1];
-    return list.map((entry, i) => {
-      const item = { ...entry };
-      delete item.at;
-      return { item, key: Number.isNaN(keys[i]) ? Infinity : keys[i] };
-    });
+    const first = list.find(({ at }) => at >= EARLIEST_RUN_TIME);
+    return { items: list.map(({ at, ...item }) => item), key: first ? first.at : Infinity };
   });
-  const merged = [];
-  for (;;) {
-    let next = -1;
-    keyed.forEach((list, i) => {
-      if (list.length > 0 && (next < 0 || list[0].key < keyed[next][0].key)) next = i;
-    });
-    if (next < 0) return merged;
-    merged.push(keyed[next].shift().item);
-  }
+  return keyed.sort((a, b) => (a.key === b.key ? 0 : a.key < b.key ? -1 : 1))
+    .flatMap(({ items }) => items);
 }
 
 // Where one poll leaves a follow's marker and offer, and whether the follow still stands.
@@ -2055,9 +2041,9 @@ function settlePoll({ files, feed }, done) {
 // heard in it.
 // Each session's open offer is settled first, before the wait, by the cursor or its absence
 // (settleOffers). Returns { replies, cursor }: each reply as its session and its text, led by
-// how long ago it was written, oldest first across sessions, an empty list when none landed
-// in time, and the cursor that covers them, none when nothing was returned; or null when none
-// of the sessions is followed.
+// how long ago it was written, grouped by session with the session whose first reply is
+// oldest first, an empty list when none landed in time, and the cursor that covers them, none
+// when nothing was returned; or null when none of the sessions is followed.
 // With rescan, each poll after the first reads the running sessions again from it, so a session
 // that starts during the wait is followed and heard in the same call.
 // With interrupt, each poll also awaits interrupt(sessions), and the wait ends when it answers
@@ -2090,7 +2076,7 @@ export async function nextUpdates(sessions, bridgeDir,
     if (done) {
       const now = Date.now();
       const offered = followed.filter(({ feed }) => feed.relayed.length > 0);
-      const replies = oldestFirst(offered.map(({ session, feed }) => feed.relayed.map(entry => {
+      const replies = bySessionOldestFirst(offered.map(({ session, feed }) => feed.relayed.map(entry => {
         const at = feedTime(entry);
         const said = spokenEntry(bridgeDir, session.key, entry, at);
         return { session, at, text: withWhen(said, at, now) };
@@ -5002,7 +4988,8 @@ export const TOOLS = [
       + 'do not pause first. Only when it comes back saying the session is still working, '
       + 'tell the user so, read them anything it has written so far, and offer to check '
       + 'again; never report \'no answer yet\' without calling it. When it is done, read the '
-      + 'reply to the user as written. A long reply comes back as its one-line summary with a '
+      + 'reply to the user as written before any other call; never claim to have said a reply '
+      + 'you did not say. A long reply comes back as its one-line summary with a '
       + 'note that more is available; read_full_reply reads the whole of it when the user '
       + 'asks. Calling it again returns the same reply, said as a '
       + 'repeat, until the next send, so a call whose answer was lost can be made again.',
@@ -5071,12 +5058,17 @@ export const TOOLS = [
     name: 'next_update',
     description: 'Wait up to about 3 seconds for the next reply from any followed session, or '
       + 'from the one session named. Without a session, each reply starts with the name of the '
-      + 'session that wrote it. Each reply also says how long ago it was written. Read any '
-      + 'reply to the user as written, then call next_update again without waiting to be '
+      + 'session that wrote it. Each reply also says how long ago it was written. Say every '
+      + 'reply the answer carries to the user as written, not paraphrased or summarized, '
+      + 'before calling next_update again: one that is not said aloud is lost, and never '
+      + 'claim to have said a reply you did not say. Several replies are said in one turn, '
+      + 'one session at a time, as the answer orders them; grouping is an order, not a '
+      + 'summary. Then call next_update again without waiting to be '
       + 'asked, and keep doing so until the user says to stop. When nothing is new, call it '
       + 'again quietly. A warning that leads the reply, a session that ended, a follow that '
       + 'had lapsed, or a busy session gone quiet, is read to the user too. Every answer ends '
-      + 'with a cursor; never read it aloud. On the next call, pass as cursor the one from the '
+      + 'with a closing paragraph holding the cursor, led by a reminder when the answer has '
+      + 'something to say; that paragraph is for you, so never read any of it aloud. On the next call, pass as cursor the one from the '
       + 'last answer you actually received: an answer that never arrived is then sent again, '
       + 'read as new.',
     inputSchema: {
@@ -9757,7 +9749,7 @@ async function nextUpdate(args, sessions, paths, options) {
     return await followUpdates(args, sessions, paths, options);
   } catch (error) {
     const given = String(args?.cursor ?? '').trim().split(/\s+/)[0] || NO_CURSOR;
-    throw new Error(`${error.message} Call next_update again with cursor ${given}.`);
+    throw new Error(`${error.message}\n\nCall next_update again with cursor ${given}.`);
   }
 }
 
@@ -9789,7 +9781,8 @@ async function followUpdates(args, sessions, paths, { waitMs, rescan, notices })
   const result = await nextUpdates(asked, bridgeDir,
     { waitMs, rescan: grow, interrupt, cursor });
   const said = heard.length ? `${heard.join(' ')}\n\n` : '';
-  return said + spokenUpdates(result, { named, asked, current, sessions, paths });
+  return said + spokenUpdates(result,
+    { named, asked, current, sessions, paths, carries: heard.length > 0 });
 }
 
 // How read_reply says a reply an earlier read_reply already returned.
@@ -9797,7 +9790,7 @@ const REPLY_AGAIN = 'Already read out once, and here it is again: ';
 
 // What next_update reads out of the replies nextUpdates returned. The closing line carries
 // the cursor that settles them.
-function spokenUpdates(result, { named, asked, current, sessions, paths }) {
+function spokenUpdates(result, { named, asked, current, sessions, paths, carries }) {
   const updates = result?.replies ?? null;
   const { bridgeDir, projectsDir } = paths;
   // Only sessions still running get a state; one that exited during the wait has none.
@@ -9815,20 +9808,43 @@ function spokenUpdates(result, { named, asked, current, sessions, paths }) {
   const notice = unfollowed.length === 0 ? ''
     : ` Not following ${andList(unfollowed)}; call follow to hear `
       + `${unfollowed.length === 1 ? 'it' : 'them'}.`;
+  // The closing paragraph is for the voice chat and never read aloud, so everything to say, a
+  // notice included, goes in the body ahead of it.
+  const speak = carries || notice ? SPEAK_FIRST : '';
   // A follow stopped after the wait ended leaves no state to read.
   if (updates === null || (updates.length === 0 && states.length === 0)) {
-    const next = ` Call next_update again with cursor ${NO_CURSOR}.`;
-    return named ? `Not following ${asked[0].name}. Call follow first.${notice}${next}`
-      : `Not following any session.${notice || ' Call follow first.'}${next}`;
+    const closing = `${speak}Call next_update again with cursor ${NO_CURSOR}.`;
+    const body = named ? `Not following ${asked[0].name}. Call follow first.${notice}`
+      : `Not following any session.${notice || ' Call follow first.'}`;
+    return `${body}\n\n${closing}`;
   }
   if (updates.length === 0) {
-    return `Nothing new yet; ${states.join('; ')}.${notice} Call next_update again with `
-      + `cursor ${result.cursor}.`;
+    return `Nothing new yet; ${states.join('; ')}.${notice}\n\n${speak}Call next_update again `
+      + `with cursor ${result.cursor}.`;
   }
-  const texts = updates.map(({ session, text }) => (named ? text : `${session.name}. ${text}`));
+  const texts = updates
+    .map(({ session, text }) => (named ? text : `${session.name}. ${text}`));
   const intro = updates.length === 1 ? '' : `${updates.length} replies. `;
-  return `${intro}${texts.join('\n\n')}\n\n${notice.trim()}${notice ? ' ' : ''}`
-    + `Call next_update again with cursor ${result.cursor} to keep following.`;
+  return `${intro}${texts.join('\n\n')}${notice ? `\n\n${notice.trim()}` : ''}\n\n`
+    + `${SPEAK_FIRST}Call next_update again with cursor ${result.cursor} to keep following.`;
+}
+
+// Closes every next_update answer that carries something to say: replies, warnings or
+// notices. The cursor only says the answer arrived, not that the user heard it, so a voice
+// chat that chains calls drops whatever it did not say. It sits in the closing paragraph, which is
+// not for the user.
+export const SPEAK_FIRST = 'Not for the user: say every reply, warning and notice above before calling again. ';
+
+// The answer with SPEAK_FIRST ahead of its cursor sentence, the answer's last paragraph, when
+// it does not carry one already.
+function withSpeakFirst(reply) {
+  const at = reply.lastIndexOf('\n\n');
+  if (reply.slice(at + 2).includes(SPEAK_FIRST)) return reply;
+  if (at >= 0) return `${reply.slice(0, at + 2)}${SPEAK_FIRST}${reply.slice(at + 2)}`;
+  // No paragraph break: the reminder opens a new closing paragraph ahead of the cursor sentence.
+  const cursor = reply.lastIndexOf('Call next_update again');
+  if (cursor <= 0) return `${reply}\n\n${SPEAK_FIRST.trim()}`;
+  return `${reply.slice(0, cursor).trimEnd()}\n\n${SPEAK_FIRST}${reply.slice(cursor)}`;
 }
 
 const andList = names => (names.length > 1
@@ -10027,7 +10043,8 @@ export async function callTool(name, args, {
       // The notice stays on the record for a later call; the reply already taken is kept.
       console.error(`Could not read the gone sessions: ${error.message}`);
     }
-    return notice + reply;
+    // The notice is something to say, so the answer reminds the voice chat to say it.
+    return notice ? notice + withSpeakFirst(reply) : reply;
   }
   if (name === 'reply_length') {
     const asked = String(args?.length ?? '').trim().toLowerCase();
@@ -10152,6 +10169,16 @@ const NO_ANNOUNCE = 'Never announce this call before making it (no "one moment",
   + 'tool calls, and it overrides the voice app\'s default of acknowledging before slow lookups.';
 const REMINDER_TOOLS = new Set(['send', 'read_reply', 'list_sessions', 'summary']);
 
+// The server instructions initialize returns, which a client adds to the voice chat's prompt.
+export const INSTRUCTIONS = 'Every reply that next_update or read_reply returns, or that '
+  + 'arrives as a pushed message over the event stream, is said aloud to the user as '
+  + 'written, not paraphrased or summarized, before any other bridge call. A reply counts '
+  + 'as delivered only once it has been said; never claim to have said one that was not. '
+  + 'When several replies come back at once, say them all in one turn, one session at a '
+  + 'time; grouping is an order, not a summary. Every next_update answer ends with a '
+  + 'closing paragraph holding the cursor, led by a reminder when the answer has something '
+  + 'to say; it is for you and never read aloud.';
+
 async function handleRpc(message, context) {
   const { id, method, params } = message ?? {};
   if (id === undefined) return null; // a notification takes no reply
@@ -10161,6 +10188,7 @@ async function handleRpc(message, context) {
       protocolVersion: params?.protocolVersion ?? '2025-06-18',
       capabilities: { tools: {}, logging: {} },
       serverInfo: { name: 'voice-bridge', version: '1.0.0' },
+      instructions: INSTRUCTIONS,
     });
   }
   if (method === 'ping' || method === 'logging/setLevel') return reply({});

@@ -724,7 +724,12 @@ never merge two phases' work, and stop at the first gate that fails.
 **Job Intake.** In a session build, the source documents were refreshed first,
 as "Refreshing the source documents" above sets out; name each refreshed
 document in the intake notes. Classify the request (`<job-type>`), inventory every input
-against the table above, and set `intake.readiness`. The four required inputs
+against the table above, and set `intake.readiness`. What intake records as
+missing is what it did not receive, not the procedure's list of preferred
+inputs: a converted document whose provenance path is in a CAMP Designs folder counts
+as the CAMP document, and its revision date counts as the updated design. The
+change description in `<id-fields>` holds only the record's ALM short and long
+descriptions. The four required inputs
 are the `<issue-term>` number, the `<change-term>` number when the change has
 one, the description, and either rules in the master or a source document to
 derive them from. One missing is found here and stops the run at Phase 1, the
@@ -762,7 +767,19 @@ Code then raises any Direct Change rule below the first configured risk level,
 High by default, to that level and lists each one it raised in detail.log.
 
 **Phase 5, Testing Objective Selection.** Decide all `<objective-count>`
-objectives, each with a reason. None is left out.
+objectives, each with a reason. None is left out. A change that includes the
+stage closure submit after a FATL downgrade makes Integration Testing
+applicable. Phase 5 sees the ALM description fields plus the lines of the
+impacted rules that hold both terms, as many as fit, and detail.log says how
+many did not. The reply says whether the change includes the submit and, when
+it does, quotes the sentence that says so. Code accepts the answer only when the
+quote appears word for word (whitespace and case aside) in the ALM descriptions
+or in a Direct Change or Indirect Impact rule (read as its name and summary),
+and the one quote holds a FATL downgrade, a stage closure and a submit; then
+Integration Testing is applicable, with that reason. Otherwise the model's own
+answer for it stands, and detail.log says the evidence was rejected. Assumptions
+that cite a rule ID the pack does not hold, or a count of rules or cards it does
+not have, are dropped before the build.
 
 **Phase 6, Reusable Test Design.** One card per business decision, per the
 `<methodology>` chapters on decisions and on test cards. Test case IDs are

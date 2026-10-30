@@ -26,7 +26,7 @@ import {
   appArchived, sessionBranch, sessionWork, sharedFiles,
   START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
   startOfYesterday, startSession, codeCheckouts, repoCheckout, useExtension, resetExtension,
-  VOICE_AUTHORITY, TOOLS,
+  VOICE_AUTHORITY, TOOLS, SPEAK_FIRST,
 } from './voice-bridge.mjs';
 
 // What every read-back ends with, for the voice chat to say aloud.
@@ -107,7 +107,8 @@ function follower(context, args = {}, call = callTool) {
 }
 
 // A next_update reply's closing line for the cursor it gives.
-const keepFollowing = cursor => `Call next_update again with cursor ${cursor} to keep following.`;
+const keepFollowing = cursor => `${SPEAK_FIRST}Call next_update again with cursor ${cursor} `
+  + 'to keep following.';
 
 // A listening inbox socket that counts what reaches it, to prove a call posted nothing.
 async function inbox(socket) {
@@ -1710,7 +1711,12 @@ test('next_update warns once when a busy followed session says nothing past QUIE
     assert.match(first,
       /^Silent is still working but has said nothing for 11 minutes\.\n\nNothing new yet/);
     assert.doesNotMatch(first, /Chatty is still working but|Resting is still working but/);
-    assert.doesNotMatch(await callTool('next_update', {}, context), /said nothing/);
+    // A warning-only answer closes with the speak-first line, then the cursor sentence last.
+    assert.ok(first.includes(`\n\n${SPEAK_FIRST}Call next_update again with cursor `), first);
+    assert.match(first, /Call next_update again with cursor \S+\.$/);
+    const quiet = await callTool('next_update', {}, context);
+    assert.doesNotMatch(quiet, /said nothing/);
+    assert.ok(!quiet.includes(SPEAK_FIRST), quiet);
   });
 
 test('next_update says once that a followed session ended and following it stopped',
@@ -1950,7 +1956,7 @@ test('a next_update whose answer never arrived returns it again for an older cur
     assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'follow', '70.offered')), false);
     // An error hands back the cursor it was given.
     await assert.rejects(callTool('next_update', { session: 'nobody', cursor: '70.2' }, context),
-      /No session matches nobody\..* Call next_update again with cursor 70\.2\.$/);
+      /No session matches nobody\..*\n\nCall next_update again with cursor 70\.2\.$/s);
   });
 
 test('a none, unnamed or unreadable cursor takes an open offer as heard', async () => {
@@ -2003,6 +2009,55 @@ test('an older cursor returns the offered replies beside new ones, read as new',
   assert.match(await callTool('next_update', { cursor: cursorOf(again) }, context),
     /^Nothing new yet/);
 });
+
+// The replies a next_update answer says, each with the "how long ago" lead taken off, in order.
+const saidReplies = reply => reply.split('\n\n').slice(0, -1)
+  .map(part => part.replace(/^(\d+ replies\. )?/, '').replace(/(?<=\. )(?:Under a minute|\d+ \w+) ago: /, ''));
+
+// Two followed sessions, Alpha polled before Bravo, each with the feed given in seconds.
+async function groupedMachine(alpha, bravo) {
+  const paths = fakeMachine([
+    { pid: 81, cwd: '/repo/a', name: 'Alpha' }, { pid: 82, cwd: '/repo/b', name: 'Bravo' },
+  ]);
+  const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
+  await callTool('follow', { session: 'alpha' }, context);
+  await callTool('follow', { session: 'bravo' }, context);
+  writeFeed(paths, 81, alpha);
+  writeFeed(paths, 82, bravo);
+  return context;
+}
+
+test('replies from several sessions are said one session at a time', async () => {
+  const now = Date.now() / 1000;
+  // Alpha and Bravo interleave in time; an interleaved merge would say A, B, A, B.
+  const context = await groupedMachine(
+    [{ seq: 1, at: now - 100, text: 'A one.' }, { seq: 2, at: now - 80, text: 'A two.' }],
+    [{ seq: 1, at: now - 90, text: 'B one.' }, { seq: 2, at: now - 70, text: 'B two.' }]);
+  const reply = await callTool('next_update', {}, context);
+  assert.deepEqual(saidReplies(reply),
+    ['Alpha. A one.', 'Alpha. A two.', 'Bravo. B one.', 'Bravo. B two.']);
+  assert.ok(reply.endsWith(keepFollowing('81.2-82.2')), reply);
+});
+
+test('the session whose first reply is older is said first, whatever the poll order',
+  async () => {
+    const now = Date.now() / 1000;
+    const context = await groupedMachine(
+      [{ seq: 1, at: now - 50, text: 'A one.' }, { seq: 2, at: now - 40, text: 'A two.' }],
+      [{ seq: 1, at: now - 200, text: 'B one.' }, { seq: 2, at: now - 190, text: 'B two.' }]);
+    assert.deepEqual(saidReplies(await callTool('next_update', {}, context)),
+      ['Bravo. B one.', 'Bravo. B two.', 'Alpha. A one.', 'Alpha. A two.']);
+  });
+
+test('a session whose lead reply has no time stamp is ordered by its first real one',
+  async () => {
+    const now = Date.now() / 1000;
+    const context = await groupedMachine(
+      [{ seq: 1, at: now - 100, text: 'A one.' }, { seq: 2, at: now - 60, text: 'A two.' }],
+      [{ seq: 1, text: 'B lead.' }, { seq: 2, at: now - 300, text: 'B one.' }]);
+    assert.deepEqual(saidReplies(await callTool('next_update', {}, context)),
+      ['Bravo. B lead.', 'Bravo. B one.', 'Alpha. A one.', 'Alpha. A two.']);
+  });
 
 test('the event stream holds the marker below an open offer', async () => {
   const paths = fakeMachine([{ pid: 76, cwd: '/repo/wt', name: 'Streamed' }]);
@@ -2064,7 +2119,7 @@ test('next_update with no session relays either followed session, naming it', as
 
   await callTool('stop_following', { session: 'charlie' }, context);
   assert.equal(await next(),
-    'Nothing new yet; Alpha is idle; Bravo is still working. Call next_update again with '
+    'Nothing new yet; Alpha is idle; Bravo is still working.\n\nCall next_update again with '
       + 'cursor none.');
 
   writeFeed(paths, 82, [{ seq: 1, text: 'Bravo is green.' }]);
@@ -2102,7 +2157,7 @@ test('next_update with no session returns as soon as any followed session replie
     assert.ok(Date.now() - started < 4000, 'returned as soon as the reply landed');
   });
 
-test('next_update with no session reads replies oldest first across sessions', async () => {
+test('next_update with no session groups replies by session, the oldest session first', async () => {
   const paths = fakeMachine([
     { pid: 88, cwd: '/repo/a', name: 'First' },
     { pid: 89, cwd: '/repo/b', name: 'Second' },
@@ -2146,7 +2201,7 @@ test('next_update naming one session ignores the other followed session', async 
   await callTool('follow', { session: 'other' }, context);
   writeFeed(paths, 87, [{ seq: 1, text: 'Other spoke.' }]);
   assert.equal(await callTool('next_update', { session: 'named' }, context),
-    'Nothing new yet; Named is idle. Call next_update again with cursor none.');
+    'Nothing new yet; Named is idle.\n\nCall next_update again with cursor none.');
   writeFeed(paths, 86, [{ seq: 1, text: 'Named spoke.' }]);
   assert.equal(await callTool('next_update', { session: 'named' }, context),
     `Named spoke.\n\n${keepFollowing('86.1')}`);
@@ -2531,7 +2586,7 @@ test('a session that starts is followed without a follow call', async () => {
   const paths = fakeMachine([{ pid: 92, cwd: '/repo/a', name: 'Running' }], root);
   const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
   assert.equal(await callTool('next_update', {}, context),
-    'Nothing new yet; Running is idle. Call next_update again with '
+    'Nothing new yet; Running is idle.\n\nCall next_update again with '
       + 'cursor none.');
   fakeMachine([{ pid: 93, cwd: '/repo/b', name: 'Newcomer', sessionId: 'n1' }], root);
   assert.match(await callTool('next_update', {}, context), /Newcomer is idle/);
@@ -2586,7 +2641,7 @@ test('a session the user stopped following stays unfollowed until follow', async
   const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
   assert.match(await callTool('stop_following', { session: 'muted' }, context), /Stopped/);
   assert.equal(await callTool('next_update', {}, context),
-    'Not following any session. Call follow first. Call next_update again '
+    'Not following any session. Call follow first.\n\nCall next_update again '
       + 'with cursor none.');
   assert.match(await callTool('list_sessions', {}, context), /^Muted, idle, not followed/m);
   assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'follow', '95')), false);
@@ -2607,10 +2662,10 @@ test('a running session the bridge could not follow is named once',
   fs.mkdirSync(followDir, { mode: 0o500 });
   try {
     assert.equal(await callTool('next_update', {}, context),
-      'Not following any session. Not following Stuck; call follow to hear it. '
-        + 'Call next_update again with cursor none.');
+      'Not following any session. Not following Stuck; call follow to hear it.\n\n'
+        + `${SPEAK_FIRST}Call next_update again with cursor none.`);
     assert.equal(await callTool('next_update', {}, context),
-      'Not following any session. Call follow first. Call next_update '
+      'Not following any session. Call follow first.\n\nCall next_update '
         + 'again with cursor none.');
     assert.match(await callTool('list_sessions', {}, context), /^Stuck, idle, not followed/m);
   } finally {
@@ -3087,8 +3142,11 @@ test('a started session gone after a bridge restart is named once', async () => 
 
   fs.rmSync(path.join(paths.procDir, '81'), { recursive: true });
   const again = await restartedBridge(paths, config);
-  assert.match(await again.callTool('next_update', {}, context), new RegExp('^Survivor was not '
+  const told = await again.callTool('next_update', {}, context);
+  assert.match(told, new RegExp('^Survivor was not '
     + 'running when the bridge restarted; call start_session to start it again\\.\\n'));
+  // A notice with nothing else to say still carries the reminder, ahead of the cursor sentence.
+  assert.ok(told.endsWith(`\n\n${SPEAK_FIRST}Call next_update again with cursor none.`), told);
 });
 
 const goneLine = name => new RegExp(`^${name} was not running when the bridge restarted`);
@@ -5861,6 +5919,19 @@ test('the full code flow issues a token that opens /mcp', async () => {
     ['create_milestone', creates], ['create_label', creates],
     ['comment_pull_request', creates], ['approve_pull_request', creates],
     ['set_pull_request_draft', edits], ['update_bridge', edits]]);
+  const init = await call('POST', '/mcp', {
+    headers: auth, body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'initialize' }),
+  });
+  const { instructions } = JSON.parse(init.body).result;
+  assert.match(instructions, /^Every reply that next_update or read_reply returns/);
+  assert.match(instructions, /pushed message over the event stream/);
+  assert.match(instructions, /as written, not paraphrased or summarized, before any other bridge/);
+  assert.match(instructions, /one session at a time; grouping is an order, not a summary/);
+  assert.match(instructions, /closing paragraph holding the cursor.*never read aloud\.$/);
+  const nextUpdate = JSON.parse(list.body).result.tools.find(t => t.name === 'next_update');
+  assert.match(nextUpdate.description, /Say every reply the answer carries to the user as written, /);
+  assert.match(nextUpdate.description, /grouping is an order, not a summary/);
+  assert.match(nextUpdate.description, /closing paragraph holding the cursor.*never read any of it aloud/);
   const note = await call('POST', '/mcp', {
     headers: auth, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
   });

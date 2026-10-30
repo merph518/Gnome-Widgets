@@ -39,8 +39,6 @@ export const assumptionSchema = obj({ assumption: str, why: str, impact: str, cl
 export const intakeSchema = (candidates) => obj({
   ...(candidates.length ? { documents: listOf(oneOf(candidates), { minItems: 1 }) } : {}),
   received: strs,
-  missing: strs,
-  missingImpact: str,
   assumptionsToProceed: strs,
 });
 
@@ -82,8 +80,10 @@ export const riskSchema = (ids, risks) => obj({
   rules: keyed('id', ids, { risk: oneOf(risks) }),
 });
 
-export const objectivesSchema = (objectives) => obj({
+export const objectivesSchema = (objectives, { closure = false } = {}) => obj({
   objectives: keyed('objective', objectives, { applicable: { type: 'boolean' }, reason: str }),
+  // Evidence that the change includes the stage closure submit after a FATL downgrade.
+  ...(closure ? { stageClosureAfterDowngrade: { type: 'boolean' }, stageClosureQuote: str } : {}),
 });
 
 /** The kinds of scenario the source can support. The first four are asked for in every inventory. */

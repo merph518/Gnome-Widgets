@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { estimateTokens, ModelError } from './model.mjs';
-import { fill, globFiles } from './config.mjs';
+import { fill, globFiles, RULE_SHAPE } from './config.mjs';
 import * as S from './schemas.mjs';
 import { revisedDate, rulesStale, shapeProblems, uncitedStruck } from './rules.mjs';
 import { readSheet } from './pack.mjs';
@@ -203,10 +203,108 @@ const firstHeading = (text) => (String(text).match(/^#+\s+(.+)$/m)?.[1] ?? '').s
 // ---------------------------------------------------------------------------
 // Intake
 
+// Labels no ordinary sentence starts with: they end a description in any record.
+const ALM_LABELS = new Set(['detected by', 'detected on date', 'detected in release', 'assigned to',
+  'closing date', 'closed in release', 'target release', 'defect id', 'priority', 'severity',
+  'reproducible', 'attachments', 'history']);
+// Words that are also ordinary text: they end a description only when written the way the
+// record writes its own Short and Long Description labels, in bold or as headings.
+const ALM_WORDS = new Set(['status', 'comments', 'comment', 'summary', 'name', 'id', 'subject',
+  'module', 'project', 'owner', 'type']);
+
+/**
+ * The ALM short and long descriptions of a defect record, as one text, or the
+ * whole record when it labels neither. A field is a heading or a `Label:` line
+ * (bold or plain) named "Short Description" or "Long Description"; it runs to
+ * the next heading or the next line that opens another ALM field. A label no
+ * ordinary sentence starts with (Detected By, Priority and the like) opens one
+ * in any record; a common word (Status, Name, Type) opens one only in the
+ * record's own label style when that is bold. Other `Word:` lines stay in the field.
+ */
+export function almDescriptions(record) {
+  const lines = String(record ?? '').split('\n');
+  const field = /^\s*(?:#+\s*)?(?:\*\*)?([A-Za-z][A-Za-z ]*?)\s*(?:\*\*)?\s*(?::\s*(?:\*\*)?\s*(.*))?$/;
+  const styleOf = (line) => (/^\s*#+\s/.test(line) ? 'heading' : line.includes('**') ? 'bold' : 'plain');
+  // The style of the label that opened the field being read.
+  let style = 'plain';
+  const fields = new Map();
+  let current = null;
+  for (const line of lines) {
+    const heading = /^\s*#+\s/.test(line);
+    const match = field.exec(line);
+    const name = match?.[1].trim().toLowerCase();
+    const labeled = match && (heading || match[2] !== undefined);
+    const opens = labeled && (name === 'short description' || name === 'long description'
+      || ALM_LABELS.has(name) || (ALM_WORDS.has(name) && style !== 'plain' && styleOf(line) === style));
+    if (opens && (name === 'short description' || name === 'long description')) {
+      current = name.split(' ')[0];
+      style = styleOf(line);
+      fields.set(current, match[2] ? [match[2]] : []);
+    } else if (opens || heading) {
+      current = null;
+    } else if (current) {
+      fields.get(current).push(line);
+    }
+  }
+  const parts = ['short', 'long'].map((key) => (fields.get(key) ?? []).join('\n').trim())
+    .filter(Boolean);
+  return parts.length ? parts.join('\n\n') : String(record ?? '').trim();
+}
+
+const CAMP_DESIGNS = /^CAMP[\s_-]*Designs$/i;
+const decoded = (text) => { try { return decodeURIComponent(text); } catch { return text; } };
+
+/**
+ * The folders of the SharePoint path a converted document's provenance block
+ * gives, outermost first; the file name is not one of them.
+ */
+function provenanceFolders(text) {
+  const block = /\*\*Document provenance\*\*\s*\n((?:\s*-.*\n?)+)/.exec(String(text));
+  if (!block) return [];
+  return block[1].split('\n').filter((line) => /^\s*-\s*SharePoint\b/i.test(line))
+    .flatMap((line) => {
+      const url = /^.*\]\(([^)\s]+)/.exec(line)?.[1] ?? '';
+      const segments = url.replace(/^(?:[a-z]+:\/\/)?(?:<[^>]*>|[^/]*)/i, '').split('?')[0].split('/').map(decoded);
+      return segments.slice(0, -1);
+    });
+}
+
+/**
+ * What intake received from the documents it was given: the inputs it counts
+ * as received, and the ones it lacks. A document whose provenance path is under
+ * CAMP Designs is the CAMP document, and its revision date is the updated design.
+ * Neither is missing unless the record's descriptions name a CAMP design.
+ */
+export function documentInputs(documents, description = '') {
+  const received = [];
+  const missing = [];
+  const camp = list(documents).filter((doc) => provenanceFolders(doc.text).some((folder) => CAMP_DESIGNS.test(folder.trim())));
+  if (camp.length) {
+    received.push(...camp.map((doc) => `CAMP document: ${doc.name}`));
+    const dated = camp.map((doc) => ({ doc, day: revisedDate(doc.text) })).filter((row) => row.day);
+    if (dated.length) {
+      received.push(...dated.map(({ doc, day }) => `Updated design: ${doc.name}, revised ${day}`));
+    } else {
+      missing.push('Updated design: the CAMP document gives no revision date.');
+    }
+  } else if (/\bCAMP\s+design/i.test(almDescriptions(description))) {
+    // The record points at a CAMP design, and no received document comes from there.
+    missing.push('CAMP document: the record names one, and no received document comes from CAMP Designs.');
+    missing.push('Updated design: no CAMP document was received.');
+  }
+  for (const doc of list(documents)) {
+    if (doc.ruleCode === 'rules-derived') {
+      missing.push(`Business rules for ${doc.name}: none in the rule master, so they are derived from its text.`);
+    }
+  }
+  return { received, missing };
+}
+
 export async function intake(ctx) {
   const { job, config, pack, ref } = ctx;
   const ids = config.idFields;
   const codeMissing = [];
+  const missingFiles = [];
   let candidates = [];
 
   if (job.suite) {
@@ -241,7 +339,8 @@ export async function intake(ctx) {
         ? globFiles(config.root, fill(config.inputs.description, job)) : [];
     ctx.description = descriptionFiles.filter((f) => fs.existsSync(f))
       .map((f) => fs.readFileSync(f, 'utf8')).join('\n\n');
-    pack[ids.description] = ctx.description;
+    // The model reads the whole record; the pack's change description is the ALM fields.
+    pack[ids.description] = almDescriptions(ctx.description);
     if (blank(ctx.description)) codeMissing.push('description');
     if (!job.issue) codeMissing.push('issue-number');
     if (job.docs?.length) {
@@ -269,8 +368,7 @@ export async function intake(ctx) {
     refs: [...ref.core, ref.docs.intake],
     task: `Run Job Intake for this request.${choices.length ? ' Pick every candidate document'
       + ' the change touches: its process descriptions and design specifications.' : ''}`
-      + ' List the inputs received and the inputs missing, what the missing ones leave out,'
-      + ' and the assumptions needed to proceed.',
+      + ' List the inputs received and the assumptions needed to proceed.',
     inputs: [
       ['Request', job.suite ? `Suite pack for ${job.suite}` : `${config.terms.issue} ${job.issue}`
         + (job.change ? `, ${config.terms.change} ${job.change}` : `, no ${config.terms.change}`)],
@@ -284,8 +382,7 @@ export async function intake(ctx) {
   // A description read in parts gives one answer per part; together they are the inventory.
   const union = (key) => [...new Set(answers.flatMap((a) => list(a[key])))];
   const answer = { documents: union('documents'), received: union('received'),
-    missing: union('missing'), assumptionsToProceed: union('assumptionsToProceed'),
-    missingImpact: answers.map((a) => a.missingImpact).filter((t) => !blank(t)).join('\n') };
+    assumptionsToProceed: union('assumptionsToProceed') };
   if (choices.length) ctx.documentPaths = answer.documents.map((doc) => config.at(doc));
 
   if (!job.suite) {
@@ -294,6 +391,7 @@ export async function intake(ctx) {
     for (const file of ctx.documentPaths ?? []) {
       if (!fs.existsSync(file)) {
         codeMissing.push('document-file');
+        missingFiles.push(`Document file not found: ${relative(ctx, file)}`);
         continue;
       }
       const number = ctx.documents.length + 1;
@@ -316,9 +414,16 @@ export async function intake(ctx) {
   const keys = (ctx.documents ?? []).map((doc) => doc.key);
   if (new Set(keys).size !== keys.length) throw new GateError('intake', 'document-key-shared');
 
-  const missing = [...list(answer.missing)];
+  // What is missing is what the documents leave out, never a list of preferred inputs.
+  const fromDocuments = job.suite ? { received: [], missing: [] } : documentInputs(ctx.documents, ctx.description);
+  const READABLE = { 'folder-export': 'Rule export of the suite folder',
+    description: 'Description of the defect or change', 'issue-number': 'Issue number',
+    documents: 'Source documents' };
+  const missing = [...new Set([...codeMissing.filter((code) => code !== 'document-file')
+    .map((code) => READABLE[code] ?? code), ...missingFiles, ...fromDocuments.missing])]
+    .map((text) => `${text.replace(/\.$/, '')}.`);
   pack.intake = {
-    received: list(answer.received),
+    received: [...new Set([...list(answer.received), ...fromDocuments.received])],
     missing,
     authority: [],
     contextOnly: [],
@@ -329,7 +434,7 @@ export async function intake(ctx) {
   };
   if (missing.length) {
     pack.limitations ??= {};
-    pack.limitations['Job Intake'] = answer.missingImpact || 'Some inputs were missing at intake.';
+    pack.limitations['Job Intake'] = `Not received at intake: ${missing.join(' ')}`;
   }
   if (codeMissing.length) {
     throw new GateError('intake', 'missing-inputs', { missing: codeMissing.length });
@@ -715,22 +820,88 @@ export async function phase4(ctx) {
 // ---------------------------------------------------------------------------
 // Phase 5, Testing Objective Selection
 
+const FATL_DOWNGRADE = /\bFATLs?\b[^.\n]{0,80}\bdowngrad|\bdowngrad[^.\n]{0,80}\bFATLs?\b/i;
+const CLOSURE_SUBMIT = /\bstage[ -]closures?\b[^.\n]{0,80}\bsubmi(?:t|ts|tted|tting|ssion)\b|\bsubmi(?:t|ts|tted|tting|ssion)\b[^.\n]{0,80}\bstage[ -]closures?\b/i;
+const INTEGRATION = /^integration\b/i;
+const squash = (text) => String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+/** Whether a text, with its whitespace squashed, holds a FATL downgrade and a stage closure submit. */
+const namesBothTerms = (text) => FATL_DOWNGRADE.test(squash(text)) && CLOSURE_SUBMIT.test(squash(text));
+
+/**
+ * The Direct Change and Indirect Impact rules, as `name. summary` lines, whose
+ * text holds a FATL downgrade and a stage closure submit, which are the only rules
+ * a quote can come from, as many as fit `budget` tokens. The cap is logged.
+ */
+function quotableRules(ctx, budget) {
+  const lines = list(ctx.pack.rules)
+    .filter((rule) => ['Direct Change', 'Indirect Impact'].includes(rule.impact))
+    .map((rule) => `- ${rule.name}. ${rule.summary}`)
+    .filter(namesBothTerms);
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    used += estimateTokens(line);
+    if (used > budget) break;
+    kept.push(line);
+  }
+  if (kept.length < lines.length) {
+    ctx.logs.detail('phase 5: rule lines left out to fit the model',
+      `${lines.length - kept.length} of ${lines.length} rule lines did not fit`);
+  }
+  return kept;
+}
+
+/**
+ * Whether the model's Phase 5 evidence that the change includes the stage
+ * closure submit after a FATL downgrade holds: the answer says so, and its
+ * quote appears word for word (whitespace and case aside) in the record's ALM
+ * descriptions or in a Direct Change or Indirect Impact rule (as `name. summary`),
+ * and holds a FATL downgrade, a stage closure and a submit in the one quote.
+ * Returns { ok, why }.
+ */
+export function integrationEvidence(ctx, answer) {
+  if (answer.stageClosureAfterDowngrade !== true) return { ok: false, why: 'not claimed' };
+  const quote = squash(answer.stageClosureQuote);
+  if (!quote) return { ok: false, why: 'no quote' };
+  const sources = [almDescriptions(ctx.description), ...list(ctx.pack.rules)
+    .filter((rule) => ['Direct Change', 'Indirect Impact'].includes(rule.impact))
+    .flatMap((rule) => [rule.name, rule.summary, `${rule.name}. ${rule.summary}`])];
+  if (!sources.some((source) => squash(source).includes(quote))) {
+    return { ok: false, why: 'quote not in the description or an impacted rule' };
+  }
+  if (!namesBothTerms(quote)) {
+    return { ok: false, why: 'quote lacks a FATL downgrade, a stage closure or a submit' };
+  }
+  return { ok: true, why: 'quoted' };
+}
+
 export async function phase5(ctx) {
   const { pack, ref, job } = ctx;
   const objectives = ctx.builder.OBJECTIVES;
   const refs = [...ref.core, ...ref.chapters('5')];
+  const byImpact = Object.entries(pack.rules.reduce((acc, rule) => ({
+    ...acc, [rule.impact]: (acc[rule.impact] ?? 0) + 1 }), {}))
+    .map(([impact, n]) => `- ${impact}: ${n}`).join('\n');
+  const quotable = job.suite ? [] : quotableRules(ctx, room(ctx, true, refs)
+    - estimateTokens(`${ctx.description}${JSON.stringify(pack.executiveSummary)}${byImpact}`) - 1500);
   const answer = await ask(ctx, {
     phase: 'phase5', step: 'objectives', reasoning: true, refs,
     task: `Decide every one of the ${objectives.length} testing objectives: applicable or not,`
       + ' with a reason each.'
       + (job.suite ? ` This is a suite pack with no change under test, so ${ctx.coreObjective}`
-        + ' is not applicable.' : ''),
-    inputs: [['Change description', ctx.description],
+        + ' is not applicable.'
+        : ' A change makes Integration Testing applicable when the change'
+        + ' includes the stage closure submit after a FATL downgrade. Say whether it does in'
+        + ' stageClosureAfterDowngrade and, when it does, quote in stageClosureQuote, word for'
+        + ' word, the sentence of the description or of a Direct Change or Indirect Impact rule'
+        + ' that says so; the sentence holds the FATL downgrade, the stage closure and the submit.'),
+    // The description is the ALM fields and the rule lines are the rules' own text: the
+    // sentences integrationEvidence accepts a quote from.
+    inputs: [['Change description', job.suite ? ctx.description : almDescriptions(ctx.description)],
+      ['Direct Change and Indirect Impact rules', quotable.join('\n')],
       ['Executive summary', JSON.stringify(pack.executiveSummary)],
-      ['Rules by impact', Object.entries(pack.rules.reduce((acc, rule) => ({
-        ...acc, [rule.impact]: (acc[rule.impact] ?? 0) + 1 }), {}))
-        .map(([impact, n]) => `- ${impact}: ${n}`).join('\n')]],
-    schema: S.objectivesSchema(objectives),
+      ['Rules by impact', byImpact]],
+    schema: S.objectivesSchema(objectives, { closure: !job.suite }),
   });
   const decided = new Map(answer.objectives.map((row) => [row.objective, row]));
   if (objectives.some((objective) => !decided.has(objective))) {
@@ -740,6 +911,16 @@ export async function phase5(ctx) {
   if (job.suite) {
     const core = decided.get(ctx.coreObjective);
     core.applicable = false;
+  } else if (answer.stageClosureAfterDowngrade === true) {
+    const evidence = integrationEvidence(ctx, answer);
+    const integration = decided.get(objectives.find((o) => INTEGRATION.test(o)));
+    if (!evidence.ok) {
+      ctx.logs.detail('phase 5: the stage closure evidence was rejected', evidence.why);
+    } else if (integration && !integration.applicable) {
+      integration.applicable = true;
+      integration.reason = 'The change includes the stage closure submit after a FATL downgrade,'
+        + ' so the window is tested together with the stage it closes.';
+    }
   }
   return { applicable: pack.objectives.filter((row) => row.applicable).length };
 }
@@ -1474,11 +1655,64 @@ export function mergeSuite(ctx) {
 // Phase 8, the builder, with bounded repairs
 
 /**
+ * Drops the assumptions that cite a rule ID the pack does not hold, or a count
+ * of rules or cards the pack does not have. A count is checked against the
+ * pack's totals, its counts by impact, risk, coverage status, derivation and
+ * source document, and its set sizes. Returns how many were dropped.
+ */
+export function dropUnfoundedAssumptions(ctx, pack) {
+  const rules = list(pack.rules);
+  if (!rules.length || !list(pack.assumptions).length) return 0;
+  const shape = ctx?.config?.ruleShape ?? RULE_SHAPE;
+  const known = new Set([...rules.map((r) => r.id), ...list(pack.coverage).map((r) => r.ruleId),
+    ...list(pack.testCards).flatMap((card) => list(card.rules)),
+    ...list(ctx?.documents).flatMap((doc) => list(doc.rules).map((r) => r.rule_id))]);
+  const idPattern = new RegExp(`\\b${String(shape.prefixPattern).replace(/^\^/, '')}[A-Z0-9.-]*?`
+    + `${shape.ruleIdPattern}\\b`, 'g');
+  const tally = (items, key) => Object.values(items.reduce((acc, item) => {
+    const k = String(key(item)); acc[k] = (acc[k] ?? 0) + 1; return acc;
+  }, {}));
+  const cards = list(pack.testCards);
+  const ruleCounts = new Set([rules.length, ...tally(rules, (r) => r.impact),
+    ...tally(rules, (r) => r.risk), ...tally(rules, (r) => r.sourceDocument),
+    ...tally(rules, (r) => r.module), ...tally(list(pack.coverage), (r) => r.status),
+    rules.filter((r) => !String(r.summary ?? '').startsWith(RETIRED_SUMMARY)).length,
+    rules.filter((r) => String(r.summary ?? '').startsWith(RETIRED_SUMMARY)).length]);
+  const cardCounts = new Set([cards.length, ...tally(cards, (c) => c.derivation),
+    ...tally(cards, (c) => c.module), ...list(pack.testSets).map((set) => list(set.cards).length)]);
+  const QUALIFIER = '(?:(?:active|retired|impacted|direct change|indirect impact|regression|not impacted'
+    + '|covered|partially covered|weakly covered|missing|uncovered|high|medium|low|new|existing|business)\\s+)*';
+  const counted = new RegExp(`\\b(\\d+)\\s+${QUALIFIER}(rules?|BRs?|(?:test )?cards?|test cases?)\\b`, 'gi');
+  // A number that names a section, step or page, ends a range, or is a year is not a count.
+  const notCount = (text, index, n) => /\b(?:section|sections|step|steps|page|pages|chapter|row|rows)\s*$/i
+    .test(text.slice(0, index)) || /\d\s*(?:to|through|-|–)\s*$|\bbetween\s+\d+\s+and\s*$/i.test(text.slice(0, index))
+    || (/^(?:19|20)\d\d$/.test(n) && /\b(?:in|since|from|until)\s*$/i.test(text.slice(0, index)));
+  const grounded = (text) => {
+    for (const id of String(text).match(idPattern) ?? []) if (!known.has(id)) return false;
+    for (const { 1: n, 2: noun, index } of String(text).matchAll(counted)) {
+      if (Number(n) === 1 || notCount(text, index, n)) continue;
+      const allowed = /rule|BR/i.test(noun) ? ruleCounts : cardCounts;
+      if (!allowed.has(Number(n))) return false;
+    }
+    return true;
+  };
+  const before = pack.assumptions.length;
+  pack.assumptions = pack.assumptions.filter((a) => {
+    const ok = grounded([a.assumption, a.why, a.impact, a.clarification].filter(Boolean).join(' '));
+    if (!ok) ctx?.logs?.detail?.('assumption dropped: it cites a rule or count the pack does not hold',
+      String(a.assumption));
+    return ok;
+  });
+  return before - pack.assumptions.length;
+}
+
+/**
  * Settles what code can settle before the builder looks: coverage rows that
- * disagree with the cards, a blank assumptions sheet, Direct Change rules no
- * card covers.
+ * disagree with the cards, assumptions citing rules or counts the pack does not
+ * hold, a blank assumptions sheet, Direct Change rules no card covers.
  */
 export function reconcile(ctx, pack) {
+  dropUnfoundedAssumptions(ctx, pack);
   const covered = new Map();
   for (const card of list(pack.testCards)) {
     for (const id of list(card.rules)) {
