@@ -33,6 +33,9 @@ class Titles(unittest.TestCase):
         self.assertEqual(st.split_title("Overmind 2 (working)"), ("Overmind 2", "", "working"))
         self.assertEqual(st.split_title("Login - staging - one"),
                          ("Login - staging", "one", ""))
+        # The number Claude Code adds after a status joins the base.
+        self.assertEqual(st.split_title("Merge (idle) 2"), ("Merge 2", "", "idle"))
+        self.assertEqual(st.split_title("Merge - fix (stuck) 3"), ("Merge 3", "fix", "stuck"))
         # Parentheses that are not one of the statuses stay part of the title.
         self.assertEqual(st.split_title("Overmind (draft)"), ("Overmind (draft)", "", ""))
 
@@ -53,6 +56,12 @@ class Titles(unittest.TestCase):
         self.assertEqual(st.new_title("Overmind 2", "status", "stopped"), "Overmind 2 (stopped)")
         with self.assertRaises(ValueError):
             st.new_title("Overmind 2", "status", "napping")
+
+    def test_a_new_status_replaces_a_numbered_one(self):
+        self.assertEqual(st.new_title("Merge (idle) 2", "status", "stuck"), "Merge 2 (stuck)")
+        self.assertEqual(st.new_title("Merge - fix (stuck) 2", "status", "idle"),
+                         "Merge 2 - fix (idle)")
+        self.assertEqual(st.new_title("Merge (idle) 2", "status", ""), "Merge 2")
 
     def test_a_long_work_name_is_cut_on_a_word_to_leave_room_for_the_status(self):
         title = st.new_title("Overmind 2", "work",

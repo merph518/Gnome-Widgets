@@ -7,7 +7,10 @@
 //                  the user for, and how long ago its transcript last shows a reply and,
 //                  during a turn, a note. A session keeps its number until it ends, and the
 //                  session tools take the number in place of the name, or a nickname given by
-//                  nickname_session, which the listing says. A session in a
+//                  nickname_session, which the listing says. A status the sidebar title ends
+//                  in is dropped from the name; idle and waiting on you give way to the live
+//                  state, and stuck, stopped and waiting on CI are said as "marked" only on
+//                  the idle line, and only while the session is not waiting. A session in a
 //                  worktree on a branch also names the open pull request from that branch
 //                  and the issues it closes, or with no pull request, the In Progress issues
 //                  the branch name carries. gh is asked about each branch at most once a
@@ -74,7 +77,12 @@
 //                  amend the line is a correction to the request in flight, and the answer
 //                  says, from the session's transcript, whether it was taken in mid-turn, ran
 //                  as a turn of its own, or waits for the step in progress to end. With queue
-//                  a request for a busy session is held by the bridge instead of posted
+//                  a request for a busy session is held by the bridge instead of posted. A
+//                  request that names an issue or pull request is checked on GitHub first,
+//                  in the session's repository, and one whose first four named numbers are
+//                  all done is not sent: the answer says what finished it and what the session has open,
+//                  and anyway true sends it. A request that also names open work, or a number
+//                  GitHub cannot check in time, goes out with a note
 //   allow_blocked_call
 //                  lets through a call the auto mode classifier blocked, in two calls like
 //                  run_command. A denial since the session's latest relayed request is told
@@ -244,7 +252,9 @@
 //                  the sessions folder. A name that is empty, another listed session's
 //                  title, or a session number alone is refused first. The session keeps its
 //                  number. With work in place of name the title is the session's base title,
-//                  a dash and the work name, and new work replaces the old work name.
+//                  a dash and the work name, and new work replaces the old work name. A work
+//                  name whose every issue or pull request GitHub says is done is refused
+//                  with the session's open work, unless anyway is true.
 //   nickname_session  gives a session a short nickname, such as "question session", that the
 //                  session tools take in place of its name or number. The numbers file keeps
 //                  it beside the session's number, so it lasts until the session ends, and
@@ -334,12 +344,16 @@
 //                  closes and removes their In Progress label itself.
 //   pull_request_merged
 //                  for "I merged 5222": tells the running session that owns the merged pull
-//                  request, the one whose worktree is on its branch, so it runs its
-//                  post-merge steps, or says no running session owns it. With repo and no
-//                  running session in it, the bridge finds the repository on GitHub and
-//                  finishes the post-merge steps itself. Each merge is told
-//                  once, whichever of this, merge_pull_request, or the merge scan below tells
-//                  it first.
+//                  request so it runs its post-merge steps. The owner is the session whose
+//                  worktree is on its branch, else the one a scan recorded, else the only one
+//                  in the repository that reported it ready or whose checkout moved off its
+//                  branch since the session began. With none found, the answer names the
+//                  sessions working in the repository, and calling again with session tells
+//                  the one picked. With repo and no running session in it, the bridge finds
+//                  the repository on GitHub and finishes the post-merge steps itself. Each
+//                  merge is told once, whichever of this, merge_pull_request, or the merge
+//                  scan, which reads the repositories the running sessions work in too,
+//                  tells it first.
 //   summary        one spoken check-in built from the helpers above: the sessions waiting on
 //                  the user and why, the open pull requests, and then only what changed since
 //                  the last check-in: the sessions whose state moved, the pull requests
@@ -826,6 +840,16 @@ export function sessionRoots(config) {
   return [...new Set([...roots, ...checkouts])];
 }
 
+// The status a session appends in parentheses when it stops or waits, from session_title.py's
+// STATUSES, so a title is read the same way here and there.
+const STATUSES = ['idle', 'waiting on you', 'stuck', 'stopped', 'waiting on CI', 'needs you',
+  'working'];
+// The statuses that give way to the live state, so a listing never says them as "marked".
+const LIVE_STATUSES = ['idle', 'waiting on you'];
+// The status with the number Claude Code may add after it to a title another session holds:
+// "Merge (idle) 2". Group 1 is the status and group 2 the number.
+const NUMBERED_STATUS = new RegExp(`\\s+\\((${STATUSES.join('|')})\\)(\\s+\\d+)?$`);
+
 // Claude Code keeps one file per running session in its sessions folder, named for the
 // process id. It carries the title shown in the app's sidebar, the inbox socket, the working
 // directory and whether a turn is running. The .key files beside them hold secrets and are
@@ -862,9 +886,17 @@ export function listSessions({ sessionsDir, procDir, roots, appSessionsDir, brid
     if (!running && appArchived(entry.hostSessionId, appSessionsDir, entry.sessionId, folders)) {
       continue;
     }
+    // The sidebar title can end in a status a session wrote when it stopped or waited, which
+    // goes stale as the session moves on. The name leaves it off, sidebar keeps the title as
+    // the sidebar shows it, and marked holds the status.
+    const raw = String(entry.name ?? '').trim();
+    const found = raw.match(NUMBERED_STATUS);
     sessions.push({
       key,
-      name: String(entry.name ?? '').trim() || path.basename(cwd),
+      name: (found ? `${raw.slice(0, found.index).trim()}${found[2] ?? ''}` : raw)
+        || path.basename(cwd),
+      sidebar: raw,
+      marked: found?.[1] ?? '',
       busy: entry.status === 'busy',
       background: entry.kind === 'bg',
       // A session the Claude desktop app runs, not one started from the command line.
@@ -879,14 +911,19 @@ export function listSessions({ sessionsDir, procDir, roots, appSessionsDir, brid
       socket,
     });
   }
-  // Two sessions with one name are told apart by a number, in process id order. One whose
-  // name gets the number keeps its sidebar title as title.
+  // Two sessions with one name are told apart by a number, in process id order. A number
+  // that another session's name already holds is skipped, so no two names are alike.
+  const taken = new Set(sessions.map(s => s.name.toLowerCase()));
   const seen = new Map();
   for (const s of sessions.sort((a, b) => Number(a.key) - Number(b.key))) {
     const base = s.name.toLowerCase();
-    const count = (seen.get(base) ?? 0) + 1;
+    let count = (seen.get(base) ?? 0) + 1;
+    if (count > 1) {
+      while (taken.has(`${base} ${count}`)) count += 1;
+      taken.add(`${base} ${count}`);
+      s.name = `${s.name} ${count}`;
+    }
     seen.set(base, count);
-    if (count > 1) Object.assign(s, { title: s.name, name: `${s.name} ${count}` });
   }
   return sessions;
 }
@@ -2570,11 +2607,19 @@ export function repoOf(url) {
   return found ? `${found[1]}/${found[2]}`.toLowerCase() : null;
 }
 
-// What a session's checkout is, read from its git files without running git: the branch it
-// is on, null for a detached head, and the repository its origin remote names. .git is the
-// folder in the main checkout and, in a worktree, a file naming the worktree's folder, whose
-// commondir names the folder that holds the config. null for a folder that is no checkout.
-export function checkoutOf(cwd) {
+// The host a remote URL names, in lower case without a port, or null: git@host:o/r.git,
+// ssh://git@host:22/o/r and https://host/o/r all name host.
+function hostOf(url) {
+  const found = String(url ?? '').trim().match(
+    /^(?:[a-z+]+:\/\/)?(?:[^@\s/]+@)?([^:\s/]+)(?::|\/)/i);
+  return found ? found[1].toLowerCase() : null;
+}
+
+// A checkout's git folder and the folder that holds the shared git files, as { gitDir, common },
+// read from its git files without running git. .git is the folder in the main checkout and, in
+// a worktree, a file naming the worktree's folder, whose commondir names the common folder.
+// null for a folder that is no checkout.
+function gitDirsOf(cwd) {
   let gitDir = path.join(String(cwd ?? ''), '.git');
   try {
     if (fs.statSync(gitDir).isFile()) {
@@ -2586,16 +2631,45 @@ export function checkoutOf(cwd) {
     return null;
   }
   const named = readText(path.join(gitDir, 'commondir')).trim();
-  const common = named ? path.resolve(gitDir, named) : gitDir;
+  return { gitDir, common: named ? path.resolve(gitDir, named) : gitDir };
+}
+
+// What a session's checkout is, read from its git files without running git: the branch it
+// is on, null for a detached head, the repository its origin remote names, and that remote's
+// host. null for a folder that is no checkout.
+export function checkoutOf(cwd) {
+  const dirs = gitDirsOf(cwd);
+  if (!dirs) return null;
+  const { gitDir, common } = dirs;
   const config = readText(path.join(common, 'config'));
   const origin = config.split(/^\s*\[/m).find(section => /^remote\s+"origin"\s*\]/.test(section));
+  const url = origin?.match(/^\s*url\s*=\s*(.+)$/m)?.[1];
   return {
     branch: readText(path.join(gitDir, 'HEAD')).match(/^ref: refs\/heads\/(.+)$/m)?.[1]?.trim()
       || null,
-    repo: repoOf(origin?.match(/^\s*url\s*=\s*(.+)$/m)?.[1]),
+    repo: repoOf(url),
+    host: hostOf(url),
     // The main checkout's folder, the one that holds the shared git folder.
     toplevel: path.dirname(common),
+    // This checkout's own git folder, which holds its HEAD and the reflog of that HEAD.
+    gitDir,
   };
+}
+
+// The commit a checkout's local branch points at, from its loose ref and then packed-refs, or
+// null when the checkout, the branch or its ref cannot be read. base names another ref folder,
+// such as refs/remotes/origin for the branch as last fetched or pushed.
+export function branchTip(cwd, branch, base = 'refs/heads') {
+  const dirs = gitDirsOf(cwd);
+  if (!dirs || !branch || branch.includes('..')) return null;
+  const sha = /^[0-9a-f]{7,64}$/i;
+  const loose = readText(path.join(dirs.common, ...base.split('/'), branch)).trim();
+  if (sha.test(loose)) return loose;
+  for (const line of readText(path.join(dirs.common, 'packed-refs')).split('\n')) {
+    const [id, ref] = line.trim().split(/\s+/);
+    if (ref === `${base}/${branch}` && sha.test(id)) return id;
+  }
+  return null;
 }
 
 // The branch a session's checkout is on, or null for a detached head or no checkout.
@@ -2761,8 +2835,114 @@ const REQUEST_ISSUE = new RegExp('(?:#\\d{3,6}|\\bissues?[\\s-]*#?\\d{3,6}'
 const requestIssues = text => [...new Set([...String(text ?? '').matchAll(REQUEST_ISSUE)]
   .flatMap(found => found[0].match(/\d{3,6}/g).map(Number)))];
 
+// The issues and pull requests a request names: #5190, issue 5190, PR 5200, pull request 5200,
+// and each number of a list after one of those words, as in "PRs 5200 and 5201".
+const REQUEST_ITEM = new RegExp('(?:(?<!\\w)#\\d{3,6}'
+  + '|\\b(?:issues?|prs?|pull[\\s-]+requests?)[:\\s-]*#?\\d{3,6}'
+  + '(?:(?:\\s*,\\s*(?:(?:and|or|&)\\s*)?|\\s+(?:and|or|&)\\s+)#?\\d{3,6})*)(?![a-z0-9])', 'gi');
+// At most this many are checked, so a request that lists many costs one short wait.
+const MAX_CHECKED_ITEMS = 4;
+export const requestItems = text => [...new Set([...String(text ?? '').matchAll(REQUEST_ITEM)]
+  .flatMap(found => found[0].match(/\d{3,6}/g).map(Number)))]
+  .filter(number => number > 0).slice(0, MAX_CHECKED_ITEMS);
+
 const numbersIn = (text, pattern) =>
   [...new Set([...String(text ?? '').matchAll(pattern)].map(found => Number(found[1])))];
+
+// How long a request waits for GitHub to say whether the work it names is still open, before
+// it goes out unchecked.
+const SEND_CHECK_MS = 4000;
+// What GitHub says of one issue or pull request number: its state, and why an issue closed.
+const ITEM_STATE_QUERY = 'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,'
+  + 'name:$name){issueOrPullRequest(number:$n){__typename ... on Issue{state stateReason} '
+  + '... on PullRequest{state mergedAt}}}}';
+
+// promise's answer, or fallback once waitMs has passed.
+function within(promise, waitMs, fallback) {
+  let timer;
+  const late = new Promise(resolve => { timer = setTimeout(() => resolve(fallback), waitMs); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+// What GitHub says of number in the session's repository, as { number, state, text }: state
+// done with what finished it, open, or unknown when GitHub could not say. Never throws.
+async function itemVerdict(number, cwd, tracker) {
+  const unknown = { number, state: 'unknown' };
+  let item;
+  try {
+    const answer = JSON.parse(await tracker.gh({ cwd, args: ['api', 'graphql',
+      '-F', 'owner={owner}', '-F', 'name={repo}', '-F', `n=${number}`,
+      '-f', `query=${ITEM_STATE_QUERY}`] }));
+    item = answer?.data?.repository?.issueOrPullRequest;
+  } catch {
+    return unknown;
+  }
+  if (!item) return unknown;
+  const open = { number, state: 'open' };
+  if (item.__typename === 'PullRequest') {
+    if (item.state === 'MERGED') {
+      return { number, state: 'done', text: `pull request ${number} merged`
+        + `${item.mergedAt ? ` on ${spokenDate(item.mergedAt)}` : ''}` };
+    }
+    return item.state === 'CLOSED'
+      ? { number, state: 'done', text: `pull request ${number} was closed without merging` }
+      : open;
+  }
+  if (item.state === 'CLOSED') {
+    return { number, state: 'done', text: `issue ${number} is closed`
+      + `${item.stateReason === 'NOT_PLANNED' ? ' as not planned' : ''}` };
+  }
+  return open;
+}
+
+// Asks GitHub, in the session's repository, about each issue or pull request the text names.
+// null when the text names none or the session's folder is no checkout of a repository; else
+// { done, open, unknown }: what finished each named item, how many are open, and the numbers
+// GitHub could not say about, each one that did not answer within waitMs. The answer is read then, never from
+// the bridge's cache.
+export async function checkWork(text, session, tracker, { waitMs = SEND_CHECK_MS } = {}) {
+  const numbers = requestItems(text);
+  if (numbers.length === 0 || !checkoutOf(session.cwd)?.repo) return null;
+  // Each number has its own deadline, so one slow read leaves the others' answers standing.
+  const verdicts = await Promise.all(numbers.map(number =>
+    within(itemVerdict(number, session.cwd, tracker), waitMs, { number, state: 'unknown' })));
+  return {
+    done: verdicts.filter(v => v.state === 'done').map(v => v.text),
+    open: verdicts.filter(v => v.state === 'open').length,
+    unknown: verdicts.filter(v => v.state === 'unknown').map(v => v.number),
+  };
+}
+
+// What the session works on now, as a sentence, or '' when GitHub did not say in time.
+async function ownWorkText(session, tracker, waitMs) {
+  try {
+    const work = await within(sessionWork([session], tracker), waitMs, null);
+    // A session with no entry is on the main branch, and one whose lookup failed is unknown:
+    // neither is said to own nothing.
+    const entry = work?.get(session.key);
+    if (!entry || entry.lookupFailed || entry.issuesUnknown) return '';
+    const parts = [...(entry.pull ? [`pull request ${entry.pull.number}`] : []),
+      ...entry.issues.map(number => `issue ${number}`)];
+    return parts.length ? `${session.name}'s own open work is ${parts.join(' and ')}.`
+      : `${session.name} owns no open work.`;
+  } catch {
+    return '';
+  }
+}
+
+// The words after a check GitHub could not finish, or '' when it said about every number.
+const unknownNote = check => [
+  check?.done.length && (check.open || check.unknown.length)
+    ? ` It names work that is done, ${andList(check.done)}; the request went because it also `
+      + 'names work that is open or could not be checked.' : '',
+  check?.unknown.length
+    ? ` GitHub could not say whether ${check.unknown.join(' and ')} is still open, so the `
+      + 'request went without that check.' : '',
+].join('');
+// Whether a check found finished work and nothing else among the numbers a request names: no
+// open work, and no number GitHub could not say about.
+const onlyDone = check => Boolean(check?.done.length) && check.open === 0
+  && check.unknown.length === 0;
 
 // How long what gh said about a branch's pull request, or the In Progress issues, is kept,
 // so list_sessions and needs_attention ask gh about each at most once a minute.
@@ -3297,7 +3477,7 @@ const readyMs = at => (at < 1e11 ? at * 1000 : at);
 // per call: the ready lines the Stop hooks left that the bridge has not scanned yet, and the
 // ones ready.json holds as announced, each as { number, at, repo } with the time in
 // milliseconds. A ready line names no repository; it is the session's own.
-function readyIndex(paths) {
+export function readyIndex(paths) {
   const found = new Map();
   const add = (key, item) => found.set(key, [...(found.get(key) ?? []), item]);
   const folder = path.join(paths.bridgeDir, 'ready');
@@ -3306,23 +3486,26 @@ function readyIndex(paths) {
       const [, owner, number] = file.match(READY_FILE) ?? [];
       if (!owner) continue;
       const at = Number(readJson(path.join(folder, file), null)?.at) || 0;
-      add(owner, { number: Number(number), at: readyMs(at), repo: null });
+      add(owner, { number: Number(number), at: readyMs(at), repo: null, head: null });
     }
   } catch {
     // No ready lines waiting.
   }
   for (const [id, held] of Object.entries(readReady(paths.readyFile).announced)) {
     if (!held?.key) continue;
-    add(held.key, { number: Number(String(id).split('#').pop()), at: readyMs(Number(held.at) || 0),
-      repo: held.repo ?? null });
+    // The time the session reported it, when the record keeps it, else when the bridge
+    // announced it; and the commit it reported ready.
+    add(held.key, { number: Number(String(id).split('#').pop()),
+      at: readyMs(Number(held.reportedAt ?? held.at) || 0), repo: held.repo ?? null,
+      head: held.head ?? null });
   }
   return found;
 }
 
 // The pull requests the session reported ready, newest first: the ones in its own repository
 // from since it started, so a key a later session reuses does not inherit an earlier one's.
-function readyReported(index, session) {
-  const repo = checkoutOf(session.cwd)?.repo ?? null;
+function readyReported(index, session, checkout = checkoutOf(session.cwd)) {
+  const repo = checkout?.repo ?? null;
   return (index.get(session.key) ?? [])
     .filter(item => (item.repo === null || item.repo === repo)
       && (session.startedAt == null || item.at >= session.startedAt))
@@ -5642,6 +5825,9 @@ export const TOOLS = [
     description: 'List the Claude Code sessions running on the workstation that the voice '
       + 'bridge can reach, by their numbers and their titles in the app sidebar, whether each '
       + 'is busy, and how long ago each last replied and, during a turn, last wrote a note. '
+      + 'A name leaves off a status the sidebar title ends in, such as (idle); stuck, stopped '
+      + 'or waiting on CI, a status the session set itself, is said as ", marked <status>" '
+      + 'only while the session is idle and not waiting. '
       + 'A session keeps its number until it ends, whatever else starts or ends. A session '
       + 'working an issue or a pull request names it, such as working issue 5190, pull '
       + 'request 5200. An idle session says whether its last turn finished or stalled, and '
@@ -5734,7 +5920,11 @@ export const TOOLS = [
       + 'the session is still working if read_reply says so. With '
       + 'amend true the text goes as a correction to the request the session is working on '
       + '("actually", "instead", "also make sure to"): a busy session takes it in at its next '
-      + 'step without stopping, and the answer says whether it did.',
+      + 'step without stopping, and the answer says whether it did. A request that names an '
+      + 'issue or pull request is checked on GitHub first: when the first four numbers it '
+      + 'names are all already done, nothing is sent and the answer says what finished it and what the '
+      + 'session works on, so say that and suggest open work instead. A request that also '
+      + 'names open work, or a number GitHub could not check, goes out with a note.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -5748,6 +5938,11 @@ export const TOOLS = [
           type: 'boolean',
           description: 'True when the user wants the request to go after the session finishes '
             + 'what it is doing ("queue it", "after that", "next")',
+        },
+        anyway: {
+          type: 'boolean',
+          description: 'True only after the user said to send the request although the issue or '
+            + 'pull request it names is already done',
         },
       },
       required: ['session', 'text'],
@@ -6098,7 +6293,9 @@ export const TOOLS = [
       + 'session is working on, pass work in place of name: the title becomes its base '
       + 'title, a dash, and the work name, such as "Overmind 2 - read server window". New '
       + 'work replaces the old work name rather than adding to it, and an empty work name '
-      + 'takes it away. The session still answers to its base title and its number.',
+      + 'takes it away. The session still answers to its base title and its number. A work '
+      + 'name that names an issue or pull request GitHub says is done is refused, with the '
+      + 'work the session has open.',
     // Writes to the session, but only a title another rename can set back.
     annotations: UNDOABLE_EDIT,
     inputSchema: {
@@ -6108,6 +6305,11 @@ export const TOOLS = [
         name: { type: 'string', description: 'The new title, in the user\'s words' },
         work: { type: 'string', description: 'A short name for the work, a few words, kept '
           + 'after the session\'s base title; used in place of name' },
+        anyway: {
+          type: 'boolean',
+          description: 'True only after the user said to use the work name although the issue '
+            + 'or pull request it names is already done',
+        },
       },
       required: ['session'],
     },
@@ -6202,7 +6404,9 @@ export const TOOLS = [
   },
   {
     name: 'read_pull_request',
-    description: 'Read one pull request by number. The overview gives its title, state, '
+    description: 'Check one pull request\'s current state on GitHub by number: open, merged or '
+      + 'closed, draft, waiting on review or changes requested, and whether its checks pass. '
+      + 'The overview gives its title, state, '
       + 'labels, size, review decision, and how many review threads and checks are open or '
       + 'failing. Ask for part diff to hear each changed file with its lines added and removed '
       + 'and where it changes, part comments for the review threads, open ones first, with '
@@ -6278,6 +6482,12 @@ export const TOOLS = [
           description: 'The repository, as owner/name or its name alone; a running session '
             + 'works in it, or it is one the user or an organization of the user owns on '
             + 'GitHub. Left out, the bridge\'s own repository',
+        },
+        session: {
+          type: 'string',
+          description: 'The session to tell, when the answer named the sessions working in '
+            + 'the repository because none was found to own the pull request. It is told '
+            + 'whether or not another heard before',
         },
       },
       required: ['number'],
@@ -6661,12 +6871,22 @@ export const TOOLS = [
   {
     name: 'summary',
     description: 'One check-in on everything at once: which sessions wait on the user and '
-      + 'why, and the open pull requests, including ones a session reported ready for review '
-      + 'that lack the review label, with the repository when it is not the bridge\'s own, '
-      + 'then what changed since the last check-in: the '
-      + 'sessions whose state moved, the pull requests merged, and the workflow runs that '
-      + 'finished. With no check-in in the last 24 hours, it reads who is working, the merges '
-      + 'since the start of yesterday, and the latest runs instead. '
+      + 'why, and the pull requests waiting on the user\'s review: every open one with the '
+      + 'review label in the bridge\'s own repository and in each repository a running '
+      + 'session works in, plus ones a session reported ready that lack the label, each '
+      + 'named with its repository when it is not the bridge\'s own. A pull request whose '
+      + 'session is working and has commits on its branch that the pull request lacked when '
+      + 'it was reported ready is named apart as still being reworked, not counted as '
+      + 'waiting. Without a report, the comparison is with the branch as last fetched or '
+      + 'pushed, else with the head the pull request has on GitHub; a session that only '
+      + 'pulled a change made on GitHub is not reworking. A repository that cannot be '
+      + 'read is named as such. The total of open pull requests is the bridge\'s own '
+      + 'repository\'s alone, and says so, while the waiting count spans all the '
+      + 'repositories, so the total can be smaller than the count. Then what changed since '
+      + 'the last check-in: the sessions whose state moved, the pull requests merged, and '
+      + 'the workflow runs that finished. With no check-in in the last 24 hours, it reads '
+      + 'who is working, the merges since the start of yesterday, and the latest runs '
+      + 'instead. '
       + 'Use it for "what needs me" or "catch me up"; pass full true when the user asks for '
       + 'the whole list again. Read-only; nothing is sent to a session.',
     inputSchema: {
@@ -6703,7 +6923,8 @@ function runFile(file, args, options) {
       // killed marks a timeout, after which the work gh started may still finish. Node also
       // kills a child that answers with too much output, which is no timeout.
       const killed = error.killed && error.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-      const fail = message => reject(Object.assign(new Error(message), { killed }));
+      const fail = message => reject(Object.assign(new Error(message),
+        { killed, code: error.code }));
       const said = String(stderr).trim().split('\n')[0];
       if (said) return fail(said);
       const known = { ENOENT: 'is not installed or the start folder is missing',
@@ -6975,11 +7196,12 @@ export async function listIssues(args, tracker) {
 async function pullListing({ cwd, gh }) {
   const list = async extra => JSON.parse(await gh({
     cwd, args: ['pr', 'list', '--state', 'open', '--limit', String(TRACKER_LIST_LIMIT),
-      '--json', 'number,title,headRefName,labels', ...extra],
+      '--json', 'number,title,headRefName,labels,url', ...extra],
   }) || '[]');
   const { items: pulls, full } = await labeledFirst(list, REVIEW_LABEL);
   if (pulls.length === 0) {
-    return { summary: 'There are no open pull requests.', lines: [], waiting: [] };
+    return { summary: 'There are no open pull requests.', lines: [], waiting: [], total: 0,
+      full };
   }
   const { flagged, rows } = flaggedFirst(pulls, REVIEW_LABEL);
   const lines = rows.map(({ item: p, isFlagged, labelText }) => {
@@ -6989,7 +7211,8 @@ async function pullListing({ cwd, gh }) {
   const atLeast = full ? 'At least ' : '';
   const summary = `${atLeast}${plural(pulls.length, 'open pull request')}, `
     + `${flagged} waiting on your review.`;
-  return { summary, lines, waiting: rows.slice(0, flagged).map(row => row.item) };
+  return { summary, lines, waiting: rows.slice(0, flagged).map(row => row.item),
+    total: pulls.length, full };
 }
 
 export async function listPullRequests(args, tracker) {
@@ -7282,46 +7505,241 @@ async function summaryPart(read, what) {
 // The open pull requests the running sessions reported ready for the user's review, each read
 // through gh in its session's own folder, as { number, title, repo }. A pull request a session
 // reported ready may lack the review label, so the open list alone misses it. One that is no
-// longer open, or that gh cannot read, is left out, and one several sessions reported counts
-// once.
+// longer open is left out, and one several sessions reported counts once. A read gh cannot
+// answer is left out too, and the list's failed says how many, since each may have been open.
+// index is the sessions' ready reports, as readyIndex reads them, and checkouts each session's
+// checkout by key.
 const REPORTED_PER_SESSION = 5;
-async function reportedPulls(sessions, paths, tracker) {
-  const index = readyIndex(paths);
-  const asked = sessions.flatMap(session => readyReported(index, session)
-    .slice(0, REPORTED_PER_SESSION).map(number => ({ session, number })));
+async function reportedPulls(sessions, index, tracker, renamed, checkouts) {
+  const asked = sessions.flatMap(session => readyReported(index, session,
+    checkouts.get(session.key)).slice(0, REPORTED_PER_SESSION)
+    .map(number => ({ session, number })));
   const read = await Promise.all(asked.map(({ session, number }) => cachedRead(tracker,
     `reported\0${session.cwd}\0${number}`, async () => JSON.parse(await tracker.gh({
       cwd: session.cwd, args: ['pr', 'view', String(number), '--json', 'number,title,state,url'],
     }))).then(pull => pull, () => null)));
   const seen = new Set();
-  return read.flatMap((pull, i) => {
+  const pulls = read.flatMap((pull, i) => {
     if (pull?.state !== 'OPEN') return [];
-    const repo = repoOf(pull.url) ?? checkoutOf(asked[i].session.cwd)?.repo ?? null;
+    const repo = repoOf(pull.url)
+      ?? nowRepo(checkouts.get(asked[i].session.key)?.repo, renamed) ?? null;
     const id = `${repo}#${pull.number}`;
     if (seen.has(id)) return [];
     seen.add(id);
     return [{ number: pull.number, title: pull.title, repo }];
   });
+  return Object.assign(pulls, { failed: read.filter(pull => pull === null).length });
 }
 
-// The open pull requests as pullListing reads them, plus the ones sessions reported ready that
-// the review label does not already list, with the repository when it is not the bridge's own.
-async function pullsPart(tracker, reported = []) {
-  const { summary, waiting } = await pullListing(tracker);
-  const own = (tracker.repo ?? checkoutOf(tracker.cwd)?.repo ?? null)?.toLowerCase() ?? null;
-  const labeled = new Set(waiting.map(pull => pull.number));
-  // The labeled list is the bridge's own repository's. With that repository unknown, a
-  // number it lists counts as the same pull request whatever repository the session names.
-  const listed = pull => labeled.has(pull.number)
-    && (own === null || !pull.repo || pull.repo.toLowerCase() === own);
-  const extra = reported.filter(pull => !listed(pull));
-  let text = waiting.length ? `${summary} Waiting on you: ${spokenPulls(waiting)}.` : summary;
-  if (extra.length) {
-    const named = spokenFew(extra, pull => `${pull.number}, ${spoken(pull.title)}`
-      + (pull.repo && pull.repo.toLowerCase() !== own ? `, in ${pull.repo.split('/')[1]}` : ''));
-    text += ` Reported ready by their sessions: ${named}.`;
+// The most repositories besides the bridge's own whose labeled pull requests the summary reads.
+const SUMMARY_REPOS = 8;
+
+// The hosts gh is set up for: GH_HOST and the top-level keys of its hosts.yml, in lower case.
+// gh keeps its files in GH_CONFIG_DIR, else gh under XDG_CONFIG_HOME, else ~/.config/gh. Read
+// once per summary.
+function ghHosts() {
+  const { GH_CONFIG_DIR, XDG_CONFIG_HOME, GH_HOST } = process.env;
+  const dir = GH_CONFIG_DIR
+    || path.join(XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'gh');
+  // GH_HOST may be written with a scheme or a trailing slash.
+  const set = GH_HOST?.trim().replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  const hosts = new Set(set ? [set] : []);
+  for (const line of readText(path.join(dir, 'hosts.yml')).split('\n')) {
+    const key = line.match(/^([^\s#:][^\s:]*):\s*(?:#.*)?$/)?.[1];
+    if (key) hosts.add(key.toLowerCase());
   }
-  return text;
+  return hosts;
+}
+
+// The host gh reads a remote's repository from, or null for one gh is not set up for.
+// github.com, its ssh.github.com endpoint, a github.com-* alias and an ssh alias with no dot
+// all stand for github.com; a host in known, the hosts gh is set up for, stands for itself.
+function readHost(host, known) {
+  if (!host || !host.includes('.')) return 'github.com';
+  if (host === 'github.com' || host === 'ssh.github.com' || host.startsWith('github.com-')) {
+    return 'github.com';
+  }
+  return known.has(host) ? host : null;
+}
+
+// The repositories the running sessions work in other than the bridge's own, each once by its
+// current owner/name, as { repo, host } in the order the sessions list them. renamed maps an
+// old name to the current one, so a clone made under an old name is the repository it is now.
+// A checkout whose host gh is not set up for is left out.
+function otherRepos(sessions, own, renamed, checkouts, known) {
+  const seen = new Map();
+  for (const session of sessions) {
+    const checkout = checkouts.get(session.key);
+    const repo = checkout?.repo && nowRepo(checkout.repo, renamed);
+    const host = readHost(checkout?.host, known);
+    if (repo && host && repo.toLowerCase() !== own && !seen.has(repo.toLowerCase())) {
+      seen.set(repo.toLowerCase(), { repo, host });
+    }
+  }
+  return [...seen.values()];
+}
+
+// A failure's first line as a sentence, or a plain reason when it said nothing.
+function oneSentence(error) {
+  const first = String(error?.message ?? error ?? '').trim().split('\n')[0].trim();
+  if (!first) return 'gh gave no reason.';
+  return /[.!?]$/.test(first) ? first : `${first}.`;
+}
+
+// The open pull requests carrying the review label in each of the repositories, read through
+// GH_REPO so no checkout is needed, as { repo, pulls, full } for each one read, full when the
+// page was full and there may be more, and { repo, error } for one gh could not read. A host
+// other than github.com leads the name gh is given. Each read is kept for a minute.
+function labeledIn(repos, tracker) {
+  return Promise.all(repos.map(({ repo, host }) => {
+    const named = host === 'github.com' ? repo : `${host}/${repo}`;
+    return cachedRead(tracker, `labeled\0${named.toLowerCase()}`,
+      async () => JSON.parse(await tracker.gh({
+        cwd: tracker.cwd, repo: named, args: ['pr', 'list', '--state', 'open', '--label',
+          REVIEW_LABEL, '--limit', String(TRACKER_LIST_LIMIT), '--json', 'number,title,url'],
+      }) || '[]')).then(pulls => ({ repo, pulls, full: pulls.length >= TRACKER_LIST_LIMIT }),
+    error => ({ repo, error: oneSentence(error) }));
+  }));
+}
+
+// Whether a checkout's tip has commits the baseline lacks, by asking git whether the tip is an
+// ancestor of the baseline: exit 0 says it is, so the baseline already has everything the tip
+// has, as when the session fetched or pulled a change made on GitHub; exit 1 says it is not.
+// Any other failure, such as a baseline commit the checkout does not have, is no answer, and
+// reads as not ahead.
+export async function tipAhead(cwd, tip, baseline, git = runGit) {
+  if (tip === baseline) return false;
+  try {
+    await git({ cwd, args: ['merge-base', '--is-ancestor', tip, baseline] });
+    return false;
+  } catch (error) {
+    return error?.code === 1;
+  }
+}
+
+// The open pull requests a working session is reworking, by lowercase "owner/name#number". A
+// session reworks its pull request when its checkout's tip of the pull request's branch has
+// commits the baseline lacks, so a session that only fetched or pulled a change made on GitHub
+// is not reworking. The baseline is the commit the pull request was reported ready at. For one
+// never reported, it is the branch as last fetched or pushed, and when that ref is missing, the
+// commit the pull request has on GitHub. A session busy on an unrelated question has not moved
+// the branch, so its finished pull request stays waiting. A tip that cannot be read is not
+// taken to be a rework. working is the sessions that are busy and not waiting on the user,
+// index the ready reports, and checkouts each session's checkout by key.
+async function reworkedPulls(working, index, tracker, renamed, checkouts, git) {
+  if (working.length === 0) return new Set();
+  const work = await sessionWork(working, tracker).catch(() => new Map());
+  const asked = working.flatMap(session => {
+    const { pull, branch } = work.get(session.key) ?? {};
+    const tip = pull && branchTip(session.cwd, branch);
+    if (!tip) return [];
+    const checkoutRepo = checkouts.get(session.key)?.repo;
+    const repos = [repoOf(pull.url), checkoutRepo].filter(Boolean)
+      .map(repo => nowRepo(repo, renamed));
+    const reportedHead = (index.get(session.key) ?? [])
+      .filter(item => item.number === pull.number && item.head
+        && (item.repo === null || repos.includes(nowRepo(item.repo, renamed))))
+      .sort((a, b) => b.at - a.at)[0]?.head;
+    const baseline = reportedHead ?? branchTip(session.cwd, branch, 'refs/remotes/origin')
+      ?? pull.headRefOid;
+    if (!baseline || baseline === tip) return [];
+    const repo = repoOf(pull.url) ?? nowRepo(checkoutRepo, renamed);
+    return [{ cwd: session.cwd, tip, baseline, id: `${repo?.toLowerCase() ?? ''}#${pull.number}` }];
+  });
+  const ahead = await Promise.all(asked.map(({ cwd, tip, baseline }) =>
+    tipAhead(cwd, tip, baseline, git)));
+  return new Set(asked.filter((_, i) => ahead[i]).map(({ id }) => id));
+}
+
+// The open pull requests waiting on the user's review, across the bridge's own repository and
+// every repository the running sessions work in. Those are the ones carrying the review label
+// and the ones sessions reported ready, each repository and number once, by the repository's
+// current name. A pull request whose session has moved its branch since reporting it ready is
+// named apart as still being reworked and not counted. The total of open pull requests is the
+// bridge's own repository's, and is given only when that repository was read; the waiting
+// count spans all the repositories read, and says so when it counts a pull request from
+// outside the bridge's own, so it can exceed the total. A repository gh cannot read is named
+// as such, and the count then reads at least. A pull request outside the bridge's own
+// repository is named with its repository. reported is a promise of the reported pull
+// requests, read alongside the repositories.
+async function pullsPart(tracker, sessions, reported,
+  { working, renamed, index, checkouts, hosts, git }) {
+  const found = tracker.repo ?? checkoutOf(tracker.cwd)?.repo ?? null;
+  const ownRepo = found && nowRepo(found, renamed);
+  const own = ownRepo?.toLowerCase() ?? null;
+  const others = otherRepos(sessions, own, renamed, checkouts, hosts);
+  const [listing, away, reworked, extraRead] = await Promise.all([
+    pullListing(tracker).catch(error => ({ error: oneSentence(error) })),
+    labeledIn(others.slice(0, SUMMARY_REPOS), tracker),
+    reworkedPulls(working, index, tracker, renamed, checkouts, git),
+    reported,
+  ]);
+  // With the bridge's own repository unknown, a pull request with no repository stands for it.
+  const idOf = pull => `${(pull.repo ?? own ?? '').toLowerCase()}#${pull.number}`;
+  const seen = new Set();
+  const fresh = pulls => pulls.filter(pull => !seen.has(idOf(pull)) && seen.add(idOf(pull)));
+  const labeled = fresh([
+    ...(listing.waiting ?? []).map(pull => ({
+      number: pull.number, title: pull.title, repo: repoOf(pull.url) ?? ownRepo, bridge: true })),
+    ...away.flatMap(({ repo, pulls = [] }) => pulls.map(pull => ({
+      number: pull.number, title: pull.title, repo: repoOf(pull.url) ?? repo }))),
+  ]);
+  const extra = fresh(extraRead);
+  const isReworked = pull => reworked.has(idOf(pull));
+  const ready = labeled.filter(pull => !isReworked(pull));
+  const readyReported = extra.filter(pull => !isReworked(pull));
+  const still = [...labeled, ...extra].filter(isReworked);
+  // A pull request from the bridge's own listing is the bridge's own, whatever its name.
+  const outside = pull => !pull.bridge && pull.repo && pull.repo.toLowerCase() !== own;
+  const named = pull => `${pull.number}, ${spoken(pull.title)}`
+    + (outside(pull) ? `, in ${pull.repo.split('/')[1]}` : '');
+  const counted = [...ready, ...readyReported];
+  const unread = [...(listing.error ? [{ repo: ownRepo ?? 'the bridge\'s repository',
+    error: listing.error }] : []), ...away.filter(read => read.error)];
+  // A read that failed or was never made may have held more, and so may a full page.
+  const partial = (listing.waiting?.length ?? 0) >= TRACKER_LIST_LIMIT
+    || away.some(read => read.full) || unread.length > 0 || others.length > SUMMARY_REPOS
+    || (extraRead.failed ?? 0) > 0;
+  const spans = others.length > 0 || counted.some(outside);
+  const everyReadFailed = Boolean(listing.error) && away.every(read => read.error);
+  const waiting = `${partial ? 'at least ' : ''}${counted.length} waiting on your review`
+    + `${spans ? ' across all repositories' : ''}.`;
+  // A count of none that may have missed some is not spoken: the failure lines say so.
+  const noCount = counted.length === 0 && partial;
+  let text = '';
+  if (everyReadFailed && counted.length === 0) {
+    text = '';
+  } else if (listing.error || (listing.total === 0 && (counted.length || still.length))) {
+    text = noCount ? '' : waiting[0].toUpperCase() + waiting.slice(1);
+  } else if (listing.total === 0 && !spans) {
+    text = listing.summary;
+  } else {
+    // The bridge's own total leads when that repository was read and the pull requests named
+    // below do not contradict it by being none of them open.
+    const inOwn = spans && ownRepo ? ` in ${ownRepo.split('/')[1]}` : '';
+    const total = listing.total === 0 ? `There are no open pull requests${inOwn}`
+      : `${listing.full ? 'At least ' : ''}${plural(listing.total, 'open pull request')}${inOwn}`;
+    text = noCount ? `${total}.` : `${total}, ${waiting}`;
+  }
+  const parts = [text];
+  if (ready.length) parts.push(`Waiting on you: ${spokenFew(ready, named)}.`);
+  if (readyReported.length) {
+    parts.push(`Reported ready by their sessions: ${spokenFew(readyReported, named)}.`);
+  }
+  if (still.length) parts.push(`Still being reworked: ${spokenFew(still, named)}.`);
+  for (const { repo, error } of unread) {
+    parts.push(`The pull requests in ${repo.split('/').at(-1)} could not be read: ${error}`);
+  }
+  const lost = extraRead.failed ?? 0;
+  if (lost) {
+    parts.push(`${lost === 1 ? 'A reported pull request' : `${lost} reported pull requests`} `
+      + 'could not be read.');
+  }
+  if (others.length > SUMMARY_REPOS) {
+    const more = others.length - SUMMARY_REPOS;
+    parts.push(`${more} more ${more === 1 ? 'repository' : 'repositories'} not read.`);
+  }
+  return parts.filter(Boolean).join(' ');
 }
 
 // The pull requests merged since the start of yesterday, or with since, those merged after
@@ -7409,14 +7827,16 @@ function runsSince(runs, at, since) {
 // full is not set; otherwise the merged ones go back to the start of yesterday. Each part read
 // in full moves its own mark in paths.checkinFile, so a part that could not be read is read
 // from the same mark next time.
-export async function spokenSummary(sessions, paths, tracker, cache, { full = false } = {}) {
+export async function spokenSummary(sessions, paths, tracker, cache,
+  { full = false, renamed = {}, git = runGit } = {}) {
   const at = tracker.now();
   const before = full ? { merged: null, runs: null, sessions: null } : readCheckin(
     paths.checkinFile, at);
   const attended = withAttention(sessions, paths, at, cache);
   const waiting = waitingLines(attended);
-  const working = attended.filter(({ session, state }) => session.busy && !state)
-    .map(({ session }) => session.name);
+  const workingSessions = attended.filter(({ session, state }) => session.busy && !state)
+    .map(({ session }) => session);
+  const working = workingSessions.map(session => session.name);
   const read = {};
   // A part's mark is the time just before its read, so a merge or run that lands while the
   // read is under way is read again next time rather than missed.
@@ -7427,8 +7847,14 @@ export async function spokenSummary(sessions, paths, tracker, cache, { full = fa
     return text;
   };
   const parts = await Promise.all([
-    summaryPart(async () => pullsPart(tracker,
-      await reportedPulls(sessions, paths, tracker).catch(() => [])), 'open pull requests'),
+    summaryPart(async () => {
+      const index = readyIndex(paths);
+      const checkouts = new Map(sessions.map(session => [session.key, checkoutOf(session.cwd)]));
+      return pullsPart(tracker, sessions,
+        reportedPulls(sessions, index, tracker, renamed, checkouts)
+          .catch(() => Object.assign([], { failed: 1 })),
+        { working: workingSessions, renamed, index, checkouts, hosts: ghHosts(), git });
+    }, 'open pull requests'),
     summaryPart(marked('merged', () => mergedPart(tracker, before.merged)),
       'merged pull requests'),
     summaryPart(marked('runs', () => runsPart(tracker, before.runs)), 'workflow runs'),
@@ -9843,6 +10269,7 @@ const readMerges = file => {
     since: Number.isFinite(held?.since) ? held.since : null,
     owners: isRecord(held?.owners) ? held.owners : {},
     told: isRecord(held?.told) ? held.told : {},
+    ...(isRecord(held?.repos) ? { repos: held.repos } : {}),
     ...(Array.isArray(held?.unowned) ? { unowned: held.unowned } : {}),
   };
 };
@@ -9896,33 +10323,82 @@ const sessionCheckouts = (sessions, roots = DEFAULT_ROOTS, renamed = {}) => {
   });
 };
 
-// The running session whose checkout is on a pull request's branch, in the pull request's
-// own repository, so a branch of the same name in another repository is not it. A checkout
-// whose origin names no repository repoOf can read, such as a local path, is matched by its
-// branch alone only when its main checkout is a configured root, the repository the bridge
-// reads pull requests from.
-function onBranch(pull, checkouts) {
+// Whether a checkout is in the pull request's own repository, so a branch or number of the
+// same name in another repository is not it. A checkout whose origin names no repository repoOf
+// can read, such as a local path, counts only when its main checkout is a configured root, the
+// repository the bridge reads pull requests from.
+function worksIn(checkout, pull) {
   const repo = repoOf(pull.url);
-  const same = c => (c.repo && repo ? c.repo === repo || c.current === repo : c.rooted);
-  return checkouts.find(c => c.branch === pull.headRefName && same(c))?.session ?? null;
+  return checkout.repo && repo ? checkout.repo === repo || checkout.current === repo
+    : checkout.rooted;
 }
 
-// The running session that owns a pull request: the one whose checkout is on its branch,
-// else the one a scan recorded as its owner, while that session still runs.
-function mergeOwner(pull, checkouts, owners) {
-  const held = owners[pull.number];
-  return onBranch(pull, checkouts) ?? checkouts.map(c => c.session)
-    .find(s => held && s.key === held.key && s.startedAt === held.startedAt) ?? null;
+// The running session whose checkout is on a pull request's branch, in the pull request's
+// own repository.
+function onBranch(pull, checkouts) {
+  return checkouts.find(c => c.branch === pull.headRefName && worksIn(c, pull))?.session ?? null;
+}
+
+// How much of the end of a checkout's HEAD reflog is read.
+const REFLOG_TAIL_BYTES = 64 * 1024;
+
+// The branches a checkout moved off or onto since sinceMs, from the tail of its HEAD reflog,
+// which keeps each `checkout: moving from A to B` with the time it happened. A session that
+// reuses one checkout for each issue has left a pull request's branch by the time the pull
+// request merges, and this still names it.
+function branchTrail(checkout, sinceMs) {
+  const branches = new Set();
+  let fd;
+  try {
+    fd = fs.openSync(path.join(checkout.gitDir, 'logs', 'HEAD'), 'r');
+    const { size } = fs.fstatSync(fd);
+    const start = Math.max(0, size - REFLOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    fs.readSync(fd, buffer, 0, buffer.length, start);
+    for (const line of buffer.toString('utf8').split('\n')) {
+      const moved = /> (\d+) [+-]\d{4}\tcheckout: moving from (\S+) to (\S+)$/.exec(line);
+      if (moved && Number(moved[1]) * 1000 >= (sinceMs ?? 0)) {
+        branches.add(moved[2]);
+        branches.add(moved[3]);
+      }
+    }
+  } catch {
+    // No reflog to read.
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return branches;
+}
+
+// The running session that owns a pull request, by the first of these that names exactly one
+// session in the pull request's repository: its checkout is on the pull request's branch; a
+// scan recorded it as the owner under key, while it still runs; it reported the pull request
+// ready, per ready (readyIndex); its checkout's reflog shows it on the branch since it began.
+// Two sessions that tie at a step are not guessed between.
+function mergeOwner(pull, checkouts, { owners = {}, key = pull.number, ready } = {}) {
+  const branch = onBranch(pull, checkouts);
+  if (branch) return branch;
+  const held = owners[key];
+  const recorded = checkouts.map(c => c.session)
+    .find(s => held && s.key === held.key && s.startedAt === held.startedAt);
+  if (recorded) return recorded;
+  const here = checkouts.filter(c => worksIn(c, pull));
+  const only = list => (list.length === 1 ? list[0].session : null);
+  return (ready && only(here.filter(c =>
+    readyReported(ready, c.session).includes(pull.number))))
+    ?? only(here.filter(c => c.gitDir && c.session.startedAt != null
+      && branchTrail(c, c.session.startedAt).has(pull.headRefName)));
 }
 
 // What the owning session is sent: a plain message, not a voice request, so its answer stays
 // in the session.
-export const mergedMessage = pull => `The voice bridge saw pull request ${pull.number}`
-  + `${pull.title ? `, ${pull.title},` : ''} merge. Run your post-merge steps for it now: close `
-  + 'its issue if it is still open, remove In Progress, and start any queued work.';
+export const mergedMessage = (pull, repo) => `The voice bridge saw pull request ${pull.number}`
+  + `${repo ? ` in ${repo}` : ''}${pull.title ? `, ${pull.title},` : ''} merge. Run your `
+  + 'post-merge steps for it now: close its issue if it is still open, remove In Progress, '
+  + 'and start any queued work.';
 
-function postMerged(session, pull, post) {
-  const content = mergedMessage(pull);
+function postMerged(session, pull, post, repo) {
+  const content = mergedMessage(pull, repo);
   return post(session.socket, { type: 'user', message: { role: 'user', content } });
 }
 
@@ -9992,87 +10468,193 @@ export async function finishMerge(number, { repo, dir, gh }) {
   return `${lead}: ${said.join('; ')}.`;
 }
 
-const unownedText = (number, name) => `Pull request ${number} merged, but ${name}, the `
+const unownedText = (key, name) => `Pull request ${String(key).replace('#', ' ')} merged, `
+  + `but ${name}, the `
   + 'session that worked it, is no longer running to do its post-merge steps.';
+
+// How many repositories besides the bridge's own one merge scan reads.
+const MERGE_REPOS_MAX = 6;
+
+// The repositories, besides own, that the running sessions' checkouts are in, the ones most
+// sessions work in first, at most MERGE_REPOS_MAX, as lowercase owner/name.
+function watchedRepos(checkouts, own) {
+  if (!own) return [];
+  const counts = new Map();
+  for (const c of checkouts) {
+    const repo = c.current ?? c.repo;
+    if (repo && repo !== own) counts.set(repo, (counts.get(repo) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, MERGE_REPOS_MAX).map(([repo]) => repo);
+}
 
 // One scan: records which running session owns each open pull request, then tells the owner
 // of each pull request merged since the record started, once. A merge whose recorded owner
 // no longer runs becomes a notice in the notices folder; a merge no session was seen owning
 // is not the bridge's to tell. A message that cannot be posted is tried again on the next
 // scan. The first scan with no record starts it. gh is read before the record is queued.
-// Returns the sessions told, as { number, name }.
+// The repositories the running sessions work in, besides the bridge's own, are read the same
+// way, each from the moment it was first watched, and kept under owner/name#number; one
+// that gh cannot read is logged and skipped, with its recorded owners kept for the next
+// scan. Returns the sessions told, as { number, name }.
 export async function announceMerges({
-  sessions, tracker, file, notices, roots, post = postLine, log, renamed = {},
+  sessions, tracker, file, notices, roots, post = postLine, log, renamed = {}, paths,
 }) {
   const now = tracker.now();
-  const since = readMerges(file).since ?? now;
-  const from = new Date(Math.max(since, now - MERGE_LOOKBACK_MS));
-  const read = args => ghJson(tracker, args);
-  const [open, merged] = await Promise.all([
-    read(['pr', 'list', '--state', 'open', '--limit', String(TRACKER_LIST_LIMIT),
-      '--json', 'number,headRefName,url']),
-    read(['pr', 'list', '--state', 'merged', '--limit', String(TRACKER_LIST_LIMIT),
-      '--search', `merged:>=${from.toISOString().replace(/\.\d{3}Z$/, 'Z')}`,
-      '--json', MERGE_FIELDS]),
-  ]);
+  const before = readMerges(file);
+  const since = before.since ?? now;
   const checkouts = sessionCheckouts(sessions, roots, renamed);
+  const own = nowRepo(checkoutOf(tracker.cwd)?.repo, renamed);
+  const lists = async (reader, from) => {
+    const read = args => ghJson(reader, args);
+    const [open, merged] = await Promise.all([
+      read(['pr', 'list', '--state', 'open', '--limit', String(TRACKER_LIST_LIMIT),
+        '--json', 'number,headRefName,url']),
+      read(['pr', 'list', '--state', 'merged', '--limit', String(TRACKER_LIST_LIMIT),
+        '--search', `merged:>=${from.toISOString().replace(/\.\d{3}Z$/, 'Z')}`,
+        '--json', MERGE_FIELDS]),
+    ]);
+    return { open, merged };
+  };
+  const scopes = [{ repo: null, ...await lists(tracker,
+    new Date(Math.max(since, now - MERGE_LOOKBACK_MS))) }];
+  const others = await Promise.all(watchedRepos(checkouts, own).map(async repo => {
+    const from = before.repos?.[repo]?.since ?? now;
+    const away = { ...tracker, repo, gh: call => tracker.gh({ ...call, repo }) };
+    try {
+      const since = new Date(Math.max(from, now - MERGE_LOOKBACK_MS));
+      return { repo, from, ...await lists(away, since) };
+    } catch (error) {
+      log?.(`merge scan of ${repo} failed: ${error?.message ?? error}`);
+      return null;
+    }
+  }));
+  scopes.push(...others.filter(Boolean));
+  const ready = paths ? readyIndex(paths) : undefined;
   return withMerges(file, notices, tracker.now(), async state => {
     state.since ??= since;
-    const owners = {};
-    for (const pull of open) {
-      const session = onBranch(pull, checkouts);
-      if (session) owners[pull.number] = ownerOf(session);
+    const read = new Set(scopes.map(scope => scope.repo).filter(Boolean));
+    for (const scope of scopes.slice(1)) {
+      state.repos = { ...state.repos, [scope.repo]: { since: scope.from, seen: now } };
     }
+    // A repository that was not read keeps the owners recorded for it.
+    const owners = Object.fromEntries(Object.entries(state.owners)
+      .filter(([key]) => key.includes('#') && !read.has(key.split('#')[0])));
     const told = [];
-    for (const pull of merged) {
-      if (Date.parse(pull.mergedAt) < state.since || state.told[pull.number]) continue;
-      const owner = mergeOwner(pull, checkouts, state.owners);
-      if (owner) {
-        try {
-          await postMerged(owner, pull, post);
-        } catch (error) {
-          log?.(`merge of ${pull.number} not told to ${owner.name}: ${error.message}`);
-          owners[pull.number] = ownerOf(owner);
-          continue;
+    for (const scope of scopes) {
+      const keyOf = number => (scope.repo ? `${scope.repo}#${number}` : number);
+      for (const pull of scope.open) {
+        const session = onBranch(pull, checkouts);
+        if (session) owners[keyOf(pull.number)] = ownerOf(session);
+      }
+      for (const pull of scope.merged) {
+        const key = keyOf(pull.number);
+        if (Date.parse(pull.mergedAt) < (scope.repo ? scope.from : state.since)
+          || state.told[key]) continue;
+        const owner = mergeOwner(pull, checkouts, { owners: state.owners, key, ready });
+        if (owner) {
+          try {
+            await postMerged(owner, pull, post, scope.repo ?? undefined);
+          } catch (error) {
+            log?.(`merge of ${key} not told to ${owner.name}: ${error.message}`);
+            owners[key] = ownerOf(owner);
+            continue;
+          }
+          state.told[key] = { at: now, to: owner.name };
+          told.push({ number: pull.number, name: owner.name });
+        } else if (scope.repo || state.owners[key]) {
+          // A merge in another repository is looked into once, so a scan does not read the
+          // reflogs again for it every minute; pull_request_merged can still be asked.
+          state.told[key] = { at: now, to: null };
+          if (state.owners[key]) {
+            addNotice(notices, mergeNotice(key), unownedText(key, state.owners[key].name), now);
+          }
         }
-        state.told[pull.number] = { at: now, to: owner.name };
-        told.push({ number: pull.number, name: owner.name });
-      } else if (state.owners[pull.number]) {
-        state.told[pull.number] = { at: now, to: null };
-        addNotice(notices, `merge-${pull.number}`,
-          unownedText(pull.number, state.owners[pull.number].name), now);
+      }
+    }
+    // A repository not read for MERGE_KEEP_MS is forgotten with its owners; seen is when it was
+    // last read, and since is when it was first watched.
+    for (const [repo, held] of Object.entries(state.repos ?? {})) {
+      if (!read.has(repo) && now - (held.seen ?? held.since) > MERGE_KEEP_MS) {
+        delete state.repos[repo];
+        for (const key of Object.keys(owners)) if (key.startsWith(`${repo}#`)) delete owners[key];
       }
     }
     state.owners = owners;
-    for (const [number, { at }] of Object.entries(state.told)) {
-      if (now - at > MERGE_KEEP_MS) delete state.told[number];
+    for (const [key, { at }] of Object.entries(state.told)) {
+      if (now - at > MERGE_KEEP_MS) delete state.told[key];
     }
     return told;
   });
 }
 
+// The notice name for a merge no session was left to hear, by number for the bridge's own
+// repository and by repository and number for another.
+export const mergeNotice = key => `merge-${String(key).replace(/[^A-Za-z0-9-]/g,
+  char => `_${char.charCodeAt(0).toString(16)}`)}`;
+
+// The running sessions whose checkouts are in the pull request's repository, the ones that
+// could be told about it, those whose name carries its number first, at most four.
+function mergeCandidates(pull, checkouts) {
+  const named = session => new RegExp(`\\b${pull.number}\\b`).test(session.name);
+  return checkouts.filter(c => worksIn(c, pull)).map(c => c.session)
+    .sort((a, b) => Number(named(b)) - Number(named(a))).slice(0, 4);
+}
+
+const nameList = names => (names.length < 2 ? names.join('')
+  : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`);
+
 // Tells the session that owns a merged pull request, for a merge the user reports or the
 // bridge made, unless it was told already. Returns what to say; with quiet, a merge no
 // running session owns says nothing. A tracker with a repo is another repository than the one
-// the merge scan watches, so its merges are kept under the repository and found by branch alone.
-export async function tellMerged(number,
-  { sessions, tracker, file, notices, roots, post = postLine, quiet = false, renamed = {} }) {
+// the merge scan watches, so its merges are kept under the repository and the number. With
+// no owner found, the sessions working in that repository are named so the user can pick one
+// and call again with session, which tells that one whether or not another heard it before;
+// nothing is recorded then, so the offer stands.
+export async function tellMerged(number, {
+  sessions, tracker, file, notices, roots, post = postLine, quiet = false, renamed = {}, paths,
+  pick,
+}) {
   const pull = await pullView(number, 'owner', tracker);
   if (pull.state !== 'MERGED') {
     return `Pull request ${number} is not merged; it reads ${String(pull.state).toLowerCase()}.`;
   }
   const checkouts = sessionCheckouts(sessions, roots, renamed);
   const key = tracker.repo ? `${tracker.repo}#${number}` : number;
+  const label = tracker.repo ? repoOf(pull.url) ?? tracker.repo : undefined;
+  const where = label ?? repoOf(pull.url) ?? 'that repository';
+  const ready = paths ? readyIndex(paths) : undefined;
   return withMerges(file, notices, tracker.now(), async state => {
     const before = state.told[key];
+    if (pick) {
+      if (!checkouts.some(c => c.session.key === pick.key && worksIn(c, pull))) {
+        const here = mergeCandidates(pull, checkouts).map(s => s.name);
+        return `${pick.name} does not work in ${where}.`
+          + (here.length ? ` ${nameList(here)} ${here.length > 1 ? 'do' : 'does'}.` : '');
+      }
+      if (before?.to === pick.name) {
+        return `${pick.name} already heard that pull request ${number} merged.`;
+      }
+      await postMerged(pick, pull, post, label);
+      state.told[key] = { at: tracker.now(), to: pick.name };
+      dropNotice(notices, mergeNotice(key));
+      return `Told ${pick.name} that pull request ${number} merged, so it runs its `
+        + `post-merge steps.${before?.to && before.to !== pick.name
+          ? ` ${before.to} had heard it already.` : ''}`;
+    }
     if (before?.to) return `${before.to} already heard that pull request ${number} merged.`;
-    if (!tracker.repo) dropNotice(notices, `merge-${number}`);
-    const owner = mergeOwner(pull, checkouts, tracker.repo ? {} : state.owners);
+    dropNotice(notices, mergeNotice(key));
+    const owner = mergeOwner(pull, checkouts, { owners: state.owners, key, ready });
     if (!owner) {
+      const near = quiet ? [] : mergeCandidates(pull, checkouts).map(s => s.name);
+      if (near.length) {
+        return `No session is on pull request ${number}'s branch now, but ${nameList(near)} `
+          + `${near.length > 1 ? 'work' : 'works'} in ${where}. Call again with session set `
+          + `to ${near.length > 1 ? 'the one to tell.' : `${near[0]} to tell it.`}`;
+      }
       state.told[key] = { at: tracker.now(), to: null };
       return quiet ? '' : `No running session owns pull request ${number}.`;
     }
-    await postMerged(owner, pull, post);
+    await postMerged(owner, pull, post, label);
     state.told[key] = { at: tracker.now(), to: owner.name };
     return `Told ${owner.name} that pull request ${number} merged, so it runs its post-merge `
       + 'steps.';
@@ -10259,7 +10841,8 @@ export async function scanReady({ paths, tracker, sessions, log }) {
       const name = ownerOf(key)?.name ?? 'A session';
       // The session and its repository are kept with the head, so a listing can say which
       // sessions reported a pull request ready and in which repository.
-      state.announced[id] = { head: pull.headRefOid, at: now, key, repo };
+      state.announced[id] = { head: pull.headRefOid, at: now, key, repo,
+        reportedAt: readyMs(at) };
       const apart = id !== pull.number;
       const line = `${name} marked pull request ${pull.number}, ${spoken(pull.title)}, `
         + `${apart ? `in ${repo.split('/')[1]}, ` : ''}ready for your review.`;
@@ -10289,7 +10872,7 @@ function watchTracker(paths, config, log) {
   };
   repeat(MERGE_SCAN_MS, 'merge', async () => {
     const told = await announceMerges({ sessions: running(), tracker, file: paths.mergesFile,
-      notices: paths.noticesDir, roots: config.roots ?? DEFAULT_ROOTS, log,
+      notices: paths.noticesDir, roots: config.roots ?? DEFAULT_ROOTS, log, paths,
       renamed: repoNames(paths, config).renamed });
     for (const { number, name } of told) log(`merge of ${number} told to ${name}`);
   });
@@ -10837,8 +11420,8 @@ export async function startSession(args, {
 
 const sameTitle = (a, b) => asNumbers(words(a)).join(' ') === asNumbers(words(b)).join(' ');
 const sessionLabel = s => (s.number === undefined ? s.name : `Session ${s.number}`);
-// The sidebar title, without the number a listing adds to a second session of one title.
-const titleOf = s => s.title ?? s.name;
+// The title as the sidebar shows it, which a listing keeps apart from the name it reports.
+const titleOf = s => s.sidebar || s.name;
 
 // What separates a session's base title from the work it is on: "Overmind 2 - read window".
 const WORK_SEPARATOR = ' - ';
@@ -10851,18 +11434,17 @@ function baseTitle(title) {
 }
 
 // A title taken apart as session_title.py's split_title does: the base, the work name, and the
-// status in parentheses with the space before it, each '' when it has none.
+// status in parentheses with the space before it, each '' when it has none. A number Claude Code
+// added after the status joins the base, as there.
 function splitTitle(title) {
-  const tail = title.match(STATUS_SUFFIX)?.[0] ?? '';
-  const named = title.slice(0, title.length - tail.length);
+  const found = title.match(NUMBERED_STATUS);
+  const number = found?.[2] ?? '';
+  const tail = found ? found[0].slice(0, found[0].length - number.length) : '';
+  const named = found ? title.slice(0, found.index) : title;
   const at = named.lastIndexOf(WORK_SEPARATOR);
-  return { base: (at < 0 ? named : named.slice(0, at)).trim(),
+  return { base: (at < 0 ? named : named.slice(0, at)).trim() + number,
     work: at < 0 ? '' : named.slice(at + WORK_SEPARATOR.length).trim(), tail };
 }
-
-// The status a session appends in parentheses when it stops or waits, from session_title.py's
-// STATUSES, so a base title is read the same way here and there.
-const STATUS_SUFFIX = /\s+\((?:idle|waiting on you|stuck|stopped|waiting on CI|needs you|working)\)$/;
 
 // The title for a session starting the work `work`: its base title, the separator, and the
 // work name clipped to what the title limit leaves. An empty work name returns the base title.
@@ -11079,7 +11661,7 @@ export async function callTool(name, args, {
   pages, now = Date.now, renameWaitMs = RENAME_WAIT_MS, startWaitMs,
   answerTakenMs = ANSWER_TAKEN_MS, git = runGit, post = postLine, log, bridge = BRIDGE_UPDATE,
   background = runBackgroundPending, stopSeenMs = STOP_SEEN_MS,
-  amendSeenMs = STOP_SEEN_MS, replyWaitMs = REPLY_WAIT_MS,
+  amendSeenMs = STOP_SEEN_MS, replyWaitMs = REPLY_WAIT_MS, sendCheckMs = SEND_CHECK_MS,
   kill, stopClaude = runClaudeStop, closeWaitMs = CLOSE_WAIT_MS,
   archiveWaitMs = ARCHIVE_WAIT_MS,
   run = runShell, guard = guardRefusal, home = os.homedir(),
@@ -11092,7 +11674,7 @@ export async function callTool(name, args, {
   const roots = config.roots ?? DEFAULT_ROOTS;
   const listed = sessionRoots(config);
   // renamed is read when a merge is told, after a lookup may have stored a new name.
-  const merges = { tracker, file: paths.mergesFile, notices: paths.noticesDir, roots, post,
+  const merges = { tracker, file: paths.mergesFile, notices: paths.noticesDir, roots, post, paths,
     get renamed() { return repoNames(paths, config).renamed; } };
   // A merge merge_pull_request makes is told to the session that owns the pull request.
   tracker.onMerged = number => tellMerged(number,
@@ -11188,6 +11770,9 @@ export async function callTool(name, args, {
   }
   if (name === 'pull_request_merged') {
     const number = itemNumber(args, 'pull request');
+    // A session the user picked to tell, when none was found to own the pull request.
+    const pick = String(args?.session ?? '').trim() ? findSession(sessions, args.session) : null;
+    if (pick) merges.pick = pick;
     if (String(args?.repo ?? '').trim()) {
       const found = await sessionCheckout(args.repo, sessionCheckouts(sessions, roots),
         { paths, config, tracker });
@@ -11275,8 +11860,13 @@ export async function callTool(name, args, {
       const kind = s.background ? ', background' : '';
       const loaded = loadText(load, { busy: s.busy, now: at, window });
       const idle = `idle${loaded}${verdicts[i] && `, ${verdicts[i]}`}`;
-      return said(`${label}, ${s.busy ? `busy${loaded}` : idle}${kind}${earlier}${following}`
-        + waits + update.text);
+      // A status the title carries is the session's own word, not the live state. idle and
+      // waiting on you give way to that state; the others show only while the session is
+      // idle and not waiting.
+      const marked = s.busy || waiting || !s.marked || LIVE_STATUSES.includes(s.marked)
+        ? '' : `, marked ${s.marked}`;
+      return said(`${label}, ${s.busy ? `busy${loaded}` : idle}${marked}${kind}${earlier}`
+        + `${following}${waits}${update.text}`);
     });
     // The replies are read, and so marked read, only once every line is built, so a listing
     // that throws leaves them for the next call.
@@ -11307,7 +11897,7 @@ export async function callTool(name, args, {
   if (name === 'summary') {
     const failed = takeNotices(paths.noticesDir, ['failed']);
     const summary = await spokenSummary(sessions, paths, tracker, transcripts,
-      { full: args?.full === true });
+      { full: args?.full === true, renamed: repoNames(paths, config).renamed, git });
     return failed.length ? `${failed.join('\n')}\n${summary}` : summary;
   }
   if (name === 'archive_sessions') {
@@ -11397,15 +11987,30 @@ export async function callTool(name, args, {
     const text = String(args?.text ?? '').trim();
     if (!text) throw new Error('The request is empty.');
     if (text.length > MAX_REQUEST_CHARS) throw new Error('The request is too long to send.');
-    if (String(args?.amend ?? false).trim().toLowerCase() === 'true') {
+    const flag = value => String(value ?? false).trim().toLowerCase() === 'true';
+    if (flag(args?.amend)) {
       return amendRequest(session, text, { paths, now, post, seenMs: amendSeenMs });
+    }
+    // Work the request names that GitHub says is done is not sent, unless the user said to.
+    // A check GitHub cannot finish never holds the request back.
+    let note = '';
+    if (!flag(args?.anyway)) {
+      const check = await checkWork(text, session, tracker, { waitMs: sendCheckMs });
+      if (onlyDone(check)) {
+        const own = await ownWorkText(session, tracker, sendCheckMs);
+        return [`Not sent to ${session.name}: ${andList(check.done)}.`, own,
+          'Tell the user, and ask what to send instead; list_issues and list_pull_requests '
+          + 'read the open work. If the user still wants it sent as it is, call send again '
+          + 'with the same text and anyway true.'].filter(Boolean).join(' ');
+      }
+      note = unknownNote(check);
     }
     const queue = String(args?.queue ?? false).trim().toLowerCase() === 'true';
     if (queue && mustHold(session, paths, now())) {
       const place = holdRequest(session, text, { bridgeDir: paths.bridgeDir, now: now() });
       return `Held for ${session.name}, number ${place} in line. It goes when ${session.name} `
         + 'is idle, and until then queued_requests lists it and drop_request takes it back. An '
-        + 'answer you have not heard yet stays for read_reply.';
+        + `answer you have not heard yet stays for read_reply.${note}`;
     }
     const ahead = readHeld(paths.bridgeDir, session).items.filter(item => !item.releasing).length;
     await sendToSession(session, text, paths.bridgeDir, { post });
@@ -11417,7 +12022,7 @@ export async function callTool(name, args, {
       : '';
     const first = ahead ? ` It went ahead of the ${ahead} held request${ahead === 1 ? '' : 's'}.`
       : '';
-    return `Sent to ${session.name}.${wait}${first} Call read_reply for the `
+    return `Sent to ${session.name}.${wait}${first}${note} Call read_reply for the `
       + 'answer; it waits about three seconds for it.';
   }
   if (name === 'allow_blocked_call') return allowBlockedCall(session, args, { paths, pages, now });
@@ -11449,6 +12054,17 @@ export async function callTool(name, args, {
   }
   if (name === 'catch_up') return catchUp(session, paths, { now: now(), background });
   if (name === 'rename_session') {
+    // A work name that names finished work is not set, unless the user said to.
+    if (args?.work !== undefined && String(args.anyway ?? false).trim().toLowerCase() !== 'true') {
+      const check = await checkWork(String(args.work), session, tracker, { waitMs: sendCheckMs });
+      if (onlyDone(check)) {
+        const own = await ownWorkText(session, tracker, sendCheckMs);
+        return [`Not renamed: ${andList(check.done)}.`, own,
+          'Name the work from what is open, or call rename_all_sessions to name every session '
+          + 'from its live work. If the user still wants this name, call rename_session again '
+          + 'with anyway true.'].filter(Boolean).join(' ');
+      }
+    }
     const list = () => listSessions({ ...paths, roots: sessionRoots(config) });
     const settle = () => numberedSessions(paths, config);
     // The bridge starts no rename of this session while the user's is under way.
@@ -11508,7 +12124,10 @@ export const INSTRUCTIONS = 'Every reply that next_update or read_reply returns,
   + 'When several replies come back at once, say them all in one turn, one session at a '
   + 'time; grouping is an order, not a summary. Every next_update answer ends with a '
   + 'closing paragraph holding the cursor, led by a reminder when the answer has something '
-  + 'to say; it is for you and never read aloud.';
+  + 'to say; it is for you and never read aloud. A pull request\'s or issue\'s state (open, '
+  + 'merged, closed, waiting on review, checks) is said only from read_pull_request or '
+  + 'read_issue, called at that moment, never from a session\'s notes, a title, or an '
+  + 'earlier answer in the call.';
 
 async function handleRpc(message, context) {
   const { id, method, params } = message ?? {};

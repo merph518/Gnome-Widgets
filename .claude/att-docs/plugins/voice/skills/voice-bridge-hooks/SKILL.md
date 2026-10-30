@@ -40,7 +40,7 @@ All of them ship in this folder.
 | `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle` and `managed <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
 | `sessions.py` | Lists the open Claude sessions the way the bridge's `list_sessions` does; imported by `speechctl` | no |
 | `speak_pending.py` | Picks the text blocks a turn has not had read aloud yet | no |
-| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; it talks to the session's own inbox, never to the voice bridge | no |
+| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; it talks to the session's own inbox, never to the voice bridge. The bridge drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped` and `waiting on CI` as "marked ..." only on the idle line, and only while the session is not waiting | no |
 | `background_pending.py` | Names the background work still due to wake a session, so a stop stays quiet; `--describe` also says what each item is, for the bridge's session list | no |
 | `hook_config.py` | Reads `<config>` | |
 | `defaults.json` | The config for a repository with no extension file; the plugin's `hooks/run.sh` passes it | |
@@ -188,6 +188,29 @@ Claude Code defers MCP tools behind a tool search, which pauses the first call. 
 `tools/list` marks `send`, `read_reply` and `catch_up` with `_meta` `anthropic/alwaysLoad`
 set to true, so Claude Code lists those three up front, and leaves every other tool
 deferred to keep the startup list short. The set is `ALWAYS_LOAD_TOOLS` in `voice-bridge.mjs`.
+
+## Checking GitHub before work goes out
+
+A session's notes and title go stale, so the bridge reads GitHub when a request names work.
+`send` finds the issues and pull requests in the text (`#5190`, `issue 5190`, `PR 5200`,
+`pull request 5200`, and lists such as `PRs 5200 and 5201`), at most four, and asks GitHub about
+each in the session's own repository. It does not use the cache. When all of those numbers
+are done (a pull request merged or closed, or an issue closed), nothing is sent. The answer
+says what finished it and what the session has open, when GitHub says, so
+the voice chat can tell the user and suggest open work. A request that names done work beside
+open work, or a number GitHub could not check, goes out, with a note naming the done work. Passing `anyway` true sends the request
+as it is, which the voice chat does only after the user says so. `rename_session` does the
+same for a work name.
+
+The check never holds a request back when it cannot finish: a GitHub error, an unknown number,
+a session folder that is not a checkout, or no answer within four seconds sends the request,
+and the answer names the numbers that went unchecked. Each number has its own four seconds, so
+one slow answer leaves the others standing. A correction sent with `amend` is not checked.
+
+The voice chat says a pull request's or issue's state only from `read_pull_request` or
+`read_issue` called at that moment. The bridge's instructions say so, and the
+`read_pull_request` description leads with the state it reports, so a tool search for a pull
+request's status finds it.
 
 ## Titles for every session at once
 
