@@ -25,7 +25,8 @@ import {
   runBackgroundPending, describeBackground, lastTurnEnd, cursorSeqs, nextUpdates,
   appArchived, sessionBranch, sessionWork, sharedFiles,
   START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
-  startOfYesterday, startSession, codeCheckouts, repoCheckout, repositoryCheckout, useExtension, resetExtension,
+  startOfYesterday, startSession, codeCheckouts, repoCheckout, repositoryCheckout,
+  finishMerge, useExtension, resetExtension,
   VOICE_AUTHORITY, TOOLS, SPEAK_FIRST,
 } from './voice-bridge.mjs';
 
@@ -3080,6 +3081,11 @@ test('findSession reaches a session with a work name by its base name, full name
   const crowded = [...sessions, { key: '4', name: 'Overmind 1 - fix 2', number: 5 }];
   assert.equal(findSession(crowded, 'Overmind 2').key, '1');
   assert.equal(findSession(crowded, 'Overmind 1').key, '4');
+  // A status in parentheses after the work name leaves the base title reachable.
+  const waiting = [{ key: '7', name: 'Overmind 4 - read window (waiting on you)', number: 8 },
+    { key: '8', name: 'Overmind 5 (idle)', number: 9 }];
+  assert.equal(findSession(waiting, 'Overmind 4').key, '7');
+  assert.equal(findSession(waiting, 'Overmind 5').key, '8');
   // A whole name wins over another session's base title.
   const same = [{ key: '5', name: 'Overmind', number: 6 },
     { key: '6', name: 'Overmind - fix', number: 7 }];
@@ -4912,14 +4918,111 @@ test('merge_pull_request merges in another repository a running session works in
     assert.equal(m.posted.length, 1);
   });
 
-test('merge_pull_request refuses a repository no running session works in', async () => {
+test('merge_pull_request refuses a repository with no session and no local checkout', async () => {
   const m = mergeMachine();
   const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED });
-  const context = { ...m.context, gh, pages: new Map(), now: () => 0 };
+  const codeDir = path.join(tempDir(), 'Code');
+  const context = { ...m.context, gh, pages: new Map(), now: () => 0,
+    config: { ...m.context.config, codeDir } };
   assert.equal(await callTool('merge_pull_request', { number: 44, repo: 'LaundryBot' }, context),
     'No running session works in a repository named LaundryBot, so the bridge cannot reach it.');
   assert.deepEqual(calls, []);
 });
+
+// A gh for the post-merge steps: the closing references and issue reads answer from refs and
+// issues, { number: { state, labels } }, and the other issue commands are recorded. editError
+// fails the label removal as gh would; every other call goes to inner.
+function postMergeGh(inner, { refs = [], issues = {}, editError = null, readError = null } = {}) {
+  const issueCalls = [];
+  const gh = async call => {
+    if (call.args[0] === 'api' && call.args.some(arg => arg.includes('closingIssuesReferences'))) {
+      if (readError) throw readError;
+      return JSON.stringify({ data: { repository: { pullRequest: {
+        closingIssuesReferences: { nodes: refs } } } } });
+    }
+    if (call.args[0] !== 'issue') return inner(call);
+    issueCalls.push({ repo: call.repo, cwd: call.cwd, args: call.args });
+    if (call.args[1] === 'view') {
+      const issue = issues[call.args[2]] ?? { state: 'OPEN', labels: ['In Progress'] };
+      return JSON.stringify({ state: issue.state,
+        labels: issue.labels.map(name => ({ name })) });
+    }
+    if (call.args[1] === 'edit' && editError) throw editError;
+    return '';
+  };
+  return { gh, issueCalls };
+}
+
+const ref = (number, repo) => ({ number, repository: { nameWithOwner: repo } });
+
+test('merge_pull_request in a repository with no session merges from its checkout and finishes '
+  + 'the post-merge steps itself', async () => {
+  const m = mergeMachine();
+  const { codeDir, laundry } = codeFolder();
+  const inner = fakeGh({ pull: { ...READY, number: 44, headRefName: 'feat/dry' },
+    threads: RESOLVED, afterMerge: { ...MERGED, number: 44, title: 'Pull 44',
+      headRefName: 'feat/dry', url: pullUrl(44, 'mfagerstrom/LaundryBot') } });
+  const { gh, issueCalls } = postMergeGh(inner.gh, {
+    refs: [ref(12, 'mfagerstrom/LaundryBot'), ref(13, 'mfagerstrom/LaundryBot'),
+      ref(3, 'other/repo')],
+    issues: { 12: { state: 'OPEN', labels: ['In Progress', 'bug'] },
+      13: { state: 'CLOSED', labels: [] } } });
+  let clock = 0;
+  const context = { ...m.context, gh, pages: new Map(), now: () => (clock += 10 * 1000),
+    config: { ...m.context.config, codeDir } };
+  const away = { number: 44, repo: 'Laundry-Bot' };
+  await callTool('merge_pull_request', away, context);
+  assert.deepEqual(issueCalls, []);
+  assert.equal(await callTool('merge_pull_request', { ...away, confirm: true }, context),
+    'Merged pull request 44 in mfagerstrom/laundrybot into main as commit 41bead5. No session '
+    + 'runs there, so the bridge ran the post-merge steps itself: issue 12: closed it, removed '
+    + 'In Progress; issue 13: it was already closed, it had no In Progress label.');
+  assert.deepEqual(mergeCalls(inner.calls).map(call => call.cwd), [laundry]);
+  // An issue in another repository is left alone, and every call names the repository.
+  assert.deepEqual(issueCalls.map(call => call.args.slice(0, 3).join(' ')), [
+    'issue view 12', 'issue close 12', 'issue edit 12', 'issue view 13']);
+  assert.ok(issueCalls.every(call => call.repo === 'mfagerstrom/laundrybot'));
+  assert.equal(m.posted.length, 0);
+});
+
+test('post-merge steps say what failed, and a closed issue still loses its label', async () => {
+  const inner = async () => '';
+  const run = more => {
+    const { gh, issueCalls } = postMergeGh(inner, more);
+    return { gh, issueCalls, say: () => finishMerge(44, { repo: 'o/r', dir: '/x', gh }) };
+  };
+  const none = run({ refs: [] });
+  assert.equal(await none.say(),
+    'No session runs there, so the bridge ran the post-merge steps itself: the pull request '
+    + 'closes no issue, so there was nothing to do.');
+  assert.deepEqual(none.issueCalls, []);
+  // gh answers without a period, as the first line of its stderr.
+  assert.equal(await run({ readError: new Error('Unknown JSON field') }).say(),
+    'No session runs there, so the bridge ran the post-merge steps itself, but reading the '
+    + 'pull request failed: Unknown JSON field. Run them by hand.');
+  const closed = run({ refs: [ref(5, 'o/r')], issues: { 5: { state: 'CLOSED',
+    labels: ['In Progress'] } } });
+  assert.match(await closed.say(), /issue 5: it was already closed, removed In Progress\.$/);
+  assert.deepEqual(closed.issueCalls.map(call => call.args[1]), ['view', 'edit']);
+  const refused = run({ refs: [ref(5, 'o/r')], editError: new Error('HTTP 403') });
+  assert.match(await refused.say(), /issue 5: closed it, failed: HTTP 403\.$/);
+});
+
+test('merge_pull_request asks which repository when a name matches two sessions\' repositories',
+  async () => {
+    const m = mergeMachine();
+    const { codeDir } = codeFolder();
+    startFake(m.paths, { pid: 72, cwd: fakeCheckout(m.root, 'a', 'feat/a', 'alice/laundrybot'),
+      name: 'A', startedAt: 2 });
+    startFake(m.paths, { pid: 73, cwd: fakeCheckout(m.root, 'b', 'feat/b', 'bob/laundrybot'),
+      name: 'B', startedAt: 3 });
+    const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED });
+    const context = { ...m.context, gh, pages: new Map(), now: () => 0,
+      config: { ...m.context.config, codeDir } };
+    assert.match(await callTool('merge_pull_request', { number: 44, repo: 'laundrybot' }, context),
+      /^laundrybot names more than one repository: alice\/laundrybot, bob\/laundrybot\./);
+    assert.deepEqual(calls, []);
+  });
 
 test('merge_pull_request summarizes, then merges the read commit after a yes', async () => {
   const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED, afterMerge: MERGED });
@@ -6134,6 +6237,11 @@ test('the full code flow issues a token that opens /mcp', async () => {
   for (const tool of JSON.parse(list.body).result.tools) {
     assert.match(tool.description, /Never announce this call before making it/, tool.name);
   }
+  // send, read_reply and catch_up carry the load-at-startup marking; no other tool does.
+  const listed = JSON.parse(list.body).result.tools;
+  assert.deepEqual(listed.filter(t => t._meta?.['anthropic/alwaysLoad'] === true).map(t => t.name)
+    .sort(), ['catch_up', 'read_reply', 'send']);
+  assert.equal(listed.find(t => t.name === 'list_sessions')._meta, undefined);
   const sessions = await call('POST', '/mcp', {
     headers: auth, body: JSON.stringify({
       jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_sessions', arguments: {} },
@@ -7370,22 +7478,168 @@ test('a request that went out before the drop is confirmed cannot be dropped', a
   assert.equal(posted.length, 0);
 });
 
-test('a held request waits for the last answer to be heard, then goes', async () => {
-  const { paths, context } = stopContext({ status: 'idle' });
-  const sent = [];
-  const post = async (socket, message) => { sent.push(message); };
+// An idle Runner whose last answer, All green., has not been read.
+function unheardContext() {
+  const { paths, posted, context } = stopContext({ status: 'idle' });
+  context.replyWaitMs = 0;
   fs.mkdirSync(path.join(paths.bridgeDir, 'replies'), { recursive: true });
   fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '90.json'),
-    JSON.stringify({ text: 'All green.' }));
-  assert.match(await callTool('send', queueArgs('next'), context), /^Held for Runner/);
-  assert.match(await callTool('queued_requests', { session: 'runner' }, context),
-    /once you have heard Runner's answer/);
-  await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN });
-  assert.equal(sent.length, 0);
+    JSON.stringify({ text: 'All green.', at: BEGAN / 1000 }));
+  return { paths, posted, context };
+}
+
+const EARLIER = 'An earlier answer from Runner, from before the last message sent to it: ';
+
+test('a held request goes to an idle session whose last answer is unheard, and the answer stays',
+  async () => {
+    const { paths, context } = unheardContext();
+    writePrivateJson(path.join(paths.bridgeDir, 'held', '90.json'), {
+      sessionId: 'sess-90', items: [{ id: 'next1', text: 'next', at: BEGAN }],
+    });
+    assert.match(await callTool('queued_requests', { session: 'runner' }, context),
+      /Nothing is holding them back/);
+    const sent = [];
+    const post = async (socket, message) => { sent.push(message); };
+    assert.deepEqual(await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN }),
+      ['90']);
+    assert.deepEqual(heldContents(sent), [REQUEST_PREFIX + 'next']);
+    const runner = heldSessions(paths)[0];
+    // A wait on the new request is not answered by the earlier reply.
+    assert.equal(readReply(runner, paths.bridgeDir, { peek: true }).status, 'working');
+    assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+      `${EARLIER}All green.`);
+    assert.match(await callTool('read_reply', { session: 'runner' }, context),
+      /^Runner is still working/);
+    fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '90.json'),
+      JSON.stringify({ text: 'Next is done.', at: BEGAN / 1000 + 60 }));
+    assert.equal(await callTool('read_reply', { session: 'runner' }, context), 'Next is done.');
+  });
+
+test('a send of any kind keeps an unheard answer for read_reply, said as earlier', async () => {
+  for (const args of [queueArgs('now'), { session: 'runner', text: 'now' }]) {
+    const { posted, context } = unheardContext();
+    assert.match(await callTool('send', args, context), /^Sent to Runner\./);
+    assert.equal(posted.length, 1);
+    assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+      `${EARLIER}All green.`);
+  }
+});
+
+test('a listing names an earlier answer waiting while the session works, and leaves it',
+  async () => {
+    const { paths, context } = unheardContext();
+    await sendToSession(heldSessions(paths)[0], 'next', paths.bridgeDir, { post: async () => {} });
+    const listed = await callTool('list_sessions', {}, context);
+    assert.match(listed, /Runner.*an earlier answer waiting for read_reply/);
+    assert.doesNotMatch(listed, /All green/);
+    assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+      `${EARLIER}All green.`);
+  });
+
+test('a release whose post fails puts the unheard answer back where it was', async () => {
+  const { paths, context } = unheardContext();
+  writePrivateJson(path.join(paths.bridgeDir, 'held', '90.json'), {
+    sessionId: 'sess-90', items: [{ id: 'next1', text: 'next', at: BEGAN }],
+  });
+  const failing = async () => { throw new Error('socket closed'); };
+  assert.deepEqual(await releaseHeld(heldSessions(paths), {
+    paths, post: failing, now: () => BEGAN,
+  }), []);
+  assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'replies', '90.earlier.json')), false);
   assert.equal(await callTool('read_reply', { session: 'runner' }, context), 'All green.');
-  assert.deepEqual(await releaseHeld(heldSessions(paths), { paths, post, now: () => BEGAN }),
-    ['90']);
-  assert.deepEqual(heldContents(sent), [REQUEST_PREFIX + 'next']);
+});
+
+test('a failed post keeps the set-aside answer when a new reply landed meanwhile', async () => {
+  const { paths, context } = unheardContext();
+  const replyFile = path.join(paths.bridgeDir, 'replies', '90.json');
+  const failing = async () => {
+    fs.writeFileSync(replyFile, JSON.stringify({ text: 'Landed late.', at: BEGAN / 1000 + 30 }));
+    throw new Error('socket closed');
+  };
+  await assert.rejects(sendToSession(heldSessions(paths)[0], 'next', paths.bridgeDir,
+    { post: failing }));
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+    `${EARLIER}All green.`);
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context), 'Landed late.');
+});
+
+test('unheard answers set aside by several sends are read oldest first', async () => {
+  const { paths, context } = unheardContext();
+  const replyFile = path.join(paths.bridgeDir, 'replies', '90.json');
+  const runner = () => heldSessions(paths)[0];
+  await sendToSession(runner(), 'second', paths.bridgeDir, { post: async () => {} });
+  fs.writeFileSync(replyFile, JSON.stringify({ text: 'Second done.', at: BEGAN / 1000 + 60 }));
+  await sendToSession(runner(), 'third', paths.bridgeDir, { post: async () => {} });
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+    `${EARLIER}All green.`);
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+    `${EARLIER}Second done.`);
+  assert.match(await callTool('read_reply', { session: 'runner' }, context),
+    /^Runner is still working/);
+});
+
+test('an unheard answer the follow feed already carried is not set aside', async () => {
+  const { paths, context } = unheardContext();
+  fs.mkdirSync(path.join(paths.bridgeDir, 'feed'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'feed', '90.json'),
+    JSON.stringify([{ seq: 3, at: BEGAN / 1000, text: 'All green.', reply: true }]));
+  fs.mkdirSync(path.join(paths.bridgeDir, 'follow'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'follow', '90'), '3');
+  await sendToSession(heldSessions(paths)[0], 'next', paths.bridgeDir, { post: async () => {} });
+  assert.equal(fs.existsSync(path.join(paths.bridgeDir, 'replies', '90.earlier.json')), false);
+  assert.match(await callTool('read_reply', { session: 'runner' }, context),
+    /^Runner is still working/);
+});
+
+test('a listing reads only the latest reply inline and leaves the earlier one', async () => {
+  const { paths, context } = unheardContext();
+  await sendToSession(heldSessions(paths)[0], 'next', paths.bridgeDir, { post: async () => {} });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '90.json'),
+    JSON.stringify({ text: 'Next is done.', at: BEGAN / 1000 + 60 }));
+  const listed = await callTool('list_sessions', {}, context);
+  assert.match(listed, /reply ready, an earlier answer waiting for read_reply.*It said: Next is done\./);
+  assert.doesNotMatch(listed, /All green/);
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context),
+    `${EARLIER}All green.`);
+});
+
+test('the earlier answers of a session that is gone are swept after a day', async () => {
+  const { paths } = unheardContext();
+  const file = path.join(paths.bridgeDir, 'replies', '55.earlier.json');
+  writePrivateJson(file, { sessionId: 'gone', replies: [{ id: 'a', text: 'Old.', at: 1 }] });
+  await releaseHeld(heldSessions(paths), { paths, now: () => Date.now() });
+  assert.equal(fs.existsSync(file), true);
+  const live = path.join(paths.bridgeDir, 'replies', '90.earlier.json');
+  writePrivateJson(live, { sessionId: 'sess-90', replies: [{ id: 'b', text: 'Kept.', at: 2 }] });
+  await releaseHeld(heldSessions(paths), { paths, now: () => Date.now() + 25 * 60 * 60 * 1000 });
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(fs.existsSync(live), true, 'a live session keeps its file');
+});
+
+test('read_full_reply gives a long earlier answer just read, not a later reply kept before',
+  async () => {
+    const { paths, context } = unheardContext();
+    const replyFile = path.join(paths.bridgeDir, 'replies', '90.json');
+    const long = (head, line) => `Summary: ${head}\n\n${`${line} `.repeat(80)}`;
+    fs.writeFileSync(replyFile,
+      JSON.stringify({ text: long('First finding.', 'Early detail.'), at: BEGAN / 1000 }));
+    await sendToSession(heldSessions(paths)[0], 'next', paths.bridgeDir, { post: async () => {} });
+    fs.writeFileSync(replyFile,
+      JSON.stringify({ text: long('Second finding.', 'Late detail.'), at: BEGAN / 1000 + 60 }));
+    assert.match(await callTool('list_sessions', {}, context), /Second finding/);
+    assert.match(await callTool('read_reply', { session: 'runner' }, context),
+      /^An earlier answer from Runner.*First finding/);
+    const full = await callTool('read_full_reply', { session: 'runner' }, context);
+    assert.match(full, /Early detail\./);
+    assert.doesNotMatch(full, /Late detail/);
+  });
+
+test('earlier answers kept for another conversation on the same key are not read', async () => {
+  const { paths, context } = unheardContext();
+  writePrivateJson(path.join(paths.bridgeDir, 'replies', '90.earlier.json'), {
+    sessionId: 'an-older-conversation', replies: [{ text: 'Old news.', at: BEGAN / 1000 - 600 }],
+  });
+  assert.equal(await callTool('read_reply', { session: 'runner' }, context), 'All green.');
 });
 
 test('a held request waits for a busy session and for its own conversation', async () => {
@@ -9334,7 +9588,7 @@ test('list_sessions does not read a reply the follow feed already carried, and m
   const listed = await callTool('list_sessions', {}, context);
   assert.match(listed, /reply ready.*, already heard/);
   assert.doesNotMatch(listed, /It said/);
-  // It counts as read, so it no longer holds the next request, and read_reply repeats it.
+  // It counts as read, so a listing no longer shows it, and read_reply repeats it.
   assert.doesNotMatch(await callTool('list_sessions', {}, context), /reply ready/);
   assert.equal(await callTool('read_reply', { session: 'wt' }, context),
     'Already read out once, and here it is again: Done and pushed.');

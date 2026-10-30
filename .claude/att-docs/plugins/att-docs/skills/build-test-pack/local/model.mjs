@@ -70,22 +70,91 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
   const base = localEndpoint(endpoint);
   let tokenizeUrl;
 
+  // Every read of the server's status goes through here: GET only, no redirects,
+  // a short time-out, and a URL that localEndpoint already held to loopback.
+  async function getJson(url) {
+    const reply = await fetchImpl(url, { redirect: 'error', signal: AbortSignal.timeout(5000) });
+    if (reply.ok === false) throw new Error(`${url} answered ${reply.status}`);
+    return reply.json();
+  }
+
+  // Lemonade reports the llama.cpp server each loaded model runs on, and the
+  // options it loaded with. Null when the model is not loaded. A reply that is
+  // not ok, or that has no list of loaded models, throws: it says nothing about
+  // what is loaded.
+  async function loadedEntry() {
+    const body = await getJson(`${base}/health`);
+    if (!Array.isArray(body?.all_models_loaded)) throw new Error('health lists no loaded models');
+    return body.all_models_loaded.find((m) => m.model_name === name) ?? null;
+  }
+
+  const backendOf = (loaded) => localEndpoint(loaded.backend_url.replace(/\/v1\/?$/, ''));
+
   async function backendTokenizer() {
     if (tokenizeUrl !== undefined) return tokenizeUrl;
     tokenizeUrl = null;
     try {
-      // Lemonade reports the llama.cpp server each loaded model runs on.
-      const health = await fetchImpl(`${base}/health`, { redirect: 'error', signal: AbortSignal.timeout(5000) });
-      const body = await health.json();
-      const loaded = (body.all_models_loaded ?? []).find((m) => m.model_name === name);
-      if (loaded?.backend_url) {
-        const backend = localEndpoint(loaded.backend_url.replace(/\/v1\/?$/, ''));
-        tokenizeUrl = `${backend}/tokenize`;
-      }
+      const loaded = await loadedEntry();
+      if (loaded?.backend_url) tokenizeUrl = `${backendOf(loaded)}/tokenize`;
     } catch {
       tokenizeUrl = null;
     }
     return tokenizeUrl;
+  }
+
+  const positive = (n) => (Number.isInteger(n) && n > 0 ? n : null);
+
+  // The per-slot window from recipe options: `ctx_size` divided by the slot
+  // count in `llamacpp_args` (`-np N` or `--parallel N`, one when absent).
+  const perSlot = (options) => {
+    const total = positive(options?.ctx_size);
+    if (!total) return null;
+    const match = /(?:^|\s)(?:-np|--parallel)(?:\s+|=)(\d+)(?=\s|$)/.exec(String(options.llamacpp_args ?? ''));
+    const slots = match && Number(match[1]) > 0 ? Number(match[1]) : 1;
+    return positive(Math.floor(total / slots));
+  };
+
+  /**
+   * The context size the server runs this model with, as `{ size, guess }`, or
+   * null when it cannot be read. Asked fresh each time, so a reload at a new
+   * size shows. The loaded backend's own figure comes first, then the options
+   * the model loaded with; both are sure (`guess: false`). When the model is
+   * listed as not loaded, the options saved for it are the size the server
+   * loads it at next, and are sure. When the health check fails, or answers
+   * without a list of loaded models, a model may already run at a size other
+   * than the saved one, so the saved size is a guess (`guess: true`). A loaded
+   * model whose size cannot be read gives null.
+   */
+  async function contextWindow() {
+    let loaded;
+    let guess = false;
+    try {
+      loaded = await loadedEntry();
+    } catch {
+      guess = true;
+    }
+    if (loaded?.backend_url) {
+      try {
+        const props = await getJson(`${backendOf(loaded)}/props`);
+        const found = positive(props.default_generation_settings?.n_ctx);
+        if (found) return { size: found, guess: false };
+      } catch {
+        // Fall through to the options Lemonade reports.
+      }
+    }
+    // `ctx_size` is the server's total window across its slots, so it is divided
+    // by the slot count in the same options. The backend's own /props, read
+    // first, already reports the per-slot figure.
+    const fromLoaded = perSlot(loaded?.recipe_options);
+    if (fromLoaded) return { size: fromLoaded, guess: false };
+    if (loaded) return null;
+    try {
+      const saved = await getJson(`${base}/models/${encodeURIComponent(name)}`);
+      const size = perSlot(saved.recipe_options);
+      return size ? { size, guess } : null;
+    } catch {
+      return null;
+    }
   }
 
   async function countTokens(text) {
@@ -163,5 +232,5 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
     }
   }
 
-  return { json, countTokens };
+  return { json, countTokens, contextWindow };
 }

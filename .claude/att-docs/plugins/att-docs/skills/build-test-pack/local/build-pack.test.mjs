@@ -599,12 +599,12 @@ test('repairs are bounded: a FAIL the model cannot fix stops the run', async () 
 
 test('a prompt too big for the context is refused, not truncated', async () => {
   const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
-    context: 3000, maxOutput: 500, reasoningOutput: 500 } });
+    context: 6000, maxOutput: 500, reasoningOutput: 500 } });
   const model = fakeModel();
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, false);
   // Intake fits; the documents do not, even as digests, and nothing is cut to make them.
-  assert.match(result.reason, /too-big/);
+  assert.equal(result.reason, 'gate:documents-too-big');
 });
 
 test('only a loopback endpoint is accepted', () => {
@@ -665,7 +665,7 @@ test('a cut-off reply is retried once with thinking off', async () => {
   const logs = { status() {}, detail() {} };
   const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, logs, job: { id: 'j' },
     model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
-      countTokens: async () => 10 } };
+      countTokens: async () => 10, contextWindow: async () => null } };
   const value = await ask(ctx, { phase: 'phase1', step: 's', reasoning: true, inputs: [],
     schema: { type: 'object' }, task: 't' });
   assert.deepEqual(value, { ok: true });
@@ -3155,4 +3155,286 @@ test('a range with and keeps its number, a list of counts does not', () => {
 test('the model defaults to a 128000-token context', () => {
   const { model } = fixtureConfig();
   assert.equal(model.context, 128000);
+});
+
+const LOADED = (extra = {}) => ({ all_models_loaded: [{ model_name: 'm a/b',
+  backend_url: 'http://127.0.0.1:8001/v1', recipe_options: { ctx_size: 65536 }, ...extra }] });
+const NOT_LOADED = { all_models_loaded: [] };
+const windowClient = (routes, urls = []) => modelClient({ endpoint: 'http://localhost:13305/api/v1',
+  name: 'm a/b', fetchImpl: async (url, options = {}) => {
+    urls.push({ url: String(url), method: options.method ?? 'GET' });
+    const hit = Object.entries(routes).find(([suffix]) => String(url).endsWith(suffix));
+    if (!hit || hit[1] === 'throw') throw new Error('unreachable');
+    const { status = 200, body = hit[1] } = typeof hit[1]?.status === 'number' ? hit[1] : {};
+    return { ok: status >= 200 && status < 300, status, json: async () => body };
+  } });
+
+test('the context window comes from the backend, the loaded entry, or the saved options', async () => {
+  assert.deepEqual(await windowClient({ '/health': LOADED(), '/props': 'throw' }).contextWindow(), { size: 65536, guess: false });
+  const props = { default_generation_settings: { n_ctx: 32768 } };
+  assert.deepEqual(await windowClient({ '/health': LOADED(), '/props': props }).contextWindow(), { size: 32768, guess: false });
+  const saved = windowClient({ '/health': NOT_LOADED,
+    '/models/m%20a%2Fb': { recipe_options: { ctx_size: 49152 } } });
+  assert.deepEqual(await saved.contextWindow(), { size: 49152, guess: false });
+});
+
+test('the context window is null when nothing can be read', async () => {
+  assert.equal(await windowClient({}).contextWindow(), null);
+  assert.equal(await windowClient({ '/health': NOT_LOADED, '/models/m%20a%2Fb': {} }).contextWindow(), null);
+});
+
+const SAVED_SIZE = (size) => ({ recipe_options: { ctx_size: size } });
+
+test('a failed health check reads the saved window as a guess', async () => {
+  const client = windowClient({ '/health': 'throw', '/models/m%20a%2Fb': SAVED_SIZE(65536) });
+  assert.deepEqual(await client.contextWindow(), { size: 65536, guess: true });
+});
+
+test('a health check that answers with an error or no loaded list gives a guess', async () => {
+  const saved = { '/models/m%20a%2Fb': SAVED_SIZE(65536) };
+  const busy = windowClient({ '/health': { status: 500, body: { error: 'busy' } }, ...saved });
+  assert.deepEqual(await busy.contextWindow(), { size: 65536, guess: true });
+  const noList = windowClient({ '/health': {}, ...saved });
+  assert.deepEqual(await noList.contextWindow(), { size: 65536, guess: true });
+  // The same body with a loaded model listed would be read as sure.
+  const body = { status: 500, body: LOADED() };
+  assert.deepEqual(await windowClient({ '/health': body, '/props': 'throw', ...saved }).contextWindow(),
+    { size: 65536, guess: true });
+});
+
+test('a guess lowers the window but never raises a smaller one', async () => {
+  const { readWindow } = await import('./phases.mjs');
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 128000, maxOutput: 500, reasoningOutput: 500 } });
+  const run = async (health, saved, window) => {
+    const ctx = { config, job: { id: 'j' }, logs: { status() {}, detail() {} }, window,
+      model: windowClient({ '/health': health, '/models/m%20a%2Fb': SAVED_SIZE(saved) }) };
+    await readWindow(ctx, 'p');
+    return ctx.window;
+  };
+  assert.equal(await run('throw', 65536, undefined), 65536);
+  assert.equal(await run('throw', 128000, 32768), 32768);
+  assert.equal(await run({ status: 500, body: { error: 'busy' } }, 65536, undefined), 65536);
+  assert.equal(await run({ status: 500, body: { error: 'busy' } }, 128000, 32768), 32768);
+  assert.equal(await run({}, 65536, undefined), 65536);
+  assert.equal(await run({}, 128000, 32768), 32768);
+});
+
+test('the fallback window is per slot', async () => {
+  const size = async (args) => (await windowClient({ '/health': LOADED({ recipe_options:
+    { ctx_size: 131072, ...(args === undefined ? {} : { llamacpp_args: args }) } }), '/props': 'throw' })
+    .contextWindow()).size;
+  assert.equal(await size('--jinja -np 2'), 65536);
+  assert.equal(await size('--parallel 4 --jinja'), 32768);
+  assert.equal(await size('--jinja'), 131072);
+  assert.equal(await size(undefined), 131072);
+  assert.equal(await size('-np x'), 131072);
+  const saved = windowClient({ '/health': NOT_LOADED, '/models/m%20a%2Fb':
+    { recipe_options: { ctx_size: 131072, llamacpp_args: '-np 2' } } });
+  assert.deepEqual(await saved.contextWindow(), { size: 65536, guess: false });
+});
+
+const windowReader = async (config, reads) => {
+  const { readWindow } = await import('./phases.mjs');
+  const warns = [];
+  const ctx = { config, job: { id: 'j' }, model: { contextWindow: async () => reads.shift() },
+    logs: { status: (fields) => { if (fields.event === 'warn') warns.push(fields); }, detail() {} } };
+  return { ctx, warns, read: () => readWindow(ctx, 'p') };
+};
+
+test('a sure size after a guess raises the window back', async () => {
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 128000, maxOutput: 500, reasoningOutput: 500 } });
+  const { ctx, read } = await windowReader(config,
+    [{ size: 32768, guess: true }, { size: 65536, guess: false }]);
+  await read();
+  assert.equal(ctx.window, 32768);
+  await read();
+  assert.equal(ctx.window, 65536);
+});
+
+test('a guess too small never fails a job, but a sure size that small does', async () => {
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput: 500, reasoningOutput: 500 } });
+  const { ctx, warns, read } = await windowReader(config,
+    [{ size: 7000, guess: false }, { size: 2800, guess: true }, { size: 2800, guess: true }]);
+  await read();
+  await read();
+  await read();
+  assert.equal(ctx.window, 7000);
+  assert.deepEqual(warns.map((w) => w.reason), ['server-window', 'server-window-unknown']);
+  const first = await windowReader(config, [{ size: 2800, guess: true }]);
+  await first.read();
+  assert.equal(first.ctx.window, 20000);
+  const sure = await windowReader(config, [{ size: 2800, guess: false }]);
+  await assert.rejects(sure.read(),
+    (error) => error instanceof ModelError && error.code === 'window-too-small');
+});
+
+test('a guess is logged only when it lowers the window, and carries the guess marker', async () => {
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput: 500, reasoningOutput: 500 } });
+  const same = await windowReader(config, [{ size: 9000, guess: false }, { size: 12000, guess: true }]);
+  await same.read();
+  await same.read();
+  assert.equal(same.warns.filter((w) => w.reason === 'server-window').length, 1);
+  assert.equal(same.warns[0].guess, undefined);
+  const lower = await windowReader(config, [{ size: 9000, guess: false }, { size: 8000, guess: true }]);
+  await lower.read();
+  await lower.read();
+  assert.equal(lower.ctx.window, 8000);
+  assert.equal(lower.warns[1].reason, 'server-window');
+  assert.equal(lower.warns[1].guess, true);
+});
+
+test('a loaded entry with no backend and no options reads no saved window', async () => {
+  const urls = [];
+  const client = windowClient({ '/health': { all_models_loaded: [{ model_name: 'm a/b' }] },
+    '/models/m%20a%2Fb': { recipe_options: { ctx_size: 128000 } } }, urls);
+  assert.equal(await client.contextWindow(), null);
+  assert.ok(!urls.some(({ url }) => url.includes('/models/')), 'the saved route was requested');
+});
+
+test('reading the context window calls only loopback addresses, and only with GET', async () => {
+  const urls = [];
+  await windowClient({ '/health': LOADED(), '/props': 'throw' }, urls).contextWindow();
+  await windowClient({ '/health': NOT_LOADED, '/models/m%20a%2Fb': {} }, urls).contextWindow();
+  assert.ok(urls.some(({ url }) => url.endsWith('/props')));
+  assert.ok(urls.some(({ url }) => url.endsWith('/models/m%20a%2Fb')));
+  for (const { url, method } of urls) {
+    assert.ok(/^http:\/\/(localhost:13305|127\.0\.0\.1:8001)\//.test(url), url);
+    assert.equal(method, 'GET');
+  }
+});
+
+test('a server window smaller than the config is the budget, and is warned about once', async () => {
+  const { ask } = await import('./phases.mjs');
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput: 500, reasoningOutput: 500 } });
+  const warns = [];
+  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
+    logs: { status: (fields) => { if (fields.event === 'warn') warns.push(fields); }, detail() {} },
+    model: { ...fakeModel(), contextWindow: async () => ({ size: 7000, guess: false }) } };
+  const options = { phase: 'phase1', step: 's', reasoning: false, inputs: [['Doc', 'x'.repeat(30000)]],
+    schema: { type: 'object' }, task: 't' };
+  // About 10,000 tokens: fits 20000, not 7000.
+  for (let i = 0; i < 2; i += 1) {
+    await assert.rejects(ask(ctx, options), (error) => error instanceof ModelError && error.code === 'too-big');
+  }
+  assert.deepEqual(warns.map(({ reason, context, serverContext }) => ({ reason, context, serverContext })),
+    [{ reason: 'server-window', context: 20000, serverContext: 7000 }]);
+});
+
+test('a server window with no room for a prompt fails the job', async () => {
+  const config = fixtureConfig();
+  const model = { ...fakeModel(), contextWindow: async () => ({ size: 1000, guess: false }) };
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model:window-too-small');
+});
+
+test('an unreadable server window falls back to the config and is warned about once', async () => {
+  const config = fixtureConfig();
+  const model = { ...fakeModel(), contextWindow: async () => null };
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const warns = statusLines(result.outDir).filter((l) => l.reason === 'server-window-unknown');
+  assert.equal(warns.length, 1);
+});
+
+test('a server window just above the reply and reserve but with no input room fails the job', async () => {
+  // 2800 clears the reasoning reply, the 2048 reserve and the system text, with
+  // almost nothing left for a document.
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput: 500, reasoningOutput: 500 } });
+  const model = { ...fakeModel(), contextWindow: async () => ({ size: 2800, guess: false }) };
+  const { readWindow } = await import('./phases.mjs');
+  const ctx = { config, job: { id: 'j' }, model, logs: { status() {}, detail() {} } };
+  await assert.rejects(readWindow(ctx, 'intake'),
+    (error) => error instanceof ModelError && error.code === 'window-too-small');
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model:window-too-small');
+});
+
+test('splitText with no token budget is a window-too-small error', () => {
+  for (const tokens of [0, -1, -500]) {
+    assert.throws(() => splitText('some text', tokens),
+      (error) => error instanceof ModelError && error.code === 'window-too-small');
+  }
+});
+
+test('an unreadable window after a known smaller one keeps the smaller one', async () => {
+  const { readWindow } = await import('./phases.mjs');
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput: 500, reasoningOutput: 500 } });
+  const sizes = [{ size: 7000, guess: false }, null, null];
+  const warns = [];
+  const ctx = { config, job: { id: 'j' }, model: { contextWindow: async () => sizes.shift() },
+    logs: { status: (fields) => { if (fields.event === 'warn') warns.push(fields.reason); }, detail() {} } };
+  await readWindow(ctx, 'phase1');
+  await readWindow(ctx, 'phase1');
+  await readWindow(ctx, 'phase1');
+  assert.equal(ctx.window, 7000);
+  assert.deepEqual(warns, ['server-window', 'server-window-unknown']);
+});
+
+test('the context window is read afresh on every call', async () => {
+  const routes = { '/health': LOADED({ recipe_options: { ctx_size: 65536 } }), '/props': 'throw' };
+  const client = windowClient(routes);
+  assert.deepEqual(await client.contextWindow(), { size: 65536, guess: false });
+  routes['/health'] = LOADED({ recipe_options: { ctx_size: 32768 } });
+  assert.deepEqual(await client.contextWindow(), { size: 32768, guess: false });
+});
+
+test('the loaded entry whose model_name matches is the one used', async () => {
+  const other = { model_name: 'other', backend_url: 'http://127.0.0.1:8002/v1',
+    recipe_options: { ctx_size: 1111 } };
+  const health = { all_models_loaded: [other, ...LOADED().all_models_loaded] };
+  assert.deepEqual(await windowClient({ '/health': health, '/props': 'throw' }).contextWindow(), { size: 65536, guess: false });
+  const reversed = { all_models_loaded: [...LOADED().all_models_loaded, other] };
+  assert.deepEqual(await windowClient({ '/health': reversed, '/props': 'throw' }).contextWindow(), { size: 65536, guess: false });
+});
+
+test('a loaded model with no readable size does not fall back to the saved options', async () => {
+  const urls = [];
+  const client = windowClient({ '/health': LOADED({ recipe_options: {} }), '/props': 'throw',
+    '/models/m%20a%2Fb': { recipe_options: { ctx_size: 128000 } } }, urls);
+  assert.equal(await client.contextWindow(), null);
+  assert.ok(!urls.some(({ url }) => url.endsWith('/models/m%20a%2Fb')));
+});
+
+test('the floor uses the larger reply, so a window only that floor rejects fails', async () => {
+  const { readWindow } = await import('./phases.mjs');
+  const accepts = async (cfg, size) => {
+    try {
+      await readWindow({ config: cfg, job: { id: 'j' }, model: { contextWindow: async () => ({ size, guess: false }) },
+        logs: { status() {}, detail() {} } }, 'p');
+      return true;
+    } catch (error) {
+      if (error instanceof ModelError && error.code === 'window-too-small') return false;
+      throw error;
+    }
+  };
+  const model = (maxOutput) => fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 20000, maxOutput, reasoningOutput: 500 } });
+  // The smallest window that leaves input room when the reasoning reply is the only reserve.
+  let least = 3000;
+  while (!await accepts(model(500), least)) least += 1;
+  // A larger plain reply raises the floor, so a window just above `least` is refused.
+  assert.equal(await accepts(model(3000), least + 100), false);
+  assert.equal(await accepts(model(3000), least + 3000), true);
+});
+
+test('a window that is zero, negative, fractional or text falls through to the next source', async () => {
+  for (const bad of [0, -4096, 4096.5, '4096']) {
+    const props = { default_generation_settings: { n_ctx: bad } };
+    assert.deepEqual(await windowClient({ '/health': LOADED(), '/props': props }).contextWindow(), { size: 65536, guess: false },
+      `props ${JSON.stringify(bad)}`);
+    const saved = windowClient({ '/health': LOADED({ recipe_options: { ctx_size: bad } }), '/props': props,
+      '/models/m%20a%2Fb': { recipe_options: { ctx_size: 49152 } } });
+    assert.equal(await saved.contextWindow(), null, `loaded ${JSON.stringify(bad)}`);
+    assert.equal(await windowClient({ '/health': NOT_LOADED,
+      '/models/m%20a%2Fb': { recipe_options: { ctx_size: bad } } }).contextWindow(), null);
+  }
 });
