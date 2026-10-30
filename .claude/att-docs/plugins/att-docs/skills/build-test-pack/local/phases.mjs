@@ -37,6 +37,7 @@ const blank = (value) => list(value).every((item) => String(item ?? '').trim() =
 
 /** Splits text on paragraph boundaries into pieces of at most `tokens` estimated tokens. */
 export function splitText(text, tokens) {
+  if (!(tokens > 0)) throw new ModelError('window-too-small', 'the model server window leaves no room for text');
   const limit = tokens * 3;
   const pieces = [];
   let current = '';
@@ -76,6 +77,64 @@ export function batches(items, render, tokens, max = Infinity) {
   return out;
 }
 
+/** The window every prompt is budgeted against: the smaller of the config's and the server's. */
+const budgetWindow = (ctx) => ctx.window ?? ctx.config.model.context;
+
+/**
+ * The least room a prompt must leave for inputs once the core references and the
+ * reply are in. Documents are split at `room - 1000`, so a window this small
+ * leaves pieces of about a page or more. When `maxOutput` is larger than
+ * `reasoningOutput` the split room can be smaller; a piece with no room is a
+ * `window-too-small` error from `splitText`, not a silent failure.
+ */
+const MIN_INPUT_ROOM = 2000;
+
+/**
+ * Reads the model server's context size and sets ctx.window to the smaller of
+ * it and `model.context`. Asked again on every call, so a reload at another
+ * size is picked up; each distinct smaller size is logged once. A size marked
+ * as a guess can only lower the window, never raise it, and never fails the
+ * job: one that leaves no room counts as unread. A size that cannot be
+ * read keeps the last server-based window in force, and the config's applies
+ * until one has been read; it is logged once. A window
+ * with no room left for a prompt is a `window-too-small` error.
+ */
+export async function readWindow(ctx, phase) {
+  const configured = ctx.config.model.context;
+  if (typeof ctx.model.contextWindow !== 'function') {
+    delete ctx.window;
+    return;
+  }
+  const read = await ctx.model.contextWindow();
+  const before = ctx.window ?? configured;
+  const { reasoningOutput, maxOutput } = ctx.config.model;
+  const floor = Math.max(reasoningOutput, maxOutput) + 2048 + estimateTokens(SYSTEM);
+  const tooSmall = () => ctx.window - floor <= 0
+    || room(ctx, true, ctx.ref?.core ?? []) < MIN_INPUT_ROOM;
+  let server = read?.size ?? null;
+  // An unreadable size keeps the last server-based window; the config's applies
+  // only until one has been read. A guess never raises the window, and a guess
+  // that would leave no room is treated as unknown: only a sure size fails a job.
+  ctx.window = !server ? before
+    : read.guess ? Math.min(before, server) : Math.min(configured, server);
+  if (server && read.guess && tooSmall()) {
+    ctx.window = before;
+    server = null;
+  }
+  const noted = ctx.windowNoted ?? (ctx.windowNoted = new Set());
+  if (!server && !noted.has('unknown')) {
+    noted.add('unknown');
+    ctx.logs.status({ job: ctx.job.id, phase, event: 'warn', reason: 'server-window-unknown' });
+  } else if (server && server < configured && !noted.has(server) && (!read.guess || server < before)) {
+    noted.add(server);
+    ctx.logs.status({ job: ctx.job.id, phase, event: 'warn', reason: 'server-window',
+      context: configured, serverContext: server, ...(read.guess ? { guess: true } : {}) });
+  }
+  if (tooSmall()) {
+    throw new ModelError('window-too-small', 'the model server window leaves no room for a prompt');
+  }
+}
+
 /**
  * The pipeline's one way to call the model. Checks the token count first and
  * throws `too-big` rather than truncating, retries a failed call once with
@@ -87,8 +146,9 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
   const user = [section('Task', task), ...inputs.filter(([, text]) => !blank(text))
     .map(([label, text]) => section(label, text))].join('\n');
   const maxTokens = reasoning ? ctx.config.model.reasoningOutput : ctx.config.model.maxOutput;
+  await readWindow(ctx, phase);
   const promptTokens = await ctx.model.countTokens(`${system}\n${user}`);
-  if (promptTokens + maxTokens + 512 > ctx.config.model.context) {
+  if (promptTokens + maxTokens + 512 > budgetWindow(ctx)) {
     throw Object.assign(new ModelError('too-big', 'prompt does not fit the context'),
       { promptTokens });
   }
@@ -119,7 +179,7 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
 }
 
 /** Room left for inputs in one call, after the reference and the reply. */
-const room = (ctx, reasoning, refs) => ctx.config.model.context
+const room = (ctx, reasoning, refs) => budgetWindow(ctx)
   - (reasoning ? ctx.config.model.reasoningOutput : ctx.config.model.maxOutput)
   - estimateTokens(SYSTEM + refs.join('\n')) - 2048;
 

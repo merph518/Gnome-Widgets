@@ -50,7 +50,7 @@ reply text: the user does not see it there.**
 | `<dependency-setup>` | `package.json` needs only `dotenv`. There is no lockfile, so run `npm install` in the worktree when a test imports it. `node_modules` is gitignored |
 | `<shell-text-note>` | Under Overrides, Section 3 |
 | `<branch-types>` | `feat`, `fix`, `chore`, `docs`, `ci` |
-| `<default-branch>` | `main`. Never merge, never push to `main`, never force-push |
+| `<default-branch>` | `main`. Never merge, except a pin-only pull request under Added gates, Post-merge pin; never push to `main`, never force-push |
 | `<follow-up-note>` | `gh issue create` in `merph518/Overmind`. When a write is refused, put the text in the pull request body under `Follow-ups` |
 | `<sampling-note>` | Not applicable here, because nothing is dispatched; Section 6 below runs every affected test file |
 | `<discovery-rules>` | Not applicable here, because there is no test data discovery |
@@ -199,7 +199,8 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   fixed, Overlap, Self review, Settled decisions, then the attribution lines the session
   gives.
 - Never merge the pull request, never push to `main`, and never force-push. The user
-  merges.
+  merges. The one exception is a pin-only bump pull request, under Added gates, Post-merge
+  pin.
 - `gh pr edit` fails on a Projects classic deprecation. Edit a body with
   `gh api -X PATCH repos/merph518/Overmind/pulls/<n> -F "body=@<file>"`.
 - Mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. Resolve a conflict by
@@ -328,8 +329,8 @@ done until it finishes or is skipped.
   - The workflow ran. Look for the open release pull request with
     `gh pr list --state open --head release-please--branches--main --json number,title`.
     When it lists this pull request in its changelog, ask the user through
-    `AskUserQuestion` to merge it, because this skill never merges. When there is none,
-    or it does not list this pull request, because the change merged as a type
+    `AskUserQuestion` to merge it, because this skill merges only pin-only bump pull
+    requests. When there is none, or it does not list this pull request, because the change merged as a type
     release-please ignores (it reads only `feat`, `fix` and `perf`), report that no pin
     was cut and why, and open no bump pull request. A failed run is reported the same
     way, with the run's link.
@@ -347,15 +348,67 @@ done until it finishes or is skipped.
   the repository does not pin Overmind. Read the list fresh each time.
 - **Open one pin-bump pull request per repository.** This session cannot write outside
   its own worktree, so each bump is handed to a session started in that repository, or to
-  the user. That session runs its own implement procedure, including its self review
-  loop, an Opus review, and the ready label: `scripts/overmind-sync.sh <new tag>`, then
-  `scripts/overmind-check.sh`, a `chore:` commit, and a pull request that names the tag
-  and the Overmind pull request. When the new tag crosses a minor version, it checks
-  its extension first, per the README's Releases section. Nothing merges and nothing
-  pushes to a repository's `main`.
-- **Report** the tag and each repository with its bump pull request number or the
-  session it was handed to. A repository whose sync or check fails is reported with the
-  failing command, and the others still go ahead.
+  the user. That session runs `scripts/overmind-sync.sh <new tag>`, then
+  `scripts/overmind-check.sh`, a `chore:` commit, and a pull request titled
+  `chore: Move the Overmind pin to <new tag>` that names the Overmind pull request. When
+  the new tag crosses a minor version, it checks its extension first, per the README's
+  Releases section. Nothing pushes to a repository's `main`.
+  - A bump whose diff is only the lock, `.claude/att-docs.lock`, and the vendored files
+    under `.claude/att-docs/` is a pin-only pull request. It skips the self review loop,
+    the Opus review and the ready label, because the code it brings in was reviewed in
+    this repository, and it merges by the next step without a confirm. The handoff says
+    so, because that repository's own rules otherwise call for the full procedure.
+  - A bump with any other change, such as an extension edit for a new minor version,
+    runs that repository's own implement procedure in full, with its review loop and
+    ready label, and is never merged by this step.
+- **Close the pin pull requests it supersedes.** Once a repository's bump pull request is
+  open, run `close_superseded_pins.py` from this skill's folder in the Overmind checkout
+  (add `--dry-run` first to see the list). It only calls `gh`, so it works for a repository
+  whose bump was handed to another session once that session reports its pull request number:
+
+  ```bash
+  python3 .claude/skills/implement/close_superseded_pins.py <owner/repo> <new tag> <new pull request number>
+  ```
+
+  It requires the new pull request to be open with the new tag in its title. It then closes
+  each other open pin pull request in that repository that targets an earlier version, with
+  a comment naming the new pull request, and deletes its branch. It never closes the new
+  pull request, a pin pull request for the same or a newer version, or a pull request whose
+  title is not a pin bump, so a repository ends with one open pin pull request, the newest.
+  A pull request it could not close, or whose branch it could not delete, is reported with
+  the reason.
+- **Merge each pin-only pull request once its checks pass.** This is the one exception to
+  the rule that a session never merges. Once a repository's bump pull request is open,
+  run `merge_pin_pr.py` from this skill's folder in the Overmind checkout, in the
+  background, one per repository:
+
+  ```bash
+  python3 .claude/skills/implement/merge_pin_pr.py <owner/repo> <pull request number>
+  ```
+
+  It reads the pull request again and acts only on a pin-only one: an open, non-draft pull
+  request from a branch in the same repository into its default branch, with a pin title,
+  whose changed files, and the files any rename moved from, are the lock and vendored
+  files alone, with the lock changed, not removed or renamed, and naming the same
+  repository as before, the title's tag, and the commit that tag points to. Any other
+  pull request is left as it is (exit 2, verdict `review`). It waits up to an hour for the
+  checks and for any branch rule blocking the merge to clear, giving each new head commit
+  five minutes for its checks to start, and merges that commit when every check has
+  passed, or when none has started, with the repository's allowed merge method, deleting
+  the branch. A failing check, a wait still unfinished at the deadline, a conflict, a
+  branch behind its base, a hundred checks or more, a pull request or lock it cannot read,
+  or a refused merge leaves the pull request open with a comment saying why and the
+  `Manual Review Needed` label, so it shows as waiting on the user (exit 1, verdict
+  `flagged`). `--dry-run` judges the pull request
+  as it stands, without waiting, and writes nothing.
+- **Finish each merged pin.** For each pull request merged, run that repository's
+  post-merge steps in a session there: the session that opened the bump when it is still
+  running, or a session started for those steps alone, closed when they finish.
+- **Report** one line per tag, not per repository: the tag, how many repositories it
+  merged in, and each pull request left waiting on the user with its reason, such as
+  `v1.4.0 pinned in 6 repositories; Gnome-Widgets #12 waits on you, a check failed`.
+  A repository whose sync or check fails is named on that line with the failing command,
+  and the others still go ahead.
 
 ### Releases
 

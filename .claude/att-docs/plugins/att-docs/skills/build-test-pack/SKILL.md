@@ -271,13 +271,21 @@ passed.
 A reasoning call can think for up to `model.reasoningOutput` tokens (40,960 by
 default), which takes well over an hour at local generation speeds, inside a
 `model.context` of 128,000 tokens by default, so a call waits up to
-`model.timeoutMinutes` (150 by default). The model server's context has to be at
-least `model.context` (128000 by default; a `pipeline.json` can change it), and
-its own request time-out at least `model.timeoutMinutes`, or the server ends the
-reply early and the call fails with `no-reply`. A window smaller than
-`model.context` may not show up as an error at all: the server runs with context
-shift on, so it can drop the start of a prompt that is too long and answer
-anyway. A call that fails while thinking is retried once with thinking off.
+`model.timeoutMinutes` (150 by default). The pipeline reads the model server's
+context size before every call and budgets the prompt against the smaller of it
+and `model.context` (128000 by default; a `pipeline.json` can change it). When
+the server's is smaller, the status log gets a `server-window` warning with both
+sizes, and a prompt that does not fit the smaller one fails with `too-big`
+rather than reaching a server that would drop the start of it. When the size
+cannot be read, the log gets a `server-window-unknown` warning once per job;
+`model.context` is used until a size has been read, and the last size read stays
+in force after that. When the health check fails, the saved window is used as a guess that can
+only lower the budget and never fails the job. The window sizes are per slot.
+A window with no room left for a prompt fails the job
+with `model:window-too-small`. The server's own request time-out must still be at
+least `model.timeoutMinutes`, or the server ends the reply early and the call
+fails with `no-reply`. A call that fails while thinking is retried once with
+thinking off.
 
 Lemonade keeps the model's window as a saved recipe option on the user model,
 not in `/etc/lemonade` or the systemd unit. In the commands below, `<endpoint>`
@@ -286,6 +294,7 @@ is `model.endpoint` (for example `http://localhost:13305/api/v1`) and `<model na
 
 - To check the saved window, run `curl -s <endpoint>/models/<model name>` and
   read `recipe_options.ctx_size`. It works whether or not the model is loaded.
+  URL-encode the model name when it has characters such as `/` or spaces.
   To see what a loaded model is running with, read `recipe_options.ctx_size` in
   the matching `model_name` entry of `all_models_loaded` in `<endpoint>/health`;
   that list is empty when no model is loaded.
@@ -602,13 +611,14 @@ half an hour after the queue's default cutoff.
   is). A restart during a job makes the call in flight fail, and the job takes
   an ordinary failed try (`model:network`, `model:http` or `model:no-reply`),
   so it is retried like any other failure; only a pipeline process that died
-  itself leaves an `interrupted` row. After a restart, the server's context size
-  and request time-out must still be at least `model.context` and
-  `model.timeoutMinutes`. Lemonade keeps the window as a saved recipe option on
+  itself leaves an `interrupted` row. After a restart, the server's request
+  time-out must still be at least `model.timeoutMinutes`, and its context size
+  should still match what you want, because the pipeline uses the smaller of
+  that and `model.context`, so a larger `model.context` is not honored.
+  Lemonade keeps the window as a saved recipe option on
   the model, so read `recipe_options.ctx_size` from
   `<endpoint>/models/<model name>` (`<endpoint>` and `<model name>` as defined
-  above) to confirm it is still at least
-  `model.context`; `/health` shows nothing until the model is loaded.
+  above) to confirm it; `/health` shows nothing until the model is loaded.
 - Move the timer to another host. On the new host install the repository, the
   model server, the pipeline config and the env file at
   `~/.config/build-pack/env`, then copy `build-pack.service`, `build-pack.timer`,

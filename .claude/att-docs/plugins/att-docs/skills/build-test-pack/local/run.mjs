@@ -45,7 +45,8 @@ export const PHASES = ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5
 
 // What a run builds for itself from the config; everything else on ctx is the job's state.
 const SETUP = new Set(['config', 'job', 'logs', 'builder', 'suiteMerge', 'model', 'ref', 'private',
-  'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets', 'fullCoverageObjective', 'breakItObjective', 'rulesFresh']);
+  'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets', 'fullCoverageObjective', 'breakItObjective', 'rulesFresh',
+  'window', 'windowNoted']);
 
 const checkpointPath = (outDir) => path.join(outDir, 'work', 'checkpoint.json');
 
@@ -132,6 +133,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
   const packPath = path.join(outDir, packName);
   let written = null;
   try {
+    await P.readWindow(ctx, PHASES[done + 1] ?? 'done');
     await step('intake', () => P.intake(ctx));
     await step('phase1', () => P.phase1(ctx));
     await step('phase2', async () => {

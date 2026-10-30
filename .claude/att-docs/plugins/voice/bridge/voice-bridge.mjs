@@ -62,8 +62,7 @@
 //                  amend the line is a correction to the request in flight, and the answer
 //                  says, from the session's transcript, whether it was taken in mid-turn, ran
 //                  as a turn of its own, or waits for the step in progress to end. With queue
-//                  a request for a busy session, or one whose last answer is unheard, is held
-//                  by the bridge instead of posted
+//                  a request for a busy session is held by the bridge instead of posted
 //   run_command    runs a command a session asked the user to run, a "!" line in its last
 //                  reply, in two calls like stop_turn. The command is never passed in: the
 //                  first call takes it from the transcript, checks it against the bridge's
@@ -77,10 +76,12 @@
 //                  status and the end of the output, and posts the output to the session in
 //                  the tags a "!" command's output carries. Preapproved never skips the yes.
 //   queued_requests  reads a session's held requests in the order they go out, each with how
-//                  long ago it was sent; the bridge posts the first once the session is idle
-//                  and its last answer has been heard. A request already posted to a session
-//                  is in the session's own queue, which nothing outside the session can read
-//                  or change, so it is reported as waiting and not offered for dropping
+//                  long ago it was sent; the bridge posts the first once the session is idle,
+//                  heard or not: an answer still unheard then stays for read_reply, and the
+//                  follow feed carries it for a followed session. A request already posted to
+//                  a session is in the session's own queue, which nothing outside the session
+//                  can read or change, so it is reported as waiting and not offered for
+//                  dropping
 //   drop_request   drops one held request in two calls like stop_turn: the first reads it
 //                  back, the second, after a yes, removes it unless it has gone. A dropped
 //                  request never reaches the session. Preapproved never skips the yes.
@@ -302,6 +303,10 @@
 //                  says why.
 //                  With repo it works in another repository a running session has checked
 //                  out, from that checkout, and a summary confirms a merge only in its own.
+//                  With no running session in it but a checkout in the code folder, it
+//                  merges from that checkout and closes the issues the pull request closes
+//                  and removes their In Progress label itself; with no checkout it merges
+//                  nothing.
 //   pull_request_merged
 //                  for "I merged 5222": tells the running session that owns the merged pull
 //                  request, the one whose worktree is on its branch, so it runs its
@@ -1046,7 +1051,37 @@ function bridgeFiles(bridgeDir, key) {
   return {
     pending: path.join(bridgeDir, 'pending', key),
     reply: path.join(bridgeDir, 'replies', `${key}.json`),
+    earlier: path.join(bridgeDir, 'replies', `${key}.earlier.json`),
   };
+}
+
+// The earlier replies: ones a later request went out over before they were heard, kept in
+// replies/<key>.earlier.json as { sessionId, replies: [{ id, at, text, readAt }] }, oldest
+// first, so read_reply still gives each once. A file kept for an earlier conversation on the
+// same key is not read, and one whose session is gone is swept by releaseHeld. Past
+// EARLIER_KEEP the oldest goes.
+const EARLIER_KEEP = 10;
+
+function readEarlier(files, session) {
+  const kept = readJson(files.earlier, null);
+  if (!Array.isArray(kept?.replies) || kept.sessionId !== session.sessionId) return [];
+  return kept.replies.filter(reply => reply?.text);
+}
+
+function writeEarlier(files, session, list) {
+  if (list.length === 0) fs.rmSync(files.earlier, { force: true });
+  else {
+    writePrivateJson(files.earlier,
+      { sessionId: session.sessionId, replies: list.slice(-EARLIER_KEEP) });
+  }
+}
+
+// The earlier replies not read yet, and not already carried to the phone by the follow feed.
+function unreadEarlier(files, session, bridgeDir) {
+  const earlier = readEarlier(files, session).filter(reply => !reply.readAt);
+  if (earlier.length === 0) return [];
+  const inFeed = feedReplyTimes(bridgeDir, session.key);
+  return earlier.filter(reply => !inFeed(reply));
 }
 
 function postLine(socket, message) {
@@ -1064,6 +1099,8 @@ function postLine(socket, message) {
 // A line with priority now cancels the session's running turn and then runs as its next
 // prompt; the default priority is folded into a running turn at its next step, or runs after
 // the turn when none follows.
+// A reply not heard yet, by read_reply or the follow feed, is set aside with the session's
+// earlier replies rather than dropped, and the ones already read are cleared.
 export async function sendToSession(session, text, bridgeDir, {
   priority, post = postLine, marker = REQUEST_PREFIX,
 } = {}) {
@@ -1071,6 +1108,11 @@ export async function sendToSession(session, text, bridgeDir, {
   fs.mkdirSync(path.dirname(files.pending), { recursive: true, mode: 0o700 });
   // A post that fails sent nothing, so the request already being tracked stays as it was.
   const before = { pending: readText(files.pending), reply: readText(files.reply) };
+  const unheard = readJson(files.reply, null);
+  const kept = unheard?.text && !unheard.readAt && !replyInFeed(bridgeDir, session.key, unheard)
+    ? { id: crypto.randomBytes(8).toString('hex'), at: unheard.at, text: unheard.text } : null;
+  const earlier = unreadEarlier(files, session, bridgeDir);
+  writeEarlier(files, session, kept ? [...earlier, kept] : earlier);
   fs.rmSync(files.reply, { force: true });
   fs.writeFileSync(files.pending, String(Date.now()), { mode: 0o600 });
   try {
@@ -1079,11 +1121,19 @@ export async function sendToSession(session, text, bridgeDir, {
       type: 'user', ...(priority && { priority }), message: { role: 'user', content },
     });
   } catch (error) {
+    let restored = false;
     for (const [name, text] of Object.entries(before)) {
       // A reply the session wrote while the post waited is the earlier request's, so it stays.
       if (name === 'reply' && fs.existsSync(files.reply)) continue;
       if (text) fs.writeFileSync(files[name], text, { mode: 0o600 });
       else fs.rmSync(files[name], { force: true });
+      if (name === 'reply') restored = Boolean(text);
+    }
+    // The reply set aside is back in its own file, so it comes off the earlier list; one the
+    // session overwrote meanwhile stays there.
+    if (kept && restored) {
+      writeEarlier(files, session, readEarlier(files, session)
+        .filter(reply => reply.id !== kept.id));
     }
     throw error;
   }
@@ -1096,8 +1146,22 @@ export async function sendToSession(session, text, bridgeDir, {
 // While the request is still working, text holds what the session's feed gained since the
 // request was sent, the turn's mid-turn notes, and is empty when the session has no feed or
 // the call peeks.
-export function readReply(session, bridgeDir, { now = Date.now(), peek = false } = {}) {
+// An earlier reply, one a later request went out over, comes first, oldest first, once, said
+// as earlier so it is not taken for the answer to the latest request. A peek never sees it,
+// so a wait on the latest request is not answered by it, and latest skips it.
+export function readReply(session, bridgeDir, {
+  now = Date.now(), peek = false, latest = false,
+} = {}) {
   const files = bridgeFiles(bridgeDir, session.key);
+  const [first] = peek || latest ? [] : unreadEarlier(files, session, bridgeDir);
+  if (first) {
+    writeEarlier(files, session, readEarlier(files, session)
+      .map(reply => (reply.id === first.id ? { ...reply, readAt: now } : reply)));
+    // The answer just read is the one read_full_reply means, though a later one was kept.
+    const text = spokenReply(bridgeDir, session.key, first.text, Number(first.at) * 1000,
+      { current: true });
+    return { status: 'done', text: `${earlierLead(session)}${text}`, again: false, earlier: true };
+  }
   const reply = readJson(files.reply, null);
   if (reply?.text && !(peek && reply.readAt)) {
     if (peek) return { status: 'done', text: speakable(reply.text), again: false };
@@ -1124,15 +1188,28 @@ export function readReply(session, bridgeDir, { now = Date.now(), peek = false }
   return { status: 'working', seconds, text: latestNotes(notes) };
 }
 
-// Whether the follow feed already carried this session's ready reply to the phone: a reply
-// entry written at the reply's time, at or below the follow's marker.
-function replyHeardInFeed(bridgeDir, key) {
-  const reply = readJson(bridgeFiles(bridgeDir, key).reply, null);
-  if (!reply?.at) return false;
+// How an earlier reply is introduced when read_reply gives it.
+const earlierLead = session => `An earlier answer from ${session.name}, from before the last `
+  + 'message sent to it: ';
+
+// Whether the follow feed already carried a reply to the phone: a reply entry written at the
+// reply's time, at or below the follow's marker. The feed is read once per call.
+function feedReplyTimes(bridgeDir, key) {
   const files = followFiles(bridgeDir, key);
   const heard = Number(readText(files.marker)) || 0;
-  return feedEntries(files.feed).some(entry => entry.reply === true && !entry.copy
-    && entry.seq <= heard && Math.abs(Number(entry.at) - Number(reply.at)) <= 5);
+  const times = feedEntries(files.feed)
+    .filter(entry => entry.reply === true && !entry.copy && entry.seq <= heard)
+    .map(entry => Number(entry.at));
+  return reply => Boolean(reply?.at) && times.some(at => Math.abs(at - Number(reply.at)) <= 5);
+}
+
+function replyInFeed(bridgeDir, key, reply) {
+  return feedReplyTimes(bridgeDir, key)(reply);
+}
+
+// Whether the follow feed already carried this session's ready reply to the phone.
+function replyHeardInFeed(bridgeDir, key) {
+  return replyInFeed(bridgeDir, key, readJson(bridgeFiles(bridgeDir, key).reply, null));
 }
 
 // A reply as list_sessions reads it beside its session: on one line, and cut short at
@@ -1228,12 +1305,12 @@ const replyLengthText = length => (length === 'long' ? 'whole'
 // read_full_reply, unless the file already holds one written later, as when an older reply is
 // read again. A short reply written later than the kept one is noted as wholeAt, so
 // read_full_reply can say the reply it reads is not the latest.
-function spokenReply(bridgeDir, key, reply, at) {
+function spokenReply(bridgeDir, key, reply, at, { current = false } = {}) {
   const long = replyLength(bridgeDir) === 'long';
   const { text, more } = long ? { text: reply, more: false } : replySummary(reply);
   const file = fullReplyFile(bridgeDir, key);
   const kept = readJson(file, null);
-  const later = when => !(at <= Number(when));
+  const later = when => current || !(at <= Number(when));
   let write = null;
   if (more && later(kept?.at)) write = { at, text: String(reply ?? '').trim() };
   if (!more && kept && later(kept.at) && later(kept.wholeAt)) write = { ...kept, wholeAt: at };
@@ -3638,8 +3715,8 @@ export async function amendRequest(session, text, {
 
 // --- Held requests -------------------------------------------------------------------------
 
-// A request sent with queue true waits here while its session is busy or its last answer has
-// not been heard, in held/<key>.json as { sessionId, items: [{ id, text, at, releasing }] }
+// A request sent with queue true waits here while its session is busy, in held/<key>.json
+// as { sessionId, items: [{ id, text, at, releasing }] }
 // in the order the items go out. A line already posted to a session is in the session's own
 // queue, which only the session can change, so only a held request can be dropped.
 const DROPS_KEY = Symbol('drops');
@@ -3670,15 +3747,14 @@ const ABANDONED_MS = 30 * 1000;
 
 // What keeps the session from taking a held request now, or '' when nothing does: it is busy,
 // it is waiting on a prompt or a question that a new request would be read as the answer to,
-// its last answer has not been heard, which a new request would overwrite, or it has not
-// answered its last request yet.
+// or it has not answered its last request yet. An answer not yet heard holds nothing back:
+// the release sets it aside for read_reply, and the follow feed carries it.
 function heldBlock(session, paths, at) {
   if (session.busy) return 'busy';
   if (readAttention(session, paths.bridgeDir, { projectsDir: paths.projectsDir })) {
     return 'attention';
   }
   const { status } = readReply(session, paths.bridgeDir, { peek: true });
-  if (status === 'done') return 'unheard';
   if (status !== 'working') return '';
   const sentAt = Number(readText(bridgeFiles(paths.bridgeDir, session.key).pending));
   const ended = session.statusSince;
@@ -3706,8 +3782,6 @@ function heldWaiting(session, paths, at) {
     busy: `${name} is busy.`,
     attention: `${name} is waiting on a prompt or a question, which answer_prompt or the app `
       + 'can answer; the first goes once that is answered.',
-    unheard: `They go once you have heard ${name}'s answer to the last request; `
-      + 'read_reply plays it.',
     working: `They go once ${name} has answered the last request.`,
     '': 'Nothing is holding them back, so the first goes within seconds.',
   }[heldBlock(session, paths, at)];
@@ -3796,7 +3870,7 @@ function lineSeen(file, text, since) {
     || transcriptTail(file).some(row => rowTime(row) >= since && ranAsTurn(row, content));
 }
 
-// Posts the first held item of one session when it is idle and its last answer was heard. The
+// Posts the first held item of one session when it is idle, keeping an unheard answer. The
 // item is marked as being sent before the post and removed after it, so a drop never takes one
 // in flight. A mark left by a bridge that stopped in between is settled first, from the
 // transcript: the item is gone when the session shows the line, and posted again when it does
@@ -3829,11 +3903,29 @@ async function releaseOne(session, { paths, post, now }) {
   return first;
 }
 
+// Removes the earlier-reply file of a session that is gone once OUTCOME_KEEP_MS has passed.
+function sweepEarlier(sessions, bridgeDir, at) {
+  const dir = path.join(bridgeDir, 'replies');
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names.filter(file => file.endsWith('.earlier.json'))) {
+    if (sessions.some(s => `${s.key}.earlier.json` === name)) continue;
+    const file = path.join(dir, name);
+    const mtime = fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? at;
+    if (at - mtime > OUTCOME_KEEP_MS) fs.rmSync(file, { force: true });
+  }
+}
+
 // Releases the first held request of every idle session in the list, one per session per scan,
 // and sweeps the file of a session that is gone once OUTCOME_KEEP_MS has passed. A session
 // whose post fails is logged and the others go on. Returns the keys it sent a request to.
 export async function releaseHeld(sessions, { paths, post = postLine, now = Date.now,
   log = () => {} }) {
+  sweepEarlier(sessions, paths.bridgeDir, now());
   const dir = path.join(paths.bridgeDir, 'held');
   let names;
   try {
@@ -4945,7 +5037,7 @@ export const TOOLS = [
   {
     name: 'queued_requests',
     description: 'Read one session\'s held requests, the ones sent with queue true that wait '
-      + 'until the session is idle and its last answer has been heard, in the order they go '
+      + 'until the session is idle, in the order they go '
       + 'out and with how long ago each was sent. Says whether a request already posted to '
       + 'the session is still waiting its turn, which cannot be dropped.',
     inputSchema: {
@@ -5088,7 +5180,9 @@ export const TOOLS = [
       + 'you did not say. A long reply comes back as its one-line summary with a '
       + 'note that more is available; read_full_reply reads the whole of it when the user '
       + 'asks. Calling it again returns the same reply, said as a '
-      + 'repeat, until the next send, so a call whose answer was lost can be made again.',
+      + 'repeat, until the next send, so a call whose answer was lost can be made again. An '
+      + 'answer not heard before a later request went out comes first, once each, introduced '
+      + 'as an earlier answer; read it as that, and call again for the latest one.',
     inputSchema: { type: 'object', properties: { session: sessionArg }, required: ['session'] },
   },
   {
@@ -5360,8 +5454,8 @@ export const TOOLS = [
         repo: {
           type: 'string',
           description: 'The repository, as owner/name or its name alone, such as LaundryBot; '
-            + 'a running session has to work in it. Left out, the repository the followed '
-            + 'sessions work in, or the tool asks which one',
+            + 'a running session works in it, or it has a checkout in the code folder. Left '
+            + 'out, the repository the followed sessions work in, or the tool asks which one',
         },
         confirm: {
           type: 'boolean',
@@ -8139,6 +8233,10 @@ async function mergeAndReport(number, { head, method }, tracker) {
     `Merged pull request ${number}${where} into ${after.baseRefName}${commit}.${owner}`, true);
 }
 
+// How the refusal for a repository no session works in begins, so a caller can tell it from
+// the one for a name that matches more than one.
+const NO_SESSION = 'No running session works in a repository named';
+
 // The repositories among the session checkouts that a spoken name means, by the keys
 // checkoutKeys gives a checkout: its folder, its remote's name, the name GitHub gives it now,
 // and an alias. Case and punctuation are dropped, and a name with an owner matches owner/name.
@@ -8167,8 +8265,7 @@ export function repositoryCheckout(named, checkouts, names = {}) {
       + 'owner/name.';
   }
   if (!found.length) {
-    return `No running session works in a repository named ${named}, so the bridge cannot `
-      + 'reach it.';
+    return `${NO_SESSION} ${named}, so the bridge cannot reach it.`;
   }
   return { repo: found[0], cwd: matched[0].toplevel, remote: matched[0].repo };
 }
@@ -8992,6 +9089,72 @@ function postMerged(session, pull, post) {
   return post(session.socket, { type: 'user', message: { role: 'user', content } });
 }
 
+// The issues a pull request closes, from GitHub's closing references, kept to those in the
+// repository the pull request is in. Read through GraphQL, since older gh builds list no
+// closingIssuesReferences field.
+const CLOSING_QUERY = 'query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n)'
+  + '{pullRequest(number:$p){closingIssuesReferences(first:50){nodes{number repository'
+  + '{nameWithOwner}}}}}}';
+
+async function mergeClosedIssues(number, repo, call) {
+  const [owner, name] = repo.split('/');
+  const reply = JSON.parse(await call(['api', 'graphql', '-f', `query=${CLOSING_QUERY}`,
+    '-f', `o=${owner}`, '-f', `n=${name}`, '-F', `p=${number}`]));
+  const nodes = reply?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+  return nodes.filter(issue => Number.isInteger(issue.number)
+    && String(issue.repository?.nameWithOwner ?? '').toLowerCase() === repo.toLowerCase())
+    .map(issue => issue.number);
+}
+
+// An error as a spoken sentence, ended with a period when it has none.
+const failure = error => {
+  const text = spoken(error?.message ?? error).trim();
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+};
+
+// The post-merge steps for a merge in a repository with no running session, done by the bridge
+// itself: each issue the pull request closes in its own repository is closed if the merge left
+// it open, and loses its In Progress label. The issues come from GitHub's own closing
+// references, so nothing a pull request says is acted on. Returns what to say, including any
+// step that failed, since the merge itself already happened.
+export async function finishMerge(number, { repo, dir, gh }) {
+  const lead = 'No session runs there, so the bridge ran the post-merge steps itself';
+  const call = args => gh({ cwd: dir, repo, args });
+  let issues;
+  try {
+    issues = await mergeClosedIssues(number, repo, call);
+  } catch (error) {
+    return `${lead}, but reading the pull request failed: ${failure(error)} Run them by hand.`;
+  }
+  if (!issues.length) {
+    return `${lead}: the pull request closes no issue, so there was nothing to do.`;
+  }
+  const said = [];
+  for (const issue of issues) {
+    const steps = [];
+    try {
+      const read = JSON.parse(await call(['issue', 'view', String(issue), '--json',
+        'state,labels']));
+      if (read.state === 'OPEN') {
+        await call(['issue', 'close', String(issue), '--reason', 'completed']);
+        steps.push('closed it');
+      } else {
+        steps.push('it was already closed');
+      }
+      if ((read.labels ?? []).some(label => label.name === 'In Progress')) {
+        await call(['issue', 'edit', String(issue), '--remove-label', 'In Progress']);
+        steps.push('removed In Progress');
+      } else {
+        steps.push('it had no In Progress label');
+      }
+    } catch (error) {
+      steps.push(`failed: ${failure(error)}`.replace(/\.$/, ''));
+    }
+    said.push(`issue ${issue}: ${steps.join(', ')}`);
+  }
+  return `${lead}: ${said.join('; ')}.`;
+}
+
 const unownedText = (number, name) => `Pull request ${number} merged, but ${name}, the `
   + 'session that worked it, is no longer running to do its post-merge steps.';
 
@@ -9808,9 +9971,14 @@ const WORK_SEPARATOR = ' - ';
 // rather than adding to it. The last separator ends the base, so a base title that holds a
 // dash of its own keeps it, and a work name never holds the separator (workTitle drops it).
 function baseTitle(title) {
-  const at = title.lastIndexOf(WORK_SEPARATOR);
-  return (at < 0 ? title : title.slice(0, at)).trim();
+  const named = title.replace(STATUS_SUFFIX, '');
+  const at = named.lastIndexOf(WORK_SEPARATOR);
+  return (at < 0 ? named : named.slice(0, at)).trim();
 }
+
+// The status a session appends in parentheses when it stops or waits, from session_title.py's
+// STATUSES, so a base title is read the same way here and there.
+const STATUS_SUFFIX = /\s+\((?:idle|waiting on you|stuck|stopped|waiting on CI)\)$/;
 
 // The title for a session starting the work `work`: its base title, the separator, and the
 // work name clipped to what the title limit leaves. An empty work name returns the base title.
@@ -10049,7 +10217,31 @@ export async function callTool(name, args, {
     const sessions = listSessions({ ...paths, roots: listed });
     const found = await sessionCheckout(args.repo, sessionCheckouts(sessions, roots),
       { paths, config, tracker });
-    if (typeof found === 'string') return found;
+    if (typeof found === 'string') {
+      // No session works there. A local checkout lets the bridge merge from it and finish the
+      // post-merge steps itself; with none, the merge is not made, since those steps could not
+      // run. A name that matches more than one repository is asked about, not looked up again.
+      if (!found.startsWith(NO_SESSION)) return found;
+      let local;
+      try {
+        local = await startCheckout(args.repo, { paths, config, tracker });
+      } catch (error) {
+        return error.missing ? found : error.message;
+      }
+      // The bridge's own repository keeps its merges keyed by number, as the merge scan does.
+      const own = local.repo === nowRepo(checkoutOf(tracker.cwd)?.repo, merges.renamed);
+      const away = own ? { ...tracker } : { ...tracker, repo: local.repo, cwd: local.dir };
+      away.onMerged = async number => {
+        const told = await tellMerged(number, { ...merges, tracker: away, quiet: true,
+          sessions: listSessions({ ...paths, roots: listed }) }).catch(error => {
+          log?.(`telling a session that ${local.repo} ${number} merged failed: `
+            + `${error?.message ?? error}`);
+          return '';
+        });
+        return told || finishMerge(number, { repo: local.repo, dir: local.dir, gh });
+      };
+      return mergePullRequest(args, away);
+    }
     if (found.repo !== nowRepo(checkoutOf(tracker.cwd)?.repo, merges.renamed)) {
       const away = { ...tracker, repo: found.repo, cwd: found.cwd };
       away.onMerged = number => tellMerged(number,
@@ -10121,15 +10313,17 @@ export async function callTool(name, args, {
       const label = namedLabel(s);
       const state = readReply(s, paths.bridgeDir, { peek: true });
       const following = isFollowed(s, paths.bridgeDir) ? '' : ', not followed';
+      const earlier = unreadEarlier(bridgeFiles(paths.bridgeDir, s.key), s, paths.bridgeDir).length
+        ? ', an earlier answer waiting for read_reply' : '';
       const said = text => ({ long, text });
       if (state.status === 'done') {
         // An unread reply does not hide the background work the session waits on.
         const awaiting = verdicts[i].startsWith('waiting on background work')
           ? `, ${verdicts[i]}` : '';
-        const ready = `${label}${awaiting}, reply ready${following}${waits}`;
+        const ready = `${label}${awaiting}, reply ready${earlier}${following}${waits}`;
         if (args?.replies === false) return said(ready);
         // A reply the follow feed already carried to the phone is not read out a second time,
-        // but it is marked read like one that was, so it stops holding the session's next request.
+        // but it is marked read like one that was.
         const heard = replyHeardInFeed(paths.bridgeDir, s.key);
         return { long, text: heard ? `${ready}, already heard` : ready, inline: s, heard };
       }
@@ -10140,17 +10334,18 @@ export async function callTool(name, args, {
         const used = loadText(turn, { busy: true, now: at, window });
         return { long: state.seconds * 1000 >= LONG_TURN_MS,
           text: `${label}, working on your request for ${state.seconds} seconds`
-            + `${used}${following}${waits}` };
+            + `${used}${earlier}${following}${waits}` };
       }
       const kind = s.background ? ', background' : '';
       const loaded = loadText(load, { busy: s.busy, now: at, window });
       const idle = `idle${loaded}${verdicts[i] && `, ${verdicts[i]}`}`;
-      return said(`${label}, ${s.busy ? `busy${loaded}` : idle}${kind}${following}${waits}`);
+      return said(`${label}, ${s.busy ? `busy${loaded}` : idle}${kind}${earlier}${following}`
+        + waits);
     });
     // The replies are read, and so marked read, only once every line is built, so a listing
     // that throws leaves them for the next call.
     for (const line of lines.filter(row => row.inline)) {
-      const reply = readReply(line.inline, paths.bridgeDir);
+      const reply = readReply(line.inline, paths.bridgeDir, { latest: true });
       if (reply.status === 'done' && !line.heard) {
         line.text += `. It said: ${inlineReply(reply.text)}`;
       }
@@ -10266,8 +10461,8 @@ export async function callTool(name, args, {
     if (queue && mustHold(session, paths, now())) {
       const place = holdRequest(session, text, { bridgeDir: paths.bridgeDir, now: now() });
       return `Held for ${session.name}, number ${place} in line. It goes when ${session.name} `
-        + 'is idle and you have heard its last answer, and until then queued_requests lists it '
-        + 'and drop_request takes it back.';
+        + 'is idle, and until then queued_requests lists it and drop_request takes it back. An '
+        + 'answer you have not heard yet stays for read_reply.';
     }
     const ahead = readHeld(paths.bridgeDir, session).items.filter(item => !item.releasing).length;
     await sendToSession(session, text, paths.bridgeDir, { post });
@@ -10341,6 +10536,11 @@ const NO_ANNOUNCE = 'Never announce this call before making it (no "one moment",
   + 'tool calls, and it overrides the voice app\'s default of acknowledging before slow lookups.';
 const REMINDER_TOOLS = new Set(['send', 'read_reply', 'list_sessions', 'summary']);
 
+// The tools a voice exchange cannot start without. Claude Code defers MCP tools behind a tool
+// search; this marking makes it list these three up front, so the first spoken request does
+// not pause for the search. The rest stay deferred to keep the startup tool list short.
+export const ALWAYS_LOAD_TOOLS = new Set(['send', 'read_reply', 'catch_up']);
+
 // The server instructions initialize returns, which a client adds to the voice chat's prompt.
 export const INSTRUCTIONS = 'Every reply that next_update or read_reply returns, or that '
   + 'arrives as a pushed message over the event stream, is said aloud to the user as '
@@ -10367,6 +10567,8 @@ async function handleRpc(message, context) {
   if (method === 'tools/list') {
     return reply({ tools: TOOLS.map(t => ({
       ...t, description: [t.description, NO_ANNOUNCE].filter(Boolean).join(' '),
+      ...(ALWAYS_LOAD_TOOLS.has(t.name)
+        ? { _meta: { ...t._meta, 'anthropic/alwaysLoad': true } } : {}),
     })) });
   }
   if (method === 'tools/call') {
