@@ -122,3 +122,29 @@ New runners register on the organization from the start: the same
 `config.sh --url https://github.com/merph518 --runnergroup Default` call the
 scripts make, with an organization registration token and the labels from the
 table.
+
+## Docker on the tablet runners
+
+A tablet runner needs Docker from the `docker.io` apt package
+(`sudo apt install docker.io` when it is missing) for a job that builds or runs
+a container. A job reaches the daemon through `/var/run/docker.sock`, which
+only root and the `docker` group may open, so the runner's service account has
+to be in that group.
+
+Membership in the `docker` group is root-equivalent on the runner. For that
+reason a workflow that uses Docker must skip pull requests from forks of a
+private repository; nothing here enforces it, so each workflow does, for
+example with
+`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`
+on the job.
+
+On each tablet runner:
+
+1. Add the account the runner service runs as (`michael`) to the group:
+   `sudo usermod -aG docker michael`.
+2. Restart the runner service from its folder:
+   `sudo ./svc.sh stop && sudo ./svc.sh start`. A running service keeps the
+   groups it started with, so a job fails with `permission denied` on the
+   socket until it restarts.
+3. Check it as that account: `docker info` should print the server details
+   rather than a permission error. Do this on all four runners, not only one.

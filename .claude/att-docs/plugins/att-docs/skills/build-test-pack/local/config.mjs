@@ -39,11 +39,12 @@ export function loadConfig(configPath) {
   const at = (relative) => (relative ? path.resolve(root, relative) : undefined);
   // A reasoning call can think for 40k tokens, about 100 minutes at the 7 tokens a
   // second a 27B model makes on a single GPU, and reading a prompt that fills the
-  // rest of a 150k context adds up to a quarter hour, so a call waits up to two
-  // and a half hours. The model server's context and its own request time-out
-  // have to be at least as large.
+  // rest of a 128,000-token context adds up to a quarter hour, so a call waits up
+  // to two and a half hours. The model server's context has to be at least
+  // `context` (128000 by default) and its own request time-out at least as long
+  // as the call waits.
   const model = {
-    temperature: 0.1, context: 153600, maxOutput: 16384, reasoningOutput: 40960,
+    temperature: 0.1, context: 128000, maxOutput: 16384, reasoningOutput: 40960,
     timeoutMinutes: 150, ...raw.model,
   };
   localEndpoint(model.endpoint);

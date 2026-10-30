@@ -3151,3 +3151,8 @@ test('a range with and keeps its number, a list of counts does not', () => {
     'In 2025 and 40 rules apply.', 'Version 3 and 40 rules apply.'].map(keep) };
   assert.equal(dropUnfoundedAssumptions({}, other), 4);
 });
+
+test('the model defaults to a 128000-token context', () => {
+  const { model } = fixtureConfig();
+  assert.equal(model.context, 128000);
+});

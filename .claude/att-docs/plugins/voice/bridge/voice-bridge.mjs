@@ -2753,6 +2753,70 @@ export function runBackgroundPending(transcript) {
   });
 }
 
+// The background work in the transcript that is due to wake the session, one { kind, what }
+// for each item background_pending.py --describe names: [] when there is none, null when it
+// could not say. pid is the session process, so work a restart left behind does not count.
+// An answer is kept for BACKGROUND_KEPT_MS while the transcript has the same size and time,
+// since a wakeup or a monitor can run out with no new row, and only as long as the cache
+// holds BACKGROUND_KEPT_MAX transcripts.
+const BACKGROUND_NAMES = new Map();
+const BACKGROUND_KEPT_MS = 15 * 1000;
+const BACKGROUND_KEPT_MAX = 100;
+export function describeBackground(transcript, pid, now = Date.now()) {
+  let stamp = '';
+  try {
+    const { mtimeMs, size } = fs.statSync(transcript);
+    stamp = `${mtimeMs}:${size}:${pid}`;
+  } catch { /* an unreadable transcript is asked about each time */ }
+  const kept = stamp && BACKGROUND_NAMES.get(transcript);
+  if (kept?.stamp === stamp && now - kept.at < BACKGROUND_KEPT_MS) return kept.found;
+  const found = new Promise(resolve => {
+    const args = [BACKGROUND_PENDING, '--describe', transcript, ...(pid ? [String(pid)] : [])];
+    execFile('python3', args, { timeout: BACKGROUND_TIMEOUT_MS }, (error, out) => {
+      if (error) return resolve(error.code === 1 ? [] : null);
+      resolve(String(out).split('\n').filter(Boolean).map(line => {
+        const [, kind = 'work', what = ''] = line.split('\t');
+        return { kind, what };
+      }));
+    });
+  });
+  if (stamp) {
+    BACKGROUND_NAMES.delete(transcript);
+    BACKGROUND_NAMES.set(transcript, { stamp, found, at: now });
+    // A failure to answer is not kept, so a timeout does not stand until the transcript moves.
+    found.then(work => {
+      if (work === null && BACKGROUND_NAMES.get(transcript)?.found === found) {
+        BACKGROUND_NAMES.delete(transcript);
+      }
+    });
+    while (BACKGROUND_NAMES.size > BACKGROUND_KEPT_MAX) {
+      BACKGROUND_NAMES.delete(BACKGROUND_NAMES.keys().next().value);
+    }
+  }
+  return found;
+}
+runBackgroundPending.describe = describeBackground;
+
+// Up to this many items are named in a verdict, and the rest are counted.
+const NAMED_WORK = 3;
+
+// What an idle session says it is waiting on, from the items describeBackground returns, or
+// IDLE_VERDICTS.waking when only the fact that some is due is known.
+function waitingOn(work) {
+  if (work.every(item => !item.what && item.kind === 'work')) return IDLE_VERDICTS.waking;
+  const named = work.map(item => item.what || (item.kind === 'work' ? 'other work' : item.kind));
+  const more = named.length > NAMED_WORK ? ` and ${named.length - NAMED_WORK} more` : '';
+  return `waiting on background work: ${named.slice(0, NAMED_WORK).join('; ')}${more}`;
+}
+
+// The background work due to wake the session as a list, [] for none and null when unknown,
+// asking for the descriptions when background can give them and for yes or no otherwise.
+async function backgroundWork(background, file, session) {
+  if (typeof background.describe === 'function') return background.describe(file, session.pid);
+  const due = await background(file);
+  return due === null ? null : due ? [{ kind: 'work', what: '' }] : [];
+}
+
 // What an idle session's last turn says about it, from IDLE_VERDICTS, or '' when its
 // transcript cannot say. A turn that ended promising more work is stalled only when
 // background(transcript) finds nothing due to wake the session; with work due it is waiting
@@ -2763,15 +2827,17 @@ async function idleVerdict(session, projectsDir, background, waiting) {
   const file = transcriptPath(session, projectsDir);
   const ended = file ? lastTurnEnd(transcriptTail(file)) : null;
   if (ended === null) return '';
-  if (ended !== 'goesOn') return IDLE_VERDICTS[ended];
-  const due = await background(file);
-  if (due === null) return '';
-  return IDLE_VERDICTS[due ? 'waking' : 'goesOn'];
+  // A turn that ended on a launch ("Watching run 4.") reads as finished, so both ask.
+  if (ended !== 'goesOn' && ended !== 'finished') return IDLE_VERDICTS[ended];
+  const work = await backgroundWork(background, file, session);
+  if (work === null) return ended === 'finished' ? IDLE_VERDICTS.finished : '';
+  return work.length > 0 ? waitingOn(work) : IDLE_VERDICTS[ended];
 }
 
 // The verdicts a block says more than: a turn that finished, or work due to wake the session.
 // A stall still needs a nudge whatever the session waits on, so it is said beside the block.
-const BLOCK_REPLACES = new Set(['', IDLE_VERDICTS.finished, IDLE_VERDICTS.waking]);
+const replacesBlock = verdict => verdict === '' || verdict === IDLE_VERDICTS.finished
+  || verdict.startsWith('waiting on background work');
 
 // What list_sessions and catch_up say after "idle": the verdict, and what the session is
 // blocked on, in place of a verdict BLOCK_REPLACES holds or after a stall. A busy session, or
@@ -2782,7 +2848,14 @@ async function idleState(session, projectsDir, background, waiting) {
     idleVerdict(session, projectsDir, background, waiting), blockedOn(session, projectsDir)]);
   const blocked = blockedText(block);
   if (!blocked) return verdict;
-  return BLOCK_REPLACES.has(verdict) ? blocked : `${verdict}, ${blocked}`;
+  return replacesBlock(verdict) ? blocked : `${verdict}, ${blocked}`;
+}
+
+// How much of a note list_sessions quotes: the start of it, on one line.
+const NOTE_CHARS = 160;
+function noteText(text) {
+  const flat = text.trim().split(/\s+/).join(' ');
+  return flat.length <= NOTE_CHARS ? flat : `${flat.slice(0, NOTE_CHARS - 1).trimEnd()}…`;
 }
 
 // When the session last ended a turn with a reply, and when it last wrote a note mid-turn
@@ -2794,8 +2867,11 @@ function lastWritten(session, projectsDir, now) {
   if (!progress) return '';
   const { replyAt, noteAt } = progress;
   const reply = ageOf(replyAt, now);
-  const note = noteAt > replyAt || !reply ? ageOf(noteAt, now) : '';
-  return `${reply ? `, last reply ${reply}` : ''}${note ? `, last note ${note}` : ''}`;
+  const current = noteAt > replyAt || !reply;
+  const note = current ? ageOf(noteAt, now) : '';
+  // The note's own words, so the voice side need not fetch them with a second call.
+  const said = note && progress.reply ? `: ${noteText(progress.reply)}` : '';
+  return `${reply ? `, last reply ${reply}` : ''}${note ? `, last note ${note}${said}` : ''}`;
 }
 
 // --- Time on task, usage and context --------------------------------------------------------
@@ -4721,8 +4797,12 @@ export const TOOLS = [
       + 'A session keeps its number until it ends, whatever else starts or ends. A session '
       + 'working an issue or a pull request names it, such as working issue 5190, pull '
       + 'request 5200. An idle session says whether its last turn finished or stalled, and '
-      + 'why, that it waits on background work that will wake it, or which issue or pull '
-      + 'request it is blocked on. A busy session says how long it has been on its current '
+      + 'why, that it waits on background work, naming what, or which issue or pull '
+      + 'request it is blocked on; a session with a reply ready names its background work '
+      + 'too. A session mid-turn gives the text of its latest note, so a question about what '
+      + 'a session is doing needs no second call. To monitor sessions, read this listing '
+      + 'quietly and speak only when asked, or when a session needs the user: an open '
+      + 'question, a permission prompt, or a ready pull request. A busy session says how long it has been on its current '
       + 'turn and roughly how many tokens the turn has used, and an idle one how long it has '
       + 'been idle. A session busy on one turn for over half an hour is named first, and one '
       + 'whose context is nearly full says so. A session with a reply ready has the reply '
@@ -9954,7 +10034,10 @@ export async function callTool(name, args, {
       const following = isFollowed(s, paths.bridgeDir) ? '' : ', not followed';
       const said = text => ({ long, text });
       if (state.status === 'done') {
-        const ready = `${label}, reply ready${following}${waits}`;
+        // An unread reply does not hide the background work the session waits on.
+        const awaiting = verdicts[i].startsWith('waiting on background work')
+          ? `, ${verdicts[i]}` : '';
+        const ready = `${label}${awaiting}, reply ready${following}${waits}`;
         if (args?.replies === false) return said(ready);
         // A reply the follow feed already carried to the phone is not read out a second time,
         // but it is marked read like one that was, so it stops holding the session's next request.

@@ -9,6 +9,20 @@ description: >-
 
 # Implement
 
+## Applies to every pull request
+
+This procedure is the standard for every pull request here, including documentation,
+script and skill changes that start from no issue and sessions that were never asked to
+implement one. `CLAUDE.md` at the root says so for every session.
+
+A change with no issue skips the steps that need one: reading and claiming it, `issue-<N>`
+in the branch name, `(#<N>)` in the title, `Closes #<N>`, the `Blocked` label on the
+issue, and closing it after the merge. Name the branch `<type>/<slug>`, and treat the
+folders from the `<ownership-unit>` row that hold the files the change touches as the
+ownership unit when reading the board. The worktree (Section 3), the non-draft pull
+request, the self review loop, and the `Manual Review Needed` label (Section 7) hold for
+every pull request.
+
 ## Base
 
 Read [the general skill](../../../plugins/general/skills/implement/SKILL.md), which lives in this repository rather than in a vendored copy, first and follow it, except where this file overrides it.
@@ -63,12 +77,29 @@ reply text: the user does not see it there.**
 | `<self-review>` | Under Overrides, Section 7 |
 | `<ready-signal>` | Under Overrides, Section 7, Ready signal. A pull request reported ready carries `Manual Review Needed`, read back |
 | `<skip-ledger>` | Not applicable here, because there is no skip ledger |
-| `<instructions-file>` | None: Overmind has no `CLAUDE.md`. The `README.md` is the standing reference |
+| `<instructions-file>` | `CLAUDE.md` at the root, for the rule that every pull request follows this procedure. `README.md` for the layout and the extension contract |
 | `<post-merge-checks>` | None |
 | `<pairing>` | None |
 | `<merge-cleanup>` | Nothing runs automatically. Removing the worktree after the merge, with `git worktree remove` from the main checkout, is the user's |
 
 ## Overrides
+
+### Models
+
+Each step has one model:
+
+| Step | Model |
+| --- | --- |
+| Planning and design advice, before any code is written | Opus |
+| Writing the code and its tests | Sonnet |
+| Reviewing every change, including the last fix | Opus |
+| Fixing review findings | Sonnet |
+
+Before coding, spawn an Opus agent with the issue or task and the files it touches, and
+ask it for the plan and design advice: the approach, the files to change, and the risks.
+Sonnet implements from that advice and records in the pull request body, under Judgment
+calls, any place it departed from it. A fix for a review finding is written by Sonnet, then
+reviewed by Opus.
 
 ### Section 2, labels
 
@@ -172,7 +203,8 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   `gh api -X PATCH repos/merph518/Overmind/pulls/<n> -F "body=@<file>"`.
 - Mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. Resolve a conflict by
   merging `origin/main` into the branch, never by rebase plus force-push.
-- Self review: Sonnet implements and Opus reviews every change, including the final fix.
+- Self review: Sonnet implements and fixes, and Opus reviews every change, including the
+  final fix (see Models above).
   Spawn an Opus review agent on the diff, and run the `code-review` skill on the pull
   request number. Fix real findings and review again, for at most three passes. The
   fixes from the last pass still get an Opus review before the pull request is marked

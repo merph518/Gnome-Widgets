@@ -262,18 +262,42 @@ phases left. Without `--resume` a job starts over from intake.
 
 Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
 (issues, coverage rows, assumptions, the fix rounds), `phase9-confidence` (the
-overall level and each field of the assessment, one call per field), `phase9-senior`
-(the senior review and tester notes, written last), and `phase9-revalidate` (the rebuild and
-the revalidation). Each call thinks through one part of the review, and a job
-resumed in Phase 9 keeps the steps that passed.
+overall level and each field of the assessment, one call per field),
+`phase9-senior` (the senior review and tester notes, written last), and
+`phase9-revalidate` (the rebuild and the revalidation). Each call thinks through
+one part of the review, and a job resumed in Phase 9 keeps the steps that
+passed.
 
 A reasoning call can think for up to `model.reasoningOutput` tokens (40,960 by
 default), which takes well over an hour at local generation speeds, inside a
-`model.context` of 153,600 tokens, so a call waits up to `model.timeoutMinutes`
-(150 by default). The model server's context has to be at least
-`model.context`, and its own request time-out at least `model.timeoutMinutes`,
-or the server ends the reply early and the call fails with `no-reply`. A call
-that fails while thinking is retried once with thinking off.
+`model.context` of 128,000 tokens by default, so a call waits up to
+`model.timeoutMinutes` (150 by default). The model server's context has to be at
+least `model.context` (128000 by default; a `pipeline.json` can change it), and
+its own request time-out at least `model.timeoutMinutes`, or the server ends the
+reply early and the call fails with `no-reply`. A window smaller than
+`model.context` may not show up as an error at all: the server runs with context
+shift on, so it can drop the start of a prompt that is too long and answer
+anyway. A call that fails while thinking is retried once with thinking off.
+
+Lemonade keeps the model's window as a saved recipe option on the user model,
+not in `/etc/lemonade` or the systemd unit. In the commands below, `<endpoint>`
+is `model.endpoint` (for example `http://localhost:13305/api/v1`) and `<model name>` is
+`model.name` in the pipeline config.
+
+- To check the saved window, run `curl -s <endpoint>/models/<model name>` and
+  read `recipe_options.ctx_size`. It works whether or not the model is loaded.
+  To see what a loaded model is running with, read `recipe_options.ctx_size` in
+  the matching `model_name` entry of `all_models_loaded` in `<endpoint>/health`;
+  that list is empty when no model is loaded.
+- To set it, load the model with the window saved:
+
+        curl -sS --fail-with-body -X POST <endpoint>/load -H 'content-type: application/json' \
+          -d '{"model_name":"<model name>","ctx_size":<model.context>,"llamacpp_backend":"<saved backend>","llamacpp_args":"<saved args>","save_options":true}'
+
+  Take the backend and args from the model's saved `recipe_options`, carrying
+  over every key it has and leaving out one that is not saved, because saving
+  may replace the stored options. A rejected load prints the server's error and
+  exits non-zero. The load reloads the model, so do it when no build is running.
 
 A job takes an hour or more, so a request made during the day is queued.
 `local/systemd/` holds a user timer that starts `queue run` at 22:00; the queue
@@ -545,7 +569,11 @@ half an hour after the queue's default cutoff.
   so it is retried like any other failure; only a pipeline process that died
   itself leaves an `interrupted` row. After a restart, the server's context size
   and request time-out must still be at least `model.context` and
-  `model.timeoutMinutes`.
+  `model.timeoutMinutes`. Lemonade keeps the window as a saved recipe option on
+  the model, so read `recipe_options.ctx_size` from
+  `<endpoint>/models/<model name>` (`<endpoint>` and `<model name>` as defined
+  above) to confirm it is still at least
+  `model.context`; `/health` shows nothing until the model is loaded.
 - Move the timer to another host. On the new host install the repository, the
   model server, the pipeline config and the env file at
   `~/.config/build-pack/env`, then copy `build-pack.service`, `build-pack.timer`,

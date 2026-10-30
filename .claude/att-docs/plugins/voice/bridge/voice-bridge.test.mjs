@@ -22,7 +22,7 @@ import {
   headerText, listSessions, sessionRoots, markHeard, notifyFiles, NUMBER_GRACE_MS, numberedSessions,
   openState, publishPluginDir, pushedUpdates,
   MARKER_STALE_MS, REQUEST_PREFIX, RELAY_HEADER, sendToSession, turnStopped, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
-  runBackgroundPending, lastTurnEnd, cursorSeqs, nextUpdates,
+  runBackgroundPending, describeBackground, lastTurnEnd, cursorSeqs, nextUpdates,
   appArchived, sessionBranch, sessionWork, sharedFiles,
   START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
   startOfYesterday, startSession, codeCheckouts, repoCheckout, useExtension, resetExtension,
@@ -1294,7 +1294,7 @@ test('catch_up and list_sessions read transcript times; an untimed row reads wit
 
     const listed = await callTool('list_sessions', {}, context);
     assert.match(listed,
-      /^Turning, busy, last reply 2 hours ago, last note 3 minutes ago$/m);
+      /^Turning, busy, last reply 2 hours ago, last note 3 minutes ago: Reading the spec\.$/m);
     assert.match(listed, /^Done, idle for 20 minutes, finished, last reply 20 minutes ago$/m);
     assert.match(listed, /^Untimed, idle, stalled: its last turn stopped partway$/m);
   });
@@ -1339,8 +1339,10 @@ test('list_sessions and catch_up say whether an idle session finished or stalled
     /^Promised, idle, stalled: it said it would go on, and nothing is due to wake it$/m);
   assert.match(listed, /^Waking, idle, waiting on background work that will wake it$/m);
   assert.match(listed, /^Handed, idle, finished$/m);
-  // Only a turn that promised more asks whether background work is due.
-  assert.deepEqual(asked.sort(), ['Promised-1.jsonl', 'Waking-1.jsonl']);
+  // A turn that finished or promised more asks whether background work is due; a stalled one
+  // does not.
+  assert.deepEqual(asked.sort(),
+    ['Finished-1.jsonl', 'Handed-1.jsonl', 'Promised-1.jsonl', 'Waking-1.jsonl']);
   assert.match(await callTool('catch_up', { session: 'errored' }, context),
     /^Errored is idle, stalled: its last turn ended on an error\. It last said:/);
   assert.match(await callTool('catch_up', { session: 'finished' }, context),
@@ -1348,6 +1350,87 @@ test('list_sessions and catch_up say whether an idle session finished or stalled
   // With no answer on background work, the verdict is left out.
   assert.match(await callTool('catch_up', { session: 'promised' },
     { ...context, background: async () => null }), /^Promised is idle\. It last said:/);
+});
+
+test('list_sessions names the background work an idle session waits on, whatever its last turn said',
+  async () => {
+    const sessions = {
+      Launched: [called('Bash', {}), ended('Watching run 41064.')],
+      Several: [ended('Done for now.')],
+      Reply: [ended('Pull request 7 is open.')],
+      Quiet: [ended('Pull request 8 is open.')],
+    };
+    const names = Object.keys(sessions);
+    const paths = fakeMachine(names.map((name, i) => ({
+      pid: 70 + i, cwd: `/repo/${name}`, name, sessionId: `${name}-1`,
+    })));
+    for (const [name, rows] of Object.entries(sessions)) {
+      writeTranscript(paths, `-repo-${name}`, `${name}-1`,
+        [{ type: 'user', message: { content: 'go' } }, ...rows, { type: 'system' }]);
+    }
+    const work = {
+      Launched: [{ kind: 'run', what: 'watch the CI run' }],
+      Several: [...['one', 'two', 'three'].map(what => ({ kind: 'agent', what })),
+        { kind: 'work', what: '' }],
+      Reply: [{ kind: 'agent', what: 'Opus review of PR 7' }],
+    };
+    const pids = [];
+    const background = async () => true;
+    background.describe = async (file, pid) => {
+      pids.push(pid);
+      return work[names.find(name => file.includes(`-repo-${name}`))] ?? [];
+    };
+    // Reply holds a reply nobody has read yet; the work it waits on is still said.
+    const replies = path.join(paths.bridgeDir, 'replies');
+    fs.mkdirSync(replies, { recursive: true });
+    fs.writeFileSync(path.join(replies, '72.json'), JSON.stringify({ text: 'Open.' }));
+    const context = { paths, config: { roots: ['/repo'] }, background, replyWaitMs: 0 };
+    const listed = await callTool('list_sessions', { replies: false }, context);
+    // A turn that ended on a launch is not left as finished.
+    assert.match(listed, /^Launched, idle, waiting on background work: watch the CI run$/m);
+    assert.match(listed,
+      /^Several, idle, waiting on background work: one; two; three and 1 more$/m);
+    assert.match(listed,
+      /^Reply, waiting on background work: Opus review of PR 7, reply ready/m);
+    // A session with nothing running still reads as it did.
+    assert.match(listed, /^Quiet, idle, finished$/m);
+    // The session process is passed, so work a restart left behind does not count.
+    assert.deepEqual(pids.sort(), [70, 71, 72, 73]);
+  });
+
+test('describeBackground keeps an answer only briefly, so work that runs out is not reported', async () => {
+  const file = path.join(tempDir(), 'wake.jsonl');
+  const launch = { type: 'user', timestamp: '2026-10-30T12:00:00.000Z',
+    toolUseResult: { scheduledFor: Date.UTC(2099, 0, 1) },
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'x' }] } };
+  fs.writeFileSync(file, `${JSON.stringify(launch)}\n`);
+  const first = describeBackground(file, undefined, 1000);
+  assert.equal(describeBackground(file, undefined, 5000), first);
+  assert.notEqual(describeBackground(file, undefined, 17000), first);
+  assert.deepEqual(await first, [{ kind: 'work', what: '' }]);
+  // Once the answer is older than its lifetime, work that has run out is not reported.
+  fs.writeFileSync(file, `${JSON.stringify({ ...launch,
+    toolUseResult: { scheduledFor: Date.UTC(2020, 0, 1) } })}\n`);
+  assert.deepEqual(await describeBackground(file, undefined, 40000), []);
+});
+
+test('list_sessions quotes the latest note of a session mid-turn, clipped to one line', async () => {
+  const paths = fakeMachine([{ pid: 66, cwd: '/repo/n', name: 'Noted', sessionId: 'n-1',
+    status: 'busy' }]);
+  const long = `Checking the digest.\n\n${'Wordy. '.repeat(60)}`;
+  const now = Date.UTC(2026, 9, 30, 12, 0, 0);
+  writeTranscript(paths, '-repo-n', 'n-1', [
+    { type: 'user', message: { content: 'go' } },
+    { ...said(long), timestamp: new Date(now - 60000).toISOString(),
+      message: { ...said(long).message, stop_reason: 'tool_use' } },
+    called('Bash', {})]);
+  const listed = await callTool('list_sessions', {},
+    { paths, config: { roots: ['/repo'] }, now: () => now });
+  const note = listed.split('last note ')[1];
+  assert.match(note, /^[^:]+: Checking the digest\. Wordy\./);
+  assert.ok(note.endsWith('…'), note);
+  assert.ok(!note.includes('\n'), note);
+  assert.ok(note.length < 260, note.length);
 });
 
 // A model call's rows as Claude Code writes them, one per block, each with the call's usage.
@@ -1416,9 +1499,9 @@ test('list_sessions says time on the turn, its usage, time idle, and names a lon
     const listed = (await callTool('list_sessions', {}, context)).split('\n');
     // 1,000 tokens read and written per call, plus the cache each one read.
     assert.equal(listed[0], 'Looping, busy for 1 hour, about 1.7 million tokens this request, '
-      + 'last note 1 minute ago');
+      + 'last note 1 minute ago: Note m2.');
     assert.ok(listed.includes('Quick, busy for 5 minutes, about 52 thousand tokens this '
-      + 'request, last note 3 minutes ago'), listed.join('\n'));
+      + 'request, last note 3 minutes ago: Note m2.'), listed.join('\n'));
     assert.ok(listed.includes('Resting, idle for 3 hours, finished, last reply 3 hours ago'),
       listed.join('\n'));
     // A transcript that records no usage says only the time.
