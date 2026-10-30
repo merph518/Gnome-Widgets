@@ -12,7 +12,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
   announceMerges, announcePrompts, callTool, checkBridgeStarts, claudeBackgroundArgs,
-  closingIssues, contextWindow, createHandler, MORE_TEXT, relayFailures, replySummary,
+  classifierDenials, closingIssues, contextWindow, createHandler, MORE_TEXT, relayBlocks,
+  relayFailures, replySummary, suggestedRule,
   updateBridge, releaseHeld, commandRefusal, guardRefusal, runShell,
   checkoutOf, findSession, setNickname, readJson, repoOf, scanReady, sendNotices, takeNotices,
   waitingNotices,
@@ -24,7 +25,7 @@ import {
   MARKER_STALE_MS, REQUEST_PREFIX, RELAY_HEADER, sendToSession, turnStopped, readAttention, readReply, relayed, renameSession, REQUEST_MARKER, runGit,
   runBackgroundPending, describeBackground, lastTurnEnd, cursorSeqs, nextUpdates,
   appArchived, sessionBranch, sessionWork, sharedFiles,
-  START_MODEL, START_MODELS, startModel, findLauncher, launcherMessage, LAUNCHER_NAME,
+  START_MODEL, START_MODELS, startModel, findLauncher, factTitle, launcherMessage, LAUNCHER_NAME,
   startOfYesterday, startSession, codeCheckouts, repoCheckout, repositoryCheckout,
   finishMerge, useExtension, resetExtension,
   VOICE_AUTHORITY, TOOLS, SPEAK_FIRST,
@@ -964,6 +965,1043 @@ test('list_sessions names the issue and pull request each session owns', async (
   assert.equal(calls.length, 5);
 });
 
+// One session in a checkout on a branch with an open pull request, with a socket at 92.sock
+// and a ready line its hook left for that pull request.
+function readyWorkMachine({ name = 'MR phase fix', ready = true } = {}) {
+  const root = tempDir();
+  const cwd = fakeCheckout(root, 'b', 'feat/issue-332-updates');
+  const paths = fakeMachine([{ pid: 92, cwd, name, startedAt: 2, sessionId: 'b2' }], root);
+  if (ready) {
+    fs.mkdirSync(path.join(paths.bridgeDir, 'ready'), { recursive: true });
+    fs.writeFileSync(path.join(paths.bridgeDir, 'ready', '92-325.json'),
+      JSON.stringify({ at: 1_800_000_000_000 }));
+  }
+  const pulls = [{ number: 325, title: 'Updates', state: 'OPEN', url: 'https://github.com/o/r/pull/325',
+    headRefName: 'feat/issue-332-updates', body: '' }];
+  const context = { paths, config: { roots: [path.join(root, 'repo')] },
+    gh: workGh(pulls, []), git: fakeGit({}).git };
+  return { paths, cwd, root, context, socket: path.join(root, '92.sock') };
+}
+
+const settled = () => new Promise(resolve => setTimeout(resolve, 50));
+
+test('list_sessions sums up the latest reply of an idle session whose reply was read, and marks nothing',
+  async () => {
+    const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], tempDir());
+    const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+    const file = path.join(paths.bridgeDir, 'replies', '77.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ text: 'Opened the change for review.', readAt: 5 }));
+    const listed = 'Wt, idle, last said: Opened the change for review.';
+    assert.equal(await callTool('list_sessions', {}, context), listed);
+    assert.equal(await callTool('list_sessions', { replies: false }, context), listed);
+    // The reply is neither read in full nor marked read, so read_reply still says it was read.
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).readAt, 5);
+    assert.equal(await callTool('read_reply', { session: 'wt' }, context),
+      'Already read out once, and here it is again: Opened the change for review.');
+
+    // A long reply is its one-line summary, and a question it ends on is said as asked.
+    const long = `Summary: The checks pass.\n\n${'Detail line. '.repeat(80)}\n\nShall I merge it?`;
+    fs.writeFileSync(file, JSON.stringify({ text: long, readAt: 5 }));
+    assert.equal(await callTool('list_sessions', {}, context),
+      'Wt, idle, last said: The checks pass., and asks: Shall I merge it?');
+  });
+
+test('rename_all_sessions titles each session with its pull request and state, and says what changed',
+  async () => {
+    const { paths, root, context, socket } = readyWorkMachine({ name: 'MR phase fix' });
+    // A second session, an idle one on the main branch that last said something, and a third
+    // whose socket nothing listens on.
+    startFake(paths, { pid: 93, cwd: path.join(root, 'repo', 'quiet'), name: 'Quiet', startedAt: 3, sessionId: 'c3' });
+    startFake(paths, { pid: 94, cwd: path.join(root, 'repo', 'gone'), name: 'Gone', startedAt: 4, sessionId: 'd4' });
+    fs.mkdirSync(path.join(paths.bridgeDir, 'replies'), { recursive: true });
+    fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '93.json'),
+      JSON.stringify({ text: 'Opened the change for review.', readAt: 5 }));
+    const sockets = path.dirname(paths.sessionsDir);
+    const inbox = await listenForRenames(socket);
+    const second = await listenForRenames(path.join(sockets, '93.sock'));
+    try {
+      const said = await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (needs you)']);
+      assert.deepEqual(second.lines.map(line => line.name),
+        ['Quiet - Opened the change for review. (idle)']);
+      assert.match(said, /^Renamed 2 of 3 sessions\./);
+      assert.match(said, /MR phase fix is now MR phase fix - PR #325 Updates \(needs you\)\./);
+      assert.match(said, /Quiet is now Quiet - Opened the change for review\. \(idle\)\./);
+      assert.match(said, /Left alone: Gone \(could not be reached: /);
+    } finally {
+      await inbox.close();
+      await second.close();
+    }
+  });
+
+test('rename_all_sessions leaves a title that already fits, keeps a work name the session set, and replaces a stale status',
+  async () => {
+    const fits = readyWorkMachine({ name: 'MR phase fix - PR #325 Updates (needs you)' });
+    const first = await listenForRenames(fits.socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, fits.context);
+      await settled();
+      assert.deepEqual(first.lines, []);
+      assert.equal(said, 'Renamed 0 of 1 session.\nAlready fit: MR phase fix - PR #325 Updates '
+        + '(needs you).');
+    } finally {
+      await first.close();
+    }
+    // The session's own work name stays as the task, and its stale status gives way.
+    const stale = readyWorkMachine({ name: 'MR phase fix - read window (waiting on you)' });
+    const second = await listenForRenames(stale.socket);
+    try {
+      await callTool('rename_all_sessions', {}, stale.context);
+      await settled();
+      assert.deepEqual(second.lines.map(line => line.name),
+        ['MR phase fix - read window (needs you)']);
+    } finally {
+      await second.close();
+    }
+    // A status that says more than the bridge can, such as stuck, is kept.
+    const stuck = readyWorkMachine({ name: 'MR phase fix (stuck)', ready: false });
+    const third = await listenForRenames(stuck.socket);
+    try {
+      await callTool('rename_all_sessions', {}, stuck.context);
+      await settled();
+      assert.deepEqual(third.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (stuck)']);
+    } finally {
+      await third.close();
+    }
+    // A needs you the session set at the end of its turn is kept while the bridge sees it idle,
+    // so the two never rename each other back and forth.
+    const asked = readyWorkMachine({ name: 'MR phase fix - issue #57 ask (needs you)',
+      ready: false });
+    const fifth = await listenForRenames(asked.socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, asked.context);
+      await settled();
+      assert.deepEqual(fifth.lines, []);
+      assert.match(said, /Already fit: /);
+    } finally {
+      await fifth.close();
+    }
+    // But not over a session that needs the user: stuck gives way to needs you.
+    const needs = readyWorkMachine({ name: 'MR phase fix (stuck)' });
+    const fourth = await listenForRenames(needs.socket);
+    try {
+      await callTool('rename_all_sessions', {}, needs.context);
+      await settled();
+      assert.deepEqual(fourth.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (needs you)']);
+    } finally {
+      await fourth.close();
+    }
+  });
+
+test('rename_all_sessions never shortens a work name the session set, and leaves the session alone instead',
+  async () => {
+    // 'MR phase fix - ' and ' (idle)' leave 38 characters for the work, ' (needs you)' 33.
+    const own = 'MR phase fix - read the server window and settle it (idle)';
+    const { context, socket } = readyWorkMachine({ name: own });
+    const inbox = await listenForRenames(socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines, []);
+      assert.match(said, /Left alone: .*\(its work name leaves no room for \(needs you\)\)\./);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('rename_all_sessions replaces a work name the listing gave, and keeps a working the session set',
+  async () => {
+    const given = readyWorkMachine({ name: 'MR phase fix - PR 325 ready', ready: false });
+    fs.mkdirSync(given.paths.bridgeDir, { recursive: true });
+    fs.writeFileSync(path.join(given.paths.bridgeDir, 'rename-work.json'),
+      JSON.stringify({ '92:2': ['PR 325 ready'] }));
+    const inbox = await listenForRenames(given.socket);
+    try {
+      await callTool('rename_all_sessions', {}, given.context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (idle)']);
+    } finally {
+      await inbox.close();
+    }
+    // A working the session set while a background task runs is kept while the bridge sees it idle.
+    const kept = readyWorkMachine({ name: 'MR phase fix - issue #57 build (working)',
+      ready: false });
+    const second = await listenForRenames(kept.socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, kept.context);
+      await settled();
+      assert.deepEqual(second.lines, []);
+      assert.match(said, /Already fit: /);
+    } finally {
+      await second.close();
+    }
+  });
+
+test('rename_all_sessions refreshes a task it wrote, but never one the session set',
+  async () => {
+    const { paths, cwd, context, socket } = readyWorkMachine({ name: 'MR phase fix', ready: false });
+    const inbox = await listenForRenames(socket);
+    try {
+      await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (idle)']);
+      // The session takes the title, and then its pull request is retitled.
+      startFake(paths, { pid: 92, cwd, name: 'MR phase fix - PR #325 Updates (idle)',
+        startedAt: 2, sessionId: 'b2' });
+      context.gh = workGh([{ number: 325, title: 'fix: Other title', state: 'OPEN',
+        url: 'https://github.com/o/r/pull/325', headRefName: 'feat/issue-332-updates',
+        body: '' }], []);
+      await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name).slice(1),
+        ['MR phase fix - PR #325 Other title (idle)']);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('rename_all_sessions gives two sessions the same title once, says so, and shows a busy one working',
+  async () => {
+    const root = tempDir();
+    const paths = fakeMachine([
+      { pid: 81, cwd: path.join(root, 'repo', 'a'), name: 'Dup', startedAt: 1, sessionId: 'a1' },
+      { pid: 82, cwd: path.join(root, 'repo', 'b'), name: 'Dup', startedAt: 2, sessionId: 'b2' },
+    ], root);
+    const context = { paths, config: { roots: [path.join(root, 'repo')] } };
+    const sockets = path.dirname(paths.sessionsDir);
+    const one = await listenForRenames(path.join(sockets, '81.sock'));
+    const two = await listenForRenames(path.join(sockets, '82.sock'));
+    try {
+      const said = await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.equal(one.lines.length + two.lines.length, 1);
+      assert.match(said, /^Renamed 1 of 2 sessions\./);
+      assert.match(said, /Left alone: Dup 2 \(Dup is getting the same title\)\./);
+    } finally {
+      await one.close();
+      await two.close();
+    }
+    const busy = readyWorkMachine({ name: 'MR phase fix' });
+    startFake(busy.paths, { pid: 92, cwd: busy.cwd, name: 'MR phase fix', startedAt: 2,
+      sessionId: 'b2', status: 'busy' });
+    const third = await listenForRenames(busy.socket);
+    try {
+      await callTool('rename_all_sessions', {}, busy.context);
+      await settled();
+      assert.deepEqual(third.lines.map(line => line.name),
+        ['MR phase fix - PR #325 Updates (working)']);
+    } finally {
+      await third.close();
+    }
+  });
+
+test('rename_all_sessions marks a busy session working, clips a long task on a word, and skips the Session Launcher',
+  async () => {
+    const longTitle = 'Add a long winded pull request title that cannot fit in a sidebar';
+    const busy = readyWorkMachine({ name: 'Overmind 2', ready: false });
+    startFake(busy.paths, { pid: 92, cwd: busy.cwd, name: 'Overmind 2', startedAt: 2,
+      sessionId: 'b2', status: 'busy' });
+    busy.context.gh = workGh([{ number: 325, title: `feat: ${longTitle}`, state: 'OPEN',
+      url: 'https://github.com/o/r/pull/325', headRefName: 'feat/issue-332-updates', body: '' }],
+    []);
+    const inbox = await listenForRenames(busy.socket);
+    try {
+      await callTool('rename_all_sessions', {}, busy.context);
+      await settled();
+      const [title] = inbox.lines.map(line => line.name);
+      assert.match(title, /^Overmind 2 - PR #325 Add a long winded pull.* \(working\)$/);
+      assert.ok(title.length <= 60, title);
+      assert.doesNotMatch(title, /sidebar/);
+    } finally {
+      await inbox.close();
+    }
+    const launcher = readyWorkMachine({ name: 'Session Launcher' });
+    startFake(launcher.paths, { pid: 92, cwd: launcher.cwd, name: 'Session Launcher',
+      startedAt: 2, sessionId: 'b2', entrypoint: 'claude-desktop' });
+    const second = await listenForRenames(launcher.socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, launcher.context);
+      await settled();
+      assert.deepEqual(second.lines, []);
+      assert.match(said, /Left alone: Session Launcher \(the Session Launcher\)\./);
+    } finally {
+      await second.close();
+    }
+  });
+
+test('rename_session with work reads needs you and working as a status to replace',
+  async () => {
+    const { paths, fix, socket, context } = renameMachine();
+    const inbox = await sessionInbox(socket, line => {
+      if (line.type === 'control') startFake(paths, { ...fix, name: line.name });
+    });
+    try {
+      startFake(paths, { ...fix, name: 'MR phase fix (needs you)' });
+      await callTool('rename_session', { session: 'session 2', work: 'next' }, context);
+      assert.equal(inbox.lines.at(-1).name, 'MR phase fix - next');
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('summary names pull requests a session reported ready, once, with a repository that is not its own',
+  async () => {
+    const root = tempDir();
+    const a = fakeCheckout(root, 'a', 'feat/a', 'o/r');
+    const b = fakeCheckout(root, 'b', 'feat/b', 'o/personal');
+    const paths = {
+      ...fakeMachine([
+        { pid: 91, cwd: a, name: 'Alpha', startedAt: 1 },
+        { pid: 92, cwd: b, name: 'Bravo', startedAt: 2 },
+      ], root),
+      readyFile: path.join(root, 'state', 'ready.json'),
+    };
+    const announced = (key, repo) => ({ head: 'h', at: 1_800_000_000_000, key, repo });
+    fs.mkdirSync(path.dirname(paths.readyFile), { recursive: true });
+    fs.writeFileSync(paths.readyFile, JSON.stringify({ announced: {
+      7: announced('91', 'o/r'), 325: announced('91', 'o/r'), 20: announced('92', 'o/personal'),
+      99: announced('91', 'o/r'),
+    } }));
+    const views = {
+      7: { number: 7, title: 'labeled one', state: 'OPEN', url: 'https://github.com/o/r/pull/7' },
+      325: { number: 325, title: 'fix thing', state: 'OPEN',
+        url: 'https://github.com/o/r/pull/325' },
+      20: { number: 20, title: 'personal tweak', state: 'OPEN',
+        url: 'https://github.com/o/personal/pull/20' },
+      99: { number: 99, title: 'old', state: 'MERGED', url: 'https://github.com/o/r/pull/99' },
+    };
+    const base = fakeGh({ pulls: [pullRow(7, 'labeled one', 'feat/z', ['Manual Review Needed'])] });
+    const gh = async call => (call.args[0] === 'pr' && call.args[1] === 'view'
+      ? JSON.stringify(views[call.args[2]]) : base.gh(call));
+    const context = { ...runsContext(gh), paths,
+      config: { roots: [path.join(root, 'repo')], startDir: a } };
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request, 1 waiting on your review. Waiting on you: 7, '
+      + 'labeled one. Reported ready by their sessions: 325, fix thing; 20, personal tweak, in '
+      + 'personal.'), lines.join('\n'));
+  });
+
+test('list_sessions renames a session from what it knows, without waiting, and not again once the title reads that',
+  async () => {
+    const { paths, cwd, context, socket } = readyWorkMachine();
+    const inbox = await sessionInbox(socket, line => {
+      if (line.type === 'control') {
+        startFake(paths, { pid: 92, cwd, name: line.name, startedAt: 2, sessionId: 'b2' });
+      }
+    });
+    try {
+      // The states alone are listed with replies false, and the session is renamed all the same.
+      const first = await callTool('list_sessions', { replies: false }, context);
+      assert.match(first, /^MR phase fix, idle, in r, pull request 325, marked pull request 325 ready for your review$/);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix - PR 325 ready']);
+      // Its title now reads that, so later listings send nothing.
+      assert.match(await callTool('list_sessions', {}, context), /^MR phase fix - PR 325 ready, idle/);
+      await settled();
+      assert.equal(inbox.lines.length, 1);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('list_sessions leaves a title alone that reads the work already, whatever status it ends in',
+  async () => {
+    const { context, socket } = readyWorkMachine({ name: 'MR phase fix - PR 325 ready (waiting on you)' });
+    const inbox = await sessionInbox(socket);
+    try {
+      assert.match(await callTool('list_sessions', {}, context),
+        /^MR phase fix - PR 325 ready \(waiting on you\), idle/);
+      await settled();
+      assert.deepEqual(inbox.lines, []);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('list_sessions still lists when a rename fails, and logs it', async () => {
+  const { context } = readyWorkMachine();
+  const errors = [];
+  const log = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try {
+    // Nothing listens on the session's socket, so the rename cannot be sent.
+    assert.match(await callTool('list_sessions', {}, context),
+      /^MR phase fix, idle, in r, pull request 325, marked pull request 325 ready/);
+    await settled();
+  } finally {
+    console.error = log;
+  }
+  assert.ok(errors.some(line => line.startsWith('Could not rename MR phase fix:')),
+    errors.join('\n'));
+});
+
+// Records that the bridge gave session 92 (session id b2) this work name.
+function ownedWorkIs(paths, work) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'rename-work.json'), JSON.stringify({ '92:2': [work] }));
+}
+
+// The control lines a fake session's socket receives, with the socket open until close.
+async function listenForRenames(socket) {
+  const inbox = await sessionInbox(socket);
+  return inbox;
+}
+
+test('list_sessions never renames the Session Launcher, and findLauncher still finds one that was renamed',
+  async () => {
+    const { paths, cwd, context, socket } = readyWorkMachine({ name: 'Session Launcher' });
+    startFake(paths, { pid: 92, cwd, name: 'Session Launcher', startedAt: 2, sessionId: 'b2',
+      entrypoint: 'claude-desktop' });
+    const inbox = await listenForRenames(socket);
+    try {
+      await callTool('list_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines, []);
+      startFake(paths, { pid: 92, cwd, name: 'Session Launcher - PR 3 ready (idle)', startedAt: 2,
+        sessionId: 'b2', entrypoint: 'claude-desktop' });
+      assert.equal(findLauncher(paths, context.config).key, '92');
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('list_sessions clears a work name of its own that no longer holds, and keeps one the user set',
+  async () => {
+    const stale = readyWorkMachine({ name: 'MR phase fix - PR 325 ready', ready: false });
+    ownedWorkIs(stale.paths, 'PR 325 ready');
+    // No pull request any more: the branch is main.
+    const main = fakeCheckout(stale.root, 'm', 'main');
+    startFake(stale.paths, { pid: 92, cwd: main, name: 'MR phase fix - PR 325 ready',
+      startedAt: 2, sessionId: 'b2' });
+    const inbox = await listenForRenames(stale.socket);
+    try {
+      await callTool('list_sessions', {}, stale.context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix']);
+    } finally {
+      await inbox.close();
+    }
+    // A work name the user or the session set is never replaced, even one shaped like the
+    // bridge's own.
+    const kept = readyWorkMachine({ name: 'MR phase fix - PR 337' });
+    const second = await listenForRenames(kept.socket);
+    try {
+      await callTool('list_sessions', {}, kept.context);
+      await settled();
+      assert.deepEqual(second.lines, []);
+    } finally {
+      await second.close();
+    }
+  });
+
+test('list_sessions keeps the status a session appended to its title', async () => {
+  const { context, socket } = readyWorkMachine({ name: 'MR phase fix (waiting on you)' });
+  const inbox = await listenForRenames(socket);
+  try {
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.deepEqual(inbox.lines.map(line => line.name),
+      ['MR phase fix - PR 325 ready (waiting on you)']);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('an unread reply that asks is a needs your answer name at once, with replies false too',
+  async () => {
+    const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt', sessionId: 'w1' }],
+      tempDir());
+    const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+    fs.mkdirSync(path.join(paths.bridgeDir, 'replies'), { recursive: true });
+    fs.writeFileSync(path.join(paths.bridgeDir, 'replies', '77.json'),
+      JSON.stringify({ text: `${'Long detail. '.repeat(400)}\n\nShall I merge it?` }));
+    const inbox = await listenForRenames(path.join(path.dirname(paths.sessionsDir), '77.sock'));
+    try {
+      assert.match(await callTool('list_sessions', { replies: false }, context),
+        /^Wt, reply ready/);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['Wt - needs your answer']);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('a permission prompt is needs your approval, even when its reason says question', async () => {
+  const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt', sessionId: 'w1' }],
+    tempDir());
+  const marker = path.join(paths.bridgeDir, 'attention', '77.json');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ reason: 'a question about Bash' }));
+  const inbox = await listenForRenames(path.join(path.dirname(paths.sessionsDir), '77.sock'));
+  try {
+    await callTool('list_sessions', {}, { paths, config: { roots: ['/repo'] } });
+    await settled();
+    assert.deepEqual(inbox.lines.map(line => line.name), ['Wt - needs your approval']);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('a note written mid-turn is neither what an idle session last said nor a question it asks',
+  async () => {
+    const paths = fakeMachine([{ pid: 77, cwd: '/repo/n', name: 'Noted', sessionId: 'n-1' }],
+      tempDir());
+    writeTranscript(paths, '-repo-n', 'n-1', [ended('Done with the change.'),
+      said('Should I go on with the next one?')]);
+    const listed = await callTool('list_sessions', {},
+      { paths, config: { roots: ['/repo'] } });
+    assert.match(listed, /last said: Done with the change\./);
+    assert.doesNotMatch(listed, /asks|Should I go on/);
+  });
+
+test('list_sessions leaves a title alone when gh could not read the session\'s pull request',
+  async () => {
+    const { context, socket } = readyWorkMachine({ name: 'MR phase fix - PR 325 ready' });
+    const inbox = await listenForRenames(socket);
+    try {
+      const down = { ...context, gh: async () => { throw new Error('gh is down'); } };
+      await callTool('list_sessions', {}, down);
+      await settled();
+      assert.deepEqual(inbox.lines, []);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('list_sessions does not wait on a session that takes the rename and never closes',
+  async () => {
+    const { context, socket } = readyWorkMachine();
+    const held = [];
+    const server = net.createServer(conn => { held.push(conn); conn.on('error', () => {}); });
+    await new Promise(resolve => server.listen(socket, resolve));
+    try {
+      const began = Date.now();
+      assert.match(await callTool('list_sessions', {}, context), /^MR phase fix, idle/);
+      assert.ok(Date.now() - began < 2000, `took ${Date.now() - began} ms`);
+    } finally {
+      for (const conn of held) conn.destroy();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+test('a pull request a session in another repository reported ready is read there, announced, and summarized',
+  async () => {
+    const root = tempDir();
+    const a = fakeCheckout(root, 'a', 'feat/a', 'o/r');
+    const b = fakeCheckout(root, 'b', 'feat/b', 'o/personal');
+    const paths = {
+      ...fakeMachine([
+        { pid: 91, cwd: a, name: 'Alpha', startedAt: 1_700_000_000_000 },
+        { pid: 92, cwd: b, name: 'Bravo', startedAt: 1_700_000_000_000 },
+      ], root),
+      readyFile: path.join(root, 'state', 'ready.json'),
+      noticesDir: path.join(root, 'state', 'notices'),
+    };
+    fs.mkdirSync(path.join(paths.bridgeDir, 'ready'), { recursive: true });
+    fs.writeFileSync(path.join(paths.bridgeDir, 'ready', '92-20.json'),
+      JSON.stringify({ number: 20, at: 1_800_000_000 }));
+    const base = fakeGh({});
+    const gh = async call => {
+      if (call.args[0] === 'pr' && call.args[1] === 'view') {
+        // Only the personal checkout has a pull request 20.
+        if (call.cwd !== b) throw new Error('Could not resolve to a PullRequest with the number of 20.');
+        return JSON.stringify({ number: 20, title: 'personal tweak', state: 'OPEN',
+          headRefOid: 'h1', url: 'https://github.com/o/personal/pull/20' });
+      }
+      return base.gh(call);
+    };
+    const lines = await scanReady({ paths, tracker: { cwd: a, gh, now: () => 1_800_000_000_000 },
+      sessions: () => listSessions({ ...paths, roots: [path.join(root, 'repo')] }) });
+    assert.deepEqual(lines, ['Bravo marked pull request 20, personal tweak, in personal, ready '
+      + 'for your review.']);
+    const kept = JSON.parse(fs.readFileSync(paths.readyFile, 'utf8')).announced;
+    assert.deepEqual(kept['o/personal#20'], { head: 'h1', at: 1_800_000_000_000, key: '92',
+      repo: 'o/personal' });
+    const context = { ...runsContext(gh), paths,
+      config: { roots: [path.join(root, 'repo')], startDir: a } };
+    const text = await callTool('summary', {}, context);
+    assert.match(text, /Reported ready by their sessions: 20, personal tweak, in personal\./);
+  });
+
+test('a pull request announced for an earlier session under a reused key is not credited to a new one',
+  async () => {
+    const root = tempDir();
+    const a = fakeCheckout(root, 'a', 'feat/a', 'o/r');
+    const paths = {
+      ...fakeMachine([{ pid: 91, cwd: a, name: 'Alpha', startedAt: 1_800_000_000_000 }], root),
+      readyFile: path.join(root, 'state', 'ready.json'),
+    };
+    fs.mkdirSync(path.dirname(paths.readyFile), { recursive: true });
+    fs.writeFileSync(paths.readyFile, JSON.stringify({ announced: {
+      325: { head: 'h', at: 1_700_000_000_000, key: '91', repo: 'o/r' } } }));
+    const gh = async call => (call.args[0] === 'pr' && call.args[1] === 'view'
+      ? JSON.stringify({ number: 325, title: 'old', state: 'OPEN',
+        url: 'https://github.com/o/r/pull/325' })
+      : fakeGh({}).gh(call));
+    const context = { ...runsContext(gh), paths,
+      config: { roots: [path.join(root, 'repo')], startDir: a } };
+    assert.doesNotMatch(await callTool('summary', {}, context), /Reported ready/);
+  });
+
+test('a work name the session set on main stays, and one the bridge gave is cleared, across a new paths object',
+  async () => {
+    const own = readyWorkMachine({ name: 'MR phase fix', ready: true });
+    const inbox = await listenForRenames(own.socket);
+    try {
+      // The bridge names it; the session takes the title.
+      await callTool('list_sessions', {}, own.context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix - PR 325 ready']);
+      const record = recordOf(own.paths);
+      assert.deepEqual(record, { '92:2': ['PR 325 ready'] });
+      // The branch is main now, and a new paths object stands for a restarted bridge.
+      const main = fakeCheckout(own.root, 'm', 'main');
+      startFake(own.paths, { pid: 92, cwd: main, name: 'MR phase fix - PR 325 ready',
+        startedAt: 2, sessionId: 'b2' });
+      await callTool('list_sessions', {}, { ...own.context, paths: { ...own.paths } });
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name),
+        ['MR phase fix - PR 325 ready', 'MR phase fix']);
+    } finally {
+      await inbox.close();
+    }
+    // The session set "PR 337" itself on main: it is not on record, so it stays.
+    const theirs = readyWorkMachine({ name: 'MR phase fix - PR 337', ready: false });
+    startFake(theirs.paths, { pid: 92, cwd: fakeCheckout(theirs.root, 'm', 'main'),
+      name: 'MR phase fix - PR 337', startedAt: 2, sessionId: 'b2' });
+    const second = await listenForRenames(theirs.socket);
+    try {
+      await callTool('list_sessions', {}, theirs.context);
+      await settled();
+      assert.deepEqual(second.lines, []);
+    } finally {
+      await second.close();
+    }
+  });
+
+test('rename_session takes a session\'s work name off the bridge\'s record', async () => {
+  const { paths, fix, socket, context } = renameMachine();
+  ownedWorkIs(paths, 'PR 1 ready');
+  const inbox = await sessionInbox(socket, line => {
+    if (line.type === 'control') startFake(paths, { ...fix, name: line.name });
+  });
+  try {
+    await callTool('rename_session', { session: 'session two', work: 'read window' }, context);
+    assert.deepEqual(recordOf(paths), {});
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('a ready line from an ended session in another repository is not read in the bridge\'s repository',
+  async () => {
+    const root = tempDir();
+    const a = fakeCheckout(root, 'a', 'feat/a', 'o/r');
+    const away = fakeCheckout(root, 'away', 'feat/away', 'o/personal');
+    const paths = {
+      ...fakeMachine([{ pid: 91, cwd: a, name: 'Alpha', startedAt: 1, sessionId: 'a1' }], root),
+      readyFile: path.join(root, 'state', 'ready.json'),
+      noticesDir: path.join(root, 'state', 'notices'),
+    };
+    const folder = path.join(paths.bridgeDir, 'ready');
+    fs.mkdirSync(folder, { recursive: true });
+    // Session 93 ended; its line names no folder. Session 94's line names the folder it ran in.
+    fs.writeFileSync(path.join(folder, '93-20.json'),
+      JSON.stringify({ number: 20, at: 1_800_000_000, session: 's93' }));
+    fs.writeFileSync(path.join(folder, '94-21.json'),
+      JSON.stringify({ number: 21, at: 1_800_000_000, session: 's94', cwd: away }));
+    const asked = [];
+    const gh = async ({ cwd, args }) => {
+      asked.push({ cwd, number: args[2] });
+      return JSON.stringify({ number: Number(args[2]), title: 'in personal', state: 'OPEN',
+        headRefOid: 'h' });
+    };
+    const logged = [];
+    const lines = await scanReady({ paths, tracker: { cwd: a, gh, now: () => 1_800_000_000_000 },
+      sessions: () => listSessions({ ...paths, roots: [path.join(root, 'repo')] }),
+      log: line => logged.push(line) });
+    assert.deepEqual(asked, [{ cwd: away, number: '21' }]);
+    assert.equal(lines.length, 1);
+    assert.ok(logged.some(line => /ready line for 20 dropped: its session is no longer running/
+      .test(line)), logged.join('\n'));
+    assert.deepEqual(fs.readdirSync(folder), []);
+  });
+
+test('list_sessions leaves a title alone when the In Progress issues could not be listed',
+  async () => {
+    const { paths, context, socket } = readyWorkMachine({ ready: false });
+    startFake(paths, { pid: 92, cwd: fakeCheckout(path.dirname(paths.sessionsDir), 'w',
+      'feat/issue-5190-thing'), name: 'MR phase fix - issue 5190', startedAt: 2, sessionId: 'b2' });
+    ownedWorkIs(paths, 'issue 5190');
+    const inbox = await listenForRenames(socket);
+    try {
+      const gh = async ({ args }) => {
+        if (args[0] === 'pr') return '[]';
+        throw new Error('gh is down');
+      };
+      await callTool('list_sessions', {}, { ...context, gh });
+      await settled();
+      assert.deepEqual(inbox.lines, []);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('a name that does not fit clears the bridge\'s stale work name rather than clipping', async () => {
+  const base = 'x'.repeat(40);
+  const paths = fakeMachine([{ pid: 92, cwd: '/repo/b', name: `${base} - PR 325 ready`,
+    sessionId: 'b2', startedAt: 2 }], tempDir());
+  ownedWorkIs(paths, 'PR 325 ready');
+  const marker = path.join(paths.bridgeDir, 'attention', '92.json');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ reason: 'permission for Bash' }));
+  const inbox = await listenForRenames(path.join(path.dirname(paths.sessionsDir), '92.sock'));
+  try {
+    await callTool('list_sessions', {}, { paths, config: { roots: ['/repo'] } });
+    await settled();
+    assert.deepEqual(inbox.lines.map(line => line.name), [base]);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('an interrupted turn gives no question, and a working session still names its ready pull request',
+  async () => {
+    const paths = fakeMachine([{ pid: 77, cwd: '/repo/n', name: 'Cut', sessionId: 'n-1' }],
+      tempDir());
+    const at = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+    writeTranscript(paths, '-repo-n', 'n-1', [
+      { ...ended('Shall I go on?'), timestamp: at(10) },
+      { type: 'user', timestamp: at(5), message: { role: 'user', content: 'Stop, do this.' } },
+    ]);
+    const listed = await callTool('list_sessions', {}, { paths, config: { roots: ['/repo'] } });
+    assert.doesNotMatch(listed, /last said|asks|Shall I/);
+    // A session working on a request still says the pull request it reported ready.
+    const { paths: wp, context } = readyWorkMachine();
+    fs.mkdirSync(path.join(wp.bridgeDir, 'pending'), { recursive: true });
+    fs.writeFileSync(path.join(wp.bridgeDir, 'pending', '92'), String(Date.now()));
+    assert.match(await callTool('list_sessions', {}, context),
+      /working on your request.*marked pull request 325 ready for your review/);
+  });
+
+test('a question is told by its last line, past markdown and closing punctuation', async () => {
+  const paths = fakeMachine([{ pid: 77, cwd: '/repo/wt', name: 'Wt' }], tempDir());
+  const context = { paths, config: { roots: ['/repo'] }, replyWaitMs: 0 };
+  const file = path.join(paths.bridgeDir, 'replies', '77.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const detail = 'Detail line. '.repeat(80);
+  for (const [question, said] of [
+    ['**Want me to merge it?**', 'Want me to merge it?'],
+    ['Proceed? (yes/no)', 'Proceed? (yes/no)'],
+    ['Is that right?)', 'Is that right?)'],
+  ]) {
+    fs.writeFileSync(file, JSON.stringify({
+      text: `Summary: Checks pass.\n\n${detail}\n\n${question}`, readAt: 5 }));
+    assert.match(await callTool('list_sessions', {}, context),
+      new RegExp(`, and asks: ${said.replace(/[?()]/g, '\\$&')}$`), question);
+  }
+  fs.writeFileSync(file, JSON.stringify({ text: `Done.\n\n${detail}\n\nIt is merged.`, readAt: 5 }));
+  assert.doesNotMatch(await callTool('list_sessions', {}, context), /asks/);
+});
+
+test('a rename whose post failed is tried again at the next listing, and logged once', async () => {
+  const { context, socket } = readyWorkMachine();
+  const errors = [];
+  const log = console.error;
+  console.error = (...args) => {
+    // Only this test's own socket, as an earlier test's rename can still be failing.
+    if (args.join(' ').includes(socket)) errors.push(args.join(' '));
+  };
+  try {
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.equal(errors.length, 1);
+    const inbox = await listenForRenames(socket);
+    try {
+      await callTool('list_sessions', {}, context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix - PR 325 ready']);
+      assert.equal(errors.length, 1);
+    } finally {
+      await inbox.close();
+    }
+  } finally {
+    console.error = log;
+  }
+});
+
+test('a title with no base is not renamed', () => {
+  const session = { key: '1', sessionId: 's', socket: '/x.sock', name: '  (waiting on you)' };
+  assert.equal(factTitle({ ...session, title: '  (waiting on you)' }, 'PR 3',
+    { config: {}, bridgeDir: tempDir() }), null);
+});
+
+// The work names on record by session, without the times they were last seen.
+const recordOf = paths => Object.fromEntries(Object.entries(JSON.parse(fs.readFileSync(
+  path.join(paths.bridgeDir, 'rename-work.json'), 'utf8')))
+  .map(([key, value]) => [key, value.names ?? value]));
+
+test('a failed In Progress list marks only a numbered branch with no pull request, and nothing that blocks archiving',
+  async () => {
+    const root = tempDir();
+    const numbered = { key: '1', cwd: fakeCheckout(root, 'n', 'feat/issue-5190-x') };
+    const merged = { key: '2', cwd: fakeCheckout(root, 'm', 'feat/done-5190') };
+    const open = { key: '3', cwd: fakeCheckout(root, 'o', 'feat/issue-5191-y') };
+    const plain = { key: '4', cwd: fakeCheckout(root, 'p', 'feat/quiet') };
+    const pulls = [
+      { number: 7, state: 'MERGED', headRefName: 'feat/done-5190', body: '', url: 'https://github.com/o/r/pull/7' },
+      { number: 8, state: 'OPEN', headRefName: 'feat/issue-5191-y', body: '', url: 'https://github.com/o/r/pull/8' },
+    ];
+    const gh = async ({ args }) => {
+      if (args[0] === 'issue') throw new Error('gh is down');
+      const head = args[args.indexOf('--head') + 1];
+      return JSON.stringify(pulls.filter(pull => pull.headRefName === head));
+    };
+    const work = await sessionWork([numbered, merged, open, plain], { cwd: root, gh });
+    assert.equal(work.get('1').issuesUnknown, true);
+    assert.equal(work.get('1').lookupFailed, undefined);
+    for (const key of ['2', '3', '4']) {
+      assert.equal(work.get(key).issuesUnknown, undefined, key);
+      assert.equal(work.get(key).lookupFailed, undefined, key);
+    }
+    // A pull request still names its session under a failed list.
+    const { context, socket } = readyWorkMachine();
+    const inbox = await listenForRenames(socket);
+    try {
+      await callTool('list_sessions', {}, { ...context, gh: async call => {
+        if (call.args[0] === 'issue') throw new Error('gh is down');
+        return context.gh(call);
+      } });
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix - PR 325 ready']);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('a turn cut off before the tail gives no last said, unless the kept reply came after the prompt',
+  async () => {
+    const paths = fakeMachine([{ pid: 77, cwd: '/repo/n', name: 'Cut', sessionId: 'n-1' }],
+      tempDir());
+    const minutes = ago => Date.now() - ago * 60000;
+    writeTranscript(paths, '-repo-n', 'n-1', [{ type: 'user', timestamp: new Date(minutes(5))
+      .toISOString(), message: { role: 'user', content: 'Do this instead.' } }]);
+    const file = path.join(paths.bridgeDir, 'replies', '77.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const keep = ago => fs.writeFileSync(file, JSON.stringify({ text: 'Old answer.', readAt: 1,
+      at: minutes(ago) / 1000 }));
+    const context = { paths, config: { roots: ['/repo'] } };
+    keep(10);
+    assert.doesNotMatch(await callTool('list_sessions', {}, context), /last said/);
+    keep(1);
+    assert.match(await callTool('list_sessions', {}, context), /last said: Old answer\./);
+  });
+
+test('the bridge keeps a work name through a new session id, a clipped name, and a name in flight',
+  async () => {
+    // /clear changes the session id; the record is by start time.
+    const cleared = readyWorkMachine({ name: 'MR phase fix - PR 9 ready', ready: false });
+    startFake(cleared.paths, { pid: 92, cwd: fakeCheckout(cleared.root, 'm', 'main'),
+      name: 'MR phase fix - PR 9 ready', startedAt: 2, sessionId: 'after-clear' });
+    ownedWorkIs(cleared.paths, 'PR 9 ready');
+    let inbox = await listenForRenames(cleared.socket);
+    try {
+      await callTool('list_sessions', {}, cleared.context);
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), ['MR phase fix']);
+    } finally {
+      await inbox.close();
+    }
+    // A name the status made the session clip is still the bridge's.
+    const base = 'y'.repeat(30);
+    const clipped = fakeMachine([{ pid: 92, cwd: '/repo/b', name: `${base} - needs your (waiting on you)`,
+      startedAt: 2, sessionId: 'b2' }], tempDir());
+    ownedWorkIs(clipped, 'needs your approval');
+    inbox = await listenForRenames(path.join(path.dirname(clipped.sessionsDir), '92.sock'));
+    try {
+      await callTool('list_sessions', {}, { paths: clipped, config: { roots: ['/repo'] } });
+      await settled();
+      assert.deepEqual(inbox.lines.map(line => line.name), [`${base} (waiting on you)`]);
+    } finally {
+      await inbox.close();
+    }
+    // A post that failed after the line may have been written leaves its name owned, and the
+    // earlier name stays until the title shows the new one.
+    const flight = readyWorkMachine({ name: 'MR phase fix - PR 1 ready' });
+    ownedWorkIs(flight.paths, 'PR 1 ready');
+    await callTool('list_sessions', {}, flight.context);
+    await settled();
+    assert.deepEqual(recordOf(flight.paths), { '92:2': ['PR 1 ready', 'PR 325 ready'] });
+    startFake(flight.paths, { pid: 92, cwd: flight.cwd, name: 'MR phase fix - PR 325 ready',
+      startedAt: 2, sessionId: 'b2' });
+    // Within a minute of the try nothing is shrunk, as the session may still be taking it.
+    await callTool('list_sessions', {}, flight.context);
+    assert.deepEqual(recordOf(flight.paths), { '92:2': ['PR 1 ready', 'PR 325 ready'] });
+    await callTool('list_sessions', {}, { ...flight.context, now: () => Date.now() + 61_000 });
+    assert.deepEqual(recordOf(flight.paths), { '92:2': ['PR 325 ready'] });
+  });
+
+test('list_sessions does not start a rename while the user\'s rename_session of that session runs',
+  async () => {
+    const { context, socket } = readyWorkMachine();
+    const lines = [];
+    const server = net.createServer({ allowHalfOpen: true }, conn => {
+      let text = '';
+      conn.setEncoding('utf8');
+      conn.on('data', chunk => { text += chunk; });
+      conn.on('end', () => {
+        lines.push(JSON.parse(text.trim()));
+        setTimeout(() => conn.end(), 300);
+      });
+    });
+    await new Promise(resolve => server.listen(socket, resolve));
+    try {
+      const user = callTool('rename_session', { session: 'mr phase fix', work: 'manual' },
+        { ...context, renameWaitMs: 0 });
+      await settled();
+      await callTool('list_sessions', {}, context);
+      await settled();
+      assert.deepEqual(lines.map(line => line.name), ['MR phase fix - manual']);
+      await user;
+      assert.deepEqual(recordOf(context.paths), {});
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+test('a second listing does not post again while the first post is still going', async () => {
+  const { context, socket } = readyWorkMachine();
+  const held = [];
+  const server = net.createServer(conn => { held.push(conn); conn.on('error', () => {}); });
+  await new Promise(resolve => server.listen(socket, resolve));
+  try {
+    await callTool('list_sessions', {}, context);
+    await settled();
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.equal(held.length, 1);
+  } finally {
+    for (const conn of held) conn.destroy();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a title another session has falls back to clearing the bridge\'s own name', async () => {
+  const root = tempDir();
+  const cwd = fakeCheckout(root, 'b', 'feat/issue-332-updates');
+  const paths = fakeMachine([
+    { pid: 91, cwd: '/repo/a', name: 'Twin - PR 325 ready', startedAt: 1, sessionId: 'a1' },
+    { pid: 92, cwd, name: 'Twin - PR 1 ready', startedAt: 2, sessionId: 'b2' },
+  ], root);
+  ownedWorkIs(paths, 'PR 1 ready');
+  fs.mkdirSync(path.join(paths.bridgeDir, 'ready'), { recursive: true });
+  fs.writeFileSync(path.join(paths.bridgeDir, 'ready', '92-325.json'),
+    JSON.stringify({ at: 1_800_000_000_000 }));
+  const pulls = [{ number: 325, state: 'OPEN', url: 'https://github.com/o/r/pull/325',
+    headRefName: 'feat/issue-332-updates', body: '', title: 'x' }];
+  const inbox = await listenForRenames(path.join(root, '92.sock'));
+  try {
+    await callTool('list_sessions', {}, { paths, config: { roots: [path.join(root, 'repo'), '/repo'] },
+      gh: workGh(pulls, []), git: fakeGit({}).git });
+    await settled();
+    assert.deepEqual(inbox.lines.map(line => line.name), ['Twin']);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('the work name record keeps a session missing from a listing, and drops one unseen for a week',
+  async () => {
+    const { paths, context, socket } = readyWorkMachine();
+    fs.mkdirSync(paths.bridgeDir, { recursive: true });
+    const week = 7 * 24 * 60 * 60 * 1000;
+    const file = path.join(paths.bridgeDir, 'rename-work.json');
+    fs.writeFileSync(file, JSON.stringify({
+      '999:5': ['PR 4 ready'],
+      '998:5': { names: ['PR 5 ready'], seen: Date.now() - 60_000 },
+      '997:5': { names: ['PR 6 ready'], seen: Date.now() - week - 60_000 },
+      '92:old': 'PR 2',
+    }));
+    const inbox = await listenForRenames(socket);
+    try {
+      await callTool('list_sessions', {}, context);
+      await settled();
+      assert.deepEqual(Object.keys(recordOf(paths)).sort(), ['92:2', '998:5', '999:5']);
+      // The record in the earlier form counts as seen now.
+      assert.ok(JSON.parse(fs.readFileSync(file, 'utf8'))['999:5'].seen > Date.now() - 60_000);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('a name whose post failed stays on record for a minute', async () => {
+  const { paths, context, socket } = readyWorkMachine();
+  const log = console.error;
+  console.error = () => {};
+  try {
+    // The post fails, and the title carries no work name yet.
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.deepEqual(recordOf(paths), { '92:2': ['PR 325 ready'] });
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.deepEqual(recordOf(paths), { '92:2': ['PR 325 ready'] });
+  } finally {
+    console.error = log;
+  }
+  assert.ok(socket);
+});
+
+test('a rename_session that ends does not clear the marker of a post the bridge has going', async () => {
+  const { context, socket } = readyWorkMachine();
+  const held = [];
+  const server = net.createServer(conn => { held.push(conn); conn.on('error', () => {}); });
+  await new Promise(resolve => server.listen(socket, resolve));
+  try {
+    await callTool('list_sessions', {}, context);
+    await settled();
+    // An empty name ends rename_session at once; the bridge's post is still going.
+    await assert.rejects(callTool('rename_session', { session: 'mr phase fix', name: '' }, context));
+    await callTool('list_sessions', {}, context);
+    await settled();
+    assert.equal(held.length, 1);
+  } finally {
+    for (const conn of held) conn.destroy();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('a ready line with neither a folder nor a session is still read in the bridge\'s repository',
+  async () => {
+    const root = tempDir();
+    const a = fakeCheckout(root, 'a', 'feat/a', 'o/r');
+    const paths = {
+      ...fakeMachine([], root),
+      readyFile: path.join(root, 'state', 'ready.json'),
+      noticesDir: path.join(root, 'state', 'notices'),
+    };
+    fs.mkdirSync(path.join(paths.bridgeDir, 'ready'), { recursive: true });
+    fs.writeFileSync(path.join(paths.bridgeDir, 'ready', '95-30.json'),
+      JSON.stringify({ number: 30, at: 1_800_000_000 }));
+    const asked = [];
+    const gh = async ({ cwd, args }) => {
+      asked.push(cwd);
+      return JSON.stringify({ number: Number(args[2]), title: 'old line', state: 'OPEN',
+        headRefOid: 'h' });
+    };
+    const lines = await scanReady({ paths, tracker: { cwd: a, gh, now: () => 1_800_000_000_000 },
+      sessions: () => [] });
+    assert.deepEqual(asked, [a]);
+    assert.equal(lines.length, 1);
+  });
+
 test('closingIssues reads lists, other spellings, and only this repository\'s issues', () => {
   assert.deepEqual(closingIssues('Closes #1, #2 and #3. Fixes: #4, and #5', 'o/r'),
     [1, 2, 3, 4, 5]);
@@ -1312,7 +2350,7 @@ test('catch_up and list_sessions read transcript times; an untimed row reads wit
     const listed = await callTool('list_sessions', {}, context);
     assert.match(listed,
       /^Turning, busy, last reply 2 hours ago, last note 3 minutes ago: Reading the spec\.$/m);
-    assert.match(listed, /^Done, idle for 20 minutes, finished, last reply 20 minutes ago$/m);
+    assert.match(listed, /^Done, idle for 20 minutes, finished, last reply 20 minutes ago, last said: PR is open\.$/m);
     assert.match(listed, /^Untimed, idle, stalled: its last turn stopped partway$/m);
   });
 
@@ -1349,13 +2387,13 @@ test('list_sessions and catch_up say whether an idle session finished or stalled
   };
   const context = { paths, config: { roots: ['/repo'] }, background };
   const listed = await callTool('list_sessions', {}, context);
-  assert.match(listed, /^Finished, idle, finished$/m);
+  assert.match(listed, /^Finished, idle, finished, last said: Pull request 5300 is ready for your review\.$/m);
   assert.match(listed, /^Interrupted, idle, stalled: its last turn was interrupted$/m);
-  assert.match(listed, /^Errored, idle, stalled: its last turn ended on an error$/m);
+  assert.match(listed, /^Errored, idle, stalled: its last turn ended on an error, last said: API Error/m);
   assert.match(listed,
-    /^Promised, idle, stalled: it said it would go on, and nothing is due to wake it$/m);
-  assert.match(listed, /^Waking, idle, waiting on background work that will wake it$/m);
-  assert.match(listed, /^Handed, idle, finished$/m);
+    /^Promised, idle, stalled: it said it would go on, and nothing is due to wake it, last said: Run 4 is red\./m);
+  assert.match(listed, /^Waking, idle, waiting on background work that will wake it, last said: Watching\./m);
+  assert.match(listed, /^Handed, idle, finished, last said: Done\./m);
   // A turn that finished or promised more asks whether background work is due; a stalled one
   // does not.
   assert.deepEqual(asked.sort(),
@@ -1404,13 +2442,13 @@ test('list_sessions names the background work an idle session waits on, whatever
     const context = { paths, config: { roots: ['/repo'] }, background, replyWaitMs: 0 };
     const listed = await callTool('list_sessions', { replies: false }, context);
     // A turn that ended on a launch is not left as finished.
-    assert.match(listed, /^Launched, idle, waiting on background work: watch the CI run$/m);
+    assert.match(listed, /^Launched, idle, waiting on background work: watch the CI run, last said: Watching run/m);
     assert.match(listed,
-      /^Several, idle, waiting on background work: one; two; three and 1 more$/m);
+      /^Several, idle, waiting on background work: one; two; three and 1 more, last said: Done for now\.$/m);
     assert.match(listed,
       /^Reply, waiting on background work: Opus review of PR 7, reply ready/m);
     // A session with nothing running still reads as it did.
-    assert.match(listed, /^Quiet, idle, finished$/m);
+    assert.match(listed, /^Quiet, idle, finished, last said: Pull request 8 is open\.$/m);
     // The session process is passed, so work a restart left behind does not count.
     assert.deepEqual(pids.sort(), [70, 71, 72, 73]);
   });
@@ -1519,7 +2557,7 @@ test('list_sessions says time on the turn, its usage, time idle, and names a lon
       + 'last note 1 minute ago: Note m2.');
     assert.ok(listed.includes('Quick, busy for 5 minutes, about 52 thousand tokens this '
       + 'request, last note 3 minutes ago: Note m2.'), listed.join('\n'));
-    assert.ok(listed.includes('Resting, idle for 3 hours, finished, last reply 3 hours ago'),
+    assert.ok(listed.includes('Resting, idle for 3 hours, finished, last reply 3 hours ago, last said: Done.'),
       listed.join('\n'));
     // A transcript that records no usage says only the time.
     assert.ok(listed.includes('Unmetered, busy for 2 minutes'), listed.join('\n'));
@@ -4698,10 +5736,11 @@ test('pull_request_merged with repo tells the session working in that repository
     startFake(m.paths, { pid: 72, cwd, name: 'Laundry', startedAt: 2 });
     m.lists.views = { 44: { number: 44, title: 'Pull 44', state: 'MERGED',
       headRefName: 'feat/dry', headRefOid: 'abc', url: pullUrl(44, 'm/LaundryBot') } };
-    const merged = args => callTool('pull_request_merged', args, m.context);
+    const { gh } = postMergeGh(m.context.gh, { owned: ['mfagerstrom/LaundryBot'] });
+    const merged = args => callTool('pull_request_merged', args, { ...m.context, gh });
     // The number alone is read in the bridge's own repository, where no pull request has it.
     assert.equal(await merged({ number: 44, repo: 'Nowhere' }),
-      'No running session works in a repository named Nowhere, so the bridge cannot reach it.');
+      'No repository called Nowhere was found in mfagerstrom.');
     assert.equal(await merged({ number: 44, repo: 'LaundryBot' }),
       'Told Laundry that pull request 44 merged, so it runs its post-merge steps.');
     assert.equal(await merged({ number: 44, repo: 'LaundryBot' }),
@@ -4752,6 +5791,23 @@ test('pull_request_merged finds a session by a name the repository was renamed t
   assert.equal(JSON.parse(fs.readFileSync(namesFile, 'utf8')).repos['m/ai-health-coach'].current,
     'm/fagerteam-health-coach');
 });
+
+test('pull_request_merged finishes the post-merge steps for a repository only GitHub lists',
+  async () => {
+    const m = mergeMachine();
+    m.lists.views = { 44: { number: 44, title: 'Pull 44', state: 'MERGED', headRefName: 'feat/x',
+      headRefOid: 'abc', url: pullUrl(44, 'mfagerstrom/RemoteOnly') } };
+    const { gh, issueCalls } = postMergeGh(m.context.gh, {
+      owned: ['mfagerstrom/RemoteOnly'], refs: [ref(12, 'mfagerstrom/RemoteOnly')] });
+    const context = { ...m.context, gh, config: { ...m.context.config,
+      codeDir: path.join(tempDir(), 'Code') } };
+    const said = { number: 44, repo: 'remote only' };
+    assert.equal(await callTool('pull_request_merged', said, context),
+      'No session runs there, so the bridge ran the post-merge steps itself: issue 12: closed '
+      + 'it, removed In Progress.');
+    assert.ok(issueCalls.every(call => call.repo === 'mfagerstrom/RemoteOnly'));
+    assert.equal(m.posted.length, 0);
+  });
 
 // A machine with a followed session, Watched, and one the user stopped following, Unwatched,
 // a ready record, a notices folder, a gh whose pull request views can change, and a scan of
@@ -4918,29 +5974,44 @@ test('merge_pull_request merges in another repository a running session works in
     assert.equal(m.posted.length, 1);
   });
 
-test('merge_pull_request refuses a repository with no session and no local checkout', async () => {
-  const m = mergeMachine();
-  const { gh, calls } = fakeGh({ pull: READY, threads: RESOLVED });
-  const codeDir = path.join(tempDir(), 'Code');
-  const context = { ...m.context, gh, pages: new Map(), now: () => 0,
-    config: { ...m.context.config, codeDir } };
-  assert.equal(await callTool('merge_pull_request', { number: 44, repo: 'LaundryBot' }, context),
-    'No running session works in a repository named LaundryBot, so the bridge cannot reach it.');
-  assert.deepEqual(calls, []);
-});
+test('merge_pull_request refuses a repository GitHub does not list or any checkout has',
+  async () => {
+    const m = mergeMachine();
+    const inner = fakeGh({ pull: READY, threads: RESOLVED });
+    const { gh } = postMergeGh(inner.gh, { owned: ['mfagerstrom/Other'] });
+    const codeDir = path.join(tempDir(), 'Code');
+    const context = { ...m.context, gh, pages: new Map(), now: () => 0,
+      config: { ...m.context.config, codeDir } };
+    assert.equal(await callTool('merge_pull_request', { number: 44, repo: 'LaundryBot' }, context),
+      'No repository called LaundryBot was found in mfagerstrom.');
+    assert.deepEqual(mergeCalls(inner.calls), []);
+  });
 
 // A gh for the post-merge steps: the closing references and issue reads answer from refs and
 // issues, { number: { state, labels } }, and the other issue commands are recorded. editError
-// fails the label removal as gh would; every other call goes to inner.
-function postMergeGh(inner, { refs = [], issues = {}, editError = null, readError = null } = {}) {
+// fails the label removal as gh would, and owned lists the repositories the owner listing
+// returns; every other call goes to inner.
+function postMergeGh(inner, {
+  refs = [], issues = {}, editError = null, readError = null, owned = [],
+} = {}) {
   const issueCalls = [];
+  const passed = [];
   const gh = async call => {
+    // The owner listing the bridge reads to find a repository on GitHub.
+    if (call.args[0] === 'api' && call.args[1] === 'user') return 'mfagerstrom';
+    if (call.args[0] === 'api' && call.args[1] === 'user/orgs') return '';
+    if (call.args[0] === 'repo' && call.args[1] === 'list') {
+      return owned.map(repo => `${repo} false`).join('\n');
+    }
     if (call.args[0] === 'api' && call.args.some(arg => arg.includes('closingIssuesReferences'))) {
       if (readError) throw readError;
       return JSON.stringify({ data: { repository: { pullRequest: {
         closingIssuesReferences: { nodes: refs } } } } });
     }
-    if (call.args[0] !== 'issue') return inner(call);
+    if (call.args[0] !== 'issue') {
+      passed.push({ repo: call.repo, args: call.args });
+      return inner(call);
+    }
     issueCalls.push({ repo: call.repo, cwd: call.cwd, args: call.args });
     if (call.args[1] === 'view') {
       const issue = issues[call.args[2]] ?? { state: 'OPEN', labels: ['In Progress'] };
@@ -4950,19 +6021,21 @@ function postMergeGh(inner, { refs = [], issues = {}, editError = null, readErro
     if (call.args[1] === 'edit' && editError) throw editError;
     return '';
   };
-  return { gh, issueCalls };
+  return { gh, issueCalls, passed };
 }
 
 const ref = (number, repo) => ({ number, repository: { nameWithOwner: repo } });
 
-test('merge_pull_request in a repository with no session merges from its checkout and finishes '
-  + 'the post-merge steps itself', async () => {
+// A merge in a repository with no running session, through a gh that lists the owner's
+// repositories. codeDir decides whether a local checkout exists; the merge reply and the gh
+// calls come back for the assertions.
+async function mergeWithoutSession({ codeDir }) {
   const m = mergeMachine();
-  const { codeDir, laundry } = codeFolder();
   const inner = fakeGh({ pull: { ...READY, number: 44, headRefName: 'feat/dry' },
     threads: RESOLVED, afterMerge: { ...MERGED, number: 44, title: 'Pull 44',
       headRefName: 'feat/dry', url: pullUrl(44, 'mfagerstrom/LaundryBot') } });
-  const { gh, issueCalls } = postMergeGh(inner.gh, {
+  const { gh, issueCalls, passed } = postMergeGh(inner.gh, {
+    owned: ['mfagerstrom/LaundryBot', 'mfagerstrom/Other'],
     refs: [ref(12, 'mfagerstrom/LaundryBot'), ref(13, 'mfagerstrom/LaundryBot'),
       ref(3, 'other/repo')],
     issues: { 12: { state: 'OPEN', labels: ['In Progress', 'bug'] },
@@ -4973,17 +6046,45 @@ test('merge_pull_request in a repository with no session merges from its checkou
   const away = { number: 44, repo: 'Laundry-Bot' };
   await callTool('merge_pull_request', away, context);
   assert.deepEqual(issueCalls, []);
-  assert.equal(await callTool('merge_pull_request', { ...away, confirm: true }, context),
-    'Merged pull request 44 in mfagerstrom/laundrybot into main as commit 41bead5. No session '
-    + 'runs there, so the bridge ran the post-merge steps itself: issue 12: closed it, removed '
-    + 'In Progress; issue 13: it was already closed, it had no In Progress label.');
-  assert.deepEqual(mergeCalls(inner.calls).map(call => call.cwd), [laundry]);
+  // The confirm names the repository differently, as it can be said.
+  const reply = await callTool('merge_pull_request',
+    { number: 44, repo: 'laundry bot', confirm: true }, context);
+  return { m, reply, issueCalls, merges: mergeCalls(inner.calls),
+    mergeRepos: passed.filter(call => call.args[1] === 'merge').map(call => call.repo),
+    // gh ignores GH_REPO for repo view without an argument, so the repository is named in it.
+    viewed: passed.filter(call => call.args[0] === 'repo' && call.args[1] === 'view')
+      .map(call => [call.args[2], call.repo]) };
+}
+
+const POST_MERGE_REPLY = 'Merged pull request 44 in mfagerstrom/laundrybot into main as commit '
+  + '41bead5. No session runs there, so the bridge ran the post-merge steps itself: issue 12: '
+  + 'closed it, removed In Progress; issue 13: it was already closed, it had no In Progress '
+  + 'label.';
+
+test('merge_pull_request in a repository with no session merges from its checkout and finishes '
+  + 'the post-merge steps itself', async () => {
+  const { codeDir, laundry } = codeFolder();
+  const { m, reply, issueCalls, merges } = await mergeWithoutSession({ codeDir });
+  assert.equal(reply, POST_MERGE_REPLY);
+  assert.deepEqual(merges.map(call => call.cwd), [laundry]);
   // An issue in another repository is left alone, and every call names the repository.
   assert.deepEqual(issueCalls.map(call => call.args.slice(0, 3).join(' ')), [
     'issue view 12', 'issue close 12', 'issue edit 12', 'issue view 13']);
-  assert.ok(issueCalls.every(call => call.repo === 'mfagerstrom/laundrybot'));
+  assert.ok(issueCalls.every(call => call.repo === 'mfagerstrom/LaundryBot'));
   assert.equal(m.posted.length, 0);
 });
+
+test('merge_pull_request finds a repository on GitHub when no session or checkout has it',
+  async () => {
+    const codeDir = path.join(tempDir(), 'Code');
+    const { reply, issueCalls, mergeRepos, viewed } = await mergeWithoutSession({ codeDir });
+    assert.equal(reply, POST_MERGE_REPLY);
+    assert.deepEqual(mergeRepos, ['mfagerstrom/LaundryBot']);
+    assert.ok(viewed.length > 0);
+    assert.ok(viewed.every(([named, repo]) => named === 'mfagerstrom/laundrybot'
+      && repo === 'mfagerstrom/LaundryBot'));
+    assert.ok(issueCalls.every(call => call.repo === 'mfagerstrom/LaundryBot'));
+  });
 
 test('post-merge steps say what failed, and a closed issue still loses its label', async () => {
   const inner = async () => '';
@@ -6210,12 +7311,12 @@ test('the full code flow issues a token that opens /mcp', async () => {
   });
   assert.deepEqual(JSON.parse(list.body).result.tools.map(t => t.name),
     [
-      'list_sessions', 'needs_attention', 'answer_prompt', 'send', 'run_command',
-      'queued_requests',
+      'list_sessions', 'needs_attention', 'answer_prompt', 'send', 'allow_blocked_call',
+      'run_command', 'queued_requests',
       'drop_request', 'stop_turn', 'close_session', 'archive_sessions', 'read_reply',
       'read_full_reply', 'reply_length', 'context_usage', 'catch_up',
       'follow', 'next_update',
-      'start_session', 'rename_session', 'nickname_session',
+      'start_session', 'rename_session', 'rename_all_sessions', 'nickname_session',
       'stop_following', 'list_milestones', 'list_issues', 'read_issue', 'list_pull_requests',
       'read_pull_request', 'merge_pull_request', 'pull_request_merged', 'set_issue_fields',
       'create_issue', 'close_issue', 'reopen_issue', 'edit_issue', 'create_milestone',
@@ -6229,7 +7330,7 @@ test('the full code flow issues a token that opens /mcp', async () => {
   assert.match(JSON.parse(list.body).result.tools.find(t => t.name === 'next_update').description,
     /^Wait up to about 3 seconds /);
   const waiting = JSON.parse(list.body).result.tools.filter(t => t.inputSchema.properties?.confirm);
-  assert.equal(waiting.length, 16);
+  assert.equal(waiting.length, 17);
   for (const tool of waiting) assert.match(tool.description, /"I need a yes for that\."/, tool.name);
   for (const tool of JSON.parse(list.body).result.tools.filter(t => !t.inputSchema.properties?.confirm)) {
     assert.doesNotMatch(tool.description, /I need a yes for that/, tool.name);
@@ -6264,16 +7365,18 @@ test('the full code flow issues a token that opens /mcp', async () => {
   assert.deepEqual(send.required, ['session', 'text']);
   const writes = { readOnlyHint: false, destructiveHint: true, idempotentHint: false };
   const edits = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
+  const widens = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
   const creates = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
   assert.deepEqual(JSON.parse(list.body).result.tools.filter(t => t.annotations)
     .map(t => [t.name, t.annotations]),
-  [['answer_prompt', writes], ['run_command', writes],
+  [['answer_prompt', writes], ['allow_blocked_call', widens], ['run_command', writes],
     ['drop_request', writes],
     ['stop_turn', writes],
     ['close_session', writes],
     ['archive_sessions', writes],
     ['reply_length', edits],
     ['rename_session', edits],
+    ['rename_all_sessions', edits],
     ['nickname_session', edits],
     ['merge_pull_request', writes],
     ['pull_request_merged', edits],
@@ -10013,3 +11116,253 @@ test('the stop line is found in a row the harness labels as another session\'s m
   fs.writeFileSync(file, `${JSON.stringify(row)}\n`);
   assert.equal(turnStopped(file, BEGAN), true);
 });
+
+// --- Calls the classifier denied ------------------------------------------------------------
+
+const CLASSIFIED = 'Permission for this action was denied by the Claude Code auto mode '
+  + 'classifier. Reason: [External System Writes]. If you have other tasks that do not '
+  + 'depend on this action, continue. To allow this type of action in the future, the user '
+  + 'can add a Bash permission rule to their settings.';
+const relayedRow = { type: 'user', message: { content: [
+  { type: 'text', text: 'Voice request: open an issue' }] } };
+const GH_CREATE = { command: 'gh issue create -R o/r --title "x" --body-file /home/u/.claude/b' };
+const blockRows = (id, input = GH_CREATE, options = { error: true, text: CLASSIFIED }) =>
+  callRows(id, 'Bash', input, 100, options);
+
+// A session whose transcript holds rows, with a settings file holding settings.
+function blockedSession(rows, settings = { permissions: { allow: ['Bash(git push:*)'] } }) {
+  const { paths, session, write } = promptedSession([], rows);
+  paths.settingsFile = path.join(tempDir(), 'settings.json');
+  if (settings) fs.writeFileSync(paths.settingsFile, JSON.stringify(settings, null, 2));
+  return { paths, session, write };
+}
+
+test('suggestedRule names the narrowest allow rule the blocked call needs', () => {
+  const rule = (tool, input, lists) => suggestedRule(tool, input, lists);
+  assert.deepEqual(rule('Bash', GH_CREATE), { rule: 'Bash(gh issue create:*)' });
+  assert.deepEqual(rule('Bash', { command: 'gh pr edit 5 --add-label X 2>&1 | tail -1' }),
+    { rule: 'Bash(gh pr edit:*)' });
+  assert.deepEqual(rule('mcp__srv__send', {}), { rule: 'mcp__srv__send' });
+  assert.deepEqual(rule('WebFetch', { url: 'https://docs.example.com/a?b=1' }),
+    { rule: 'WebFetch(domain:docs.example.com)' });
+  // A part already allowed is not asked for again; two parts that need rules are not guessed.
+  assert.deepEqual(rule('Bash', { command: 'gh pr edit 5 --title x; gh pr ready 5' },
+    { allow: ['Bash(gh pr edit:*)'] }), { rule: 'Bash(gh pr ready:*)' });
+  assert.match(rule('Bash', { command: 'gh pr edit 5; gh pr ready 5' }).why,
+    /More than one part/);
+  assert.match(rule('Bash', GH_CREATE, { allow: ['Bash(gh issue create:*)'] }).why,
+    /already has an allow rule/);
+  for (const command of ['gh issue create --body "$(cat f)"', 'gh pr edit 5 --body `x`',
+    'gh issue create --body-file f > out', 'git push --force', 'gh api -X DELETE repos/o/r',
+    'rm -rf /', 'gh issue create <<EOF\nx\nEOF']) {
+    assert.equal(rule('Bash', { command }).rule, undefined, command);
+    assert.ok(rule('Bash', { command }).why, command);
+  }
+  assert.ok(rule('Edit', { file_path: '/x' }).why);
+  assert.match(rule('mcp__srv__send', {}, { deny: ['mcp__srv'] }).why, /deny rule/);
+  assert.match(rule('mcp__srv__send', {}, { deny: ['mcp__srv__*'] }).why, /deny rule/);
+  assert.match(rule('Bash', GH_CREATE, { deny: ['Bash(gh issue:*)'] }).why, /deny rule/);
+  for (const deny of ['Bash(gh issue create:*)', 'Bash(gh issue create)']) {
+    assert.match(rule('Bash', GH_CREATE, { deny: [deny] }).why, /deny rule/, deny);
+  }
+  assert.equal(rule('Bash', GH_CREATE, { deny: ['Bash(gh issue edit:*)'] }).rule,
+    'Bash(gh issue create:*)');
+  assert.ok(rule('mcp__srv__.claude', {}).why);
+  for (const deny of ['Bash', 'Bash(*)', 'Bash(gh *)', 'Bash(gh issue create *)', 'Bash(gh:*)']) {
+    assert.match(rule('Bash', GH_CREATE, { deny: [deny] }).why, /deny rule/, deny);
+  }
+  assert.match(rule('Bash', GH_CREATE, { allow: ['Bash(gh *)'] }).why, /already has an allow/);
+  assert.match(rule('WebFetch', { url: 'https://a.example.com/x' }, { deny: ['WebFetch'] }).why,
+    /deny rule/);
+  assert.match(rule('WebFetch', { url: 'https://a.example.com/x' },
+    { deny: ['WebFetch(domain:*.example.com)'] }).why, /deny rule/);
+  // A bare web deny leaves other tools alone.
+  assert.equal(rule('Bash', GH_CREATE, { deny: ['WebFetch'] }).rule, 'Bash(gh issue create:*)');
+  assert.equal(rule('mcp__srv__send', {}, { deny: ['WebFetch'] }).rule, 'mcp__srv__send');
+  assert.ok(rule('WebFetch', { url: 'file:///etc/passwd' }).why);
+  assert.ok(rule('WebFetch', { url: 'data:text/plain,x' }).why);
+  // A filter that writes a file is not skipped.
+  assert.match(rule('Bash', { command: 'sort -o out a; gh pr create' }).why, /More than one/);
+});
+
+test('classifierDenials counts only denials after the latest relayedRow request', () => {
+  const { paths, session } = blockedSession([
+    ...blockRows('t0', { command: 'gh pr edit 1 --title a' }), relayedRow, ...blockRows('t1'),
+    ...blockRows('t2', GH_CREATE, { error: true, text: 'auto mode classifier gave no verdict' }),
+    ...blockRows('t3', GH_CREATE, { error: true, text: 'The user doesn\'t want to proceed' }),
+    ...blockRows('t4', GH_CREATE, { error: false, text: 'ok' }),
+    // Output that quotes the denial is not a denial.
+    ...blockRows('t5', GH_CREATE, { error: true, text: `head notes: ${CLASSIFIED}` }),
+  ]);
+  assert.deepEqual(classifierDenials(session, paths.projectsDir).map(d => [d.id, d.reason]),
+    [['t1', '[External System Writes]']]);
+});
+
+test('relayBlocks tells each classifier denial once, with the rule that would fix it', () => {
+  const { paths, session, write } = blockedSession([relayedRow, ...blockRows('t1')]);
+  const [text, ...more] = relayBlocks({ sessions: [session], paths });
+  assert.equal(more.length, 0);
+  assert.match(text, /^Asker: .* was blocked by the auto mode classifier, \[External System/);
+  assert.match(text, /The allow rule Bash\(gh issue create:\*\) would let it through/);
+  assert.deepEqual(waitingNotices(paths.noticesDir, ['failed']).map(n => n.text), [text]);
+  assert.deepEqual(relayBlocks({ sessions: [session], paths }), []);
+  // A scan that does not list the session keeps what it was told.
+  assert.deepEqual(relayBlocks({ sessions: [], paths }), []);
+  assert.deepEqual(relayBlocks({ sessions: [session], paths }), []);
+  write([relayedRow, ...blockRows('t1'), ...blockRows('t5', { command: 'gh api repos/o/r' })]);
+  assert.match(relayBlocks({ sessions: [session], paths })[0], /No rule is offered for gh api/);
+});
+
+// The voice chat's calls to allow_blocked_call, a clock that moves ten seconds a call.
+function fixContext(machine) {
+  let clock = 1000;
+  return { paths: machine.paths, config: { roots: ['/repo'] }, pages: new Map(),
+    now: () => (clock += 10 * 1000) };
+}
+const fix = (context, args = {}) => callTool('allow_blocked_call', { session: 'asker', ...args },
+  context);
+
+test('allow_blocked_call reads the rule back, then adds it only after a yes', async () => {
+  const settings = { model: 'x', permissions: { defaultMode: 'auto',
+    allow: ['Bash(git push:*)'], deny: ['mcp__v'] }, autoMode: { a: 1 } };
+  const machine = blockedSession([relayedRow, ...blockRows('t1')], settings);
+  const context = fixContext(machine);
+  const file = machine.paths.settingsFile;
+  const readBack = await fix(context);
+  assert.match(readBack, /Bash\(gh issue create:\*\) to .*settings\.json/);
+  assert.match(readBack, /every session in every repository/);
+  assert.match(readBack, /I need a yes for that\./);
+  assert.deepEqual(readJson(file), settings);
+  assert.match(await fix(context, { confirm: true }), /^Added Bash\(gh issue create:\*\)/);
+  const after = readJson(file);
+  assert.deepEqual(after.permissions.allow, ['Bash(git push:*)', 'Bash(gh issue create:*)']);
+  assert.deepEqual({ ...after, permissions: { ...after.permissions, allow: 0 } },
+    { ...settings, permissions: { ...settings.permissions, allow: 0 } });
+  assert.deepEqual(Object.keys(after), Object.keys(settings));
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['settings.json']);
+  // The read-back was spent, and the rule is there already.
+  assert.match(await fix(context, { confirm: true }), /already has an allow rule/);
+  assert.match(await fix(context), /Nothing was changed\. .*already has an allow rule/);
+});
+
+test('allow_blocked_call refuses a yes that is early, late, unread or changed', async () => {
+  const machine = blockedSession([relayedRow, ...blockRows('t1')]);
+  const file = machine.paths.settingsFile;
+  const context = fixContext(machine);
+  const original = fs.readFileSync(file, 'utf8');
+  assert.match(await fix(context, { confirm: true }), /has not been read back/);
+  let clock = 1000;
+  const quick = { ...context, now: () => clock };
+  await fix(quick);
+  assert.match(await fix(quick, { confirm: true }), /came too soon/);
+  await fix(quick);
+  clock += 4 * 60 * 1000;
+  assert.match(await fix(quick, { confirm: true }), /more than 3 minutes old/);
+  await fix(context);
+  fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }));
+  assert.match(await fix(context, { confirm: true }), /changed since the read-back/);
+  fs.writeFileSync(file, original);
+  assert.deepEqual(readJson(file).permissions.allow, ['Bash(git push:*)']);
+});
+
+test('allow_blocked_call never takes a rule or file, and please and thank you is no yes',
+  async () => {
+    const machine = blockedSession([relayedRow, ...blockRows('t1')]);
+    const context = fixContext(machine);
+    const first = await fix(context, { rule: 'Bash', file: '/etc/x', preapproved: true });
+    assert.match(first, /Bash\(gh issue create:\*\)/);
+    assert.doesNotMatch(first, /\/etc\/x/);
+    assert.match(first, /Please and thank you does not stand in for the yes/);
+    assert.deepEqual(readJson(machine.paths.settingsFile).permissions.allow,
+      ['Bash(git push:*)']);
+  });
+
+test('allow_blocked_call leaves a settings file it cannot change as it is', async () => {
+  for (const [text, why] of [['{ not json', /does not parse/], ['[]', /shape/],
+    ['{"permissions":{"allow":[1]}}', /shape/]]) {
+    const machine = blockedSession([relayedRow, ...blockRows('t1')], null);
+    fs.writeFileSync(machine.paths.settingsFile, text);
+    assert.match(await fix(fixContext(machine)), why);
+    assert.equal(fs.readFileSync(machine.paths.settingsFile, 'utf8'), text);
+  }
+  const machine = blockedSession([relayedRow, ...blockRows('t1')], null);
+  const real = path.join(path.dirname(machine.paths.settingsFile), 'real.json');
+  fs.writeFileSync(real, '{}');
+  fs.symlinkSync(real, machine.paths.settingsFile);
+  assert.match(await fix(fixContext(machine)), /is a link/);
+  assert.equal(fs.readFileSync(real, 'utf8'), '{}');
+});
+
+test('allow_blocked_call creates the settings file when there is none', async () => {
+  const machine = blockedSession([relayedRow, ...blockRows('t1')], null);
+  const context = fixContext(machine);
+  await fix(context);
+  assert.match(await fix(context, { confirm: true }), /^Added /);
+  assert.deepEqual(readJson(machine.paths.settingsFile),
+    { permissions: { allow: ['Bash(gh issue create:*)'] } });
+  assert.equal(fs.statSync(machine.paths.settingsFile).mode & 0o777, 0o600);
+});
+
+test('allow_blocked_call says so when nothing was blocked, or no rule fits', async () => {
+  const none = blockedSession([relayedRow]);
+  assert.match(await fix(fixContext(none)), /has no call the classifier blocked/);
+  const odd = blockedSession([relayedRow, ...blockRows('t1', { command: 'rm -rf x' })]);
+  assert.match(await fix(fixContext(odd)), /^Nothing was changed\. No rule is offered/);
+});
+
+test('allow_blocked_call drops the blocked notice once the rule is added', async () => {
+  const machine = blockedSession([relayedRow, ...blockRows('t1')]);
+  relayBlocks({ sessions: [machine.session], paths: machine.paths });
+  assert.equal(waitingNotices(machine.paths.noticesDir, ['failed']).length, 1);
+  const context = fixContext(machine);
+  await fix(context);
+  await fix(context, { confirm: true });
+  assert.equal(waitingNotices(machine.paths.noticesDir, ['failed']).length, 0);
+});
+
+test('allow_blocked_call says a web rule opens the whole host, and a failed write changes nothing',
+  async () => {
+    const web = blockedSession([relayedRow, ...callRows('w1', 'WebFetch',
+      { url: 'https://raw.example.com/a/b' }, 100, { error: true, text: CLASSIFIED })]);
+    assert.match(await fix(fixContext(web)), /WebFetch\(domain:raw\.example\.com\).*every address/);
+    const machine = blockedSession([relayedRow, ...blockRows('t1')]);
+    const context = fixContext(machine);
+    const original = fs.readFileSync(machine.paths.settingsFile, 'utf8');
+    await fix(context);
+    fs.chmodSync(path.dirname(machine.paths.settingsFile), 0o500);
+    try {
+      assert.match(await fix(context, { confirm: true }), /could not be written/);
+    } finally {
+      fs.chmodSync(path.dirname(machine.paths.settingsFile), 0o700);
+    }
+    assert.equal(fs.readFileSync(machine.paths.settingsFile, 'utf8'), original);
+    assert.deepEqual(fs.readdirSync(path.dirname(machine.paths.settingsFile)), ['settings.json']);
+  });
+
+test('a denial counts only after a relayed request, and the reason is the bracketed one', () => {
+  const none = blockedSession([...blockRows('t1')]);
+  assert.deepEqual(classifierDenials(none.session, none.paths.projectsDir), []);
+  const { paths, session } = blockedSession([relayedRow, ...blockRows('t1')]);
+  assert.equal(classifierDenials(session, paths.projectsDir)[0].reason,
+    '[External System Writes]');
+});
+
+test('allow_blocked_call keeps the settings file mode, and a denial is not told again later',
+  async () => {
+    const machine = blockedSession([relayedRow, ...blockRows('t1')]);
+    fs.chmodSync(machine.paths.settingsFile, 0o664);
+    const context = fixContext(machine);
+    await fix(context);
+    const umask = process.umask(0o077);
+    try {
+      await fix(context, { confirm: true });
+    } finally {
+      process.umask(umask);
+    }
+    assert.equal(fs.statSync(machine.paths.settingsFile).mode & 0o777, 0o664);
+    const [session] = [machine.session];
+    relayBlocks({ sessions: [session], paths: machine.paths, now: Date.now() });
+    const told = relayBlocks({ sessions: [session], paths: machine.paths,
+      now: Date.now() + 48 * 60 * 60 * 1000 });
+    assert.deepEqual(told, []);
+  });

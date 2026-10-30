@@ -515,11 +515,13 @@ class VoiceBridgeReplyTest(unittest.TestCase):
 
     def test_ready_form_records_each_pull_request_the_check_lets_through(self):
         payload = {'last_assistant_message': 'Done.\n\nPULL REQUEST 5250 IS READY FOR YOUR '
-                   'REVIEW\nPULL REQUEST 5251 IS READY FOR\nYOUR REVIEW', 'session_id': 'abc'}
+                   'REVIEW\nPULL REQUEST 5251 IS READY FOR\nYOUR REVIEW', 'session_id': 'abc',
+                   'cwd': '/repo/x'}
         written = hook.ready(payload, self.socket, self.root, now=50,
                              check=lambda p: ['5250'])
         self.assertEqual(len(written), 1)
-        self.assertEqual(self.ready_record(5250), {'number': 5250, 'at': 50, 'session': 'abc'})
+        self.assertEqual(self.ready_record(5250), {'number': 5250, 'at': 50, 'session': 'abc',
+                                                'cwd': '/repo/x'})
         self.assertFalse(os.path.exists(os.path.join(self.root, 'ready', '4242-5251.json')))
 
     def test_ready_form_runs_unfollowed_and_skips_a_reply_with_no_ready_line(self):

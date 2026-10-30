@@ -261,10 +261,11 @@ plugin's `voice-bridge-hooks` folder (under `.claude/att-docs` in a repository
 that vendors the plugins), and never through the voice bridge's tools:
 
 ```bash
-python3 <voice-bridge-hooks folder>/session_title.py work "read server window"
+python3 <voice-bridge-hooks folder>/session_title.py work "issue #57 read server window"
 ```
 
-The work name is a few words from the issue title. The script finds the session
+The work name starts with the issue, written with a `#`, and a few words from
+its title. The script finds the session
 it runs in, keeps its base title, such as `Overmind 2`, and replaces only the
 work name after the dash, so names do not pile up when the session moves on to
 other work, and spoken references to the base title still find it. Run it again
@@ -272,33 +273,79 @@ whenever the session starts work on a different issue. If the script is missing
 or reports an error, skip the rename and go on, since the name is a convenience
 and never gates the work.
 
-### Show when the session stops or waits
+### Status words
 
-When the session stops, stalls or waits on something other than its own work,
-it appends its status in parentheses after its current name, with the same
+A session shows its status in parentheses after its current name, with the same
 script and one of these words:
 
 - `idle`: no work is left to do, the task is finished and nothing is queued;
-- `waiting on you`: it has asked the user something or needs a decision;
+- `needs you`: it has asked the user something, needs a decision, or has a pull
+  request ready for review;
 - `waiting on CI`: it is waiting on a check or a run to finish;
 - `stuck`: it cannot go on without help and has said why;
-- `stopped`: it ended on an error or was stopped.
+- `stopped`: it ended on an error or was stopped;
+- `working`: work goes on after this turn, such as a background task still
+  running, and nothing waits on the user.
 
 ```bash
-python3 <voice-bridge-hooks folder>/session_title.py status "waiting on you"
+python3 <voice-bridge-hooks folder>/session_title.py status "needs you"
 ```
 
-Run it just before the turn that stops, such as the one that asks a question or
-reports the work ready, so the sidebar and the voice bridge show at a glance
-which sessions need attention. When work resumes, naming the work again with
-`work` takes the status away, and `status ""` takes it away without naming new
-work. A status never changes the base title, so the session is still reached by
-it; a long work name is shortened, or dropped, to make room for the status and
-is not restored, so name the work again when work resumes.
+The next section says when to set it, so the sidebar and the voice bridge show
+at a glance which sessions need attention. Naming the work with `work` takes the
+status away, and `status ""` takes it away without naming new work. A status
+never changes the base title, so the session is still reached by it; a long work
+name is shortened, or dropped, to make room for the status and is not restored.
 
 Only the top-level session sets its title and status. A subagent or other
 delegated agent runs inside the same session process, so it leaves both alone
 and the session reports for it.
+
+### Keep the title current
+
+At the end of every turn, before the final reply, check whether the session's
+work or status changed since its title was last set, and set the title only
+when it did. Read the title first:
+
+```bash
+python3 <voice-bridge-hooks folder>/session_title.py show
+```
+
+When the work name and the status already read as they should, do nothing, so a
+turn that changed neither costs no rename. Otherwise set the work, then the
+status, because naming the work takes a status away:
+
+```bash
+python3 <voice-bridge-hooks folder>/session_title.py work "issue #57 block fix"
+python3 <voice-bridge-hooks folder>/session_title.py status "working"
+```
+
+The title reads `<Repo> <n> - <work name> (<status>)`, such as
+`Overmind 1 - issue #57 block fix (working)`. The base title and its number stay
+as they are. The work name starts with the issue or pull request the session is
+on, written with a `#`, and a few words: `issue #57 block fix`,
+`PR #12 rename all sessions`. Keep it under 30 characters, so the status never
+clips it; when `show` reads the same work name and status, the title is current.
+The voice bridge's rename of every session writes the same format and the same
+status words, keeps a work name set here, and refreshes only one it wrote
+itself. The bridge's session listing renames only the work names it gave itself,
+so a name set here is left alone.
+
+Pick the status from what the session is doing at the end of the turn, from the
+words above only:
+
+- work goes on after this turn, such as a background task still running:
+  `working`;
+- asked a question, needs a decision, or reported the pull request ready for
+  review: `needs you`;
+- waiting on a check: `waiting on CI`;
+- cannot go on: `stuck`;
+- ended on an error or was stopped: `stopped`;
+- finished, nothing queued: `idle`.
+
+This applies to every session that follows this skill, whether or not it works
+an issue. A session answering a relayed voice request retitles the same way.
+The rename never gates the turn: if the script is missing or fails, go on.
 
 ## 4. Do the work
 

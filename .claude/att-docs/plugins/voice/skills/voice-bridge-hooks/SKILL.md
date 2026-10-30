@@ -189,6 +189,18 @@ Claude Code defers MCP tools behind a tool search, which pauses the first call. 
 set to true, so Claude Code lists those three up front, and leaves every other tool
 deferred to keep the startup list short. The set is `ALWAYS_LOAD_TOOLS` in `voice-bridge.mjs`.
 
+## Titles for every session at once
+
+The bridge's `rename_all_sessions` tool gives each running session the title `<base> - <task>
+(<state>)` in one call, such as `Playwright 2 - PR 5593 move the Overmind pin (needs you)`. The
+task is the work name the session set, else its open pull request with its title, else its
+issue, else the start of its latest reply. The state is `needs you` (it waits or asks, or
+reported a pull request ready), `working` or `idle`. A status the session set that says more,
+`stuck`, `stopped` or `waiting on CI`, is kept. A title that already reads so, the Session
+Launcher and a session the user stopped following are left alone, and the answer lists what
+changed and what was left. `session_title.py` and the bridge share the status words, so a
+title written by either is taken apart the same way by both.
+
 ## Tests
 
 From this folder, `python3 <script>_test.py` for each Python script and

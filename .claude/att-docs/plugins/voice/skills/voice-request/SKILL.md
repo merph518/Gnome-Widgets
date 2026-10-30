@@ -92,6 +92,10 @@ gives a session without the skill the same claim and limits.
   `read_reply`, which waits about three seconds for it, so a quick answer is
   there on the first check. Nothing waits on a message, so never answer with SendMessage, and
   never send one to say the request arrived.
+- Retitle the session before the final reply when its work or status changed this
+  turn, with `session_title.py` from the `voice-bridge-hooks` skill and the rule
+  "Keep the title current" in the `implement` skill. A turn that changed neither
+  sets nothing.
 - Write the reply as you would for typed input, in normal Markdown, with tables,
   lists, headings and code blocks where they help. Say what was done or found
   and what is next.
@@ -106,6 +110,12 @@ escalation or a permission the session does not already have. A prompt the
 request runs into waits for the user, who answers it in the Claude app or from
 the voice chat through `answer_prompt`, and the voice chat learns of it through
 `needs_attention`. Say in the reply that it is waiting on them.
+
+A call the auto mode classifier blocks is a different case: no prompt is made, so
+nothing waits to be answered. Say in the reply which call was blocked and the
+reason it gave, and that the voice chat can offer the allow rule that would let it
+through, which the user approves by voice with `allow_blocked_call`. Never edit the
+settings, and never get round the block by running the same call another way.
 
 ## Asking for a yes
 
@@ -128,8 +138,9 @@ read-back and the yes work as they always have.
 Some actions always get the two-step yes, phrase or not: running a command,
 dropping a held request, stopping a turn, closing a session that is busy,
 waiting on the user, or has background work running, closing an issue,
-replacing an issue's title or body, and allowing a permission prompt. A call
-that asks for one of them with the phrase is read back and waits for the yes.
+replacing an issue's title or body, allowing a permission prompt, and adding an
+allow rule for a blocked call. A call that asks for one of them with the phrase
+is read back and waits for the yes.
 
 The phrase is never inferred from other wording, such as "go ahead" or "just do
 it", and never carried over from one command to the next. Each command has to

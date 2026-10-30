@@ -284,8 +284,34 @@ only lower the budget and never fails the job. The window sizes are per slot.
 A window with no room left for a prompt fails the job
 with `model:window-too-small`. The server's own request time-out must still be at
 least `model.timeoutMinutes`, or the server ends the reply early and the call
-fails with `no-reply`. A call that fails while thinking is retried once with
-thinking off.
+fails with `no-reply`. A thinking reply cut off at the output limit is retried
+once with thinking off and an output limit of `model.retryOutput` (8192 by
+default); a second cut fails the job as `model:runaway`. A cut with thinking off
+is not retried and fails as `model:length`. Any other failure of a thinking call
+(no reply, network, a reply that does not parse) is retried once with thinking
+off at `model.maxOutput`.
+
+`model.reasoningOutputByPhase` lowers the thinking limit for single phases, for
+example `{ "phase9": 16384 }`. Its keys are `phase1`, `phase3`, `phase4`,
+`phase5` and `phase9`, and each value is a whole number from 1024 to
+`model.reasoningOutput`. `model.retryOutput` is a whole number from 1024 to
+`model.maxOutput`; when `model.maxOutput` is smaller than 8192 it defaults to
+`model.maxOutput`. To find the phases that hit their limit, read the `retry` and
+`call-fail` lines in `status.log`: a line whose `reason` is `length` or `runaway`
+was cut off, and its `phase` and `step` say where. A server may leave out the
+token usage on a cut reply, so do not rely on `outputTokens` matching `maxTokens`.
+`queue status` and the report show `model:runaway` and `model:length` for the jobs
+that failed this way. Set a lower limit for those phases. For a thinking call, space
+for the prompt is budgeted against the larger of `model.reasoningOutput` and
+`model.maxOutput`, never against a per-phase limit.
+
+A server-wide thinking budget is an opt-in alternative that nothing in the
+pipeline sets. Lemonade runs the model with the llama.cpp build it bundles for
+the saved backend, not `/usr/bin/llama-server`, so check that binary's `--help`
+for `--reasoning-budget` first. If it is there, append `--reasoning-budget N` to
+the model's saved `llamacpp_args`. It caps every thinking call on the server,
+and when the budget runs out the model stops thinking and finishes the reply
+instead of failing at the output limit.
 
 Lemonade keeps the model's window as a saved recipe option on the user model,
 not in `/etc/lemonade` or the systemd unit. In the commands below, `<endpoint>`
@@ -551,7 +577,8 @@ during the night is not retaken that night; the next nightly run takes it and
 resumes from the phase that stopped it. A job that failed in the daytime, such as
 one started on request, is taken by that evening's run. A job that fails a
 second time stays `failed`, is never taken again, and is flagged in the report
-with both reasons. A run that died mid-job counts as a failed try with the
+with both reasons. A model failure during the night window, such as `model:runaway`, waits
+for the next night like any other failure. A run that died mid-job counts as a failed try with the
 reason `interrupted` and no wait. A run that works every queued row takes it at
 once; a `queue start` run works only rows marked `--now`, so it leaves the row
 for the night. `queue start --job <job-id>` on a job waiting for its retry runs
