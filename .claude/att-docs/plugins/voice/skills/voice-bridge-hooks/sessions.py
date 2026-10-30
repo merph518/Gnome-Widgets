@@ -13,6 +13,10 @@ SPEAK_SESSIONS_DIR and SPEAK_PROC_DIR point it at fixtures in tests.
 import json
 import os
 import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from session_title import NUMBERED_STATUS  # noqa: E402
 
 KINDS = ("interactive", "bg")
 
@@ -47,20 +51,32 @@ def list_sessions(sessions_dir=None, proc_dir=None):
         if not os.path.exists(os.path.join(proc_dir, str(entry.get("pid")))):
             continue
         cwd = str(entry.get("cwd") or "")
+        # a status the title ends in goes stale, so the name leaves it off, as the bridge does;
+        # a number Claude Code added after it stays
+        raw = str(entry.get("name") or "").strip()
+        found = NUMBERED_STATUS.search(raw)
+        if found:
+            raw = raw[:found.start()].strip() + (found.group(2) or "")
         sessions.append({
             "id": str(entry.get("sessionId") or ""),
-            "name": str(entry.get("name") or "").strip() or os.path.basename(cwd),
+            "name": raw or os.path.basename(cwd),
             "busy": entry.get("status") == "busy",
             "background": entry.get("kind") == "bg",
             "pid": int(entry.get("pid")),
             "cwd": cwd,
         })
+    # a number another session's name already holds is skipped, so no two names are alike
+    taken = {s["name"].lower() for s in sessions}
     seen = {}
     for s in sorted(sessions, key=lambda s: s["pid"]):
         base = s["name"].lower()
-        seen[base] = seen.get(base, 0) + 1
-        if seen[base] > 1:
-            s["name"] = "%s %d" % (s["name"], seen[base])
+        count = seen.get(base, 0) + 1
+        if count > 1:
+            while "%s %d" % (base, count) in taken:
+                count += 1
+            taken.add("%s %d" % (base, count))
+            s["name"] = "%s %d" % (s["name"], count)
+        seen[base] = count
     return sorted(sessions, key=lambda s: s["pid"])
 
 

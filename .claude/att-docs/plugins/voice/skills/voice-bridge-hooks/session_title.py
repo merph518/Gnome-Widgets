@@ -35,22 +35,28 @@ MAX_TITLE = 60
 # How long to read the session's file for the new title before saying it did not appear.
 WAIT_SECONDS = 5.0
 POLL_SECONDS = 0.25
-STATUS_SUFFIX = re.compile(r"\s+\((%s)\)$" % "|".join(re.escape(s) for s in STATUSES))
+# A status with the number Claude Code may add after it to a title another session holds:
+# "Merge (idle) 2". Group 1 is the status and group 2 the number, with its space.
+NUMBERED_STATUS = re.compile(
+    r"\s+\((%s)\)(\s+\d+)?$" % "|".join(re.escape(s) for s in STATUSES))
 
 
 def split_title(title):
     """(base, work, status) for a title; work and status are empty when it has none. The
-    last separator ends the base, as in the voice bridge."""
+    last separator ends the base, as in the voice bridge. A number after the status joins the
+    base, so "Merge (idle) 2" is ("Merge 2", "", "idle") and a new status goes after it."""
     title = title.strip()
     status = ""
-    found = STATUS_SUFFIX.search(title)
+    number = ""
+    found = NUMBERED_STATUS.search(title)
     if found:
         status = found.group(1)
+        number = found.group(2) or ""
         title = title[:found.start()].strip()
     at = title.rfind(SEPARATOR)
     if at < 0:
-        return title, "", status
-    return title[:at].strip(), title[at + len(SEPARATOR):].strip(), status
+        return title + number, "", status
+    return title[:at].strip() + number, title[at + len(SEPARATOR):].strip(), status
 
 
 def clip_to_words(text, room):

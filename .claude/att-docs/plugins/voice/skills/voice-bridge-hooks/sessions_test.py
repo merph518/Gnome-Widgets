@@ -53,6 +53,18 @@ class ListSessions(unittest.TestCase):
         self.add(40, name="Overmind")
         self.assertEqual([s["name"] for s in self.listed()], ["overmind", "Overmind 2", "Overmind 3"])
 
+    def test_status_suffix_is_stripped_before_numbering(self):
+        self.add(10, name="Merge")
+        self.add(11, name="Merge (idle)")
+        self.add(12, name="Ship (stuck) 2")
+        self.assertEqual([s["name"] for s in self.listed()], ["Merge", "Merge 2", "Ship 2"])
+
+    def test_a_number_another_session_holds_is_skipped(self):
+        self.add(10, name="Merge")
+        self.add(11, name="Merge (idle)")
+        self.add(12, name="Merge (idle) 2")
+        self.assertEqual([s["name"] for s in self.listed()], ["Merge", "Merge 3", "Merge 2"])
+
     def test_blank_name_falls_back_to_folder(self):
         self.add(10, name=" ", cwd="/home/me/widget")
         self.assertEqual(self.listed()[0]["name"], "widget")

@@ -11,11 +11,12 @@ import { after, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
-  announceMerges, announcePrompts, callTool, checkBridgeStarts, claudeBackgroundArgs,
-  classifierDenials, closingIssues, contextWindow, createHandler, MORE_TEXT, relayBlocks,
+  announceMerges, announcePrompts, callTool, checkBridgeStarts, checkWork, requestItems,
+  claudeBackgroundArgs, classifierDenials, closingIssues, contextWindow, createHandler,
+  MORE_TEXT, mergeNotice, relayBlocks,
   relayFailures, replySummary, suggestedRule,
   updateBridge, releaseHeld, commandRefusal, guardRefusal, runShell,
-  checkoutOf, findSession, setNickname, readJson, repoOf, scanReady, sendNotices, takeNotices,
+  branchTip, readyIndex, tipAhead, checkoutOf, findSession, setNickname, readJson, repoOf, scanReady, sendNotices, takeNotices,
   waitingNotices,
   writePrivateJson,
   FOLLOW_IDLE_MS,
@@ -136,6 +137,57 @@ test('listSessions keeps live interactive and background sessions under a root',
   const sessions = listSessions({ ...paths, roots: ['/home/u/Code/Repo'] });
   assert.deepEqual(sessions.map(s => [s.key, s.name, s.busy]),
     [['11', 'Voice Bridge', false], ['14', 'Background', false], ['16', 'wt', true]]);
+});
+
+test('listSessions strips a known status suffix and keeps the sidebar title', () => {
+  const paths = fakeMachine([
+    { pid: 21, cwd: '/repo/a', name: 'Overmind 1 - Merge (waiting on you)' },
+    { pid: 22, cwd: '/repo/b', name: 'Fix (part 2)' },
+    { pid: 23, cwd: '/repo/c', name: 'Deploy (waiting on CI)' },
+  ]);
+  const sessions = listSessions({ ...paths, roots: ['/repo'] });
+  assert.deepEqual(sessions.map(s => [s.name, s.sidebar, s.marked]), [
+    ['Overmind 1 - Merge', 'Overmind 1 - Merge (waiting on you)', 'waiting on you'],
+    ['Fix (part 2)', 'Fix (part 2)', ''],
+    ['Deploy', 'Deploy (waiting on CI)', 'waiting on CI'],
+  ]);
+});
+
+test('listSessions keeps a de-dup number that follows a status', () => {
+  const paths = fakeMachine([{ pid: 24, cwd: '/repo/a', name: 'Merge (idle) 2' }]);
+  const [session] = listSessions({ ...paths, roots: ['/repo'] });
+  assert.deepEqual([session.name, session.sidebar, session.marked],
+    ['Merge 2', 'Merge (idle) 2', 'idle']);
+});
+
+test('listSessions never gives two sessions one name when a number is already taken', () => {
+  const paths = fakeMachine([
+    { pid: 10, cwd: '/repo/a', name: 'Merge' },
+    { pid: 11, cwd: '/repo/b', name: 'Merge (idle)' },
+    { pid: 12, cwd: '/repo/c', name: 'Merge (idle) 2' },
+  ]);
+  const names = listSessions({ ...paths, roots: ['/repo'] }).map(s => s.name);
+  assert.deepEqual(names, ['Merge', 'Merge 3', 'Merge 2']);
+});
+
+test('findSession resolves a title two sessions share to the lower process id', () => {
+  const paths = fakeMachine([
+    { pid: 40, cwd: '/repo/a', name: 'Merge' },
+    { pid: 41, cwd: '/repo/b', name: 'Merge' },
+  ]);
+  const sessions = listSessions({ ...paths, roots: ['/repo'] });
+  assert.equal(findSession(sessions, 'merge').key, '40');
+  assert.equal(findSession(sessions, 'merge 2').key, '41');
+});
+
+test('findSession resolves a plain title to the lower process id when one session ends in a status', () => {
+  const paths = fakeMachine([
+    { pid: 10, cwd: '/repo/a', name: 'Overmind (idle)' },
+    { pid: 20, cwd: '/repo/b', name: 'Overmind' },
+  ]);
+  const sessions = listSessions({ ...paths, roots: ['/repo'] });
+  assert.equal(findSession(sessions, 'overmind').key, '10');
+  assert.equal(findSession(sessions, 'overmind 2').key, '20');
 });
 
 test('listSessions numbers a repeated title in process id order', () => {
@@ -851,7 +903,7 @@ test('a followed session reads only replies newer than the follow, once each', a
 
 // A worktree checkout under root/<name> on branch, as git lays one out: a .git file naming
 // its folder under root/gits, whose HEAD names the branch. Returns the checkout's path.
-function fakeCheckout(root, name, branch, repo = 'o/r') {
+function fakeCheckout(root, name, branch, repo = 'o/r', host = 'github.com') {
   const cwd = path.join(root, 'repo', name);
   const common = path.join(root, 'gits', repo);
   const gitDir = path.join(common, 'worktrees', name);
@@ -861,7 +913,7 @@ function fakeCheckout(root, name, branch, repo = 'o/r') {
   fs.writeFileSync(path.join(gitDir, 'HEAD'), `ref: refs/heads/${branch}\n`);
   fs.writeFileSync(path.join(gitDir, 'commondir'), '../..\n');
   fs.writeFileSync(path.join(common, 'config'), '[core]\n\tbare = false\n'
-    + `[remote "origin"]\n\turl = git@github.com:${repo}.git\n\tfetch = +refs/heads/*\n`);
+    + `[remote "origin"]\n\turl = git@${host}:${repo}.git\n\tfetch = +refs/heads/*\n`);
   return cwd;
 }
 
@@ -1045,8 +1097,7 @@ test('rename_all_sessions leaves a title that already fits, keeps a work name th
       const said = await callTool('rename_all_sessions', {}, fits.context);
       await settled();
       assert.deepEqual(first.lines, []);
-      assert.equal(said, 'Renamed 0 of 1 session.\nAlready fit: MR phase fix - PR #325 Updates '
-        + '(needs you).');
+      assert.equal(said, 'Renamed 0 of 1 session.\nAlready fit: MR phase fix - PR #325 Updates.');
     } finally {
       await first.close();
     }
@@ -1279,13 +1330,495 @@ test('summary names pull requests a session reported ready, once, with a reposit
     };
     const base = fakeGh({ pulls: [pullRow(7, 'labeled one', 'feat/z', ['Manual Review Needed'])] });
     const gh = async call => (call.args[0] === 'pr' && call.args[1] === 'view'
-      ? JSON.stringify(views[call.args[2]]) : base.gh(call));
+      ? JSON.stringify(views[call.args[2]]) : (call.repo ? '[]' : base.gh(call)));
     const context = { ...runsContext(gh), paths,
       config: { roots: [path.join(root, 'repo')], startDir: a } };
     const lines = (await callTool('summary', {}, context)).split('\n');
-    assert.ok(lines.includes('1 open pull request, 1 waiting on your review. Waiting on you: 7, '
-      + 'labeled one. Reported ready by their sessions: 325, fix thing; 20, personal tweak, in '
+    assert.ok(lines.includes('1 open pull request in r, 3 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, labeled one. Reported ready by their sessions: 325, '
+      + 'fix thing; 20, personal tweak, in personal.'), lines.join('\n'));
+  });
+
+// Three sessions in three repositories, the first in the bridge's own. byRepo gives each
+// repository's open pull requests, a repository given an Error cannot be read; owned gives
+// the pull request a session's folder owns, by session name; views answers a pull request
+// view by number. busy names the sessions on a turn, and reported the pull requests a
+// session announced ready, by number, with the session's pid. remotes gives a session's
+// origin repository where it is not the one above, and renamed the current name of each old
+// one. asking names the sessions waiting on a question, only the sessions it lists are
+// started, and extra starts that many more sessions, each in a repository of its own. hosts
+// gives a session's remote host, busySince the time a busy session began its turn, and
+// outside starts the bridge in a folder that is no checkout. tips gives the commit a
+// session's local branch points at, and a pull request a session owns has the head 'a1b2c3d', which
+// is also the head a session reported it ready at. origins gives the commit a session's
+// remote-tracking ref of its branch points at. A session in behind has a tip that is an
+// ancestor of its baseline, as git says it; any other has commits the baseline lacks.
+function reviewMachine({ byRepo, owned = {}, busy = [], reported = {}, views = {},
+  remotes = {}, renamed = {}, asking = [], only = null, extra = 0, hosts = {},
+  tips = {}, origins = {}, behind = [], outside = false }) {
+  const root = tempDir();
+  const all = { Alpha: ['a', 'o/r', 91], Bravo: ['b', 'o/personal', 92],
+    Charlie: ['c', 'o/third', 93] };
+  for (let i = 0; i < extra; i += 1) all[`Extra${i}`] = [`x${i}`, `o/x${i}`, 100 + i];
+  const folders = Object.fromEntries(Object.entries(all)
+    .filter(([name]) => !only || only.includes(name)));
+  const cwds = {};
+  const entries = Object.entries(folders).map(([name, [dir, repo, pid]]) => {
+    cwds[name] = fakeCheckout(root, dir, `feat/${dir}`, remotes[name] ?? repo, hosts[name]);
+    return { pid, cwd: cwds[name], name, startedAt: pid,
+      ...(busy.includes(name) && { status: 'busy' }) };
+  });
+  const paths = { ...fakeMachine(entries, root), readyFile: path.join(root, 'state', 'ready.json'),
+    repoNamesFile: path.join(root, 'state', 'repo-names.json') };
+  fs.mkdirSync(path.dirname(paths.readyFile), { recursive: true });
+  fs.writeFileSync(paths.repoNamesFile, JSON.stringify({ repos: Object.fromEntries(
+    Object.entries(renamed).map(([old, current]) => [old, { current }])) }));
+  for (const [folder, given] of [['refs/heads', tips], ['refs/remotes/origin', origins]]) {
+    for (const [name, tip] of Object.entries(given)) {
+      const [dir, repo] = all[name];
+      const ref = path.join(root, 'gits', remotes[name] ?? repo, ...folder.split('/'), 'feat', dir);
+      fs.mkdirSync(path.dirname(ref), { recursive: true });
+      fs.writeFileSync(ref, `${tip}\n`);
+    }
+  }
+  for (const name of asking) {
+    const marker = path.join(paths.bridgeDir, 'attention', `${folders[name][2]}.json`);
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, JSON.stringify({ at: RUNS_NOW / 1000 - 5, reason: 'a question' }));
+  }
+  fs.writeFileSync(paths.readyFile, JSON.stringify({ announced: Object.fromEntries(
+    Object.entries(reported).map(([number, [name, repo]]) => [number,
+      { head: 'a1b2c3d', at: 1_800_000_000_000, key: String(folders[name][2]), repo }])) }));
+  const byCwd = Object.fromEntries(Object.entries(owned).map(([name, pull]) => [cwds[name],
+    [{ title: pull.title, state: 'OPEN', headRefName: 'x', headRefOid: 'a1b2c3d', baseRefName: 'main',
+      body: '', ...pull, url: `https://github.com/${pull.repo}/pull/${pull.number}` }]]));
+  const calls = [];
+  const gh = async call => {
+    calls.push(call);
+    const { args } = call;
+    if (args[0] === 'issue') return '[]';
+    if (args[1] === 'view') return JSON.stringify(views[args[2]]);
+    if (args.includes('--head')) return JSON.stringify(byCwd[call.cwd] ?? []);
+    const rows = byRepo[call.repo ?? 'o/r'] ?? [];
+    if (rows instanceof Error) throw rows;
+    const label = args.includes('--label');
+    const limit = Number(args[args.indexOf('--limit') + 1]);
+    return JSON.stringify(rows.filter(row => !label || row.labels.length > 0).slice(0, limit));
+  };
+  const git = async ({ cwd }) => {
+    if (behind.some(name => cwds[name] === cwd)) return '';
+    throw Object.assign(new Error('git exited with code 1.'), { code: 1 });
+  };
+  const context = { ...runsContext(gh), paths, git,
+    config: { roots: [path.join(root, 'repo')],
+      startDir: outside ? path.join(root, 'elsewhere') : cwds.Alpha } };
+  if (outside) fs.mkdirSync(path.join(root, 'elsewhere'));
+  return { context, calls };
+}
+
+const REVIEW = 'Manual Review Needed';
+const viewOf = (number, title, repo) => ({ number, title, state: 'OPEN',
+  url: `https://github.com/${repo}/pull/${number}` });
+
+test('summary counts labeled pull requests in every repository its sessions work in, naming each with its repository',
+  async () => {
+    const { context, calls } = reviewMachine({
+      byRepo: {
+        'o/r': [pullRow(7, 'own one', 'feat/z', [REVIEW]), pullRow(8, 'not yet', 'feat/y', [])],
+        'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [pullRow(31, 'third thing', 'feat/t', [REVIEW])],
+      },
+      // Charlie is idle, so the pull request it owns is counted.
+      owned: { Charlie: { number: 31, title: 'third thing', repo: 'o/third' } },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('2 open pull requests in r, 3 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, own one; 20, personal tweak, in personal; 31, third '
+      + 'thing, in third.'), lines.join('\n'));
+    // Each other repository is read once, through GH_REPO.
+    const away = calls.filter(call => call.repo);
+    assert.deepEqual(away.map(call => call.repo).sort(), ['o/personal', 'o/third']);
+    assert.ok(away.every(call => call.args.includes(REVIEW)));
+  });
+
+test('summary counts a pull request both labeled and reported ready once',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: {
+        'o/r': [pullRow(7, 'own one', 'feat/z', [REVIEW])],
+        'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [],
+      },
+      reported: { 7: ['Alpha', 'o/r'], 20: ['Bravo', 'o/personal'], 325: ['Alpha', 'o/r'] },
+      views: { 7: viewOf(7, 'own one', 'o/r'), 20: viewOf(20, 'personal tweak', 'o/personal'),
+        325: viewOf(325, 'fix thing', 'o/r') },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request in r, 3 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, own one; 20, personal tweak, in personal. Reported '
+      + 'ready by their sessions: 325, fix thing.'), lines.join('\n'));
+  });
+
+test('summary names a pull request its busy session still owns as being reworked, and does not count it',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: {
+        'o/r': [pullRow(7, 'own one', 'feat/z', [REVIEW])],
+        'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [pullRow(31, 'third thing', 'feat/t', [REVIEW])],
+      },
+      busy: ['Bravo'], tips: { Bravo: 'e4f5a6b' },
+      owned: { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal' },
+        Charlie: { number: 31, title: 'third thing', repo: 'o/third' } },
+      reported: { 20: ['Bravo', 'o/personal'], 325: ['Bravo', 'o/personal'] },
+      views: { 20: viewOf(20, 'personal tweak', 'o/personal'),
+        325: viewOf(325, 'fix thing', 'o/personal') },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request in r, 3 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, own one; 31, third thing, in third. Reported ready by '
+      + 'their sessions: 325, fix thing, in personal. Still being reworked: 20, personal tweak, in '
       + 'personal.'), lines.join('\n'));
+  });
+
+test('summary names a repository it cannot read and still counts the others',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: {
+        'o/r': [pullRow(7, 'own one', 'feat/z', [REVIEW])],
+        'o/personal': new Error('HTTP 502\nthe rest of the page'),
+        'o/third': [pullRow(31, 'third thing', 'feat/t', [REVIEW])],
+      },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request in r, at least 2 waiting on your review '
+      + 'across all repositories. Waiting on you: 7, own one; 31, third thing, in third. The '
+      + 'pull requests in personal could not be read: HTTP 502.'), lines.join('\n'));
+  });
+
+test('summary counts the others when the bridge\'s own repository cannot be read, and names it',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: { 'o/r': new Error('gh is not logged in.'),
+        'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])], 'o/third': [] },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('At least 1 waiting on your review across all repositories. '
+      + 'Waiting on you: 20, personal tweak, in personal. The pull requests in r could not be '
+      + 'read: gh is not logged in.'), lines.join('\n'));
+  });
+
+test('summary gives no count when the only repository cannot be read',
+  async () => {
+    const { context } = reviewMachine({
+      only: ['Alpha'], byRepo: { 'o/r': new Error('gh is not logged in.') },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('The pull requests in r could not be read: gh is not logged in.'),
+      lines.join('\n'));
+  });
+
+test('summary keeps a pull request waiting while its busy session has not moved its branch, and sets it apart once it has',
+  async () => {
+    const rows = {
+      'o/r': [], 'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+      'o/third': [],
+    };
+    const owned = { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal' } };
+    const reported = { 20: ['Bravo', 'o/personal'] };
+    const views = { 20: viewOf(20, 'personal tweak', 'o/personal') };
+    const waiting = '1 waiting on your review across all repositories. Waiting on you: 20, '
+      + 'personal tweak, in personal.';
+    const run = async options => callTool('summary', {}, reviewMachine({
+      byRepo: rows, busy: ['Bravo'], owned, ...options }).context);
+    // The branch is where the session reported it ready: an unrelated question, no rework.
+    const same = await run({ reported, views, tips: { Bravo: 'a1b2c3d' } });
+    assert.ok(same.includes(waiting) && !same.includes('reworked'), same);
+    // The branch moved past the head it was reported at.
+    const moved = await run({ reported, views, tips: { Bravo: 'e4f5a6b' } });
+    assert.ok(moved.includes('Still being reworked: 20, personal tweak, in personal.'), moved);
+    // Labeled by hand, never reported: compared with the head the pull request has.
+    const labeledSame = await run({ tips: { Bravo: 'a1b2c3d' } });
+    assert.ok(labeledSame.includes(waiting) && !labeledSame.includes('reworked'), labeledSame);
+    const labeledMoved = await run({ tips: { Bravo: 'e4f5a6b' } });
+    assert.ok(labeledMoved.includes('Still being reworked: 20, personal tweak, in personal.'),
+      labeledMoved);
+    // A branch whose tip cannot be read is not taken to be a rework.
+    const unreadable = await run({});
+    assert.ok(unreadable.includes(waiting) && !unreadable.includes('reworked'), unreadable);
+  });
+
+// Runs fn with the environment variables set, and unset where given undefined, then puts them
+// back.
+async function withEnv(vars, fn) {
+  const before = Object.fromEntries(Object.keys(vars).map(name => [name, process.env[name]]));
+  const put = values => {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+  put(vars);
+  try {
+    return await fn();
+  } finally {
+    put(before);
+  }
+}
+
+test('summary reads a github.com alias as github.com and a host gh is set up for through that host, and skips every other host',
+  async () => {
+    const row = (number, title) => pullRow(number, title, 'feat/x', [REVIEW]);
+    const configDir = tempDir();
+    fs.writeFileSync(path.join(configDir, 'hosts.yml'),
+      'ghe.example.com:\n    user: someone\n    git_protocol: ssh\n');
+    await withEnv({ GH_CONFIG_DIR: configDir, GH_HOST: undefined, XDG_CONFIG_HOME: undefined },
+      async () => {
+        const { context, calls } = reviewMachine({
+          hosts: { Bravo: 'ssh.github.com', Charlie: 'ghe.example.com', Extra0: 'dev.azure.com',
+            Extra1: 'github.com-work', Extra2: 'codeberg.org' },
+          extra: 3,
+          byRepo: { 'o/r': [], 'o/personal': [row(20, 'personal tweak')],
+            'ghe.example.com/o/third': [row(31, 'third thing')], 'o/x1': [row(41, 'aliased')] },
+        });
+        const text = await callTool('summary', {}, context);
+        assert.deepEqual(calls.filter(call => call.repo).map(call => call.repo).sort(),
+          ['ghe.example.com/o/third', 'o/personal', 'o/x1']);
+        assert.ok(text.includes('3 waiting on your review across all repositories. Waiting on '
+          + 'you: 20, personal tweak, in personal; 31, third thing, in third; 41, aliased, in '
+          + 'x1.'), text);
+        assert.ok(!text.includes('could not be read'), text);
+      });
+  });
+
+test('summary compares a never-reported pull request with the branch as last fetched, and a reported one with its reported head',
+  async () => {
+    const rows = {
+      'o/r': [], 'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])], 'o/third': [],
+    };
+    const owned = { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal',
+      headRefOid: 'c0ffee1' } };
+    const waiting = '1 waiting on your review across all repositories. Waiting on you: 20, '
+      + 'personal tweak, in personal.';
+    const run = async options => callTool('summary', {}, reviewMachine({
+      byRepo: rows, busy: ['Bravo'], owned, ...options }).context);
+    // GitHub moved the branch (an Update branch); the session's tip is what it last fetched.
+    const fetched = await run({ tips: { Bravo: 'e4f5a6b' }, origins: { Bravo: 'e4f5a6b' } });
+    assert.ok(fetched.includes(waiting) && !fetched.includes('reworked'), fetched);
+    // The session committed past what it last fetched.
+    const ahead = await run({ tips: { Bravo: 'e4f5a6b' }, origins: { Bravo: 'a1b2c3d' } });
+    assert.ok(ahead.includes('Still being reworked: 20, personal tweak, in personal.'), ahead);
+    // Reported at one commit, the pull request now at another, the tip still the reported one.
+    const reported = await run({ reported: { 20: ['Bravo', 'o/personal'] },
+      views: { 20: viewOf(20, 'personal tweak', 'o/personal') }, tips: { Bravo: 'a1b2c3d' } });
+    assert.ok(reported.includes(waiting) && !reported.includes('reworked'), reported);
+  });
+
+test('summary reads gh\'s hosts from XDG_CONFIG_HOME when GH_CONFIG_DIR is unset, and GH_HOST written with a scheme and a slash',
+  async () => {
+    const xdg = tempDir();
+    fs.mkdirSync(path.join(xdg, 'gh'));
+    fs.writeFileSync(path.join(xdg, 'gh', 'hosts.yml'), 'ghe.example.com:\n    user: me\n');
+    await withEnv({ GH_CONFIG_DIR: undefined, XDG_CONFIG_HOME: xdg,
+      GH_HOST: 'https://GHE2.example.com/' }, async () => {
+      const row = (number, title) => pullRow(number, title, 'feat/x', [REVIEW]);
+      const { context, calls } = reviewMachine({
+        hosts: { Bravo: 'ghe2.example.com', Charlie: 'ghe.example.com' },
+        byRepo: { 'o/r': [], 'ghe2.example.com/o/personal': [row(20, 'personal tweak')],
+          'ghe.example.com/o/third': [row(31, 'third thing')] },
+      });
+      await callTool('summary', {}, context);
+      assert.deepEqual(calls.filter(call => call.repo).map(call => call.repo).sort(),
+        ['ghe.example.com/o/third', 'ghe2.example.com/o/personal']);
+    });
+  });
+
+test('summary keeps a pull request waiting when the session\'s tip is behind its baseline',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: { 'o/r': [], 'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [] },
+      busy: ['Bravo'], behind: ['Bravo'], tips: { Bravo: 'e4f5a6b' },
+      owned: { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal' } },
+    });
+    const text = await callTool('summary', {}, context);
+    assert.ok(text.includes('Waiting on you: 20, personal tweak, in personal.')
+      && !text.includes('reworked'), text);
+  });
+
+test('tipAhead says a tip has commits its baseline lacks, with real git',
+  async () => {
+    const repo = tempDir();
+    gitIn(repo, 'init', '-q', '-b', 'main');
+    const commit = message => {
+      gitIn(repo, 'commit', '-q', '--allow-empty', '-m', message);
+      return gitIn(repo, 'rev-parse', 'HEAD');
+    };
+    const first = commit('first');
+    const second = commit('second');
+    gitIn(repo, 'checkout', '-q', '-b', 'side', first);
+    const side = commit('side');
+    // A tip behind its baseline, as when the session pulled a change made on GitHub.
+    assert.equal(await tipAhead(repo, first, second), false);
+    assert.equal(await tipAhead(repo, second, second), false);
+    // A tip with a new commit.
+    assert.equal(await tipAhead(repo, second, first), true);
+    // Both moved on.
+    assert.equal(await tipAhead(repo, side, second), true);
+    // A baseline the checkout does not have is no answer.
+    assert.equal(await tipAhead(repo, second, '1234567890123456789012345678901234567890'), false);
+  });
+
+test('branchTip reads a branch and its remote-tracking ref from packed-refs when no loose ref exists',
+  () => {
+    const root = tempDir();
+    const cwd = fakeCheckout(root, 'w', 'feat/x', 'o/r');
+    assert.equal(branchTip(cwd, 'feat/x'), null);
+    fs.writeFileSync(path.join(root, 'gits', 'o', 'r', 'packed-refs'),
+      '# pack-refs with: peeled\n1111111 refs/heads/feat/y\n2222222 refs/heads/feat/x\n'
+      + '3333333 refs/remotes/origin/feat/x\n');
+    assert.equal(branchTip(cwd, 'feat/x'), '2222222');
+    assert.equal(branchTip(cwd, 'feat/x', 'refs/remotes/origin'), '3333333');
+    assert.equal(branchTip(cwd, 'feat/none'), null);
+  });
+
+test('readyIndex dates a report by when the session made it, not when the bridge announced it',
+  () => {
+    const paths = fakeMachine([]);
+    paths.readyFile = path.join(path.dirname(paths.bridgeDir), 'state', 'ready.json');
+    fs.mkdirSync(path.dirname(paths.readyFile), { recursive: true });
+    fs.writeFileSync(paths.readyFile, JSON.stringify({ announced: {
+      5: { head: 'h5', at: 1_800_000_500_000, key: '9', repo: null, reportedAt: 1_800_000_000_000 },
+      6: { head: 'h6', at: 1_800_000_500_000, key: '9', repo: null },
+    } }));
+    assert.deepEqual(readyIndex(paths).get('9').map(({ number, at, head }) => ({ number, at, head })),
+      [{ number: 5, at: 1_800_000_000_000, head: 'h5' },
+        { number: 6, at: 1_800_000_500_000, head: 'h6' }]);
+  });
+
+test('summary says at least when every read failed but a reported pull request was counted, and when a reported read failed',
+  async () => {
+    const failed = reviewMachine({
+      only: ['Alpha'], byRepo: { 'o/r': new Error('gh is not logged in.') },
+      reported: { 325: ['Alpha', 'o/r'] }, views: { 325: viewOf(325, 'fix thing', 'o/r') },
+    });
+    assert.ok((await callTool('summary', {}, failed.context)).split('\n').includes(
+      'At least 1 waiting on your review. Reported ready by their sessions: 325, fix thing. '
+      + 'The pull requests in r could not be read: gh is not logged in.'));
+    // Pull request 326 cannot be read, so it may have been waiting too.
+    const lost = reviewMachine({
+      only: ['Alpha'], byRepo: { 'o/r': [pullRow(8, 'not yet', 'feat/y', [])] },
+      reported: { 325: ['Alpha', 'o/r'], 326: ['Alpha', 'o/r'] },
+      views: { 325: viewOf(325, 'fix thing', 'o/r') },
+    });
+    assert.ok((await callTool('summary', {}, lost.context)).split('\n').includes(
+      '1 open pull request, at least 1 waiting on your review. Reported ready by their '
+      + 'sessions: 325, fix thing. A reported pull request could not be read.'));
+  });
+
+test('summary never speaks a count of none that may have missed some',
+  async () => {
+    // Pull request 326 cannot be read, and nothing else is waiting.
+    const { context } = reviewMachine({
+      only: ['Alpha'], byRepo: { 'o/r': [] }, reported: { 326: ['Alpha', 'o/r'] },
+    });
+    const text = await callTool('summary', {}, context);
+    assert.ok(text.split('\n').includes('There are no open pull requests. A reported pull '
+      + 'request could not be read.'), text);
+    assert.ok(!/at least 0/i.test(text), text);
+  });
+
+test('summary words an empty own listing consistently when pull requests are reworked',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: { 'o/r': [], 'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [] },
+      busy: ['Bravo'], tips: { Bravo: 'e4f5a6b' },
+      owned: { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal' } },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('0 waiting on your review across all repositories. Still being '
+      + 'reworked: 20, personal tweak, in personal.'), lines.join('\n'));
+  });
+
+test('summary does not name the bridge\'s own pull requests with a repository when it does not know its own',
+  async () => {
+    const { context } = reviewMachine({
+      outside: true, only: ['Alpha'],
+      byRepo: { 'o/r': [{ ...pullRow(7, 'own one', 'feat/z', [REVIEW]),
+        url: 'https://github.com/o/r/pull/7' }] },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request, 1 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, own one.'), lines.join('\n'));
+  });
+
+test('summary keys pull requests by a repository\'s current name, so a renamed one counts once and is caught as reworked',
+  async () => {
+    const url = number => `https://github.com/o/new/pull/${number}`;
+    const { context, calls } = reviewMachine({
+      // Bravo's remote has the old name, and Charlie's clone is of the bridge's own repository
+      // under its old name.
+      remotes: { Bravo: 'o/old', Charlie: 'o/r-old' },
+      renamed: { 'o/old': 'o/new', 'o/r-old': 'o/r' },
+      byRepo: {
+        'o/r': [pullRow(7, 'own one', 'feat/z', [REVIEW])],
+        'o/new': [{ ...pullRow(20, 'personal tweak', 'feat/p', [REVIEW]), url: url(20) },
+          { ...pullRow(21, 'other tweak', 'feat/q', [REVIEW]), url: url(21) }],
+      },
+      busy: ['Bravo'], tips: { Bravo: 'e4f5a6b' },
+      owned: { Bravo: { number: 20, title: 'personal tweak', repo: 'o/new' } },
+      reported: { 20: ['Bravo', 'o/old'] },
+      views: { 20: viewOf(20, 'personal tweak', 'o/new') },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.includes('1 open pull request in r, 2 waiting on your review across all '
+      + 'repositories. Waiting on you: 7, own one; 21, other tweak, in new. Still being '
+      + 'reworked: 20, personal tweak, in new.'), lines.join('\n'));
+    // The renamed repository is read once, by its current name, and the old clone of the
+    // bridge's own repository is not read apart.
+    assert.deepEqual(calls.filter(call => call.repo).map(call => call.repo), ['o/new']);
+  });
+
+test('summary counts the pull request of a busy session that waits on a question as waiting',
+  async () => {
+    const { context } = reviewMachine({
+      byRepo: { 'o/r': [], 'o/personal': [pullRow(20, 'personal tweak', 'feat/p', [REVIEW])],
+        'o/third': [] },
+      busy: ['Bravo'], asking: ['Bravo'],
+      owned: { Bravo: { number: 20, title: 'personal tweak', repo: 'o/personal' } },
+    });
+    const lines = (await callTool('summary', {}, context)).split('\n');
+    assert.ok(lines.some(line => line.endsWith('1 waiting on your review across all '
+      + 'repositories. Waiting on you: 20, personal tweak, in personal.')), lines.join('\n'));
+    assert.ok(!lines.join('\n').includes('reworked'), lines.join('\n'));
+  });
+
+test('summary counts a reported pull request in a single repository, and reads a past-the-limit repository as at least',
+  async () => {
+    const alone = reviewMachine({
+      only: ['Alpha'], byRepo: { 'o/r': [pullRow(8, 'not yet', 'feat/y', [])] },
+      reported: { 325: ['Alpha', 'o/r'] }, views: { 325: viewOf(325, 'fix thing', 'o/r') },
+    });
+    assert.ok((await callTool('summary', {}, alone.context)).split('\n').includes(
+      '1 open pull request, 1 waiting on your review. Reported ready by their sessions: 325, '
+      + 'fix thing.'));
+    const many = Array.from({ length: 600 }, (_, i) => pullRow(100 + i, `p${i}`, `feat/${i}`,
+      [REVIEW]));
+    const full = reviewMachine({ only: ['Alpha', 'Bravo'], byRepo: { 'o/r': [], 'o/personal': many } });
+    const lines = (await callTool('summary', {}, full.context)).split('\n');
+    assert.ok(lines.some(line => line.startsWith('At least 500 waiting on your review across '
+      + 'all repositories.')), lines.join('\n'));
+  });
+
+test('summary says how many repositories past the limit it did not read',
+  async () => {
+    for (const [extra, said] of [[7, '1 more repository not read.'],
+      [8, '2 more repositories not read.']]) {
+      const { context } = reviewMachine({ extra, byRepo: {} });
+      const text = await callTool('summary', {}, context);
+      assert.ok(text.includes(` ${said}`), text);
+    }
   });
 
 test('list_sessions renames a session from what it knows, without waiting, and not again once the title reads that',
@@ -1317,7 +1850,7 @@ test('list_sessions leaves a title alone that reads the work already, whatever s
     const inbox = await sessionInbox(socket);
     try {
       assert.match(await callTool('list_sessions', {}, context),
-        /^MR phase fix - PR 325 ready \(waiting on you\), idle/);
+        /^MR phase fix - PR 325 ready, idle/);
       await settled();
       assert.deepEqual(inbox.lines, []);
     } finally {
@@ -1523,7 +2056,7 @@ test('a pull request a session in another repository reported ready is read ther
       + 'for your review.']);
     const kept = JSON.parse(fs.readFileSync(paths.readyFile, 'utf8')).announced;
     assert.deepEqual(kept['o/personal#20'], { head: 'h1', at: 1_800_000_000_000, key: '92',
-      repo: 'o/personal' });
+      repo: 'o/personal', reportedAt: 1_800_000_000_000 });
     const context = { ...runsContext(gh), paths,
       config: { roots: [path.join(root, 'repo')], startDir: a } };
     const text = await callTool('summary', {}, context);
@@ -2153,7 +2686,9 @@ test('sharedFiles reads a stacked branch against its base and skips a merged bra
 test('checkoutOf reads the branch and the origin repository of a worktree', () => {
   const root = tempDir();
   assert.deepEqual(checkoutOf(fakeCheckout(root, 'w', 'feat/x', 'Me/Repo')),
-    { branch: 'feat/x', repo: 'me/repo', toplevel: path.join(root, 'gits', 'Me') });
+    { branch: 'feat/x', repo: 'me/repo', host: 'github.com',
+      toplevel: path.join(root, 'gits', 'Me'),
+      gitDir: path.join(root, 'gits', 'Me', 'Repo', 'worktrees', 'w') });
   assert.equal(checkoutOf(root), null);
   assert.equal(repoOf('https://github.com/o/r.git'), 'o/r');
   assert.equal(repoOf('https://github.com/o/r/pull/5'), 'o/r');
@@ -2193,6 +2728,39 @@ test('needs_attention names the session waiting on a prompt and not the one that
     fs.rmSync(marker);
     assert.match(await call('next_update'), /Nothing new yet; Prompted is still working/);
   });
+
+test('list_sessions reports the live state, not a stale waiting suffix', async () => {
+  const paths = fakeMachine([
+    { pid: 44, cwd: '/repo/a', name: 'Merge (waiting on you)' },
+  ]);
+  const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
+  const idle = await callTool('list_sessions', {}, context);
+  assert.match(idle, /^Merge, idle/m);
+  assert.doesNotMatch(idle, /waiting on you/);
+  const marker = path.join(paths.bridgeDir, 'attention', '44.json');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ at: Date.now() / 1000 - 5, reason: 'a question' }));
+  const waiting = await callTool('list_sessions', {}, context);
+  assert.match(waiting, /^Merge, idle.*, waiting on a question/m);
+});
+
+test('list_sessions keeps a deliberate status only while idle and not waiting', async () => {
+  const entry = { pid: 45, cwd: '/repo/a', name: 'Ship (stuck)' };
+  const paths = fakeMachine([entry]);
+  const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
+  assert.match(await callTool('list_sessions', {}, context), /^Ship, idle.*, marked stuck/m);
+  startFake(paths, { ...entry, status: 'busy' });
+  const busy = await callTool('list_sessions', {}, context);
+  assert.match(busy, /^Ship, busy/m);
+  assert.doesNotMatch(busy, /marked/);
+  startFake(paths, entry);
+  const marker = path.join(paths.bridgeDir, 'attention', '45.json');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ at: Date.now() / 1000 - 5, reason: 'a question' }));
+  const waiting = await callTool('list_sessions', {}, context);
+  assert.match(waiting, /waiting on a question/);
+  assert.doesNotMatch(waiting, /marked/);
+});
 
 test('catch_up reads a followed session\'s latest feed entries and posts nothing', async () => {
   const paths = fakeMachine([{ pid: 51, cwd: '/repo/wt', name: 'Voice Bridge', status: 'busy' }]);
@@ -3958,6 +4526,49 @@ test('send reaches a session by its nickname', async () => {
   }
 });
 
+test('rename_session clears a status suffix by naming the base title', async () => {
+  const { paths, fix, socket, context } = renameMachine();
+  startFake(paths, { ...fix, name: 'MR phase fix (idle)' });
+  const inbox = await sessionInbox(socket, line => {
+    if (line.type === 'control') startFake(paths, { ...fix, name: line.name });
+  });
+  try {
+    const reply = await callTool('rename_session',
+      { session: 'session two', name: 'MR phase fix' }, context);
+    assert.doesNotMatch(reply, /already called that/);
+    assert.deepEqual(inbox.lines,
+      [{ type: 'control', action: 'rename', name: 'MR phase fix', session_id: 'b2' }]);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test('rename_session with a work name keeps the number a status-marked duplicate is listed by',
+  async () => {
+    const root = tempDir();
+    const paths = {
+      ...fakeMachine([
+        { pid: 10, cwd: '/repo/a', name: 'Merge', startedAt: 1, sessionId: 'a1' },
+        { pid: 11, cwd: '/repo/b', name: 'Merge (idle)', startedAt: 2, sessionId: 'b2' },
+      ], root),
+      numbersFile: numbersAt(root),
+    };
+    const socket = path.join(root, '11.sock');
+    const inbox = await sessionInbox(socket, line => {
+      if (line.type === 'control') {
+        startFake(paths, { pid: 11, cwd: '/repo/b', name: line.name, startedAt: 2, sessionId: 'b2' });
+      }
+    });
+    try {
+      await callTool('rename_session', { session: 'Merge 2', work: 'read window' },
+        { paths, config: { roots: ['/repo'] } });
+      assert.deepEqual(inbox.lines,
+        [{ type: 'control', action: 'rename', name: 'Merge 2 - read window', session_id: 'b2' }]);
+    } finally {
+      await inbox.close();
+    }
+  });
+
 test('rename_session refuses a name that is another session\'s nickname', async () => {
   const { socket, context } = renameMachine();
   const inbox = await sessionInbox(socket);
@@ -5721,7 +6332,8 @@ test('pull_request_merged tells the owner once, or says no running session owns 
       'Told Owner that pull request 5222 merged, so it runs its post-merge steps.');
     assert.equal(m.posted.length, 1);
     assert.equal(await merged(5222), 'Owner already heard that pull request 5222 merged.');
-    assert.equal(await merged(5223), 'No running session owns pull request 5223.');
+    assert.equal(await merged(5223), 'No session is on pull request 5223\'s branch now, but Owner '
+      + 'works in o/r. Call again with session set to Owner to tell it.');
     assert.equal(await merged(5224), 'Pull request 5224 is not merged; it reads open.');
     assert.equal(m.posted.length, 1);
     // The scan does not tell a merge the user already reported.
@@ -6497,7 +7109,7 @@ test('list_pull_requests puts the ones waiting on review first and names each br
       + '5183: docs: acronyms, branch docs/acronyms');
     assert.equal(calls[0].cwd, '/repo');
     assert.deepEqual(calls[0].args.slice(0, 4), ['pr', 'list', '--state', 'open']);
-    assert.equal(calls[0].args.at(-1), 'number,title,headRefName,labels');
+    assert.equal(calls[0].args.at(-1), 'number,title,headRefName,labels,url');
   });
 
 test('list_pull_requests reads five at a time and says when none are open', async () => {
@@ -6605,6 +7217,17 @@ test('summary reads who waits, who works, open and merged pull requests, and fai
     assert.equal(search[search.indexOf('--search') + 1],
       `merged:>=${startOfYesterday(RUNS_NOW)}`);
   });
+
+test('summary names a session without its stale status suffix', async () => {
+  const paths = fakeMachine([
+    { pid: 46, cwd: '/repo/a', name: 'Merge (waiting on you)', status: 'busy' },
+  ]);
+  const { gh } = fakeGh({});
+  const context = { ...runsContext(gh), paths, config: { roots: ['/repo'], startDir: '/repo' } };
+  const summary = await callTool('summary', {}, context);
+  assert.match(summary, /^Still working: Merge\.$/m);
+  assert.doesNotMatch(summary, /\(waiting on you\)/);
+});
 
 test('summary says when nothing waits, works, or merged, and reads on past a failed source',
   async () => {
@@ -7394,7 +8017,8 @@ test('the full code flow issues a token that opens /mcp', async () => {
   assert.match(instructions, /pushed message over the event stream/);
   assert.match(instructions, /as written, not paraphrased or summarized, before any other bridge/);
   assert.match(instructions, /one session at a time; grouping is an order, not a summary/);
-  assert.match(instructions, /closing paragraph holding the cursor.*never read aloud\.$/);
+  assert.match(instructions, /closing paragraph holding the cursor.*never read aloud\./);
+  assert.match(instructions, /said only from read_pull_request or read_issue, called at that moment/);
   const nextUpdate = JSON.parse(list.body).result.tools.find(t => t.name === 'next_update');
   assert.match(nextUpdate.description, /Say every reply the answer carries to the user as written, /);
   assert.match(nextUpdate.description, /grouping is an order, not a summary/);
@@ -11366,3 +11990,438 @@ test('allow_blocked_call keeps the settings file mode, and a denial is not told 
       now: Date.now() + 48 * 60 * 60 * 1000 });
     assert.deepEqual(told, []);
   });
+
+// --- Merges in the repositories the sessions work in ----------------------------------------
+
+// mergeMachine with a second repository, m/Other, that a session Other works in on feat/other,
+// the bridge's own checkout o/r, and a gh that answers per repository from lists[repo], or
+// fails for a repository in broken.
+function twoRepoMachine() {
+  const m = mergeMachine();
+  const other = fakeCheckout(m.root, 'other', 'feat/other', 'm/Other');
+  startFake(m.paths, { pid: 72, cwd: other, name: 'Other', startedAt: 1 });
+  const lists = { 'o/r': { open: [], merged: [] }, 'm/other': { open: [], merged: [] } };
+  const broken = new Set();
+  const views = {};
+  const gh = async ({ repo, cwd, args }) => {
+    const key = (repo ?? (cwd?.includes('/gits/m') ? 'm/other' : 'o/r')).toLowerCase();
+    if (broken.has(key)) throw new Error(`no access to ${key}`);
+    if (args[1] === 'view') return JSON.stringify(views[`${key}#${args[2]}`]);
+    return JSON.stringify(args.includes('merged') ? lists[key].merged : lists[key].open);
+  };
+  m.tracker.cwd = path.join(m.root, 'repo', 'owner');
+  m.tracker.gh = gh;
+  m.context.gh = gh;
+  const scan = (more = {}) => m.scan({ paths: m.paths, ...more });
+  return { ...m, other, lists, broken, views, scan };
+}
+const otherPull = (number, branch, at) => mergedPull(number, branch, at, 'm/Other');
+const otherView = (number, branch) => ({ number, title: `Pull ${number}`, state: 'MERGED',
+  headRefName: branch, headRefOid: 'abc', url: pullUrl(number, 'm/Other') });
+// Writes the HEAD reflog of a checkout from [seconds, from, to] moves.
+function writeReflog(cwd, moves) {
+  const gitDir = fs.readFileSync(path.join(cwd, '.git'), 'utf8').match(/^gitdir: (.+)$/m)[1];
+  fs.mkdirSync(path.join(gitDir, 'logs'), { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'logs', 'HEAD'), moves.map(([at, from, to]) =>
+    `${'0'.repeat(40)} ${'1'.repeat(40)} U <u@x> ${at} +0000\t`
+    + `checkout: moving from ${from} to ${to}`).join('\n') + '\n');
+}
+
+test('the merge scan tells the session in another repository, once, naming the repository',
+  async () => {
+    const m = twoRepoMachine();
+    // A merge from before the repository was watched is not news.
+    m.lists['m/other'].merged = [otherPull(90, 'feat/other', m.tracker.now() - 1000)];
+    assert.deepEqual(await m.scan(), []);
+    m.tick(60 * 1000);
+    assert.deepEqual(await m.scan(), []);
+    // The merge happened between scans, after the repository was first watched.
+    m.lists['m/other'].merged.push(otherPull(99, 'feat/other', m.tracker.now()));
+    m.tick(30 * 1000);
+    assert.deepEqual(await m.scan(), [{ number: 99, name: 'Other' }]);
+    assert.ok(readJson(m.paths.mergesFile).repos['m/other'].since < m.tracker.now() - 80 * 1000);
+    assert.match(m.posted.at(-1).text,
+      /^The voice bridge saw pull request 99 in m\/other, Pull 99/);
+    assert.deepEqual(await m.scan(), []);
+    assert.equal(m.posted.length, 1);
+    assert.equal(readJson(m.paths.mergesFile).told['m/other#99'].to, 'Other');
+  });
+
+test('a pull request number in two repositories is told to each repository\'s own session',
+  async () => {
+    const m = twoRepoMachine();
+    await m.scan();
+    m.tick(60 * 1000);
+    m.lists['o/r'].merged = [mergedPull(7, 'feat/owner', m.tracker.now())];
+    m.lists['m/other'].merged = [otherPull(7, 'feat/other', m.tracker.now())];
+    assert.deepEqual((await m.scan()).map(told => told.name).sort(), ['Other', 'Owner']);
+  });
+
+test('an owner recorded in another repository is found after its checkout moves on', async () => {
+  const m = twoRepoMachine();
+  m.lists['m/other'].open = [openPull(99, 'feat/other', 'm/Other')];
+  await m.scan();
+  m.tick(60 * 1000);
+  fs.writeFileSync(path.join(path.dirname(fs.readFileSync(path.join(m.other, '.git'), 'utf8')
+    .match(/^gitdir: (.+)$/m)[1]), 'other', 'HEAD'), 'ref: refs/heads/feat/next\n');
+  m.lists['m/other'].open = [];
+  m.lists['m/other'].merged = [otherPull(99, 'feat/other', m.tracker.now())];
+  assert.deepEqual(await m.scan(), [{ number: 99, name: 'Other' }]);
+});
+
+test('one repository gh cannot read is skipped and the others are still told', async () => {
+  const m = twoRepoMachine();
+  await m.scan();
+  m.tick(60 * 1000);
+  m.broken.add('m/other');
+  m.lists['o/r'].merged = [mergedPull(5222, 'feat/owner', m.tracker.now())];
+  const logged = [];
+  assert.deepEqual(await m.scan({ log: line => logged.push(line) }),
+    [{ number: 5222, name: 'Owner' }]);
+  assert.deepEqual(logged, ['merge scan of m/other failed: no access to m/other']);
+});
+
+test('pull_request_merged finds the session whose checkout left the branch, by its reflog',
+  async () => {
+    const m = twoRepoMachine();
+    m.views['m/other#99'] = otherView(99, 'feat/moved');
+    fs.writeFileSync(path.join(path.dirname(fs.readFileSync(path.join(m.other, '.git'), 'utf8')
+      .match(/^gitdir: (.+)$/m)[1]), 'other', 'HEAD'), 'ref: refs/heads/feat/next\n');
+    const merged = args => callTool('pull_request_merged', args, m.context);
+    // Before the session began, the move says nothing about it.
+    writeReflog(m.other, [[0, 'feat/moved', 'feat/next']]);
+    assert.match(await merged({ number: 99, repo: 'm/Other' }),
+      /^No session is on pull request 99's/);
+    writeReflog(m.other, [[2000, 'feat/moved', 'feat/next']]);
+    assert.equal(await merged({ number: 99, repo: 'm/Other' }),
+      'Told Other that pull request 99 merged, so it runs its post-merge steps.');
+    assert.match(m.posted.at(-1).text, /pull request 99 in m\/other/);
+    assert.match(await merged({ number: 99, repo: 'm/Other' }), /Other already heard/);
+  });
+
+test('pull_request_merged finds the session that reported the pull request ready', async () => {
+  const m = twoRepoMachine();
+  m.views['m/other#99'] = otherView(99, 'feat/moved');
+  fs.mkdirSync(path.join(m.paths.bridgeDir, 'ready'), { recursive: true });
+  fs.writeFileSync(path.join(m.paths.bridgeDir, 'ready', '72-99.json'),
+    JSON.stringify({ at: 2000 }));
+  assert.equal(await callTool('pull_request_merged', { number: 99, repo: 'm/Other' }, m.context),
+    'Told Other that pull request 99 merged, so it runs its post-merge steps.');
+});
+
+test('with no owner found, pull_request_merged names the sessions in the repository and '
+  + 'tells the one picked', async () => {
+  const m = twoRepoMachine();
+  const second = fakeCheckout(m.root, 'other2', 'feat/else', 'm/Other');
+  startFake(m.paths, { pid: 73, cwd: second, name: 'Other 2', startedAt: 1 });
+  m.views['m/other#99'] = otherView(99, 'feat/moved');
+  const merged = args => callTool('pull_request_merged', args, m.context);
+  const offer = await merged({ number: 99, repo: 'm/Other' });
+  assert.equal(offer, 'No session is on pull request 99\'s branch now, but Other and Other 2 '
+    + 'work in m/other. Call again with session set to the one to tell.');
+  // Nothing was recorded, so the offer stands and a scan that finds the owner is not blocked.
+  assert.equal(readJson(m.paths.mergesFile, { told: {} }).told['m/other#99'], undefined);
+  assert.match(await merged({ number: 99, repo: 'm/Other', session: 'Other 2' }),
+    /^Told Other 2 that pull request 99 merged/);
+  assert.match(await merged({ number: 99, repo: 'm/Other', session: 'Other' }),
+    /^Told Other that pull request 99 merged.* Other 2 had heard it already\.$/);
+  assert.match(await merged({ number: 99, repo: 'm/Other', session: 'Owner' }),
+    /^Owner does not work in m\/other\. Other and Other 2 do\.$/);
+});
+
+test('a merge no session owns is looked into once by the scan, and the tool can still tell it',
+  async () => {
+    const m = twoRepoMachine();
+    await m.scan();
+    m.tick(60 * 1000);
+    m.lists['m/other'].merged = [otherPull(99, 'feat/gone', m.tracker.now())];
+    m.views['m/other#99'] = otherView(99, 'feat/gone');
+    assert.deepEqual(await m.scan(), []);
+    assert.equal(readJson(m.paths.mergesFile).told['m/other#99'].to, null);
+    assert.match(await callTool('pull_request_merged', { number: 99, repo: 'm/Other' }, m.context),
+      /^No session is on pull request 99's branch now, but Other works in m\/other\./);
+  });
+
+test('pull_request_merged says when the session named is not running', async () => {
+  const m = twoRepoMachine();
+  m.views['m/other#99'] = otherView(99, 'feat/gone');
+  await assert.rejects(callTool('pull_request_merged',
+    { number: 99, repo: 'm/Other', session: 'Nobody' }, m.context), /No session matches Nobody/);
+  // Picking the session that already heard sends nothing more.
+  const posted = m.posted.length;
+  const pickOther = () => callTool('pull_request_merged',
+    { number: 99, repo: 'm/Other', session: 'Other' }, m.context);
+  assert.match(await pickOther(), /^Told Other that pull request 99 merged/);
+  assert.match(await pickOther(), /^Other already heard/);
+  assert.equal(m.posted.length, posted + 1);
+});
+
+test('two sessions that both left the branch tie, so the reflog names neither', async () => {
+  const m = twoRepoMachine();
+  const second = fakeCheckout(m.root, 'other2', 'feat/else', 'm/Other');
+  startFake(m.paths, { pid: 73, cwd: second, name: 'Other 2', startedAt: 1 });
+  writeReflog(m.other, [[2000, 'feat/moved', 'feat/next']]);
+  writeReflog(second, [[2000, 'feat/moved', 'feat/next']]);
+  m.views['m/other#99'] = otherView(99, 'feat/moved');
+  assert.match(await callTool('pull_request_merged', { number: 99, repo: 'm/Other' }, m.context),
+    /^No session is on pull request 99's branch now, but Other and Other 2 work in m\/other/);
+});
+
+test('a repository gh could not read keeps its recorded owners for the next scan', async () => {
+  const m = twoRepoMachine();
+  m.lists['m/other'].open = [openPull(99, 'feat/other', 'm/Other')];
+  await m.scan();
+  assert.ok(readJson(m.paths.mergesFile).owners['m/other#99']);
+  m.tick(60 * 1000);
+  m.broken.add('m/other');
+  await m.scan({ log: () => {} });
+  assert.ok(readJson(m.paths.mergesFile).owners['m/other#99']);
+});
+
+test('a repository unread for a scan keeps its watch record, and one unread for a week loses it',
+  async () => {
+    const m = twoRepoMachine();
+    m.lists['m/other'].open = [openPull(99, 'feat/other', 'm/Other')];
+    await m.scan();
+    const first = readJson(m.paths.mergesFile).repos['m/other'].since;
+    m.tick(8 * 24 * 60 * 60 * 1000);
+    await m.scan();
+    m.tick(60 * 1000);
+    m.broken.add('m/other');
+    await m.scan({ log: () => {} });
+    const kept = readJson(m.paths.mergesFile);
+    assert.equal(kept.repos['m/other'].since, first);
+    assert.ok(kept.owners['m/other#99']);
+    m.tick(8 * 24 * 60 * 60 * 1000);
+    await m.scan({ log: () => {} });
+    const gone = readJson(m.paths.mergesFile);
+    assert.equal(gone.repos['m/other'], undefined);
+    assert.equal(gone.owners['m/other#99'], undefined);
+  });
+
+test('a merge in another repository whose session ended is read out with the repository',
+  async () => {
+    const m = twoRepoMachine();
+    const second = fakeCheckout(m.root, 'other2', 'feat/else', 'm/Other');
+    startFake(m.paths, { pid: 73, cwd: second, name: 'Other 2', startedAt: 1 });
+    m.lists['m/other'].open = [openPull(99, 'feat/other', 'm/Other')];
+    await m.scan();
+    endFake(m.paths, 72);
+    m.tick(60 * 1000);
+    m.lists['m/other'].open = [];
+    m.lists['m/other'].merged = [otherPull(99, 'feat/other', m.tracker.now())];
+    await m.scan();
+    const [notice] = waitingNotices(m.paths.noticesDir, ['merge']);
+    assert.match(notice.file, /merge-m_2fother_2399/);
+    assert.equal(notice.text, 'Pull request m/other 99 merged, but Other, the session that '
+      + 'worked it, is no longer running to do its post-merge steps.');
+  });
+
+test('notice names keep an underscore apart from the escape for another character', () => {
+  assert.equal(mergeNotice(5222), 'merge-5222');
+  assert.equal(mergeNotice('o/my_repo#7'), 'merge-o_2fmy_5frepo_237');
+  assert.notEqual(mergeNotice('o/a.b#1'), mergeNotice('o/a_2eb#1'));
+});
+
+// --- checking GitHub before work goes out -------------------------------------------------
+
+// A gh that answers the item-state read by number from items, { number: what GitHub returns,
+// or 'hang' for a read that never answers }, and nothing for the session's own work reads. It
+// records each call.
+const itemGh = (items, calls = []) => async ({ args }) => {
+  calls.push(args);
+  if (args[0] !== 'api') return '[]';
+  const number = Number(args.find(arg => arg.startsWith('n=')).slice(2));
+  if (!(number in items)) throw new Error('Could not resolve to an issue or pull request');
+  if (items[number] === 'hang') return new Promise(() => {});
+  return JSON.stringify({ data: { repository: { issueOrPullRequest: items[number] } } });
+};
+const doneMerge = { __typename: 'PullRequest', state: 'MERGED', mergedAt: '2026-10-30T12:00:00Z' };
+const doneIssue = { __typename: 'Issue', state: 'CLOSED', stateReason: 'COMPLETED' };
+const liveIssue = { __typename: 'Issue', state: 'OPEN', closedByPullRequestsReferences: { nodes: [] } };
+const itemReads = calls => calls.filter(args => args[0] === 'api');
+
+// One session, Runner, in a checkout of o/r, idle unless status says otherwise.
+function checkContext(gh, { status = 'idle', ...extra } = {}) {
+  const root = tempDir();
+  const cwd = fakeCheckout(root, 'a', 'feat/issue-350-thing');
+  const paths = fakeMachine([{ pid: 90, cwd, name: 'Runner', status, sessionId: 's90',
+    statusUpdatedAt: BEGAN }], root);
+  const posted = [];
+  const context = { paths, config: { roots: [path.join(root, 'repo')] }, pages: new Map(), gh,
+    git: fakeGit({}).git, sendCheckMs: 300, now: () => BEGAN + 60 * 1000,
+    post: async (socket, message) => { posted.push(message); }, ...extra };
+  return { posted, context };
+}
+
+test('requestItems finds the issues and pull requests a request names', () => {
+  assert.deepEqual(requestItems('look at #347 and PR 346'), [347, 346]);
+  assert.deepEqual(requestItems('Pull request 347, issue-312'), [347, 312]);
+  assert.deepEqual(requestItems('PRs 346 and 347 plus issues 312, 313'), [346, 347, 312, 313]);
+  assert.deepEqual(requestItems('PR 347 and issue 347'), [347]);
+  assert.deepEqual(requestItems('the sprint 312 port 8080 abc#347 pr 12'), []);
+  assert.equal(requestItems('issues 101, 102, 103, 104, 105 and 106').length, 4);
+  // A quantity after a number is not another item.
+  assert.deepEqual(requestItems('review PR 347 1000 lines'), [347]);
+  assert.deepEqual(requestItems('PR 347 or 348, then issue 312 & 313'), [347, 348, 312, 313]);
+});
+
+test('send names finished work instead of sending it, with what the session has open', async () => {
+  const calls = [];
+  const { posted, context } = checkContext(itemGh({ 347: doneMerge, 312: doneIssue }, calls));
+  const said = await callTool('send',
+    { session: 'Runner', text: 'finish PR 347 and issue 312' }, context);
+  assert.match(said, /^Not sent to Runner: pull request 347 merged on October 30, 2026 and issue 312 is closed\./);
+  assert.match(said, /Runner owns no open work\./);
+  assert.match(said, /call send again with the same text and anyway true/);
+  assert.equal(posted.length, 0);
+});
+
+test('send with anyway sends the request without asking GitHub', async () => {
+  const calls = [];
+  const { posted, context } = checkContext(itemGh({ 347: doneMerge }, calls));
+  const said = await callTool('send',
+    { session: 'Runner', text: 'write release notes for PR 347', anyway: true }, context);
+  assert.match(said, /^Sent to Runner\./);
+  assert.equal(posted.length, 1);
+  assert.equal(itemReads(calls).length, 0);
+});
+
+test('send goes out when the work it names is open', async () => {
+  const { posted, context } = checkContext(itemGh({ 350: liveIssue }));
+  const said = await callTool('send', { session: 'Runner', text: 'take issue 350' }, context);
+  assert.match(said, /^Sent to Runner\. Call read_reply/);
+  assert.doesNotMatch(said, /GitHub could not say/);
+  assert.equal(posted.length, 1);
+});
+
+test('send goes out for an open issue, even one a merged pull request once closed', async () => {
+  const { posted, context } = checkContext(itemGh({ 312: liveIssue }));
+  const said = await callTool('send', { session: 'Runner', text: 'redo issue 312' }, context);
+  assert.match(said, /^Sent to Runner\./);
+  assert.equal(posted.length, 1);
+});
+
+test('send goes out with a note when it names done work beside open work', async () => {
+  const { posted, context } = checkContext(itemGh({ 347: doneMerge, 350: liveIssue }));
+  const said = await callTool('send',
+    { session: 'Runner', text: 'PR 347 broke login, fix it under issue 350' }, context);
+  assert.match(said, /^Sent to Runner\./);
+  assert.match(said, /It names work that is done, pull request 347 merged on October 30, 2026; /);
+  assert.equal(posted.length, 1);
+});
+
+test('send says an issue closed as not planned', async () => {
+  const { context } = checkContext(itemGh({ 312: { ...doneIssue, stateReason: 'NOT_PLANNED' } }));
+  assert.match(await callTool('send', { session: 'Runner', text: 'do issue 312' }, context),
+    /issue 312 is closed as not planned/);
+});
+
+test('send holds a queued request for a busy session when the work is done', async () => {
+  const { posted, context } = checkContext(itemGh({ 347: doneMerge }), { status: 'busy' });
+  const said = await callTool('send',
+    { session: 'Runner', text: 'next, fix PR 347', queue: true }, context);
+  assert.match(said, /^Not sent to Runner: pull request 347 merged/);
+  assert.equal(posted.length, 0);
+  assert.equal(await callTool('queued_requests', { session: 'Runner' }, context),
+    'Nothing is waiting to go to Runner.');
+});
+
+test('send goes out and says so when GitHub cannot be asked, or is too slow', async () => {
+  for (const items of [{}, { 347: 'hang' }]) {
+    const { posted, context } = checkContext(itemGh(items), { sendCheckMs: 30 });
+    const started = Date.now();
+    const said = await callTool('send', { session: 'Runner', text: 'look at PR 347' }, context);
+    assert.match(said, /^Sent to Runner\./);
+    assert.match(said, /GitHub could not say whether 347 is still open, so the request went without that check\./);
+    assert.equal(posted.length, 1);
+    assert.ok(Date.now() - started < 2000);
+  }
+});
+
+test('send checks the numbers it can and notes the one GitHub does not know', async () => {
+  const { posted, context } = checkContext(itemGh({ 350: liveIssue }));
+  const said = await callTool('send', { session: 'Runner', text: 'issues 350 and 999' }, context);
+  assert.match(said, /^Sent to Runner\./);
+  assert.match(said, /could not say whether 999 is still open/);
+  assert.doesNotMatch(said, /350 is still open/);
+  assert.equal(posted.length, 1);
+});
+
+test('send with amend, or from a folder that is no checkout, asks GitHub nothing', async () => {
+  const calls = [];
+  const amended = checkContext(itemGh({ 347: doneMerge }, calls));
+  await callTool('send', { session: 'Runner', text: 'also PR 347', amend: true },
+    amended.context).catch(() => {});
+  const { posted, context } = stopContext({ status: 'idle' });
+  context.gh = itemGh({ 347: doneMerge }, calls);
+  assert.match(await callTool('send', { session: 'Runner', text: 'look at PR 347' }, context),
+    /^Sent to Runner\./);
+  assert.equal(posted.length, 1);
+  assert.equal(calls.length, 0);
+});
+
+test('checkWork reads each number in the session\'s repository and nothing for plain text', async () => {
+  const calls = [];
+  const { context } = checkContext(itemGh({ 347: doneMerge, 350: liveIssue }, calls));
+  const session = findSession(listSessions({ ...context.paths, roots: context.config.roots }),
+    'Runner');
+  const tracker = { cwd: '/', gh: context.gh, pages: context.pages, now: context.now };
+  assert.equal(await checkWork('no numbers here', session, tracker), null);
+  const check = await checkWork('PR 347 and issue 350', session, tracker);
+  assert.deepEqual(check,
+    { done: ['pull request 347 merged on October 30, 2026'], open: 1, unknown: [] });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(args => args.includes('owner={owner}') && args.includes('name={repo}')));
+});
+
+test('rename_session refuses a work name for finished work and points to open work', async () => {
+  const { context } = checkContext(itemGh({ 347: doneMerge }));
+  const said = await callTool('rename_session', { session: 'Runner', work: 'PR 347' }, context);
+  assert.match(said, /^Not renamed: pull request 347 merged on October 30, 2026\. Runner owns no open work\./);
+  assert.match(said, /rename_all_sessions/);
+  assert.match(said, /rename_session again with anyway true/);
+});
+
+test('send and rename_session take anyway, and read_pull_request says it checks state', () => {
+  const tool = name => TOOLS.find(t => t.name === name);
+  assert.equal(tool('send').inputSchema.properties.anyway.type, 'boolean');
+  assert.deepEqual(tool('send').inputSchema.required, ['session', 'text']);
+  assert.equal(tool('rename_session').inputSchema.properties.anyway.type, 'boolean');
+  assert.match(tool('read_pull_request').description, /current state on GitHub/);
+  assert.match(tool('read_pull_request').description, /waiting on review/);
+});
+
+test('a slow number does not discard the answer for another, and done work alone is held', async () => {
+  const slow = checkContext(itemGh({ 347: doneMerge, 999: 'hang' }), { sendCheckMs: 40 });
+  const session = findSession(
+    listSessions({ ...slow.context.paths, roots: slow.context.config.roots }), 'Runner');
+  const tracker = { cwd: '/', gh: slow.context.gh, pages: slow.context.pages, now: slow.context.now };
+  assert.deepEqual(await checkWork('PR 347 and issue 999', session, tracker, { waitMs: 40 }),
+    { done: ['pull request 347 merged on October 30, 2026'], open: 0, unknown: [999] });
+  const held = checkContext(itemGh({ 347: doneMerge }));
+  assert.match(await callTool('send', { session: 'Runner', text: 'finish PR 347' }, held.context),
+    /^Not sent to Runner: pull request 347 merged/);
+  assert.equal(held.posted.length, 0);
+});
+
+test('a refusal says nothing about open work for a session whose work is unknown', async () => {
+  const gh = async ({ args }) => {
+    if (args[0] === 'pr') throw new Error('rate limited');
+    return itemGh({ 347: doneMerge })({ args });
+  };
+  const { context } = checkContext(gh);
+  const said = await callTool('send', { session: 'Runner', text: 'finish PR 347' }, context);
+  assert.match(said, /^Not sent to Runner: pull request 347 merged on October 30, 2026\. Tell the user/);
+  assert.doesNotMatch(said, /owns no open work/);
+});
+
+test('send goes out when one number is done and another could not be checked', async () => {
+  const { posted, context } = checkContext(itemGh({ 346: doneMerge }), { sendCheckMs: 40 });
+  const said = await callTool('send',
+    { session: 'Runner', text: 'check PR 346 and PR 351' }, context);
+  assert.match(said, /^Sent to Runner\./);
+  assert.match(said, /GitHub could not say whether 351 is still open/);
+  assert.match(said, /It names work that is done, pull request 346 merged on October 30, 2026; /);
+  assert.equal(posted.length, 1);
+});
