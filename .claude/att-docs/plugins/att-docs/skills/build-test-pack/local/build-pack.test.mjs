@@ -18,7 +18,8 @@ import { loadConfig, RULE_SHAPE } from './config.mjs';
 import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
 import { createPauser, pausedPath } from './pause.mjs';
 import { ModelError, localEndpoint, modelClient } from './model.mjs';
-import { batches, expectedProblems, resultsAgree, setsOf, splitText } from './phases.mjs';
+import { almDescriptions, batches, documentInputs, dropUnfoundedAssumptions, expectedProblems, phase5,
+  resultsAgree, setsOf, splitText } from './phases.mjs';
 import { runJob } from './run.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { statusFields } from './status.mjs';
@@ -2832,4 +2833,321 @@ test('a senior review answer with a repeated or unsupported field is asked for a
   assert.equal(asks.length, 2);
   assert.match(asks[1].user, /Senior Tester Review missed: it cites BR-LIB\.UC01-099/);
   assert.equal(JSON.parse(read(result.packPath)).seniorReview.missed, 'missed value');
+});
+
+// ---------------------------------------------------------------------------
+// Intake records only what is missing; the change description is the ALM fields.
+
+const RECORD = [
+  '# SIR 501', '', 'Status: Open', 'Short Description: Renewal counts from the wrong day', '',
+  '## Long Description', '', 'A card renewed early loses days.', 'Both renewal paths take the fix.', '',
+  '## Comments', '', 'Reviewer note that is not a description.', ''].join('\n');
+
+test('the change description holds the ALM short and long descriptions only', () => {
+  const text = almDescriptions(RECORD);
+  assert.equal(text, 'Renewal counts from the wrong day\n\nA card renewed early loses days.\n'
+    + 'Both renewal paths take the fix.');
+  assert.ok(!text.includes('Reviewer note'));
+  assert.ok(!text.includes('Status'));
+});
+
+test('a record that labels neither description is used whole', () => {
+  assert.equal(almDescriptions('Plain record text.\n'), 'Plain record text.');
+});
+
+test('the pack takes the ALM descriptions while the model reads the whole record', async () => {
+  const config = fixtureConfig();
+  const file = path.join(path.dirname(config.output), 'record.md');
+  fs.writeFileSync(file, RECORD);
+  const model = fakeModel({ intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) });
+  const result = await runJob(config, { issue: '501', change: '7001', descriptionFile: file },
+    { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.changeDescription, almDescriptions(RECORD));
+  assert.match(model.calls.find((c) => c.schemaName.startsWith('intake')).user, /Reviewer note/);
+});
+
+const provenance = (lines) => `# Design\n\n**Document provenance**\n\n${lines.join('\n')}\n\nBody.\n`;
+const campDoc = (revised) => ({ name: 'Credit Design', text: provenance([
+  '- Source: `Credit Design.doc`',
+  '- SharePoint: [Credit Design.doc](<host>/sites/x/Shared%20Documents/CAMP%20Designs/Credit%20Design.doc?web=1)',
+  `- Revised: ${revised}, from the revision history table`]) });
+
+test('a document whose provenance path is under CAMP Designs is the CAMP document and its date the updated design', () => {
+  const found = documentInputs([campDoc('2026-09-30')], 'The CAMP design changed.');
+  assert.deepEqual(found.missing, []);
+  assert.deepEqual(found.received, ['CAMP document: Credit Design',
+    'Updated design: Credit Design, revised 2026-09-30']);
+});
+
+test('a CAMP document without a revision date leaves the updated design missing', () => {
+  const doc = campDoc('x');
+  doc.text = doc.text.replace(/- Revised:.*\n/, '- Revised: not stated\n');
+  const found = documentInputs([doc], '');
+  assert.equal(found.received.length, 1);
+  assert.equal(found.missing.length, 1);
+  assert.match(found.missing[0], /^Updated design/);
+});
+
+test('a record naming a CAMP design with no CAMP document lists both as missing, and one that does not lists neither', () => {
+  const other = { name: 'Other', text: provenance(['- Source: `Other.doc`', '- Revised: 2026-01-01, x']) };
+  assert.equal(documentInputs([other], 'See the CAMP design.').missing.length, 2);
+  assert.deepEqual(documentInputs([other], 'A plain change.').missing, []);
+});
+
+test('a document with derived rules is listed as missing its rules', () => {
+  const found = documentInputs([{ name: 'Doc', text: '', ruleCode: 'rules-derived' }], '');
+  assert.match(found.missing[0], /^Business rules for Doc/);
+});
+
+test('intake lists nothing missing for a job whose inputs all arrived, whatever the model says', async () => {
+  const config = fixtureConfig();
+  const model = fakeModel({ intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'],
+    missing: ['OPS-008 preferred input'] }) });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.intake.missing, []);
+  assert.equal(pack.intake.readiness, 'READY');
+  assert.ok(!(pack.limitations ?? {})['Job Intake']);
+});
+
+test('assumptions citing rule IDs or counts the pack does not hold are dropped', () => {
+  const rules = ['BR-ABC-001', 'BR-ABC-002', 'BR-ABC-003'].map((id, i) => ({ id, sourceDocument: 'Doc',
+    module: 'MOD', impact: i ? 'Not Impacted' : 'Direct Change', risk: 'Low', summary: 's' }));
+  const keep = (assumption) => ({ assumption, why: 'w', impact: 'i', clarification: 'c' });
+  const pack = { rules, testCards: [{ rules: ['BR-ABC-001'], derivation: 'Requirement', module: 'MOD' }],
+    coverage: [], assumptions: [
+      keep('BR-ABC-001 is read as written.'), keep('BR-ABC-099 is read as written.'),
+      keep('The 3 rules of the document are all read.'), keep('The 40 rules of the document are all read.'),
+      keep('The 2 impacted rules are read.'), keep('The 7 test cards are read.'),
+      keep('The 1 card is read.'), keep('OPS-009 ran limited.')] };
+  assert.equal(dropUnfoundedAssumptions({}, pack), 3);
+  assert.deepEqual(pack.assumptions.map((a) => a.assumption), [
+    'BR-ABC-001 is read as written.', 'The 3 rules of the document are all read.',
+    'The 2 impacted rules are read.', 'The 1 card is read.', 'OPS-009 ran limited.']);
+});
+
+/**
+ * Phase 5 with a model that marks every objective not applicable and answers the
+ * stage closure fields from `closure`; returns the Integration Testing row and the log.
+ */
+async function runPhase5(description, rules, closure, objectives = ['Core Change Validation', 'Integration Testing', 'BREAK IT'], context = 100000) {
+  const model = fakeModel({ phase5: (value) => {
+    for (const row of Object.values(value.objectives)) row.applicable = false;
+    return { ...value, ...closure };
+  } });
+  const logged = [];
+  const ctx = { pack: { rules, executiveSummary: {} }, ref: { core: [], chapters: () => [] },
+    job: {}, builder: { OBJECTIVES: objectives }, coreObjective: 'Core Change Validation',
+    description, model, calls: 0, tokens: { prompt: 0, output: 0 },
+    config: { model: { context, reasoningOutput: 100, maxOutput: 100 } },
+    logs: { detail: (label, text) => logged.push(`${label}: ${text}`), status() {} }, private() {} };
+  await phase5(ctx);
+  return { row: ctx.pack.objectives.find((row) => row.objective === 'Integration Testing'), logged, model };
+}
+
+const SENTENCE = 'The window submits the stage closure after a FATL downgrade.';
+const claim = (quote) => ({ stageClosureAfterDowngrade: true, stageClosureQuote: quote });
+const impacted = (impact, summary = SENTENCE) => ({ impact, name: 'Rule', summary });
+
+test('a quote found in the ALM descriptions marks Integration Testing applicable', async () => {
+  const { row, model } = await runPhase5(`Short Description: ${SENTENCE}`, [],
+    claim('the window submits the  STAGE closure after a FATL downgrade.'));
+  assert.equal(row.applicable, true);
+  assert.match(row.reason, /stage closure submit after a FATL downgrade/);
+  const asked = model.calls.find((c) => c.schemaName.startsWith('phase5'));
+  assert.ok(asked.schema.properties.stageClosureQuote);
+  assert.match(asked.user, /stageClosureQuote/);
+});
+
+test('a quote from a Direct Change rule is accepted, one from a Not Impacted rule is not', async () => {
+  const ok = await runPhase5('x', [impacted('Direct Change')], claim(SENTENCE));
+  assert.equal(ok.row.applicable, true);
+  const no = await runPhase5('x', [impacted('Not Impacted')], claim(SENTENCE));
+  assert.equal(no.row.applicable, false);
+  assert.match(no.logged.join('\n'), /evidence was rejected/);
+});
+
+test('the prompt lists the impacted rules, and a quote from one is accepted when the description lacks the terms', async () => {
+  const rule = { impact: 'Direct Change', name: 'Stage closure', summary: 'Submit the stage closure after a FATL downgrade.' };
+  const notes = '**Short Description**: A label changes.\n**Comments**: The window submits the stage closure after a FATL downgrade.';
+  const { row, model } = await runPhase5(notes, [rule, impacted('Not Impacted', 'Hidden rule text.')],
+    claim('Stage closure. Submit the stage closure after a FATL downgrade.'));
+  assert.equal(row.applicable, true);
+  const user = model.calls.find((c) => c.schemaName.startsWith('phase5')).user;
+  assert.match(user, /- Stage closure\. Submit the stage closure after a FATL downgrade\./);
+  assert.ok(!user.includes('Hidden rule text'));
+  assert.ok(!user.includes('Comments'));
+  // A quote from the comments is outside the description the check reads.
+  const rejected = await runPhase5(notes, [], claim('The window submits the stage closure after a FATL downgrade.'));
+  assert.equal(rejected.row.applicable, false);
+});
+
+test('only the impacted rules that hold both terms reach the prompt, as many as fit', async () => {
+  const other = Array.from({ length: 50 }, (_, i) => ({ impact: 'Direct Change', name: `Other ${i}`,
+    summary: 'Unrelated behavior of the window.' }));
+  const hit = { impact: 'Indirect Impact', name: 'Closure', summary: 'Submit the stage closure after a FATL downgrade.' };
+  const small = await runPhase5('x', [...other, hit], claim(SENTENCE));
+  const user = small.model.calls.find((c) => c.schemaName.startsWith('phase5')).user;
+  assert.match(user, /- Closure\. Submit the stage closure after a FATL downgrade\./);
+  assert.ok(!user.includes('Other 0.'));
+  assert.ok(!small.logged.some((line) => /left out/.test(line)));
+  const many = Array.from({ length: 40 }, (_, i) => ({ impact: 'Direct Change', name: `Closure ${i}`,
+    summary: `Submit the stage closure after a FATL downgrade, and ${'check the window. '.repeat(3)}`.replace(/\. /g, ' ') + '.' }));
+  const capped = await runPhase5('x', many, claim(SENTENCE), undefined, 5000);
+  const cappedUser = capped.model.calls.find((c) => c.schemaName.startsWith('phase5')).user;
+  const sent = (cappedUser.match(/^- Closure \d+\./gm) ?? []).length;
+  assert.ok(sent > 0 && sent < 40, `sent ${sent}`);
+  assert.match(capped.logged.join('\n'), new RegExp(`${40 - sent} of 40 rule lines did not fit`));
+});
+
+test('a rule summary with a line break or a long space run is listed and its quote accepted', async () => {
+  for (const summary of ['After a FATL is downgraded, the stage closure\nis submitted again.',
+    `After a FATL downgrade, the stage closure${' '.repeat(100)}is submitted again.`]) {
+    const rule = { impact: 'Direct Change', name: 'Closure', summary };
+    const { row, model } = await runPhase5('x', [rule],
+      claim(`Closure. ${summary}`.replace(/\s+/g, ' ')));
+    const user = model.calls.find((c) => c.schemaName.startsWith('phase5')).user;
+    assert.match(user, /- Closure\. After a FATL/, summary);
+    assert.equal(row.applicable, true, summary);
+  }
+});
+
+test('plural FATLs and stage closures are accepted in a quote', async () => {
+  for (const text of ['Submitting stage closures after FATL downgrades fails.',
+    'After FATLs are downgraded, stage closure submit fails.']) {
+    const { row } = await runPhase5(`Short Description: ${text}`, [], claim(text));
+    assert.equal(row.applicable, true, text);
+  }
+});
+
+test('a quote that is not in the record is rejected and logged', async () => {
+  const { row, logged } = await runPhase5('A plain change.', [], claim(SENTENCE));
+  assert.equal(row.applicable, false);
+  assert.match(logged.join('\n'), /evidence was rejected: quote not in/);
+});
+
+test('a quote that names only one of the downgrade and the submit is rejected', async () => {
+  for (const text of ['The window shows a new label after a FATL downgrade.',
+    'The window submits the stage closure.']) {
+    const { row, logged } = await runPhase5(`Short Description: ${text}`, [], claim(text));
+    assert.equal(row.applicable, false, text);
+    assert.match(logged.join('\n'), /lacks a FATL downgrade/);
+  }
+});
+
+test('a missing quote or a false answer leaves the model\'s choice', async () => {
+  assert.equal((await runPhase5(SENTENCE, [], claim(''))).row.applicable, false);
+  const denied = await runPhase5(SENTENCE, [], { stageClosureAfterDowngrade: false, stageClosureQuote: SENTENCE });
+  assert.equal(denied.row.applicable, false);
+  assert.ok(!denied.logged.some((line) => /rejected/.test(line)));
+});
+
+test('an objective list without Integration Testing is unaffected by a valid claim', async () => {
+  const { row } = await runPhase5(SENTENCE, [], claim(SENTENCE), ['Core Change Validation', 'BREAK IT']);
+  assert.equal(row, undefined);
+});
+
+test('a long description keeps its own Word: lines and ends at the next ALM field', () => {
+  const record = ['**Short Description**: Short text', '**Long Description:**', 'Steps to reproduce:',
+    '1. Click OK: nothing happens', 'Expected Result: a save', 'Actual Result: none', 'Note: see log',
+    '**Status**: Open', 'Comments:', 'Not part of it.'].join('\n');
+  const text = almDescriptions(record);
+  assert.match(text, /^Short text\n\nSteps to reproduce:/);
+  assert.match(text, /Actual Result: none\nNote: see log$/);
+  assert.ok(!/Open|Not part/.test(text));
+});
+
+
+test('only counts of rules or cards are checked, and dotted rule IDs and business rules are caught', () => {
+  const rules = ['BR-LIB.UC01-001', 'BR-LIB.UC01-002'].map((id) => ({ id, sourceDocument: 'D', module: 'M',
+    impact: 'Direct Change', risk: 'Low', summary: 's' }));
+  const keep = (assumption) => ({ assumption, why: 'w', impact: 'i', clarification: 'c' });
+  const logged = [];
+  const pack = { rules, testCards: [], coverage: [], assumptions: [
+    keep('Each card covers 1 rule.'), keep('Steps 1 to 3 cards are shared.'), keep('Section 5 rules apply.'),
+    keep('In 2026 rules changed.'), keep('The 2 business rules are read.'),
+    keep('The 40 business rules are read.'), keep('All 12 BRs are read.'),
+    keep('BR-LIB.UC01-099 is read.'), keep('BR-LIB.UC01-002 is read.')] };
+  assert.equal(dropUnfoundedAssumptions({ logs: { detail: (label, text) => logged.push(text) } }, pack), 3);
+  assert.deepEqual(logged, ['The 40 business rules are read.', 'All 12 BRs are read.', 'BR-LIB.UC01-099 is read.']);
+  assert.equal(pack.assumptions.length, 6);
+});
+
+test('CAMP Designs counts only as a folder, and only a CAMP design in the descriptions makes it missing', () => {
+  const named = { name: 'CAMP Designs.doc', text: provenance(['- Source: `CAMP Designs.doc`',
+    '- SharePoint: [x](<host>/sites/x/Other/CAMP%20Designs.doc?web=1)', '- Revised: 2026-01-01, x']) };
+  assert.equal(documentInputs([named], '').received.length, 0);
+  const other = { name: 'Other', text: provenance(['- Source: `Other.doc`', '- Revised: 2026-01-01, x']) };
+  assert.deepEqual(documentInputs([other], 'Short Description: x\nStatus: CAMP only here').missing, []);
+  assert.equal(documentInputs([other], 'Short Description: Update the CAMP design.').missing.length, 2);
+});
+
+test('a NOT READY partial pack names what code found missing', async () => {
+  const config = fixtureConfig();
+  const result = await runJob(config, { issue: '999' }, { model: fakeModel(), echo: false });
+  assert.equal(result.reason, 'gate:missing-inputs');
+  const pack = JSON.parse(read(path.join(result.outDir, 'work', 'partial-pack.json')));
+  assert.equal(pack.intake.readiness, 'NOT READY');
+  assert.ok(pack.intake.missing.includes('Description of the defect or change.'));
+});
+
+test('common words in a long description do not end it, and a bold Status does', () => {
+  const plain = 'Long Description:\n1. Open the form\nName: Smith\n2. Save\nType: Rail\n3. Expect error\n'
+    + 'Status: Open\nPriority: High\nComments: x';
+  assert.equal(almDescriptions(plain), '1. Open the form\nName: Smith\n2. Save\nType: Rail\n3. Expect error\nStatus: Open');
+  assert.equal(almDescriptions('Short Description: x\nSummary: the save fails'), 'x\nSummary: the save fails');
+  const bold = '**Long Description**: a\nName: Smith\n**Status**: Open\nb';
+  assert.equal(almDescriptions(bold), 'a\nName: Smith');
+});
+
+test('a number is skipped only as a section, step, page, range end or year', () => {
+  const rules = ['BR-A-001', 'BR-A-002'].map((id) => ({ id, sourceDocument: 'D', module: 'M',
+    impact: 'Direct Change', risk: 'Low', summary: 's' }));
+  const keep = (assumption) => ({ assumption, why: 'w', impact: 'i', clarification: 'c' });
+  const pack = { rules, testCards: [], coverage: [], assumptions: [
+    keep('The checks apply to 40 rules.'), keep('Covered in 12 rules.'), keep('From 40 rules, 2 apply.'),
+    keep('Rules 3 to 40 rules apply.'), keep('See page 9 rules.'), keep('Since 2026 rules changed.')] };
+  dropUnfoundedAssumptions({}, pack);
+  assert.deepEqual(pack.assumptions.map((a) => a.assumption),
+    ['Rules 3 to 40 rules apply.', 'See page 9 rules.', 'Since 2026 rules changed.']);
+});
+
+test('missing inputs read as sentences, name the missing file and list it once', async () => {
+  const config = fixtureConfig();
+  const result = await runJob(config, { issue: '501', change: '7001',
+    docs: ['docs/LIB/gone-1.md', 'docs/LIB/gone-2.md'] }, { model: fakeModel(), echo: false });
+  const pack = JSON.parse(read(path.join(result.outDir, 'work', 'partial-pack.json')));
+  const files = pack.intake.missing.filter((t) => t.startsWith('Document file not found'));
+  assert.deepEqual(files, ['Document file not found: docs/LIB/gone-1.md.',
+    'Document file not found: docs/LIB/gone-2.md.']);
+  assert.match(pack.limitations['Job Intake'], /gone-1\.md\. Document file not found: docs\/LIB\/gone-2\.md\./);
+});
+
+test('an escaped bracket in a file name does not hide the CAMP Designs folder', () => {
+  const doc = { name: 'A', text: provenance(['- Source: `A [v2](old).doc`',
+    '- SharePoint: [A \\[v2\\](old).doc](<host>/sites/x/CAMP%20Designs/A.doc?web=1)', '- Revised: 2026-01-01, x']) };
+  assert.equal(documentInputs([doc], '').received.length, 2);
+});
+
+test('the label style comes from the label that opened the current field', () => {
+  assert.equal(almDescriptions('Short Description: x\n**Long Description**: a\n**Status**: Open\nb'), 'x\n\na');
+  assert.equal(almDescriptions('**Short Description**: x\nLong Description: a\n**Status**: Open\nb'),
+    'x\n\na\n**Status**: Open\nb');
+  assert.equal(almDescriptions('**Long Description**\nShort Description: x\n**Status**: Open\ny'),
+    'x\n**Status**: Open\ny');
+});
+
+test('a range with and keeps its number, a list of counts does not', () => {
+  const rules = ['BR-A-001', 'BR-A-002'].map((id) => ({ id, sourceDocument: 'D', module: 'M',
+    impact: 'Direct Change', risk: 'Low', summary: 's' }));
+  const keep = (assumption) => ({ assumption, why: 'w', impact: 'i', clarification: 'c' });
+  const pack = { rules, testCards: [], coverage: [], assumptions: [
+    keep('Between 2 and 40 rules apply.'), keep('2 rules and 40 rules apply.')] };
+  dropUnfoundedAssumptions({}, pack);
+  assert.deepEqual(pack.assumptions.map((a) => a.assumption), ['Between 2 and 40 rules apply.']);
+  const other = { ...pack, assumptions: ['BR-A-001 and 40 rules apply.', 'Section 4 and 40 rules apply.',
+    'In 2025 and 40 rules apply.', 'Version 3 and 40 rules apply.'].map(keep) };
+  assert.equal(dropUnfoundedAssumptions({}, other), 4);
 });
