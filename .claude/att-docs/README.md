@@ -43,6 +43,7 @@ This repository is private and for my own use.
 ## Layout
 
 ```
+CLAUDE.md                         standing rules for sessions working in this repository
 .claude-plugin/marketplace.json   marketplace entry, for a machine that installs a plugin
 plugins/<group>/
   .claude-plugin/plugin.json
