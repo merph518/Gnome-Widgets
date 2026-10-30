@@ -762,7 +762,8 @@ def ready(payload, socket_path, root, now=None, check=ready_numbers):
     now = time.time() if now is None else now
     return [write_json(os.path.join(root, 'ready'), f'{key}-{number}.json',
                        {'number': int(number), 'at': now,
-                        'session': payload.get('session_id') or ''})
+                        'session': payload.get('session_id') or '',
+                        'cwd': payload.get('cwd') or ''})
             for number in numbers]
 
 

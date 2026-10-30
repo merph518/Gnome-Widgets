@@ -83,8 +83,8 @@ const budgetWindow = (ctx) => ctx.window ?? ctx.config.model.context;
 /**
  * The least room a prompt must leave for inputs once the core references and the
  * reply are in. Documents are split at `room - 1000`, so a window this small
- * leaves pieces of about a page or more. When `maxOutput` is larger than
- * `reasoningOutput` the split room can be smaller; a piece with no room is a
+ * leaves pieces of about a page or more. A split that subtracts more references
+ * than the core ones can still come out smaller; a piece with no room is a
  * `window-too-small` error from `splitText`, not a silent failure.
  */
 const MIN_INPUT_ROOM = 2000;
@@ -138,27 +138,34 @@ export async function readWindow(ctx, phase) {
 /**
  * The pipeline's one way to call the model. Checks the token count first and
  * throws `too-big` rather than truncating, retries a failed call once with
- * thinking off, and logs only counts and timings.
+ * thinking off (a thinking call cut off at its cap gets the smaller `retryOutput`,
+ * and a second cut is `runaway`), and logs only counts and timings.
  */
 export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task }) {
   const system = [SYSTEM, ...refs.filter(Boolean).map((text, i) => section(`Reference ${i + 1}`, text))]
     .join('\n');
   const user = [section('Task', task), ...inputs.filter(([, text]) => !blank(text))
     .map(([label, text]) => section(label, text))].join('\n');
-  const maxTokens = reasoning ? ctx.config.model.reasoningOutput : ctx.config.model.maxOutput;
   await readWindow(ctx, phase);
   const promptTokens = await ctx.model.countTokens(`${system}\n${user}`);
-  if (promptTokens + maxTokens + 512 > budgetWindow(ctx)) {
+  const firstCap = outputCap(ctx, phase, reasoning);
+  // A retry can ask for more than the first call: the plain cap after a failed thinking
+  // call, or the retry cap after a cut. The prompt must leave room for the largest.
+  const { maxOutput, retryOutput } = ctx.config.model;
+  const widestCap = reasoning ? Math.max(firstCap, maxOutput, retryOutput) : firstCap;
+  if (promptTokens + widestCap + 512 > budgetWindow(ctx)) {
     throw Object.assign(new ModelError('too-big', 'prompt does not fit the context'),
       { promptTokens });
   }
   let think = reasoning;
+  let maxTokens = firstCap;
+  let cutThinking = false;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     ctx.calls += 1;
     try {
       const { value, usage } = await ctx.model.json({
         system, user, schema, schemaName: `${phase}_${step}`.replace(/\W+/g, '_'),
-        reasoning: think, maxTokens: think ? ctx.config.model.reasoningOutput : ctx.config.model.maxOutput,
+        reasoning: think, maxTokens,
       });
       ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call', attempt, reasoning: think,
         promptTokens: usage.promptTokens, outputTokens: usage.outputTokens, ms: usage.ms });
@@ -166,21 +173,46 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
       ctx.tokens.prompt += usage.promptTokens;
       ctx.tokens.output += usage.outputTokens;
       return S.unkey(schema, value);
-    } catch (error) {
-      if (!(error instanceof ModelError) || attempt === 2) throw error;
-      ctx.logs.status({ job: ctx.job.id, phase, step, event: 'retry', reason: error.code,
-        outputTokens: error.usage?.outputTokens ?? 0, ms: error.usage?.ms ?? 0 });
-      // A call that failed while thinking most often thought too long: it ran out
-      // the output budget or the server's time. The retry answers without it.
+    } catch (caught) {
+      if (!(caught instanceof ModelError)) throw caught;
+      // A reply cut off at the cap with thinking off would be cut off again.
+      const cut = caught.code === 'length';
+      let error = caught;
+      if (cut && cutThinking) {
+        error = Object.assign(new ModelError('runaway', 'model kept going after thinking was turned off'),
+          { usage: caught.usage });
+      }
+      if (attempt === 2 || (cut && !think)) {
+        ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call-fail', attempt, reasoning: think,
+          maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,
+          ms: error.usage?.ms ?? 0 });
+        throw error;
+      }
+      ctx.logs.status({ job: ctx.job.id, phase, step, event: 'retry', attempt, reasoning: think,
+        maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,
+        ms: error.usage?.ms ?? 0 });
+      // A call that failed while thinking most often thought too long. One that ran
+      // out the output budget is retried with a small cap, so a model that keeps
+      // going after thinking is off fails fast; any other failure answers at the
+      // plain cap.
+      cutThinking = cut && think;
+      maxTokens = cutThinking ? ctx.config.model.retryOutput : ctx.config.model.maxOutput;
       think = false;
     }
   }
   throw new Error('unreachable');
 }
 
+/** The reply cap for a call: a reasoning phase's own cap, or the global one. */
+export function outputCap(ctx, phase, think) {
+  const { maxOutput, reasoningOutput, reasoningOutputByPhase } = ctx.config.model;
+  return think ? (reasoningOutputByPhase?.[phase] ?? reasoningOutput) : maxOutput;
+}
+
 /** Room left for inputs in one call, after the reference and the reply. */
-const room = (ctx, reasoning, refs) => budgetWindow(ctx)
-  - (reasoning ? ctx.config.model.reasoningOutput : ctx.config.model.maxOutput)
+export const room = (ctx, reasoning, refs) => budgetWindow(ctx)
+  - (reasoning ? Math.max(ctx.config.model.reasoningOutput, ctx.config.model.maxOutput)
+    : ctx.config.model.maxOutput)
   - estimateTokens(SYSTEM + refs.join('\n')) - 2048;
 
 function runCommand(ctx, template, values, { failure } = {}) {

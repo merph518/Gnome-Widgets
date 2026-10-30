@@ -651,25 +651,141 @@ test('no pipeline module reaches the network except the model client', () => {
   }
 });
 
-test('a cut-off reply is retried once with thinking off', async () => {
-  let calls = 0;
+/** An ask context over a fake server; `finish(body, n)` gives call n's finish reason. */
+async function askOver(finish, { model = {}, phase = 'phase1', reasoning = true, tokens = 10 } = {}) {
+  const bodies = [];
   const fetchImpl = async (url, options) => {
-    calls += 1;
     const body = JSON.parse(options.body);
-    const finish = body.chat_template_kwargs.enable_thinking ? 'length' : 'stop';
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: finish,
-      message: { content: '{"ok":true}' } }], usage: {} }) };
+    bodies.push(body);
+    const how = finish(body, bodies.length);
+    if (how === 'no-body') return { ok: true, json: async () => { throw new SyntaxError('x'); } };
+    return { ok: true, json: async () => ({ choices: [{ finish_reason: how,
+      message: { content: '{"ok":true}' } }], usage: { completion_tokens: 7 } }) };
   };
-  const config = fixtureConfig();
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm', ...model } });
   const { ask } = await import('./phases.mjs');
-  const logs = { status() {}, detail() {} };
-  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, logs, job: { id: 'j' },
+  const lines = [];
+  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
+    logs: { status: (fields) => lines.push(fields), detail() {} },
     model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
-      countTokens: async () => 10, contextWindow: async () => null } };
-  const value = await ask(ctx, { phase: 'phase1', step: 's', reasoning: true, inputs: [],
+      countTokens: async () => tokens, contextWindow: async () => null } };
+  const run = () => ask(ctx, { phase, step: 's', reasoning, inputs: [],
     schema: { type: 'object' }, task: 't' });
-  assert.deepEqual(value, { ok: true });
-  assert.equal(calls, 2);
+  return { run, bodies, lines, ctx };
+}
+
+test('a thinking reply cut off at length is retried once with thinking off and the smaller retry cap', async () => {
+  const { run, bodies, lines } = await askOver((body) => (
+    body.chat_template_kwargs.enable_thinking ? 'length' : 'stop'));
+  assert.deepEqual(await run(), { ok: true });
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies.map((body) => body.max_tokens), [40960, 8192]);
+  const retry = lines.find((line) => line.event === 'retry');
+  assert.equal(retry.reasoning, true);
+  assert.equal(retry.maxTokens, 40960);
+  assert.equal(retry.reason, 'length');
+});
+
+test('a thinking call that fails without being cut off is retried at the plain cap', async () => {
+  const { run, bodies } = await askOver((body, n) => (n === 1 ? 'no-body' : 'stop'));
+  assert.deepEqual(await run(), { ok: true });
+  assert.deepEqual(bodies.map((body) => body.max_tokens), [40960, 16384]);
+  assert.equal(bodies[1].chat_template_kwargs.enable_thinking, false);
+});
+
+test('a reply cut off with thinking off is not retried', async () => {
+  const { run, bodies, lines } = await askOver(() => 'length', { reasoning: false });
+  await assert.rejects(run(), (error) => error.code === 'length');
+  assert.equal(bodies.length, 1);
+  const fail = lines.find((line) => line.event === 'call-fail');
+  assert.equal(fail.reason, 'length');
+  assert.equal(fail.reasoning, false);
+  assert.equal(fail.maxTokens, 16384);
+  assert.ok(!lines.some((line) => line.event === 'retry' || line.event === 'fail'));
+});
+
+test('a thinking cut-off whose retry is also cut off fails as runaway', async () => {
+  const { run, bodies, lines } = await askOver(() => 'length');
+  await assert.rejects(run(), (error) => error.code === 'runaway' && error.usage.outputTokens === 7);
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies.map((body) => body.max_tokens), [40960, 8192]);
+  const fail = lines.find((line) => line.event === 'call-fail');
+  assert.equal(fail.reason, 'runaway');
+  assert.equal(fail.attempt, 2);
+  const config = fixtureConfig();
+  const model = fakeModel({ phase1_understanding: () => { throw new ModelError('runaway', 'x'); } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model:runaway');
+});
+
+test('a per-phase reasoning cap lowers max_tokens for that phase only', async () => {
+  const model = { reasoningOutputByPhase: { phase9: 12288 } };
+  const capped = await askOver(() => 'stop', { model, phase: 'phase9' });
+  await capped.run();
+  const other = await askOver(() => 'stop', { model, phase: 'phase1' });
+  await other.run();
+  assert.deepEqual([capped.bodies[0].max_tokens, other.bodies[0].max_tokens], [12288, 40960]);
+  const plain = await askOver(() => 'stop', { model, phase: 'phase9', reasoning: false });
+  await plain.run();
+  assert.equal(plain.bodies[0].max_tokens, 16384);
+});
+
+test('a thinking call that fails without a reply and is then cut off ends as length, not runaway', async () => {
+  const { run, bodies, lines } = await askOver((body, n) => (n === 1 ? 'no-body' : 'length'));
+  await assert.rejects(run(), (error) => error.code === 'length');
+  assert.deepEqual(bodies.map((body) => body.max_tokens), [40960, 16384]);
+  assert.equal(lines.find((line) => line.event === 'call-fail').reason, 'length');
+});
+
+test('a prompt that fits the first cap but not a retry cap is refused as too-big before any call', async () => {
+  // Window 60000: 50000 prompt tokens fit a 2048 phase cap but not the 16384 plain cap a retry can use.
+  const model = { context: 60000, reasoningOutput: 20000, reasoningOutputByPhase: { phase9: 2048 } };
+  const big = await askOver(() => 'stop', { model, phase: 'phase9', tokens: 50000 });
+  await assert.rejects(big.run(), (error) => error.code === 'too-big' && error.promptTokens === 50000);
+  assert.equal(big.bodies.length, 0);
+  const small = await askOver(() => 'stop', { model, phase: 'phase9', tokens: 40000 });
+  assert.deepEqual(await small.run(), { ok: true });
+  // With thinking off the first cap is the only one, so the same prompt is sent.
+  const plain = await askOver(() => 'stop', { model, phase: 'phase9', reasoning: false, tokens: 40000 });
+  assert.deepEqual(await plain.run(), { ok: true });
+});
+
+test('a model that runs away through a real client fails the job as model:runaway', async () => {
+  const answers = fakeModel({ ...INTAKE });
+  const bodies = [];
+  const fetchImpl = async (url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (body.chat_template_kwargs.enable_thinking) {
+      return { ok: true, json: async () => ({ choices: [{ finish_reason: 'length',
+        message: { content: '{"a":' } }], usage: { completion_tokens: 7 } }) };
+    }
+    const { schema, name } = body.response_format.json_schema;
+    // Thinking off still runs away once a thinking call has been cut.
+    const cutAgain = bodies.some((earlier) => earlier.chat_template_kwargs.enable_thinking);
+    const { value } = await answers.json({ schema, schemaName: name });
+    return { ok: true, json: async () => ({ choices: [{ finish_reason: cutAgain ? 'length' : 'stop',
+      message: { content: JSON.stringify(value) } }], usage: { completion_tokens: 7 } }) };
+  };
+  const model = { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
+    countTokens: async () => 10, contextWindow: async () => null };
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model:runaway');
+  assert.deepEqual(bodies.slice(-2).map((body) => body.chat_template_kwargs.enable_thinking), [true, false]);
+  assert.equal(bodies.at(-1).max_tokens, 8192);
+});
+
+test('config refuses a bad reasoningOutputByPhase or retryOutput', () => {
+  const bad = (model) => () => fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    ...model } });
+  assert.doesNotThrow(bad({ reasoningOutputByPhase: { phase9: 16384 }, retryOutput: 4096 }));
+  assert.throws(bad({ reasoningOutputByPhase: { phase2: 4096 } }), /not a reasoning phase/);
+  assert.throws(bad({ reasoningOutputByPhase: { phase9: 50000 } }), /1024 to model.reasoningOutput/);
+  assert.throws(bad({ reasoningOutputByPhase: { phase9: 0 } }), /1024 to model.reasoningOutput/);
+  assert.throws(bad({ reasoningOutputByPhase: [16384] }), /must be an object/);
+  assert.throws(bad({ retryOutput: 20000 }), /retryOutput/);
 });
 
 test('splitting keeps every character and stays under the limit', () => {
@@ -2197,6 +2313,16 @@ async function resumedWithMismatch(repair, answers = {}) {
   return { second, result: await runHold(second, { resume: true }) };
 }
 
+test('a verification group cut off at length fails the job after one call, with no split', async () => {
+  const cut = () => { throw new ModelError('length', 'cut off'); };
+  const run = holdRun({ phase6_cards: holdCards(), phase6_verify: cut });
+  const result = await runHold(run);
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.match(JSON.stringify(result), /model:length/);
+  assert.equal(callsNamed(run, 'phase6_verify').length, 1);
+  assert.ok(!statusLines(result.outDir).some((l) => l.event === 'split'));
+});
+
 test('a card that agrees with its rules and its last step passes untouched, after one verification call', async () => {
   const run = holdRun({ phase6_cards: holdCards(), phase6_verify: judge });
   const result = await runHold(run);
@@ -2613,7 +2739,7 @@ test('a workbook too long for one review call is read in parts, and a failing pa
   const config = fixtureConfig();
   // The room shrinks once the cards are built, so only the review's reads are split.
   const shrink = (value) => {
-    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500 });
+    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
     return value;
   };
   const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
@@ -2663,7 +2789,7 @@ test('a draft the builder writes no workbook for leaves the review the pack summ
 test('every part of a split workbook opens with the rules index, and a job missing rules says which documents', async () => {
   const config = fixtureConfig();
   const shrink = (value) => {
-    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500 });
+    Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
     return value;
   };
   const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
@@ -3424,6 +3550,19 @@ test('the floor uses the larger reply, so a window only that floor rejects fails
   // A larger plain reply raises the floor, so a window just above `least` is refused.
   assert.equal(await accepts(model(3000), least + 100), false);
   assert.equal(await accepts(model(3000), least + 3000), true);
+});
+
+test('room reserves the widest reply a thinking call may ask for, so a prompt sized to it passes ask', async () => {
+  const { ask, room } = await import('./phases.mjs');
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    context: 60000, maxOutput: 16384, reasoningOutput: 8192 } });
+  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
+    logs: { status() {}, detail() {} },
+    model: { json: async () => ({ value: {}, usage: { promptTokens: 1, outputTokens: 1, ms: 1 } }),
+      // A prompt that uses all the room, plus the reference text already counted in it.
+      countTokens: async () => room(ctx, true, []) + 100 } };
+  assert.deepEqual(await ask(ctx, { phase: 'phase3', step: 's', reasoning: true, inputs: [],
+    schema: { type: 'object' }, task: 't' }), {});
 });
 
 test('a window that is zero, negative, fractional or text falls through to the next source', async () => {

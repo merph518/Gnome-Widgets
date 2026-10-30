@@ -28,7 +28,7 @@ import socket
 import sys
 import time
 
-STATUSES = ("idle", "waiting on you", "stuck", "stopped", "waiting on CI")
+STATUSES = ("idle", "waiting on you", "stuck", "stopped", "waiting on CI", "needs you", "working")
 SEPARATOR = " - "
 # The longest title the sidebar and the bridge take.
 MAX_TITLE = 60

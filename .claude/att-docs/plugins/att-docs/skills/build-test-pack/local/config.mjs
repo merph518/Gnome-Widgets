@@ -25,6 +25,9 @@ export const RULE_SHAPE = {
   ruleIdPattern: '\\d{3}',
 };
 
+/** The `phase` names a reasoning call carries; `model.reasoningOutputByPhase` is keyed by them. */
+export const REASONING_PHASES = ['phase1', 'phase3', 'phase4', 'phase5', 'phase9'];
+
 /** How many times a job is tried before it is flagged and dropped from the queue. */
 export const MAX_TRIES = 2;
 
@@ -47,10 +50,33 @@ export function loadConfig(configPath) {
     temperature: 0.1, context: 128000, maxOutput: 16384, reasoningOutput: 40960,
     timeoutMinutes: 150, ...raw.model,
   };
+  // The reply cap for the retry of a thinking call that ran out its output budget; it
+  // answers with thinking off, so it never needs more than a plain call's maxOutput.
+  if (raw.model?.retryOutput === undefined) model.retryOutput = Math.min(8192, model.maxOutput);
   localEndpoint(model.endpoint);
   if (!model.name) throw new Error('config model.name is missing');
   if (!Number.isFinite(model.temperature) || model.temperature < 0 || model.temperature > 0.2) {
     throw new Error('config model.temperature must be between 0 and 0.2');
+  }
+  if (raw.model?.retryOutput !== undefined && (!Number.isInteger(model.retryOutput)
+    || model.retryOutput < 1024 || model.retryOutput > model.maxOutput)) {
+    throw new Error('config model.retryOutput must be a whole number from 1024 to model.maxOutput');
+  }
+  if (raw.model?.reasoningOutputByPhase !== undefined) {
+    const byPhase = model.reasoningOutputByPhase;
+    if (!byPhase || typeof byPhase !== 'object' || Array.isArray(byPhase)) {
+      throw new Error('config model.reasoningOutputByPhase must be an object of phase caps');
+    }
+    for (const [phase, cap] of Object.entries(byPhase)) {
+      if (!REASONING_PHASES.includes(phase)) {
+        throw new Error(`config model.reasoningOutputByPhase.${phase} is not a reasoning phase`
+          + ` (${REASONING_PHASES.join(', ')})`);
+      }
+      if (!Number.isInteger(cap) || cap < 1024 || cap > model.reasoningOutput) {
+        throw new Error(`config model.reasoningOutputByPhase.${phase} must be a whole number`
+          + ' from 1024 to model.reasoningOutput');
+      }
+    }
   }
   for (const key of REQUIRED_REFERENCES) {
     if (!raw.reference?.[key]) throw new Error(`config reference.${key} is missing`);

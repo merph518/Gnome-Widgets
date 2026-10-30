@@ -27,6 +27,10 @@ class Titles(unittest.TestCase):
         self.assertEqual(st.split_title("Overmind 2 - read window (waiting on CI)"),
                          ("Overmind 2", "read window", "waiting on CI"))
         self.assertEqual(st.split_title("Overmind 2 (idle)"), ("Overmind 2", "", "idle"))
+        # The words the voice bridge writes for every session are statuses here too.
+        self.assertEqual(st.split_title("Overmind 2 - PR #5 fix (needs you)"),
+                         ("Overmind 2", "PR #5 fix", "needs you"))
+        self.assertEqual(st.split_title("Overmind 2 (working)"), ("Overmind 2", "", "working"))
         self.assertEqual(st.split_title("Login - staging - one"),
                          ("Login - staging", "one", ""))
         # Parentheses that are not one of the statuses stay part of the title.

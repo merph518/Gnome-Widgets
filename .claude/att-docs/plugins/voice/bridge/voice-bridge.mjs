@@ -30,6 +30,18 @@
 //                  beside its state, as read_reply would read it, and marks it read; a long
 //                  reply is its one-line summary, and read_full_reply reads the rest.
 //                  replies false lists the states and leaves every reply unread.
+//                  An idle session, or one whose reply was already heard, also gives a
+//                  one-line summary of its latest reply, read without marking anything read,
+//                  and the question that reply ends on; a pull request the session reported
+//                  ready for review is named. Each listing also renames a session whose work
+//                  is known to its base title and a short work name, such as "PR 325 ready",
+//                  "needs your answer" or "issue 332", the way rename_session with work does,
+//                  with replies false as well. Only a work name the bridge gave is replaced
+//                  or cleared; one the user or the session set, the Session Launcher, a
+//                  session no longer followed, and a session whose pull request could not be
+//                  read are left alone, and the status the session appends itself stays on
+//                  the title. The renames are started, not waited for, and one that fails is
+//                  logged and never fails or slows the listing.
 //   needs_attention
 //                  the sessions waiting on the user: a permission prompt for a named tool,
 //                  or a question the session asked. A followed session's permission prompt
@@ -63,6 +75,19 @@
 //                  says, from the session's transcript, whether it was taken in mid-turn, ran
 //                  as a turn of its own, or waits for the step in progress to end. With queue
 //                  a request for a busy session is held by the bridge instead of posted
+//   allow_blocked_call
+//                  lets through a call the auto mode classifier blocked, in two calls like
+//                  run_command. A denial since the session's latest relayed request is told
+//                  once, by needs_attention and the other notices, with the allow rule that
+//                  would fix it. The first call reads the call, the exact rule, the settings
+//                  file and its scope, every session in every repository, back; the confirmed
+//                  call, after a yes, works the rule out again and adds that one string to
+//                  permissions.allow when it is the one read back and the file is as it was.
+//                  The rule and file are never passed in. Only gh's issue and pull request
+//                  commands by their three words, an MCP tool by its name, and a web fetch by
+//                  its host get a rule, and none that a deny rule covers. It changes nothing
+//                  else in the settings, and a file that does not parse is left as it is.
+//                  Please and thank you never stands in for the yes.
 //   run_command    runs a command a session asked the user to run, a "!" line in its last
 //                  reply, in two calls like stop_turn. The command is never passed in: the
 //                  first call takes it from the transcript, checks it against the bridge's
@@ -303,14 +328,16 @@
 //                  says why.
 //                  With repo it works in another repository a running session has checked
 //                  out, from that checkout, and a summary confirms a merge only in its own.
-//                  With no running session in it but a checkout in the code folder, it
-//                  merges from that checkout and closes the issues the pull request closes
-//                  and removes their In Progress label itself; with no checkout it merges
-//                  nothing.
+//                  With no running session in it, the repository is found on GitHub among
+//                  those the user and the user's organizations own, from its local checkout
+//                  when there is one, and the bridge closes the issues the pull request
+//                  closes and removes their In Progress label itself.
 //   pull_request_merged
 //                  for "I merged 5222": tells the running session that owns the merged pull
 //                  request, the one whose worktree is on its branch, so it runs its
-//                  post-merge steps, or says no running session owns it. Each merge is told
+//                  post-merge steps, or says no running session owns it. With repo and no
+//                  running session in it, the bridge finds the repository on GitHub and
+//                  finishes the post-merge steps itself. Each merge is told
 //                  once, whichever of this, merge_pull_request, or the merge scan below tells
 //                  it first.
 //   summary        one spoken check-in built from the helpers above: the sessions waiting on
@@ -336,7 +363,8 @@
 //                  reply, which names the commit; a call with nothing new says the commit
 //                  the bridge runs. Only a bridge running as the voice-bridge unit updates.
 // A posted message reaches the session as one from another session, so it can never approve a
-// permission prompt or change settings. Only answer_prompt answers a prompt, through the hook.
+// permission prompt or change settings. Only answer_prompt answers a prompt, through the hook,
+// and only allow_blocked_call changes a setting, one allow rule after the user's own yes.
 //
 // Sign-in is OAuth with dynamic client registration and PKCE, approved by a passphrase only
 // the owner knows. Redirects go only to claude.ai and claude.com, and five wrong passphrases
@@ -1164,7 +1192,7 @@ export function readReply(session, bridgeDir, {
   }
   const reply = readJson(files.reply, null);
   if (reply?.text && !(peek && reply.readAt)) {
-    if (peek) return { status: 'done', text: speakable(reply.text), again: false };
+    if (peek) return { status: 'done', text: speakable(reply.text), full: reply.text, again: false };
     if (!reply.readAt) {
       writePrivateJson(files.reply, { ...reply, readAt: now });
       fs.rmSync(files.pending, { force: true });
@@ -1938,6 +1966,284 @@ export function relayFailures({ sessions, paths, now = Date.now(), cache }) {
   return told;
 }
 
+// --- Calls the auto mode classifier denied ---------------------------------------------------
+
+// The result Claude Code writes for a call the classifier turned down. No permission prompt
+// is made for one, so only the transcript shows it. A classifier that gave no verdict is a
+// failure to retry, not a block.
+const CLASSIFIER_DENIED = new RegExp('^\\W*Permission for this action was denied by the '
+  + 'Claude Code auto mode classifier(?:\\.\\s*Reason:\\s*(\\[[^\\]\\n]*\\]))?', 'i');
+const CLASSIFIER_NO_VERDICT = /no verdict/i;
+// The gh commands a rule may name, by noun. A rule is always these three words and a colon
+// star, so it grants that one command with any arguments and nothing wider.
+const RULE_GH = { issue: ['create', 'edit', 'comment', 'close', 'reopen'],
+  pr: ['create', 'edit', 'comment', 'ready', 'close', 'reopen'] };
+// Commands that only shape what a pipeline prints, which a rule never has to cover.
+const RULE_FILTERS = new Set(['cd', 'tail', 'head', 'wc']);
+
+// The calls the classifier denied since the session's latest relayed request, oldest first,
+// as { id, tool, input, reason }. A denial before that request, or in a subagent, is left out.
+export function classifierDenials(session, projectsDir) {
+  const file = transcriptPath(session, projectsDir);
+  const uses = new Map();
+  let denials = [];
+  let relayed = false;
+  for (const row of file ? transcriptTail(file) : []) {
+    const content = row?.message?.content;
+    const blocks = Array.isArray(content) ? content : [];
+    const said = typeof content === 'string' ? content
+      : blocks.map(block => (block?.type === 'text' ? String(block.text ?? '') : '')).join(' ');
+    if (row?.type === 'user' && said.includes(REQUEST_MARKER)) {
+      denials = [];
+      relayed = true;
+    }
+    for (const block of blocks) {
+      if (block?.type === 'tool_use') uses.set(block.id, block);
+      if (block?.type !== 'tool_result' || block.is_error !== true) continue;
+      const text = resultText(block.content);
+      const use = uses.get(block.tool_use_id);
+      const denied = CLASSIFIER_DENIED.exec(text);
+      if (relayed && use && denied && !CLASSIFIER_NO_VERDICT.test(text)) {
+        denials.push({ id: String(block.tool_use_id), tool: use.name, input: use.input,
+          reason: (denied[1] ?? '').trim() });
+      }
+    }
+  }
+  return denials;
+}
+
+// Whether a rule list holds an entry for the Bash command words: Bash(a b:*) covers a b and
+// anything after it, Bash(a b) only that command.
+const bashRuleCovers = (rules, words) => rules.some(rule => {
+  if (['Bash', 'Bash(*)'].includes(String(rule))) return true;
+  const match = /^Bash\((.*?)(:\*| \*)?\)$/.exec(String(rule));
+  if (!match) return false;
+  const said = words.join(' ');
+  return match[2] ? said === match[1] || said.startsWith(`${match[1]} `) : said === match[1];
+});
+
+// The one allow rule that would let a blocked call through, as { rule }, or why there is none,
+// as { why }. The rule is worked out from the call itself and is never wider than it: gh's
+// issue and pull request commands by their three words, an MCP tool by its full name, and a
+// web fetch by its host. allow and deny are the rules already in the settings.
+export function suggestedRule(tool, input, { allow = [], deny = [] } = {}) {
+  const found = (() => {
+    if (tool === 'Bash') return bashRule(String(input?.command ?? ''), allow);
+    if (/^mcp__.+__.+/.test(tool)) return { rule: tool };
+    if (tool === 'WebFetch') {
+      try {
+        const url = new URL(String(input?.url));
+        if (/^https?:$/.test(url.protocol) && url.hostname) {
+          return { rule: `WebFetch(domain:${url.hostname})` };
+        }
+      } catch {
+        // Not an address.
+      }
+      return { why: 'The fetch has no web address to name in a rule.' };
+    }
+    return { why: `${tool} is not a call a rule is offered for.` };
+  })();
+  if (!found.rule) return found;
+  const server = found.rule.split('__').slice(0, 2).join('__');
+  if (/\.claude|settings(?:\.local)?\.json/.test(found.rule)) {
+    return { why: 'A rule for that call would name a settings path.' };
+  }
+  const host = found.rule.startsWith('WebFetch') ? found.rule.slice(16, -1) : '';
+  const wild = rule => /^WebFetch\(domain:\*\.(.+)\)$/.exec(String(rule))?.[1];
+  if (deny.some(rule => [found.rule, server, `${server}__*`].includes(String(rule))
+    || (host && String(rule) === 'WebFetch')
+    || (host && wild(rule) && host.endsWith(`.${wild(rule)}`))
+    || (found.rule.startsWith('Bash(') && bashRuleCovers([rule],
+      found.rule.slice(5, -3).split(' '))))) {
+    return { why: 'A deny rule in the settings covers that call, so no rule is offered.' };
+  }
+  return found;
+}
+
+function bashRule(command, allow) {
+  if (/[`$\n]/.test(command)) {
+    return { why: 'The command uses a substitution, a variable or a here document, which no '
+      + 'rule can name.' };
+  }
+  const segments = shellSegments(command);
+  if (!segments || segments.some(segment => segment.targets)) {
+    return { why: 'The command redirects into a file, which no rule can name.' };
+  }
+  const needed = [];
+  for (const words of segments.filter(segment => segment.length > 0)) {
+    if (RULE_FILTERS.has(words[0]) || bashRuleCovers(allow, words)) continue;
+    needed.push(words);
+  }
+  const rules = needed.map(([program, noun, verb]) => (program === 'gh'
+    && RULE_GH[noun]?.includes(verb) ? `Bash(gh ${noun} ${verb}:*)` : null));
+  if (needed.length === 0) {
+    return { why: 'Every part of the command already has an allow rule, so its shape kept it '
+      + 'from matching.' };
+  }
+  if (needed.length > 1) {
+    return { why: 'More than one part of the command needs a rule, so none is offered.' };
+  }
+  return rules[0] ? { rule: rules[0] }
+    : { why: `No rule is offered for ${needed[0].slice(0, 3).join(' ')}.` };
+}
+
+// The settings' allow and deny lists, and the file's text: the text is '' for no file, and
+// error says why the file cannot be changed.
+function readSettings(file) {
+  let text = '';
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) return { error: 'The settings file is a link.' };
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') return { error: 'The settings file cannot be read.' };
+  }
+  let settings = {};
+  if (text.trim()) {
+    try {
+      settings = JSON.parse(text);
+    } catch {
+      return { error: 'The settings file does not parse, so it is left as it is.' };
+    }
+  }
+  const permissions = settings?.permissions ?? {};
+  if (!isRecord(settings) || !isRecord(permissions)
+    || [permissions.allow, permissions.deny].some(list => list !== undefined
+      && !(Array.isArray(list) && list.every(rule => typeof rule === 'string')))) {
+    return { error: 'The settings file does not have the shape of Claude Code settings.' };
+  }
+  return { text, settings, allow: permissions.allow ?? [], deny: permissions.deny ?? [] };
+}
+
+// Adds one string to permissions.allow in the settings file and nothing else: every other key
+// and its place stay. The file is replaced in one rename and read back, and a file that
+// changed since text was read, or that holds the rule already, is left alone. Returns the
+// reply.
+export function addAllowRule(file, rule, text) {
+  const now = readSettings(file);
+  if (now.error) return now.error;
+  if (now.text !== text) return 'The settings file changed since the read-back.';
+  if (now.allow.includes(rule)) return `${rule} is already allowed in ${file}.`;
+  const permissions = { ...now.settings.permissions, allow: [...now.allow, rule] };
+  const next = { ...now.settings, permissions };
+  const tmp = `${file}.${process.pid}.tmp`;
+  let mode = 0o600;
+  try {
+    mode = fs.statSync(file).mode & 0o777;
+  } catch {
+    // A new file is private.
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode });
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch {
+    fs.rmSync(tmp, { force: true });
+    return `The settings file could not be written, so ${rule} was not added.`;
+  }
+  const back = readSettings(file);
+  if (back.error || !back.allow.includes(rule)) {
+    return `The settings file was written but did not read back with ${rule} in it.`;
+  }
+  return `Added ${rule} to the allow rules in ${file}.`;
+}
+
+// The notice for each classifier denial, told once: what was blocked, the rule that would let
+// it through, and how to approve it. Kept in blocks.json beside the outcomes, per session,
+// until OUTCOME_KEEP_MS has passed. Returns the notices written.
+export function relayBlocks({ sessions, paths, now = Date.now() }) {
+  const file = path.join(paths.bridgeDir, 'blocks.json');
+  const before = readJson(file, null);
+  const toldIds = isRecord(before?.told) ? before.told : {};
+  const listed = new Set(sessions.map(session => session.key));
+  const told = Object.fromEntries(Object.entries(toldIds).filter(([key]) => !listed.has(key))
+    .map(([key, ids]) => [key, Object.fromEntries(Object.entries(isRecord(ids) ? ids : {})
+      .filter(([, at]) => now - Number(at) < OUTCOME_KEEP_MS))])
+    .filter(([, ids]) => Object.keys(ids).length > 0));
+  const notices = [];
+  const { allow, deny } = readSettings(paths.settingsFile);
+  for (const session of sessions) {
+    const already = isRecord(toldIds[session.key]) ? toldIds[session.key] : {};
+    const denials = classifierDenials(session, paths.projectsDir);
+    const present = new Set(denials.map(denial => denial.id));
+    const kept = Object.fromEntries(Object.entries(already)
+      .filter(([id, at]) => present.has(id) || now - Number(at) < OUTCOME_KEEP_MS));
+    for (const denial of denials) {
+      if (kept[denial.id]) continue;
+      const fix = suggestedRule(denial.tool, denial.input, { allow, deny });
+      const text = `${session.name}: ${spokenAction({ name: denial.tool, input: denial.input })} `
+        + `was blocked by the auto mode classifier${denial.reason ? `, ${denial.reason}` : ''}. `
+        + (fix.rule ? `The allow rule ${fix.rule} would let it through next time. Call `
+          + 'allow_blocked_call on the session to hear it and approve it.' : fix.why);
+      addNotice(paths.noticesDir, `failed-blocked-${denial.id.replace(/[^\w-]/g, '')}`, text,
+        now);
+      kept[denial.id] = now;
+      notices.push(text);
+    }
+    if (Object.keys(kept).length > 0) told[session.key] = kept;
+  }
+  if (JSON.stringify(told) !== JSON.stringify(toldIds)) writePrivateJson(file, { told });
+  return notices;
+}
+
+// --- Letting a blocked call through ---------------------------------------------------------
+
+// Where the read-backs wait in pages, by session key.
+const RULES_KEY = Symbol('rules');
+
+// Adds the allow rule for a session's newest classifier denial, in two calls like the other
+// calls that cannot be taken back. The first reads the denial and the rule back, with the
+// file and the scope, and keeps them; the confirmed call, after a yes heard at least
+// ANSWER_HEARD_MS later and within ANSWER_CONFIRM_MS, works the rule out again and writes it
+// only when it is the one read back and the file is as it was. The call takes no rule or file:
+// the bridge works both out. Please and thank you never stands in for the yes, because the rule
+// lets every session do what the classifier stopped.
+export async function allowBlockedCall(session, args, { paths, pages, now = Date.now }) {
+  if (!pages) throw new Error('A fix needs somewhere to keep its read-back.');
+  const at = now();
+  const { kept, readBack } = takeReadBack(pages, RULES_KEY, session.key, at);
+  const settings = readSettings(paths.settingsFile);
+  if (settings.error) return `Nothing was changed. ${settings.error}`;
+  const denials = classifierDenials(session, paths.projectsDir);
+  const confirmed = String(args?.confirm ?? false).trim().toLowerCase() === 'true';
+  const pick = confirmed && readBack ? denials.find(denial => denial.id === readBack.id)
+    : denials.at(-1);
+  const unsent = 'Nothing was changed.';
+  if (!pick) {
+    return `${unsent} ${session.name} has no call the classifier blocked since its latest `
+      + 'request from the voice chat.';
+  }
+  const fix = suggestedRule(pick.tool, pick.input, settings);
+  if (!fix.rule) return `${unsent} ${fix.why}`;
+  const action = spokenAction({ name: pick.tool, input: pick.input });
+  if (!confirmed) {
+    kept.set(session.key, { id: pick.id, rule: fix.rule, text: settings.text, at });
+    const lead = preapprovalRefused(args, 'the rule lets every session do what the '
+      + 'classifier stopped');
+    return `${lead}${session.name}: ${action} was blocked by the auto mode classifier`
+      + `${pick.reason ? `, ${pick.reason}` : ''}.\nThe fix is to add the allow rule `
+      + `${fix.rule} to ${paths.settingsFile}. It applies to every session in every `
+      + 'repository on this machine, not only this one, and it stays until it is removed. '
+      + (fix.rule.startsWith('WebFetch') ? 'It allows every address on that host. ' : '')
+      + 'Read all of it to the user and ask whether to add it. Only after a yes call '
+      + `allow_blocked_call again with only the session and confirm true.${ASK_YES}`;
+  }
+  const again = ' Call allow_blocked_call with only the session for a new read-back, and '
+    + `answer only after the user says yes.${ASK_YES}`;
+  const refusal = readBackRefusal(readBack, at, { unsent, again,
+    unread: 'The fix has not been read back yet.',
+    soon: 'That came too soon after the read-back for the user to have heard it.' });
+  if (refusal) return refusal;
+  if (fix.rule !== readBack.rule) {
+    return `${unsent} The rule is not the one that was read back.${again}`;
+  }
+  const done = addAllowRule(paths.settingsFile, fix.rule, readBack.text);
+  if (done.startsWith('Added')) {
+    dropNotice(paths.noticesDir, `failed-blocked-${pick.id.replace(/[^\w-]/g, '')}`);
+  }
+  return done.startsWith('Added') ? `${done} ${session.name} can retry the call.` : done;
+}
+
 // Each unit, its length in seconds, and the count past which the next unit reads better:
 // 60 minutes is an hour, 48 hours 2 days.
 const SPAN_UNITS = [['minute', 60, 60], ['hour', 60 * 60, 48], ['day', 24 * 60 * 60, Infinity]];
@@ -2527,12 +2833,16 @@ export async function sessionWork(sessions, tracker, { cached = false } = {}) {
     failed.add(`${repo}\0${branch}`);
     return null;
   });
+  // The repositories whose In Progress issues gh could not list.
+  const issuesFailed = new Set();
   const claimedIn = (repo, cwd) => cachedRead(tracker, `in progress\0${repo}`,
     () => ghJson({ ...tracker, cwd }, [
       'issue', 'list', '--state', 'open', '--label', IN_PROGRESS_LABEL, '--json', 'number',
       '--limit', String(TRACKER_LIST_LIMIT),
-    ]), { cached, fallback: [] }).catch(() => [])
-    .then(issues => [repo, new Set(issues.map(issue => issue.number))]);
+    ]), { cached, fallback: [] }).catch(() => {
+    issuesFailed.add(repo);
+    return [];
+  }).then(issues => [repo, new Set(issues.map(issue => issue.number))]);
   const [inProgressBy, pulls] = await Promise.all([
     Promise.all([...repoFolders].map(([repo, cwd]) => claimedIn(repo, cwd)))
       .then(rows => new Map(rows)),
@@ -2548,6 +2858,13 @@ export async function sessionWork(sessions, tracker, { cached = false } = {}) {
       .filter(number => inProgress.has(number) && number !== pull?.number));
     const entry = { branch, pull, merged, mergedHead: merged ? newest.headRefOid : null, issues };
     if (failed.has(`${repo}\0${branch}`)) entry.lookupFailed = true;
+    // An issue named only by the branch is told from the In Progress list, so a branch with no
+    // pull request, not merged, and a number in its name, in a repository whose list gh could
+    // not read, owns an issue nobody knows. Only the renames read this.
+    if (!entry.lookupFailed && !pull && !merged && issuesFailed.has(repo)
+      && numbersIn(branch, BRANCH_NUMBER).length > 0) {
+      entry.issuesUnknown = true;
+    }
     return [key, entry];
   }));
   if (unread) work.unread = true;
@@ -2676,7 +2993,8 @@ function spokenAction({ name, input }) {
 
 // The session's last assistant text and its last few tool calls, oldest call first, from the
 // tail of its transcript, each with its row's time (NaN when the row has none). replyAt and
-// noteAt are the times of the last text that ended a turn and the last one written mid-turn:
+// noteAt are the times of the last text that ended a turn and the last one written mid-turn;
+// final is the text of the last one that ended a turn, '' when none did:
 // a turn's final row carries stop_reason end_turn, and its mid-turn text rows do not.
 // promptAt is the time of the latest row the user typed as a prompt (isPromptRow), where the
 // current turn started.
@@ -2685,6 +3003,7 @@ export function transcriptProgress(session, projectsDir) {
   const file = transcriptPath(session, projectsDir);
   if (!file) return null;
   let reply = '';
+  let final = '';
   let at = NaN;
   let replyAt = NaN;
   let noteAt = NaN;
@@ -2698,15 +3017,19 @@ export function transcriptProgress(session, projectsDir) {
       if (block?.type === 'text' && String(block.text ?? '').trim()) {
         reply = block.text.trim();
         at = rowTime(row);
-        if (row.message.stop_reason === 'end_turn') replyAt = at;
-        else noteAt = at;
+        if (row.message.stop_reason === 'end_turn') {
+          replyAt = at;
+          final = reply;
+        } else {
+          noteAt = at;
+        }
       }
       if (block?.type === 'tool_use') {
         actions.push({ text: spokenAction(block), at: rowTime(row) });
       }
     }
   }
-  return { reply, at, replyAt, noteAt, promptAt, actions: actions.slice(-CATCH_UP_ITEMS) };
+  return { reply, final, at, replyAt, noteAt, promptAt, actions: actions.slice(-CATCH_UP_ITEMS) };
 }
 
 // The text Claude Code writes in a user row when the user stops a turn, as is or "for tool
@@ -2955,8 +3278,7 @@ function noteText(text) {
 // when that note came after the reply, read from its transcript for list_sessions. A note
 // before the last reply belongs to a finished turn, so it is left out. Empty when neither
 // has a time.
-function lastWritten(session, projectsDir, now) {
-  const progress = transcriptProgress(session, projectsDir);
+function lastWritten(session, projectsDir, now, progress = transcriptProgress(session, projectsDir)) {
   if (!progress) return '';
   const { replyAt, noteAt } = progress;
   const reply = ageOf(replyAt, now);
@@ -2965,6 +3287,424 @@ function lastWritten(session, projectsDir, now) {
   // The note's own words, so the voice side need not fetch them with a second call.
   const said = note && progress.reply ? `: ${noteText(progress.reply)}` : '';
   return `${reply ? `, last reply ${reply}` : ''}${note ? `, last note ${note}${said}` : ''}`;
+}
+
+// A time in a ready line is in seconds, as the hook writes it, and in ready.json in
+// milliseconds, as the bridge does.
+const readyMs = at => (at < 1e11 ? at * 1000 : at);
+
+// Every pull request a session reported ready for the user's review, by session key, read once
+// per call: the ready lines the Stop hooks left that the bridge has not scanned yet, and the
+// ones ready.json holds as announced, each as { number, at, repo } with the time in
+// milliseconds. A ready line names no repository; it is the session's own.
+function readyIndex(paths) {
+  const found = new Map();
+  const add = (key, item) => found.set(key, [...(found.get(key) ?? []), item]);
+  const folder = path.join(paths.bridgeDir, 'ready');
+  try {
+    for (const file of fs.readdirSync(folder)) {
+      const [, owner, number] = file.match(READY_FILE) ?? [];
+      if (!owner) continue;
+      const at = Number(readJson(path.join(folder, file), null)?.at) || 0;
+      add(owner, { number: Number(number), at: readyMs(at), repo: null });
+    }
+  } catch {
+    // No ready lines waiting.
+  }
+  for (const [id, held] of Object.entries(readReady(paths.readyFile).announced)) {
+    if (!held?.key) continue;
+    add(held.key, { number: Number(String(id).split('#').pop()), at: readyMs(Number(held.at) || 0),
+      repo: held.repo ?? null });
+  }
+  return found;
+}
+
+// The pull requests the session reported ready, newest first: the ones in its own repository
+// from since it started, so a key a later session reuses does not inherit an earlier one's.
+function readyReported(index, session) {
+  const repo = checkoutOf(session.cwd)?.repo ?? null;
+  return (index.get(session.key) ?? [])
+    .filter(item => (item.repo === null || item.repo === repo)
+      && (session.startedAt == null || item.at >= session.startedAt))
+    .sort((a, b) => b.at - a.at).map(item => item.number);
+}
+
+// What a session last said that list_sessions can sum up without marking anything read: the
+// reply the bridge holds when one waits or was read, else the text of the last turn the
+// session finished. A note written mid-turn is never it, a busy session has none, and neither
+// has one whose prompt came after its last finished reply, as when a turn was interrupted.
+// state is the reply as readReply read it with peek.
+function latestSaid(session, { bridgeDir }, state, progress) {
+  if (session.busy || state.status === 'working') return '';
+  if (state.status === 'done') return String(state.full ?? '').trim();
+  const kept = readJson(bridgeFiles(bridgeDir, session.key).reply, null);
+  const text = String(kept?.text ?? '').trim();
+  const prompted = progress?.promptAt;
+  // A prompt after the last finished reply, or with none in the tail, means the turn was cut
+  // off; the reply the bridge kept is only what it said if it came after that prompt.
+  if (Number.isFinite(prompted)) {
+    if (progress.final && progress.replyAt >= prompted) return progress.final;
+    return Number(kept?.at) * 1000 >= prompted ? text : '';
+  }
+  return progress?.final || text;
+}
+
+// What stop_attention.py strips from the end of a reply before it asks whether it ends in a
+// question: whitespace, emphasis marks, backticks, closing brackets and quotes. A closing
+// parenthetical after the question mark, as in "Proceed? (yes/no)", is passed over too.
+const AFTER_QUESTION = /[\s*_`)\]"']+$/;
+const PAREN_AFTER_QUESTION = /\?\s*\([^()]*$/;
+
+// The last paragraph of a reply when its last line ends in a question, else ''.
+function openQuestion(reply) {
+  const lines = reply.split('\n').filter(line => line.trim());
+  const last = (lines.at(-1) ?? '').replace(AFTER_QUESTION, '').replace(PAREN_AFTER_QUESTION, '?');
+  if (!last.endsWith('?')) return '';
+  const paragraph = reply.trim().split(/\n\s*\n/).pop().split(/\s+/).join(' ');
+  return spoken(clipped(paragraph, NOTE_CHARS));
+}
+
+// What the hooks give as the reason a session waits on a question it asked; any other reason
+// is a permission prompt.
+const QUESTION_REASON = 'a question';
+
+// The work names the bridge gives. A name the bridge gave is recorded for the session, and
+// only a work name equal to that record is replaced or cleared.
+const WORK_NAMES = {
+  answer: 'needs your answer',
+  approval: 'needs your approval',
+  ready: number => `PR ${number} ready`,
+  pull: number => `PR ${number}`,
+  issue: number => `issue ${number}`,
+};
+// Text that reads as one of the WORK_NAMES, whoever wrote it.
+const LISTING_NAME = /^(?:needs your answer|needs your approval|PR \d+ ready|PR \d+|issue \d+)$/;
+
+// The work name a session is given from what is known of it, or '' when nothing is: what it
+// needs from the user first, then the pull request it reported ready, the one it owns, and
+// the issue it works.
+function workName({ waiting, asks, ready, work }) {
+  if (waiting) return waiting.reason === QUESTION_REASON ? WORK_NAMES.answer : WORK_NAMES.approval;
+  if (asks) return WORK_NAMES.answer;
+  if (ready) return WORK_NAMES.ready(ready);
+  if (work?.pull) return WORK_NAMES.pull(work.pull.number);
+  if (work?.issues.length) return WORK_NAMES.issue(work.issues[0]);
+  return '';
+}
+
+// A session's latest update for list_sessions: text to add to its line, and the work name its
+// title should carry. With show, a one-line summary of what it last said and the question
+// that ends it come first; a pull request it reported ready that is still its open one is
+// named either way. said is the reply read, '' for a busy session. Nothing is marked read.
+function sessionUpdate(session, { index, waiting, work, said, show }) {
+  const asks = openQuestion(said);
+  const open = work?.pull?.number;
+  const ready = open !== undefined && readyReported(index, session).includes(open) ? open : null;
+  let text = '';
+  if (show && said) {
+    const summary = spoken(clipped(replySummary(said).text.split(/\s+/).join(' '), SUMMARY_CHARS));
+    text += `, last said: ${summary}`;
+    if (asks && !summary.endsWith(asks)) text += `, and asks: ${asks}`;
+  }
+  if (ready) text += `, marked pull request ${ready} ready for your review`;
+  return { text, name: workName({ waiting, asks, ready, work }) };
+}
+
+// The work names the bridge gave each session, kept in rename-work.json in the bridge folder
+// by session key and start time, so a restart, or a /clear that changes the session id, still
+// knows which work names are its own. The names are the one on the title, the one being
+// posted, and the one posted last, latest last. A name the user or the session set is not in
+// it, and is never replaced.
+const ownedWorkFile = bridgeDir => path.join(bridgeDir, 'rename-work.json');
+const ownedKey = session => `${session.key}:${session.startedAt}`;
+// A record is { names, seen }, seen the last time its session was listed; a record in the
+// earlier form, the names alone, counts as seen now.
+const OWNED_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+// A listed session's record is marked seen again once its mark is this old.
+const OWNED_REFRESH_MS = 60 * 60 * 1000;
+const ownedRecord = held => {
+  const names = Array.isArray(held) ? held : held?.names;
+  if (!Array.isArray(names)) return null;
+  return { names: names.filter(name => typeof name === 'string' && name),
+    seen: Number(held.seen) || null };
+};
+const ownedNames = (bridgeDir, session) =>
+  ownedRecord(readJson(ownedWorkFile(bridgeDir), null)?.[ownedKey(session)])?.names ?? [];
+// session_title.py clips a work name to make room for a status, on a word, so a title can
+// carry the front of a name the bridge gave.
+const ownsWork = (names, work) => names.some(name => name === work || name.startsWith(`${work} `));
+
+// Records the work names for the session, none to forget it.
+function keepOwnedNames(bridgeDir, session, names, now = Date.now()) {
+  const held = readJson(ownedWorkFile(bridgeDir), null);
+  const all = isRecord(held) ? held : {};
+  if (names.length) all[ownedKey(session)] = { names, seen: now };
+  else delete all[ownedKey(session)];
+  writePrivateJson(ownedWorkFile(bridgeDir), all);
+}
+
+// Marks the records of the sessions in this listing as seen, and drops the records of sessions
+// not listed for OWNED_GRACE_MS, since a running session can be missing from a listing, as one
+// the app archived while idle, or one whose file was being written, is.
+function tidyOwned(bridgeDir, sessions, now) {
+  const held = readJson(ownedWorkFile(bridgeDir), null);
+  if (!isRecord(held)) return;
+  const listed = new Set(sessions.map(ownedKey));
+  let changed = false;
+  for (const [key, value] of Object.entries(held)) {
+    const record = ownedRecord(value);
+    if (!record) {
+      delete held[key];
+      changed = true;
+    } else if (listed.has(key)) {
+      if (!Array.isArray(value) && now - record.seen < OWNED_REFRESH_MS) continue;
+      held[key] = { names: record.names, seen: now };
+      changed = true;
+    } else if (!record.seen) {
+      held[key] = { names: record.names, seen: now };
+      changed = true;
+    } else if (now - record.seen > OWNED_GRACE_MS) {
+      delete held[key];
+      changed = true;
+    }
+  }
+  if (changed) writePrivateJson(ownedWorkFile(bridgeDir), held);
+}
+
+// The title a session gets for the work name it was given, as { title, work } with the work
+// name the title carries, or null when it keeps the one it has: the session is the Session
+// Launcher, the user stopped following it, it has no socket, its base title is empty, a work
+// name the bridge did not give is on it, there is nothing to say and nothing of the bridge's
+// to clear, the title already reads so, or the title is not valid. The status the session
+// appended itself stays, as compose does in session_title.py. A name that does not fit beside
+// the base and the status is not clipped; a work name of the bridge's own is cleared in its
+// place, so a stale one does not stay.
+export function factTitle(session, name, { config, bridgeDir }) {
+  const title = titleOf(session);
+  if (!session.socket) return null;
+  if (session.app && sameTitle(baseTitle(title), config.launcher ?? LAUNCHER_NAME)) return null;
+  if (holdsSession(followFiles(bridgeDir, session.key).off, session)) return null;
+  const { base, work, tail } = splitTitle(title);
+  if (!base) return null;
+  if (work && !ownsWork(ownedNames(bridgeDir, session), work)) return null;
+  const fits = name && MAX_NAME_CHARS - base.length - WORK_SEPARATOR.length - tail.length
+    >= name.length;
+  const given = fits ? name : '';
+  const wanted = given ? `${base}${WORK_SEPARATOR}${given}${tail}` : `${base}${tail}`;
+  if (wanted === title) return null;
+  try {
+    sessionTitle(wanted, '');
+  } catch {
+    return null;
+  }
+  return { title: wanted, work: given };
+}
+
+// The renames list_sessions asked for in one bridge folder, by session key: the title last sent
+// and when it was taken, so a listing repeated within RENAME_AGAIN_MS does not send it twice,
+// when each rename was last tried, the sessions with a post going, the sessions with a
+// rename_session going, which the bridge starts no rename for, and when a failure was last
+// logged.
+const renamesSent = new Map();
+const RENAME_AGAIN_MS = 60 * 1000;
+function renameMemory(bridgeDir) {
+  if (!renamesSent.has(bridgeDir)) {
+    renamesSent.set(bridgeDir, { sent: new Map(), tried: new Map(), pending: new Set(),
+      user: new Set(), logged: new Map() });
+  }
+  return renamesSent.get(bridgeDir);
+}
+
+// Starts the renames of the sessions whose update gave a work name, or whose bridge-given name
+// no longer holds, by posting the control message to each session's socket as rename_session
+// does after its checks. Nothing waits for a session to take the title, or for the post
+// itself. The name is recorded as the bridge's before it is posted, so a post that times out
+// after the session took it still leaves it owned; a name the title shows, or none when the
+// title carries none, ends the record of the names before it. A rename is remembered as sent
+// only once its post went through, so a failed one is tried again at the next listing; a
+// failure is logged at most once a minute for a session, and neither reaches the listing. A
+// title another session already has falls back to clearing the bridge's own name. A session
+// whose pull request or issues could not be read is left as it is.
+function renameFromFacts(updates, { paths, sessions, config, now }) {
+  const { bridgeDir } = paths;
+  const memory = renameMemory(bridgeDir);
+  tidyOwned(bridgeDir, sessions, Date.now());
+  const failed = (session, error) => {
+    if (now - (memory.logged.get(session.key) ?? -Infinity) < RENAME_AGAIN_MS) return;
+    memory.logged.set(session.key, now);
+    console.error(`Could not rename ${session.name}: ${error.message}`);
+  };
+  for (const { session, name, skip } of updates) {
+    try {
+      if (memory.pending.has(session.key) || memory.user.has(session.key)) continue;
+      const names = ownedNames(bridgeDir, session);
+      const shown = splitTitle(titleOf(session)).work;
+      // A name tried, even by a post that failed, may still be taken, so nothing is shrunk or
+      // cleared for a minute after a try.
+      const tried = memory.tried.get(session.key);
+      if (names.length && !(tried !== undefined && now - tried < RENAME_AGAIN_MS)) {
+        if (!shown) keepOwnedNames(bridgeDir, session, []);
+        else if (names.length > 1 && ownsWork([names.at(-1)], shown)) {
+          keepOwnedNames(bridgeDir, session, [names.at(-1)]);
+        }
+      }
+      const context = { config, bridgeDir };
+      let wanted = skip ? null : factTitle(session, name, context);
+      if (!wanted) continue;
+      try {
+        checkRename(session, wanted.title, sessions);
+      } catch (refused) {
+        const cleared = factTitle(session, '', context);
+        if (!cleared) throw refused;
+        checkRename(session, cleared.title, sessions);
+        wanted = cleared;
+      }
+      const before = memory.sent.get(session.key);
+      if (before?.title === wanted.title && now - before.at < RENAME_AGAIN_MS) continue;
+      if (wanted.work) {
+        keepOwnedNames(bridgeDir, session, [...new Set([...names, wanted.work])]);
+      }
+      memory.tried.set(session.key, now);
+      memory.pending.add(session.key);
+      postRename(session, wanted.title).then(() => {
+        memory.sent.set(session.key, { title: wanted.title, at: now });
+      }).catch(error => failed(session, error))
+        .finally(() => memory.pending.delete(session.key));
+    } catch (error) {
+      failed(session, error);
+    }
+  }
+}
+
+// --- Renaming every session at once ---------------------------------------------------------
+
+// The room a task name needs in a title to be worth writing.
+const MIN_TASK_CHARS = 8;
+// The statuses a session sets itself that say more than the bridge can tell, kept when a
+// title ends in one; any other status is replaced by the one the bridge reads.
+const KEPT_STATUS = /^\s+\((?:stuck|stopped|waiting on CI|needs you|working)\)$/;
+
+// The task a session's title names: the work name it set itself, else its open pull request
+// with its title, else the issue it works, else the start of what it last said.
+function taskName({ own, pull, issues, said }) {
+  if (own) return own;
+  // The number follows a # so a task never reads as one of the bare work names list_sessions
+  // gives and rewrites ("PR 325", "issue 341").
+  if (pull) return `PR #${pull.number} ${String(pull.title ?? '')
+    .replace(/^\w+(?:\([^)]*\))?!?:\s*/, '')}`;
+  if (issues?.length) return `issue #${issues[0]}`;
+  return said ? replySummary(said).text : '';
+}
+
+// A task name on one line without the work separator, clipped on a word to room characters.
+function fitTask(text, room) {
+  const said = String(text).replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ')
+    .split(WORK_SEPARATOR).join(' ').trim();
+  if (said.length <= room) return said;
+  return said.slice(0, room + 1).replace(/\s+\S*$/, '').slice(0, room).trim()
+    || said.slice(0, room);
+}
+
+// Gives every running session the title "<base> - <task> (<state>)" from what the bridge knows
+// of it: its base title, the work name it set or its pull request, issue, or latest reply, and
+// whether it needs the user (waiting, asking, or with a pull request reported ready), is
+// working, or is idle. A title that already reads so is left, as is the Session Launcher, a
+// session the user stopped following and one with no socket; a rename its checks refuse is
+// said, not thrown, and so is a title another session in the same call is getting. Says what
+// changed. The posts go out together and are not waited on for the titles to show; the next
+// listing shows and numbers them. The task each title got is kept in written-tasks.json, so
+// the next call refreshes a task it wrote and keeps one the session set.
+export async function renameAllSessions(sessions, { paths, config, tracker, now }) {
+  const work = await sessionWork(sessions, tracker);
+  const at = now();
+  const index = readyIndex(paths);
+  const writtenFile = path.join(paths.bridgeDir, 'written-tasks.json');
+  const written = readJson(writtenFile, {});
+  // A running session keeps its record through a call that skips it or fails to rename it.
+  const nowWritten = Object.fromEntries(Object.entries(written)
+    .filter(([key]) => sessions.some(s => s.key === key)));
+  const renamed = [], fits = [], left = [], posts = [], chosen = [];
+  for (const { session: s, state: waiting } of withAttention(sessions, paths, at)) {
+    const title = titleOf(s);
+    if (s.app && sameTitle(baseTitle(title), config.launcher ?? LAUNCHER_NAME)) {
+      left.push(`${s.name} (the Session Launcher)`);
+      continue;
+    }
+    if (holdsSession(followFiles(paths.bridgeDir, s.key).off, s)) {
+      left.push(`${s.name} (not followed)`);
+      continue;
+    }
+    if (!s.socket) {
+      left.push(`${s.name} (no socket)`);
+      continue;
+    }
+    if (work.get(s.key)?.lookupFailed) {
+      left.push(`${s.name} (its pull request could not be read)`);
+      continue;
+    }
+    const progress = transcriptProgress(s, paths.projectsDir);
+    const said = latestSaid(s, paths, readReply(s, paths.bridgeDir, { peek: true }), progress);
+    const owned = work.get(s.key);
+    const open = owned?.pull?.number;
+    const ready = open !== undefined && readyReported(index, s).includes(open);
+    const state = waiting || openQuestion(said) || (ready && !s.busy) ? 'needs you'
+      : s.busy ? 'working' : 'idle';
+    const { base, work: own, tail } = splitTitle(title);
+    // A status the session set itself that says more is kept only while nothing else needs
+    // saying, so a stale stopped never hides a session that works or waits.
+    const end = state === 'idle' && KEPT_STATUS.test(tail) ? tail : ` (${state})`;
+    const room = MAX_NAME_CHARS - base.length - WORK_SEPARATOR.length - end.length;
+    // A task this tool wrote last time is the bridge's to refresh; any other is the session's.
+    const listed = ownsWork(ownedNames(paths.bridgeDir, s), own);
+    const ownTask = own && !listed && own !== written[s.key] ? own : '';
+    if (ownTask) delete nowWritten[s.key];
+    // A work name the session set is never shortened: when it leaves no room for the state,
+    // the session is left alone. A task made here that reads as one of the listing's own
+    // names is dropped, so the listing never rewrites it.
+    if (ownTask && fitTask(ownTask, ownTask.length).length > room) {
+      left.push(`${s.name} (its work name leaves no room for ${end.trim()})`);
+      continue;
+    }
+    let task = '';
+    if (ownTask) task = fitTask(ownTask, room);
+    else if (room >= MIN_TASK_CHARS) {
+      task = fitTask(taskName({ pull: owned?.pull, issues: owned?.issues, said }), room);
+      if (LISTING_NAME.test(task)) task = '';
+    }
+    const wanted = `${base}${task ? `${WORK_SEPARATOR}${task}` : ''}${end}`;
+    if (wanted === title) {
+      fits.push(s.name);
+      if (!ownTask) { if (task) nowWritten[s.key] = task; else delete nowWritten[s.key]; }
+      continue;
+    }
+    try {
+      if (wanted.length > MAX_NAME_CHARS) throw new Error(`${base} leaves no room for a state.`);
+      checkRename(s, wanted, sessions);
+      const twin = chosen.find(other => sameTitle(other.title, wanted));
+      if (twin) throw new Error(`${twin.name} is getting the same title`);
+    } catch (error) {
+      left.push(`${s.name} (${error.message.replace(/\.$/, '')})`);
+      continue;
+    }
+    chosen.push({ name: s.name, title: wanted });
+    posts.push(postRename(s, wanted).then(() => {
+      renamed.push(`${s.name} is now ${wanted}`);
+      if (!ownTask) { if (task) nowWritten[s.key] = task; else delete nowWritten[s.key]; }
+    }, error => {
+      left.push(`${s.name} (could not be reached: ${error.message.replace(/\.$/, '')})`);
+    }));
+  }
+  await Promise.all(posts);
+  try {
+    writePrivateJson(writtenFile, nowWritten);
+  } catch (error) {
+    console.error(`Could not keep the titles it wrote: ${error.message}`);
+  }
+  const total = renamed.length + fits.length + left.length;
+  return [`Renamed ${renamed.length} of ${total} ${total === 1 ? 'session' : 'sessions'}.`,
+    ...renamed.sort().map(line => `${line}.`),
+    ...(fits.length ? [`Already fit: ${andList(fits)}.`] : []),
+    ...(left.length ? [`Left alone: ${left.sort().join('; ')}.`] : [])].join('\n');
 }
 
 // --- Time on task, usage and context --------------------------------------------------------
@@ -4908,7 +5648,14 @@ export const TOOLS = [
       + 'why, that it waits on background work, naming what, or which issue or pull '
       + 'request it is blocked on; a session with a reply ready names its background work '
       + 'too. A session mid-turn gives the text of its latest note, so a question about what '
-      + 'a session is doing needs no second call. To monitor sessions, read this listing '
+      + 'a session is doing needs no second call. An idle session, or one whose reply was '
+      + 'already heard, gives a one-line summary of its latest reply, last said, and what '
+      + 'that reply asks the user, so "what is every session up to" is answered from this '
+      + 'one listing; it never marks the reply read. A session that reported a pull request '
+      + 'ready for review says so. Each listing also renames a session whose work is known, '
+      + 'to its title and a short work name such as "PR 325 ready", "needs your answer" or '
+      + '"issue 332", so the sidebar shows what it is on; the title shown is the one before '
+      + 'that call. To monitor sessions, read this listing '
       + 'quietly and speak only when asked, or when a session needs the user: an open '
       + 'question, a permission prompt, or a ready pull request. A busy session says how long it has been on its current '
       + 'turn and roughly how many tokens the turn has used, and an idle one how long it has '
@@ -5004,6 +5751,31 @@ export const TOOLS = [
         },
       },
       required: ['session', 'text'],
+    },
+  },
+  {
+    name: 'allow_blocked_call',
+    description: 'Let a call through that the auto mode classifier blocked, by adding its allow '
+      + 'rule to the user\'s Claude settings, after a spoken yes. A blocked call is reported '
+      + 'with the rule that would let it through. Call this first with only the session: it '
+      + 'reads back the blocked call, the exact rule, the file and that the rule applies to '
+      + 'every session in every repository. Read all of it to the user. Only after a yes call '
+      + 'it again with the same session and confirm true. You never pass the rule or the '
+      + 'file: the bridge works them out from the blocked call, and offers none for a call '
+      + 'it cannot name narrowly. It adds one allow rule and changes nothing else. Please and '
+      + 'thank you never stands in for the yes here.',
+    // It widens what every session may do, which stays until the rule is removed.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session: sessionArg,
+        confirm: {
+          type: 'boolean',
+          description: 'True only once the user has said yes to this exact rule',
+        },
+      },
+      required: ['session'],
     },
   },
   {
@@ -5341,6 +6113,23 @@ export const TOOLS = [
     },
   },
   {
+    name: 'rename_all_sessions',
+    description: 'Rename every running session in one call from what each is doing, such as '
+      + '"rename all my sessions" or "update the session titles", in place of listing the '
+      + 'sessions and calling rename_session for each. Each title becomes its base title, a '
+      + 'dash, a short task and its state in parentheses, such as "Playwright 2 - PR 5593 '
+      + 'move the Overmind pin (needs you)". The task is the work name the session set, else '
+      + 'its open pull request, else its issue, else the start of its latest reply. The state '
+      + 'is needs you (it waits or asks, or reported a pull request ready), working, or idle. '
+      + 'A title that already reads so is left alone, as are the Session Launcher, a session '
+      + 'the user stopped following, and one the bridge cannot reach. The answer says which '
+      + 'sessions were renamed and to what, which already fit, and which were left alone and '
+      + 'why. Read it out briefly.',
+    // Writes to the sessions, but only titles another rename can set back.
+    annotations: UNDOABLE_EDIT,
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'nickname_session',
     description: 'Give one running session a short nickname that every session tool answers '
       + 'to from then on, such as "call session two the question session". The nickname '
@@ -5454,8 +6243,9 @@ export const TOOLS = [
         repo: {
           type: 'string',
           description: 'The repository, as owner/name or its name alone, such as LaundryBot; '
-            + 'a running session works in it, or it has a checkout in the code folder. Left '
-            + 'out, the repository the followed sessions work in, or the tool asks which one',
+            + 'a running session works in it, or it is one the user or an organization of the '
+            + 'user owns on GitHub. Left out, the repository the followed sessions work in, or '
+            + 'the tool asks which one',
         },
         confirm: {
           type: 'boolean',
@@ -5485,8 +6275,9 @@ export const TOOLS = [
         number: { type: 'integer', description: 'The pull request number' },
         repo: {
           type: 'string',
-          description: 'The repository, as owner/name or its name alone; a running session has '
-            + 'to work in it. Left out, the bridge\'s own repository',
+          description: 'The repository, as owner/name or its name alone; a running session '
+            + 'works in it, or it is one the user or an organization of the user owns on '
+            + 'GitHub. Left out, the bridge\'s own repository',
         },
       },
       required: ['number'],
@@ -5870,7 +6661,9 @@ export const TOOLS = [
   {
     name: 'summary',
     description: 'One check-in on everything at once: which sessions wait on the user and '
-      + 'why, and the open pull requests, then what changed since the last check-in: the '
+      + 'why, and the open pull requests, including ones a session reported ready for review '
+      + 'that lack the review label, with the repository when it is not the bridge\'s own, '
+      + 'then what changed since the last check-in: the '
       + 'sessions whose state moved, the pull requests merged, and the workflow runs that '
       + 'finished. With no check-in in the last 24 hours, it reads who is working, the merges '
       + 'since the start of yesterday, and the latest runs instead. '
@@ -6486,9 +7279,49 @@ async function summaryPart(read, what) {
   }
 }
 
-async function pullsPart(tracker) {
+// The open pull requests the running sessions reported ready for the user's review, each read
+// through gh in its session's own folder, as { number, title, repo }. A pull request a session
+// reported ready may lack the review label, so the open list alone misses it. One that is no
+// longer open, or that gh cannot read, is left out, and one several sessions reported counts
+// once.
+const REPORTED_PER_SESSION = 5;
+async function reportedPulls(sessions, paths, tracker) {
+  const index = readyIndex(paths);
+  const asked = sessions.flatMap(session => readyReported(index, session)
+    .slice(0, REPORTED_PER_SESSION).map(number => ({ session, number })));
+  const read = await Promise.all(asked.map(({ session, number }) => cachedRead(tracker,
+    `reported\0${session.cwd}\0${number}`, async () => JSON.parse(await tracker.gh({
+      cwd: session.cwd, args: ['pr', 'view', String(number), '--json', 'number,title,state,url'],
+    }))).then(pull => pull, () => null)));
+  const seen = new Set();
+  return read.flatMap((pull, i) => {
+    if (pull?.state !== 'OPEN') return [];
+    const repo = repoOf(pull.url) ?? checkoutOf(asked[i].session.cwd)?.repo ?? null;
+    const id = `${repo}#${pull.number}`;
+    if (seen.has(id)) return [];
+    seen.add(id);
+    return [{ number: pull.number, title: pull.title, repo }];
+  });
+}
+
+// The open pull requests as pullListing reads them, plus the ones sessions reported ready that
+// the review label does not already list, with the repository when it is not the bridge's own.
+async function pullsPart(tracker, reported = []) {
   const { summary, waiting } = await pullListing(tracker);
-  return waiting.length ? `${summary} Waiting on you: ${spokenPulls(waiting)}.` : summary;
+  const own = (tracker.repo ?? checkoutOf(tracker.cwd)?.repo ?? null)?.toLowerCase() ?? null;
+  const labeled = new Set(waiting.map(pull => pull.number));
+  // The labeled list is the bridge's own repository's. With that repository unknown, a
+  // number it lists counts as the same pull request whatever repository the session names.
+  const listed = pull => labeled.has(pull.number)
+    && (own === null || !pull.repo || pull.repo.toLowerCase() === own);
+  const extra = reported.filter(pull => !listed(pull));
+  let text = waiting.length ? `${summary} Waiting on you: ${spokenPulls(waiting)}.` : summary;
+  if (extra.length) {
+    const named = spokenFew(extra, pull => `${pull.number}, ${spoken(pull.title)}`
+      + (pull.repo && pull.repo.toLowerCase() !== own ? `, in ${pull.repo.split('/')[1]}` : ''));
+    text += ` Reported ready by their sessions: ${named}.`;
+  }
+  return text;
 }
 
 // The pull requests merged since the start of yesterday, or with since, those merged after
@@ -6594,7 +7427,8 @@ export async function spokenSummary(sessions, paths, tracker, cache, { full = fa
     return text;
   };
   const parts = await Promise.all([
-    summaryPart(() => pullsPart(tracker), 'open pull requests'),
+    summaryPart(async () => pullsPart(tracker,
+      await reportedPulls(sessions, paths, tracker).catch(() => [])), 'open pull requests'),
     summaryPart(marked('merged', () => mergedPart(tracker, before.merged)),
       'merged pull requests'),
     summaryPart(marked('runs', () => runsPart(tracker, before.runs)), 'workflow runs'),
@@ -8025,9 +8859,12 @@ const REVIEW_REFUSALS = {
 };
 
 // The merge methods the repository allows, in the order one is picked.
-async function mergeMethods({ cwd, gh }) {
+// gh ignores GH_REPO for repo view without a repository argument and reads the folder's
+// checkout, so a tracker with a repository names it.
+async function mergeMethods({ cwd, gh, repo }) {
   const settings = JSON.parse(await gh({
-    cwd, args: ['repo', 'view', '--json', MERGE_METHODS.map(m => m.setting).join(',')],
+    cwd, args: ['repo', 'view', ...(repo ? [repo] : []), '--json',
+      MERGE_METHODS.map(m => m.setting).join(',')],
   }));
   return MERGE_METHODS.filter(method => settings[method.setting]);
 }
@@ -9268,7 +10105,8 @@ function readyHeld(paths) {
 }
 
 // ready.json, beside the sign-in state, holds announced, each pull request announced as
-// ready, by number, as { head, at }, so a ready line for the same head is not announced again.
+// ready, by number, as { head, at, key, repo }, so a ready line for the same head is not
+// announced again. key is the session that reported it and repo that session's repository.
 const readReady = file => {
   const held = readJson(file, null);
   return { announced: isRecord(held?.announced) ? held.announced : {} };
@@ -9284,14 +10122,16 @@ function dropReadyLine(file, at) {
   }
 }
 
-// Each number's pull request read through gh, READY_READS_AT_ONCE at a time, as { pull } or
-// { error }.
-async function viewPulls(numbers, tracker) {
+// Each item's pull request, { id, number, cwd }, read through gh in its folder,
+// READY_READS_AT_ONCE at a time, as { pull } or { error }, by id.
+async function viewPulls(items, tracker) {
   const views = new Map();
-  const queue = [...numbers];
+  const queue = [...items];
   const reader = async () => {
-    for (let number = queue.shift(); number !== undefined; number = queue.shift()) {
-      views.set(number, await pullView(number, 'owner', tracker)
+    for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
+      // Read in the folder of the session that reported it, so its own repository answers.
+      views.set(item.id, await pullView(item.number, 'owner',
+        { ...tracker, cwd: item.cwd ?? tracker.cwd })
         .then(pull => ({ pull }), error => ({ error })));
     }
   };
@@ -9307,8 +10147,10 @@ async function viewPulls(numbers, tracker) {
 // dropped and logged. A ready line gh cannot read stays, tried again after READY_RETRY_MS,
 // then twice as long each time. A waiting notice whose pull request merged or closed is
 // dropped, and one whose pull request moved to a new head is kept at that head. sessions is
-// called for the session names only when there is a line to announce. Returns the lines
-// announced.
+// called only for a line with no cwd of its own, to find its session, and for the name of a
+// line that is announced. A line read in the folder it names, else in its live session's, else,
+// with no session information at all, in the bridge's own; a line naming a session that is gone
+// and no folder is dropped and logged. Returns the lines announced.
 export async function scanReady({ paths, tracker, sessions, log }) {
   const { tries, checked } = readyHeld(paths);
   const folder = path.join(paths.bridgeDir, 'ready');
@@ -9322,45 +10164,74 @@ export async function scanReady({ paths, tracker, sessions, log }) {
     if (!files.includes(path.basename(held))) tries.delete(held);
   }
   const now = tracker.now();
+  // A pull request in the bridge's own repository is told apart by its number, as it always
+  // was; one in another repository by the repository and the number.
+  const own = checkoutOf(tracker.cwd)?.repo ?? null;
+  const identity = (repo, number) => (!repo || repo === own ? number : `${repo}#${number}`);
+  let listed;
+  const ownerOf = (key, sessionId) => (listed ??= sessions())
+    .find(s => s.key === key && (!sessionId || s.sessionId === sessionId));
   const due = [];
   for (const file of files) {
     const full = path.join(folder, file);
-    const at = readJson(full, null)?.at;
+    const line = readJson(full, null);
+    const at = line?.at;
     const tried = tries.get(full);
     if (at === undefined || (tried && now - tried.at < tried.wait)) continue;
     const [, key, number] = file.match(READY_FILE);
-    due.push({ full, at, key, number: Number(number), tried });
+    // The pull request is read in the folder the hook recorded, else in the folder of the live
+    // session that wrote the line.
+    let cwd = line.cwd || undefined;
+    if (cwd && !fs.existsSync(cwd)) {
+      dropReadyLine(full, at);
+      log?.(`ready line for ${number} dropped: its folder ${cwd} is gone`);
+      continue;
+    }
+    if (!cwd) {
+      cwd = ownerOf(key, line.session)?.cwd;
+      if (!cwd && line.session) {
+        dropReadyLine(full, at);
+        log?.(`ready line for ${number} dropped: its session is no longer running`);
+        continue;
+      }
+    }
+    const repo = checkoutOf(cwd)?.repo ?? null;
+    due.push({ full, at, key, number: Number(number), tried, repo, cwd,
+      id: identity(repo, Number(number)) });
   }
-  const notices = waitingNotices(paths.noticesDir, ['ready']).filter(notice => notice.head);
-  const waiting = new Set(notices.map(notice => notice.number));
-  for (const [number, at] of checked) {
-    if (!waiting.has(number) || now - at > READY_KEEP_MS) checked.delete(number);
+  const notices = waitingNotices(paths.noticesDir, ['ready']).filter(notice => notice.head)
+    .map(notice => ({ ...notice, id: identity(notice.repo ?? null, notice.number) }));
+  const waiting = new Set(notices.map(notice => notice.id));
+  for (const [id, at] of checked) {
+    if (!waiting.has(id) || now - at > READY_KEEP_MS) checked.delete(id);
   }
   const recheck = notices.filter(notice =>
-    now - (checked.get(notice.number) ?? notice.at ?? -Infinity) >= READY_RECHECK_MS);
-  const numbers = [...new Set([...due, ...recheck].map(item => item.number))];
-  if (numbers.length === 0) return [];
-  const views = await viewPulls(numbers, tracker);
-  const missing = number => NO_SUCH_PULL.test(views.get(number).error?.message ?? '');
+    now - (checked.get(notice.id) ?? notice.at ?? -Infinity) >= READY_RECHECK_MS);
+  const items = new Map([...due, ...recheck]
+    .map(item => [item.id, { id: item.id, number: item.number, cwd: item.cwd }]));
+  if (items.size === 0) return [];
+  const views = await viewPulls([...items.values()], tracker);
+  const missing = id => NO_SUCH_PULL.test(views.get(id).error?.message ?? '');
   // Every waiting notice whose pull request this scan read, rechecked or not.
-  for (const notice of notices.filter(n => views.has(n.number))) {
-    const { pull } = views.get(notice.number);
-    if (pull) checked.set(notice.number, now);
-    if (missing(notice.number) || (pull && pull.state !== 'OPEN')) {
+  for (const notice of notices.filter(n => views.has(n.id))) {
+    const { pull } = views.get(notice.id);
+    if (pull) checked.set(notice.id, now);
+    if (missing(notice.id) || (pull && pull.state !== 'OPEN')) {
       claimNotice(notice.file);
       log?.(`ready notice for ${notice.number} dropped: it is no longer open`);
     } else if (pull && pull.headRefOid !== notice.head) {
-      addNotice(paths.noticesDir, `ready-${notice.number}`, notice.text, notice.at,
-        { number: notice.number, head: pull.headRefOid });
+      addNotice(paths.noticesDir, path.basename(notice.file, '.json'), notice.text, notice.at,
+        { number: notice.number, head: pull.headRefOid,
+          ...(notice.repo && { repo: notice.repo, cwd: notice.cwd }) });
     }
   }
   const found = [];
   for (const line of due) {
-    const { pull, error } = views.get(line.number);
+    const { pull, error } = views.get(line.id);
     if (pull) {
       tries.delete(line.full);
       found.push({ ...line, pull });
-    } else if (missing(line.number)) {
+    } else if (missing(line.id)) {
       tries.delete(line.full);
       dropReadyLine(line.full, line.at);
       log?.(`ready line for ${line.number} dropped: gh has no such pull request`);
@@ -9375,24 +10246,27 @@ export async function scanReady({ paths, tracker, sessions, log }) {
   return withRecord(paths.readyFile, readReady, state => {
     const lines = [];
     let listed;
-    for (const { full, at, key, pull } of found) {
+    for (const { full, at, key, pull, id, repo, cwd } of found) {
       dropReadyLine(full, at);
       if (pull.state !== 'OPEN') {
         log?.(`ready line for ${pull.number} dropped: it reads ${pull.state.toLowerCase()}`);
         continue;
       }
-      if (state.announced[pull.number]?.head === pull.headRefOid) {
+      if (state.announced[id]?.head === pull.headRefOid) {
         log?.(`ready line for ${pull.number} dropped: its head was announced already`);
         continue;
       }
-      state.announced[pull.number] = { head: pull.headRefOid, at: now };
-      listed ??= sessions();
-      const name = listed.find(s => s.key === key)?.name ?? 'A session';
-      const line = `${name} marked pull request ${pull.number}, ${spoken(pull.title)}, ready `
-        + 'for your review.';
-      addNotice(paths.noticesDir, `ready-${pull.number}`, line, now,
-        { number: pull.number, head: pull.headRefOid });
-      checked.set(pull.number, now);
+      const name = ownerOf(key)?.name ?? 'A session';
+      // The session and its repository are kept with the head, so a listing can say which
+      // sessions reported a pull request ready and in which repository.
+      state.announced[id] = { head: pull.headRefOid, at: now, key, repo };
+      const apart = id !== pull.number;
+      const line = `${name} marked pull request ${pull.number}, ${spoken(pull.title)}, `
+        + `${apart ? `in ${repo.split('/')[1]}, ` : ''}ready for your review.`;
+      addNotice(paths.noticesDir,
+        apart ? `ready-${repo.replace(/[^\w.-]/g, '-')}-${pull.number}` : `ready-${pull.number}`,
+        line, now, { number: pull.number, head: pull.headRefOid, ...(apart && { repo, cwd }) });
+      checked.set(id, now);
       lines.push(line);
     }
     for (const [number, { at }] of Object.entries(state.announced)) {
@@ -9427,6 +10301,7 @@ function watchTracker(paths, config, log) {
   });
   repeat(NOTICE_SCAN_MS, 'prompt outcome', async () => {
     for (const told of relayFailures({ sessions: running(), paths })) log(`told: ${told}`);
+    for (const told of relayBlocks({ sessions: running(), paths })) log(`told: ${told}`);
   });
 }
 
@@ -9662,14 +10537,15 @@ export function runClaudeBackground({ cwd, name, prompt, model }) {
 }
 
 // The running Claude app session titled as the launcher, in a session root or anywhere under
-// home, or null.
+// home, or null. Its base title is compared, so a launcher that carries a work name or a status
+// is still found.
 // Only a session the app runs has the app's start_session tool, and only an app session it
 // starts sits with the user's other app sessions in the sidebar.
 export function findLauncher(paths, config, home = os.homedir()) {
   const name = String(config.launcher ?? LAUNCHER_NAME).trim();
   if (!name) return null;
   return listSessions({ ...paths, roots: [...(config.roots ?? DEFAULT_ROOTS), home] })
-    .find(s => s.app && sameTitle(s.name, name)) ?? null;
+    .find(s => s.app && sameTitle(baseTitle(titleOf(s)), name)) ?? null;
 }
 
 // What the launcher is sent to start one session. The fields go as JSON, so the request text
@@ -9971,14 +10847,22 @@ const WORK_SEPARATOR = ' - ';
 // rather than adding to it. The last separator ends the base, so a base title that holds a
 // dash of its own keeps it, and a work name never holds the separator (workTitle drops it).
 function baseTitle(title) {
-  const named = title.replace(STATUS_SUFFIX, '');
+  return splitTitle(title).base;
+}
+
+// A title taken apart as session_title.py's split_title does: the base, the work name, and the
+// status in parentheses with the space before it, each '' when it has none.
+function splitTitle(title) {
+  const tail = title.match(STATUS_SUFFIX)?.[0] ?? '';
+  const named = title.slice(0, title.length - tail.length);
   const at = named.lastIndexOf(WORK_SEPARATOR);
-  return (at < 0 ? named : named.slice(0, at)).trim();
+  return { base: (at < 0 ? named : named.slice(0, at)).trim(),
+    work: at < 0 ? '' : named.slice(at + WORK_SEPARATOR.length).trim(), tail };
 }
 
 // The status a session appends in parentheses when it stops or waits, from session_title.py's
 // STATUSES, so a base title is read the same way here and there.
-const STATUS_SUFFIX = /\s+\((?:idle|waiting on you|stuck|stopped|waiting on CI)\)$/;
+const STATUS_SUFFIX = /\s+\((?:idle|waiting on you|stuck|stopped|waiting on CI|needs you|working)\)$/;
 
 // The title for a session starting the work `work`: its base title, the separator, and the
 // work name clipped to what the title limit leaves. An empty work name returns the base title.
@@ -9994,23 +10878,10 @@ function workTitle(title, work) {
   return sessionTitle(`${base}${WORK_SEPARATOR}${fits}`, '');
 }
 
-// Renames a session with the control message Claude Code's own session list sends to another
-// session's inbox socket. The session sets the title itself, as /rename typed there would,
-// and writes it to its session file, the one the sidebar and listSessions read. The
-// session_id field makes a session that took over the socket drop it.
-// list reads the sessions again, so the new title is confirmed from the sessions folder.
-export async function renameSession(session, args, {
-  sessions, list, settle = () => {}, waitMs = RENAME_WAIT_MS,
-}) {
-  if (args?.work !== undefined && args?.name !== undefined) {
-    throw new Error('Pass a name or a work name, not both.');
-  }
-  const name = args?.work === undefined
-    ? sessionTitle(args?.name, `The new name for ${session.name} is empty. Say what to call it.`)
-    : workTitle(session.name, args.work);
-  if (name === titleOf(session)) return `${session.name} is already called that.`;
-  // A title that is a number alone would answer to "session two" before the session with
-  // that number does.
+// Throws when the title would hide another session: a title that is a number alone would
+// answer to "session two" before the session with that number does, and one another session
+// is called or nicknamed would reach the wrong one.
+function checkRename(session, name, sessions) {
   const spoken = asNumbers(words(name).filter(word => !SESSION_FILLER.includes(word)));
   if (spoken.length === 1 && /^\d+$/.test(spoken[0])) {
     throw new Error(`${name} reads as a session number, so it would hide session `
@@ -10027,10 +10898,31 @@ export async function renameSession(session, args, {
     throw new Error(`${sessionLabel(nicknamed)} already answers to ${name}. Pick another `
       + `name for ${session.name}.`);
   }
-  await postLine(session.socket, {
-    type: 'control', action: 'rename', name,
-    ...(session.sessionId && { session_id: session.sessionId }),
-  });
+}
+
+// Posts the rename control message to the session's inbox socket.
+const postRename = (session, name) => postLine(session.socket, {
+  type: 'control', action: 'rename', name,
+  ...(session.sessionId && { session_id: session.sessionId }),
+});
+
+// Renames a session with the control message Claude Code's own session list sends to another
+// session's inbox socket. The session sets the title itself, as /rename typed there would,
+// and writes it to its session file, the one the sidebar and listSessions read. The
+// session_id field makes a session that took over the socket drop it.
+// list reads the sessions again, so the new title is confirmed from the sessions folder.
+export async function renameSession(session, args, {
+  sessions, list, settle = () => {}, waitMs = RENAME_WAIT_MS,
+}) {
+  if (args?.work !== undefined && args?.name !== undefined) {
+    throw new Error('Pass a name or a work name, not both.');
+  }
+  const name = args?.work === undefined
+    ? sessionTitle(args?.name, `The new name for ${session.name} is empty. Say what to call it.`)
+    : workTitle(session.name, args.work);
+  if (name === titleOf(session)) return `${session.name} is already called that.`;
+  checkRename(session, name, sessions);
+  await postRename(session, name);
   try {
     return await renamed(session, name, list, waitMs);
   } finally {
@@ -10212,25 +11104,41 @@ export async function callTool(name, args, {
     if (!repo.repo) return repo.ask;
     args = { ...args, repo: repo.repo };
   }
+  // A spoken repository found on GitHub among those the owners have, with its local checkout
+  // when there is one: { local: { repo, dir }, dir, away }, away the tracker that works in it.
+  // The bridge's own repository keeps its merges keyed by number, as the merge scan does.
+  const resolveAway = async said => {
+    const local = await resolveTrackerRepo(said, { gh, cwd: tracker.cwd,
+      checkout: name => repoCheckout(name, config.codeDir ?? CODE_DIR, repoNames(paths, config)),
+      now: now() });
+    const dir = local.dir ?? tracker.cwd;
+    const own = local.repo.toLowerCase()
+      === nowRepo(checkoutOf(tracker.cwd)?.repo, merges.renamed);
+    // The merge record is keyed by the lowercase name, as the session path keys it; gh gets
+    // GitHub's own case.
+    const away = own ? { ...tracker } : { ...tracker, repo: local.repo.toLowerCase(), cwd: dir,
+      gh: call => gh({ ...call, repo: local.repo }) };
+    return { local, dir, away };
+  };
   // A merge in another repository runs from the checkout of a session that works in it.
   if (name === 'merge_pull_request' && String(args?.repo ?? '').trim()) {
     const sessions = listSessions({ ...paths, roots: listed });
     const found = await sessionCheckout(args.repo, sessionCheckouts(sessions, roots),
       { paths, config, tracker });
     if (typeof found === 'string') {
-      // No session works there. A local checkout lets the bridge merge from it and finish the
-      // post-merge steps itself; with none, the merge is not made, since those steps could not
-      // run. A name that matches more than one repository is asked about, not looked up again.
+      // No session works there. The repository is found on GitHub among those the user and the
+      // user's organizations own, as the other tracker tools find it, so no session or checkout
+      // is needed: gh works from the repository's name, and the bridge finishes the post-merge
+      // steps itself. A name that matches more than one repository is asked about, not looked
+      // up again.
       if (!found.startsWith(NO_SESSION)) return found;
-      let local;
+      let via;
       try {
-        local = await startCheckout(args.repo, { paths, config, tracker });
+        via = await resolveAway(args.repo);
       } catch (error) {
-        return error.missing ? found : error.message;
+        return error.message;
       }
-      // The bridge's own repository keeps its merges keyed by number, as the merge scan does.
-      const own = local.repo === nowRepo(checkoutOf(tracker.cwd)?.repo, merges.renamed);
-      const away = own ? { ...tracker } : { ...tracker, repo: local.repo, cwd: local.dir };
+      const { local, dir, away } = via;
       away.onMerged = async number => {
         const told = await tellMerged(number, { ...merges, tracker: away, quiet: true,
           sessions: listSessions({ ...paths, roots: listed }) }).catch(error => {
@@ -10238,7 +11146,7 @@ export async function callTool(name, args, {
             + `${error?.message ?? error}`);
           return '';
         });
-        return told || finishMerge(number, { repo: local.repo, dir: local.dir, gh });
+        return told || finishMerge(number, { repo: local.repo, dir, gh });
       };
       return mergePullRequest(args, away);
     }
@@ -10276,13 +11184,27 @@ export async function callTool(name, args, {
   if (['list_sessions', 'needs_attention', 'summary'].includes(name)) {
     relayFailures({ sessions: listSessions({ ...paths, roots: listed }), paths, now: now(),
       cache: transcripts });
+    relayBlocks({ sessions: listSessions({ ...paths, roots: listed }), paths, now: now() });
   }
   if (name === 'pull_request_merged') {
     const number = itemNumber(args, 'pull request');
     if (String(args?.repo ?? '').trim()) {
       const found = await sessionCheckout(args.repo, sessionCheckouts(sessions, roots),
         { paths, config, tracker });
-      if (typeof found === 'string') return found;
+      if (typeof found === 'string') {
+        // No session works there: the repository is found on GitHub, and with no session to
+        // tell, the bridge finishes the post-merge steps itself.
+        if (!found.startsWith(NO_SESSION)) return found;
+        let via;
+        try {
+          via = await resolveAway(args.repo);
+        } catch (error) {
+          return error.message;
+        }
+        const told = await tellMerged(number, { ...merges, tracker: via.away, quiet: true,
+          sessions });
+        return told || finishMerge(number, { repo: via.local.repo, dir: via.dir, gh });
+      }
       if (found.repo !== nowRepo(checkoutOf(tracker.cwd)?.repo, merges.renamed)) {
         return tellMerged(number, { ...merges,
           tracker: { ...tracker, repo: found.repo, cwd: found.cwd }, sessions });
@@ -10304,14 +11226,26 @@ export async function callTool(name, args, {
     const verdicts = await Promise.all(attended.map(({ session: s, state: waiting }) =>
       idleState(s, paths.projectsDir, background, waiting)));
     const window = windowFor(paths, config);
+    const updates = [];
+    const readyIdx = readyIndex(paths);
     const lines = attended.map(({ session: s, state: waiting }, i) => {
       const load = transcriptLoad(s, paths.projectsDir);
       // Past LONG_TURN_MS on one turn, a session is named first.
       const long = s.busy && at - load?.turnAt >= LONG_TURN_MS;
-      const waits = repoText(s) + ownedText(work.get(s.key)) + lastWritten(s, paths.projectsDir, at)
+      const progress = transcriptProgress(s, paths.projectsDir);
+      const waits = repoText(s) + ownedText(work.get(s.key))
+        + lastWritten(s, paths.projectsDir, at, progress)
         + (waiting ? `, waiting on ${waiting.reason}` : '');
       const label = namedLabel(s);
       const state = readReply(s, paths.bridgeDir, { peek: true });
+      // A reply not yet heard is read in full below, so only an idle or heard one is summed
+      // up, with replies false as well; what a reply asks counts whether or not it is read.
+      const heard = state.status === 'done' && replyHeardInFeed(paths.bridgeDir, s.key);
+      const update = sessionUpdate(s, { index: readyIdx, waiting, work: work.get(s.key),
+        said: latestSaid(s, paths, state, progress),
+        show: (state.status === 'idle' && !s.busy) || heard });
+      updates.push({ session: s, name: update.name,
+        skip: Boolean(work.get(s.key)?.lookupFailed || work.get(s.key)?.issuesUnknown) });
       const following = isFollowed(s, paths.bridgeDir) ? '' : ', not followed';
       const earlier = unreadEarlier(bridgeFiles(paths.bridgeDir, s.key), s, paths.bridgeDir).length
         ? ', an earlier answer waiting for read_reply' : '';
@@ -10321,11 +11255,13 @@ export async function callTool(name, args, {
         const awaiting = verdicts[i].startsWith('waiting on background work')
           ? `, ${verdicts[i]}` : '';
         const ready = `${label}${awaiting}, reply ready${earlier}${following}${waits}`;
-        if (args?.replies === false) return said(ready);
+        if (args?.replies === false) {
+          return said(heard ? `${ready}, already heard${update.text}` : `${ready}${update.text}`);
+        }
         // A reply the follow feed already carried to the phone is not read out a second time,
         // but it is marked read like one that was.
-        const heard = replyHeardInFeed(paths.bridgeDir, s.key);
-        return { long, text: heard ? `${ready}, already heard` : ready, inline: s, heard };
+        return { long, text: heard ? `${ready}, already heard${update.text}`
+          : `${ready}${update.text}`, inline: s, heard };
       }
       if (state.status === 'working') {
         // Until the request lands as a prompt row, the turn the tail holds is the one before.
@@ -10334,13 +11270,13 @@ export async function callTool(name, args, {
         const used = loadText(turn, { busy: true, now: at, window });
         return { long: state.seconds * 1000 >= LONG_TURN_MS,
           text: `${label}, working on your request for ${state.seconds} seconds`
-            + `${used}${earlier}${following}${waits}` };
+            + `${used}${earlier}${following}${waits}${update.text}` };
       }
       const kind = s.background ? ', background' : '';
       const loaded = loadText(load, { busy: s.busy, now: at, window });
       const idle = `idle${loaded}${verdicts[i] && `, ${verdicts[i]}`}`;
       return said(`${label}, ${s.busy ? `busy${loaded}` : idle}${kind}${earlier}${following}`
-        + waits);
+        + waits + update.text);
     });
     // The replies are read, and so marked read, only once every line is built, so a listing
     // that throws leaves them for the next call.
@@ -10350,6 +11286,9 @@ export async function callTool(name, args, {
         line.text += `. It said: ${inlineReply(reply.text)}`;
       }
     }
+    // The renames start once the lines are built and are not waited for, so a rename that
+    // fails or a session that never answers cannot fail or hold up the listing.
+    renameFromFacts(updates, { paths, sessions, config, now: at });
     const ordered = [...lines.filter(line => line.long), ...lines.filter(line => !line.long)];
     return goneNotice(paths, sessions, now())
       + [...ordered.map(line => line.text), ...shared].join('\n');
@@ -10427,6 +11366,10 @@ export async function callTool(name, args, {
     if (asked.length === 0) return 'No sessions are running that the bridge can reach.';
     return asked.map(s => contextLine(s, paths, window)).join('\n');
   }
+  if (name === 'rename_all_sessions') {
+    if (sessions.length === 0) return 'No sessions are running that the bridge can reach.';
+    return renameAllSessions(sessions, { paths, config, tracker, now });
+  }
   if (name === 'list_scheduled_tasks') return listScheduledTasks(args, { paths, now: now() });
   if (name === 'read_scheduled_task_result') {
     return readScheduledTaskResult(args, { paths, now: now() });
@@ -10477,6 +11420,7 @@ export async function callTool(name, args, {
     return `Sent to ${session.name}.${wait}${first} Call read_reply for the `
       + 'answer; it waits about three seconds for it.';
   }
+  if (name === 'allow_blocked_call') return allowBlockedCall(session, args, { paths, pages, now });
   if (name === 'run_command') {
     return runCommand(session, args, { paths, pages, now, post, run, guard, home });
   }
@@ -10507,7 +11451,22 @@ export async function callTool(name, args, {
   if (name === 'rename_session') {
     const list = () => listSessions({ ...paths, roots: sessionRoots(config) });
     const settle = () => numberedSessions(paths, config);
-    return renameSession(session, args, { sessions, list, settle, waitMs: renameWaitMs });
+    // The bridge starts no rename of this session while the user's is under way.
+    const { user } = renameMemory(paths.bridgeDir);
+    user.add(session.key);
+    try {
+      const done = await renameSession(session, args, { sessions, list, settle,
+        waitMs: renameWaitMs });
+      // The title is the user's now, so the bridge no longer owns its work name.
+      try {
+        keepOwnedNames(paths.bridgeDir, session, []);
+      } catch (error) {
+        console.error(`Could not forget the work name the bridge gave: ${error.message}`);
+      }
+      return done;
+    } finally {
+      user.delete(session.key);
+    }
   }
   if (name === 'nickname_session') {
     return setNickname(session, args, { sessions, numbersFile: paths.numbersFile });
