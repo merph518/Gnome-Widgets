@@ -491,15 +491,50 @@ queued. A source is one of:
 A job line is `<issue>`, `<issue> <change>`, `suite <code>`, or the full
 `queue add` form, such as `--issue 9415 --doc <path>`. Blank lines and lines
 that start with `#` are skipped, and a line that is not a job is counted and
-skipped. Jobs queued this way skip the `check` gates, so a job whose
-documents have no usable rules fails at intake, retries once, and is dropped with
-a gate reason code (for example `gate:rules-not-extracted`);
+skipped. Jobs queued this way are not checked when they are queued, so the
+pre-check below is what catches a bad one before the night. A job whose
+documents have no usable rules otherwise fails at intake, retries once, and is
+dropped with a gate reason code (for example `gate:rules-not-extracted`);
 the report shows it. A job already in the queue file in any state (waiting, passed, failed
 or removed) is never queued again, so a list can stay in the folder after its
 jobs have run. `queue fill` does the same read by hand and prints which jobs it
 queued, how many it already knew, and which sources it could not read. A source
 that lists every record in the repository queues every one of them the first
 time, so point a `records` source at the open ones.
+
+**The queue is checked at 18:00.** `queue check` changes nothing in the
+queue. It runs the `check` input gates, with no model call, on every waiting
+issue row and on every job the sources would queue tonight, and writes the
+lines to `precheck.txt` in the pipeline output folder: a `checked <local time>`
+line, a `sources` line with the counts `queue fill` would print, then one line
+per input, `<job-id>  <input>  present|missing  <code>`, with the codes
+`check` prints. The sources are read, not filled, so a source line fixed after
+the check still counts at the nightly fill. A suite row reads
+`<job-id>  suite  refused`, since `check` takes issue jobs only. A row queued
+without `--doc` reads `rules  unchecked` when the document index has
+candidates, and `documents  missing  no-candidates` when it has none. A row
+still marked running while no run holds the queue reads `running  stale-row`
+and is checked too: the nightly run counts it as a failed try, `interrupted`,
+and takes it again. On its last try that settle drops it instead, so it reads
+`running  stale-row-dropped` and is not checked. A row whose check throws reads
+`check  failed  <error name>`, and a queue file that does not parse ends the
+lines with `precheck  failed  <error name>`.
+
+A run that holds the queue is waited for, up to an hour; after that the file
+reads `queue  held  precheck-skipped`, and a run that takes the queue mid-check
+stops it before the next row with `queue  held  precheck-stopped`; a rule
+export already going finishes first. While the check runs the file
+reads `precheck  running`, and the final `checked` time is when the queue
+was read, after any wait. A check stopped part way never leaves the last
+day's lines standing. The exit code is like `check`'s: 1 when an input is
+missing, a source could not be read, a check or the pre-check failed, or the
+queue stayed held, and 3 when some rows' rules went unchecked; the unit fails
+on 1 only.
+`local/systemd/build-pack-check.timer` starts it at 18:00, four hours before
+the nightly run at the default `queue.start`, so a job with a missing input can
+be fixed or removed with `queue remove` first; a host with an earlier
+`queue.start` moves the timer to match. A check the machine slept through is
+not made up.
 
 **A failed job tries once more.** The first time a job fails, its row goes back
 to waiting with the failure kept (phase and reason code). A job that failed
@@ -577,15 +612,16 @@ half an hour after the queue's default cutoff.
 - Move the timer to another host. On the new host install the repository, the
   model server, the pipeline config and the env file at
   `~/.config/build-pack/env`, then copy `build-pack.service`, `build-pack.timer`,
+  `build-pack-check.service`, `build-pack-check.timer`,
   `build-pack-report.service` and `build-pack-report.timer` to
   `~/.config/systemd/user/` and run `systemctl --user daemon-reload` and
-  `systemctl --user enable --now build-pack.timer build-pack-report.timer`. Run
+  `systemctl --user enable --now build-pack.timer build-pack-check.timer build-pack-report.timer`. Run
   `loginctl enable-linger <user>` on the new host as well, or user timers stop
   when that user logs out and the night's run never starts. Copy the queue file
   (`queue.file`) and the pipeline's output folder (the jobs' status logs and the
   reports) from the old host so the queue and its history carry over, and run
   `queue status` for a waiting job to check it is read. Then
-  `systemctl --user disable --now build-pack.timer build-pack-report.timer` on
+  `systemctl --user disable --now build-pack.timer build-pack-check.timer build-pack-report.timer` on
   the old host. Two hosts with the timer on would build the same jobs twice,
   since the queue lock is per host.
 

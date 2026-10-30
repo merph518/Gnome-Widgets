@@ -60,7 +60,7 @@ reply text: the user does not see it there.**
 | `<repo-constraints>` | None beyond the writing rules and the README rule under Repository notes |
 | `<test-accounts>` | Not applicable here, because there are no test accounts |
 | `<static-checks>` | Local checks, under Overrides, Section 5 |
-| `<pr-checks>` | None yet: there is no `ci.yml`. Static checks are local |
+| `<pr-checks>` | The `test-all` job in `.github/workflows/ci.yml` runs every test and the static checks on a pull request and again on each push to its branch. The ready signal waits for it, under Overrides, Section 7, Ready signal. This replaces the general skill's wording that a pull request check runs static checks only: the local runs in Section 6 still go green before the pull request opens |
 | `<test-dispatch>` | Not applicable here, because nothing is dispatched. Tests run locally, under Overrides, Section 6 |
 | `<test-run-rules>` | Not applicable here, because there are no test families or run counts |
 | `<shared-env>` | Not applicable here, because there is no shared test environment |
@@ -156,7 +156,8 @@ pull request bodies) in files in the session's scratchpad directory.
 
 ### Section 5, static checks
 
-There are no CI checks, so these run locally on the changed files before every commit:
+These run locally on the changed files before every commit, so a push does not wait on
+CI to find what a local check would have shown:
 
 - Every changed JSON file parses: `python3 -m json.tool <file>`.
 - `node --check <file>` on each changed `.mjs` or `.js` file.
@@ -213,7 +214,42 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   fix, and say in the report that the loop ran past three passes. A fifth pass that
   still finds a real bug stops the work and asks through `AskUserQuestion`.
 - Ready signal: never leave the pull request in draft. When the loop ends, mark it ready
-  with `gh pr ready <n>`, add the label through the issues endpoint, and read it back:
+  with `gh pr ready <n>`. The label is added only when every check on the pull request has
+  passed on the current head. A read right after a push or a merge of `origin/main` can
+  still show the previous commit's result, so first confirm the pull request's head is the
+  commit pushed. Write the local commit to a file in the scratchpad, then compare it with
+  the pull request's head every ten seconds for two minutes, in a background command that
+  has no command substitution:
+
+  ```bash
+  git rev-parse HEAD > <scratchpad>/head.txt
+  for i in {1..12}; do gh pr view <n> --json headRefOid --jq .headRefOid | grep -qxFf <scratchpad>/head.txt && { echo matched; break; }; sleep 10; done
+  ```
+
+  If it never prints `matched`, check that the push landed (`git status -sb`) and push it,
+  or ask through `AskUserQuestion`.
+
+  Then wait while any check is pending, or while none is reported yet, with a background
+  command that has no command substitution and stops after thirty minutes:
+
+  ```bash
+  for i in {1..30}; do gh pr checks <n> 2>&1 | grep -Eq 'pending|no checks reported' || break; sleep 60; done; gh pr checks <n>
+  ```
+
+  If the thirty minutes pass with a check still pending or none reported (a conflict, a
+  skipped run, or offline runners keep a run from starting), stop waiting and ask through
+  `AskUserQuestion`. Merging `origin/main` into the branch, or any push, starts the checks
+  again, so the head check and the wait repeat after it.
+
+  A check that fails is a real failure to fix, then Opus reviews the fix and it is pushed
+  like any other fix; the label stays off until the rerun passes. This holds for a docs-only
+  branch too, because `test-all` runs the whole suite on every pull request: a failure
+  already on `main` is fixed here, and the body's Verification reports the CI result. A
+  check that reads `cancel` (a newer push cancels the older run, and a run past its timeout
+  reads the same) is not a pass: when the head is current, rerun it once with
+  `gh run rerun <run-id>`, and ask through `AskUserQuestion` if it cancels again. Once
+  every check reads `pass` on the current head, add the label through the issues endpoint
+  and read it back:
 
   ```bash
   gh api repos/merph518/Overmind/issues/<n>/labels -f "labels[]=Manual Review Needed"
@@ -221,10 +257,11 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   ```
 
   A report that calls a pull request ready without the label reading back is wrong; fix
-  the label first. A commit pushed after the label is a new change: remove the label with
+  the label first. A label on this session's own pull request whose checks are pending or
+  red is wrong too: remove it. A commit pushed after the label is a new change: remove the label with
   `gh api -X DELETE repos/merph518/Overmind/issues/<n>/labels/Manual%20Review%20Needed`
   (a 404 means it was not on yet) and add it again only once the review of that commit
-  is clean.
+  is clean and its checks have passed.
 - Ready check: at the start of every pass of a loop over issues, and before any final
   report, list the open pull requests that are not drafts and lack the label:
 
@@ -232,10 +269,15 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   gh pr list --state open --limit 200 --json number,isDraft,labels --jq '[.[] | select(.isDraft | not) | select(any(.labels[]; .name == "Manual Review Needed") | not) | .number]'
   ```
 
-  Label this session's own pull request on that list once its review is clean. Report
-  another session's only when its body already has a `Self review` section and no
-  session holds it (`ListAgents`, the issue's `In Progress` label); one still in review
-  is not yet ready.
+  Label this session's own pull request on that list once its review is clean and its
+  checks have passed. Report another session's only when its body already has a
+  `Self review` section and no session holds it (`ListAgents`, the issue's `In Progress`
+  label); one still in review is not yet ready. Before any final report, also read
+  `gh pr checks` for each of this session's own labeled pull requests, since a later
+  "Update branch" merge or push can turn one red, and remove the label from one that is
+  not passing. In a loop over issues, the wait runs in the background while the loop works
+  the next issue; the next pass's ready check picks the pull request up when its checks
+  finish.
 
 ## Added gates
 

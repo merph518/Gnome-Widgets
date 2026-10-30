@@ -7,6 +7,7 @@
 //   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
 //   node build-pack.mjs queue remove --config <pipeline.json> --job <id>
 //   node build-pack.mjs queue fill --config <pipeline.json>
+//   node build-pack.mjs queue check --config <pipeline.json>
 //   node build-pack.mjs queue run --config <pipeline.json> [--cutoff HH:MM]
 //   node build-pack.mjs queue start --config <pipeline.json> --job <id> [--cutoff HH:MM]
 //   node build-pack.mjs queue status --config <pipeline.json> --job <id>
@@ -38,13 +39,14 @@ const USAGE = `usage:
   build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
   build-pack.mjs queue remove --config <file> --job <id>
   build-pack.mjs queue fill --config <file>
+  build-pack.mjs queue check --config <file>
   build-pack.mjs queue run --config <file> [--cutoff HH:MM]
   build-pack.mjs queue start --config <file> --job <id> [--cutoff HH:MM]
   build-pack.mjs queue status --config <file> --job <id>
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <file>]
-exit codes of check: 0 every input present, 1 an input missing, 3 documents not named, so their rules are unchecked
+exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
 exit codes of compare: 0 the comparison was written, 1 it failed while running, 2 bad arguments or unreadable input`;
 
 export function parseArgs(argv) {
@@ -136,12 +138,17 @@ export function readQueue(config) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function writeQueue(config, queue) {
-  const file = queuePath(config);
+/** Writes a whole file at once, so a reader never sees half of it. */
+function writeAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(queue, null, 1)}\n`);
+  // A temp name per process, so two writers never share one.
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, text);
   fs.renameSync(temp, file);
+}
+
+function writeQueue(config, queue) {
+  writeAtomic(queuePath(config), `${JSON.stringify(queue, null, 1)}\n`);
 }
 
 export function addJob(config, job, now = new Date()) {
@@ -199,8 +206,18 @@ export function jobFromLine(line) {
  * job, is counted and skipped so the other sources still fill the queue.
  */
 export function fillQueue(config, now = new Date()) {
+  const { jobs, ...result } = sourceJobs(config);
+  for (const job of jobs) addJob(config, job, now);
+  return { added: jobs.map(jobId), ...result };
+}
+
+/**
+ * The jobs the configured sources list that the queue has not seen, without
+ * queueing them, with the counts `fillQueue` reports.
+ */
+export function sourceJobs(config) {
   const seen = new Set(readQueue(config).jobs.map((row) => row.id));
-  const result = { added: [], known: 0, invalid: 0, errors: [] };
+  const result = { jobs: [], known: 0, invalid: 0, errors: [] };
   for (const source of config.queue.sources) {
     const { lines, error, invalid = 0 } = sourceLines(config, source);
     result.invalid += invalid;
@@ -220,8 +237,7 @@ export function fillQueue(config, now = new Date()) {
         continue;
       }
       seen.add(id);
-      addJob(config, job, now);
-      result.added.push(id);
+      result.jobs.push(job);
     }
   }
   return result;
@@ -539,6 +555,90 @@ export function jobStatus(config, id) {
   return lines;
 }
 
+/**
+ * The queue's pre-check, which changes nothing in the queue. It runs the input
+ * gates of `check`, with no model call, on every waiting row and on every job
+ * the sources would queue tonight, and returns content-free lines, each
+ * starting with a job ID, and an exit code like `check`'s: 1 when the queue
+ * stayed held, a source could not be read, an input is missing or a check or
+ * the pre-check itself failed, 3 when some rows'
+ * rules went unchecked, else 0, and `at`, when the queue was read. The sources are read, not filled, so a line
+ * fixed after the check still counts at the nightly fill.
+ *
+ * It holds no lock. While a run holds the queue it waits, polling every
+ * `pollMs` up to `waitMs`, and then skips. With the queue free, a row still marked running was left by a run that died; the
+ * nightly run settles it and runs it again, so it is checked too, unless that
+ * was its last try and the settle drops it. A run that takes the queue
+ * stops the check before its next row; a rule export already going finishes
+ * first. A suite row
+ * is refused, since `check` takes issue jobs only.
+ */
+export async function precheckQueue(config, { clock = () => new Date(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  waitMs = 60 * 60000, pollMs = 30000 } = {}) {
+  const giveUp = clock().getTime() + waitMs;
+  while (lockHeld(config)) {
+    if (clock().getTime() >= giveUp) return { lines: ['queue  held  precheck-skipped'], code: 1, at: clock() };
+    await sleep(pollMs);
+  }
+  const lines = [];
+  const at = clock();
+  let missing = false;
+  let unchecked = false;
+  try {
+    const rows = readQueue(config).jobs.filter((row) => ['queued', 'running'].includes(row.status));
+    const { jobs, ...fill } = sourceJobs(config);
+    lines.push(`sources  ${fillSummary({ added: jobs, ...fill }, 'would queue')}`);
+    // A source that cannot be read leaves its jobs out of tonight's queue.
+    missing = fill.errors.length > 0;
+    for (const job of [...rows, ...jobs]) {
+      if (lockHeld(config)) {
+        lines.push('queue  held  precheck-stopped');
+        missing = true;
+        break;
+      }
+      const id = jobId(job);
+      if (job.status === 'running') {
+        // Settling counts the interrupted try; on its last try the row is dropped, not run.
+        if ((job.failures?.length ?? 0) + 1 >= MAX_TRIES) {
+          lines.push(`${id}  running  stale-row-dropped`);
+          continue;
+        }
+        lines.push(`${id}  running  stale-row`);
+      }
+      if (job.suite) {
+        lines.push(`${id}  suite  refused`);
+        continue;
+      }
+      let checked;
+      try {
+        checked = checkJob(config, job);
+      } catch (error) {
+        // The error's name only: a message could carry a path or a document's text.
+        checked = { lines: [`check  failed  ${error.name}`], ok: false, unchecked: false };
+      }
+      for (const line of checked.lines) lines.push(`${id}  ${line}`);
+      missing ||= !checked.ok;
+      unchecked ||= checked.unchecked;
+    }
+  } catch (error) {
+    // A queue file that does not parse, say: the lines so far stand.
+    lines.push(`precheck  failed  ${error.name}`);
+    missing = true;
+  }
+  return { lines, code: missing ? 1 : unchecked ? 3 : 0, at };
+}
+
+/** Where the pre-check writes its lines: the output folder, beside the job folders. */
+export const precheckPath = (config) => path.join(config.output, 'precheck.txt');
+
+/** A local clock reading, `YYYY-MM-DD HH:MM`, the time the timers are set in. */
+export function localStamp(at) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} `
+    + `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
 async function main(argv) {
   const args = parseArgs(argv);
   const [command, sub] = args.words ?? [];
@@ -585,10 +685,14 @@ function busyQueue() {
 }
 
 /** The fill's outcome in content-free counts and codes. */
-function printFill({ added, known, invalid, errors }) {
-  for (const id of added) console.log(`queued ${id}`);
-  console.log(`filled ${added.length} job(s), ${known} already known, ${invalid} unreadable line(s)`
-    + (errors.length ? `, source problems: ${errors.join(' ')}` : ''));
+function printFill(result) {
+  for (const id of result.added) console.log(`queued ${id}`);
+  console.log(fillSummary(result));
+}
+
+function fillSummary({ added, known, invalid, errors }, verb = 'filled') {
+  return `${verb} ${added.length} job(s), ${known} already known, ${invalid} unreadable line(s)`
+    + (errors.length ? `, source problems: ${errors.join(' ')}` : '');
 }
 
 /** The compare command: needs no job config unless --model asks for the endpoint. */
@@ -657,6 +761,17 @@ async function dispatch(args, command, sub, config, track) {
     if (!held) return busyQueue();
     printFill(held.value);
     return 0;
+  }
+  if (command === 'queue' && sub === 'check') {
+    // The file reads `running` until the check ends, so a check stopped part
+    // way, by the unit's timeout say, does not leave yesterday's lines standing.
+    const write = (at, lines) => writeAtomic(precheckPath(config),
+      `${[`checked ${localStamp(at)}`, ...lines].join('\n')}\n`);
+    write(new Date(), ['precheck  running']);
+    const { lines, code, at } = await precheckQueue(config);
+    for (const line of lines) console.log(line);
+    write(at, lines);
+    return code;
   }
   if (command === 'queue' && sub === 'run') {
     const fillFirst = (cfg) => printFill(fillQueue(cfg));
