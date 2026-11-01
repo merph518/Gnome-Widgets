@@ -11,18 +11,20 @@ import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { addJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld,
-  parseArgs, readQueue, removeJob,
+  parseArgs, queueLines, readQueue, removeJob,
   summaryLines }
   from './build-pack.mjs';
-import { loadConfig, RULE_SHAPE } from './config.mjs';
+import { countedTries, loadConfig, RULE_SHAPE } from './config.mjs';
 import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
 import { createPauser, pausedPath } from './pause.mjs';
 import { ModelError, localEndpoint, modelClient } from './model.mjs';
 import { almDescriptions, batches, documentInputs, dropUnfoundedAssumptions, expectedProblems, phase5,
   resultsAgree, setsOf, splitText } from './phases.mjs';
-import { runJob } from './run.mjs';
+import { jobId, runJob } from './run.mjs';
+import { memoryLow, parseMeminfo, waitForMemory } from './meminfo.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
-import { statusFields } from './status.mjs';
+import { createReleaser } from './release.mjs';
+import { readStatusLog, statusFields } from './status.mjs';
 import { readPack } from './pack.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -34,8 +36,10 @@ const fixtureInputs = () => JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipe
 function fixtureConfig(overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-'));
   const raw = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipeline.json'), 'utf8'));
-  Object.assign(raw, { repoRoot: FIXTURES, output: path.join(dir, 'out'),
-    queue: { file: path.join(dir, 'queue.json') } }, overrides);
+  // The memory check reads the machine running the tests, so it is off unless a test turns it on.
+  // The release step is off too, so no test unloads a real model; the release tests turn it on.
+  Object.assign(raw, { repoRoot: FIXTURES, output: path.join(dir, 'out'), memory: { enabled: false },
+    queue: { file: path.join(dir, 'queue.json') }, release: { command: [] } }, overrides);
   const file = path.join(dir, 'pipeline.json');
   fs.writeFileSync(file, JSON.stringify(raw));
   return loadConfig(file);
@@ -94,6 +98,11 @@ function fakeModel(answers = {}) {
 }
 
 const read = (file) => fs.readFileSync(file, 'utf8');
+/** True when the job's status log already has a line for the phase and event. */
+const statusSeen = (config, job, phase, event) => {
+  const log = path.join(config.output, jobId(job), 'status.log');
+  return fs.existsSync(log) && statusLines(path.dirname(log)).some((l) => l.phase === phase && l.event === event);
+};
 const statusLines = (outDir) => read(path.join(outDir, 'status.log')).trim().split('\n')
   .map((line) => JSON.parse(line));
 
@@ -1137,10 +1146,165 @@ test('job status shows the row and the last status line, and nothing else', asyn
     `${JSON.stringify({ at: '2026-10-28T10:01:00.000Z', job: 'issue-9415', phase: 'phase2', event: 'start' })}\n`);
   // A line cut off mid-write is skipped.
   fs.appendFileSync(logPath, '{"at":"2026-10-28T10:02:0');
-  assert.deepEqual(jobStatus(config, 'issue-9415'),
-    ['issue-9415  running  queue free', 'job=issue-9415 phase=phase2 event=start']);
+  const clock = () => new Date('2026-10-28T10:01:30.000Z');
+  assert.deepEqual(jobStatus(config, 'issue-9415', { clock }),
+    ['issue-9415  running  queue free', 'job=issue-9415 phase=phase2 event=start',
+      'interrupted phase=phase2 elapsed=30s']);
   fs.appendFileSync(logPath, `\n${JSON.stringify({ at: '2026-10-28T10:03:00.000Z', reason: 'Patron "renewal" text' })}\n`);
-  assert.throws(() => jobStatus(config, 'issue-9415'), /short code/);
+  assert.throws(() => jobStatus(config, 'issue-9415', { clock }), /short code/);
+});
+
+const logLine = (at, fields) => JSON.stringify({ at, job: 'issue-9415', ...fields });
+function seedJob(config, row, lines) {
+  addJob(config, { issue: '9415' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], row);
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  const dir = path.join(config.output, 'issue-9415');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'status.log'), `${lines.join('\n')}\n`);
+}
+
+test('job status shows the running phase, finished phase times and the length cuts', () => {
+  const config = fixtureConfig();
+  seedJob(config, { status: 'running', added: '2026-11-01T08:00:00.000Z', started: '2026-11-01T08:00:00.000Z' }, [
+    logLine('2026-11-01T08:00:01.000Z', { phase: 'phase8', event: 'start' }),
+    logLine('2026-11-01T08:10:00.000Z', { phase: 'phase8', event: 'pass', ms: 599000, failed: 0 }),
+    logLine('2026-11-01T08:10:01.000Z', { phase: 'phase9', event: 'start' }),
+    logLine('2026-11-01T10:10:00.000Z', { phase: 'phase9', step: 'checklist', event: 'retry', attempt: 1,
+      reason: 'length', ms: 7200000 }),
+    logLine('2026-11-01T12:10:00.000Z', { phase: 'phase9', step: 'checklist', event: 'retry', attempt: 1,
+      reason: 'length', ms: 7200000 }),
+    logLine('2026-11-01T12:10:01.000Z', { phase: 'phase9', step: 'review-2', event: 'call-fail', attempt: 2,
+      reason: 'timeout', ms: 5 }),
+  ]);
+  const clock = () => new Date('2026-11-01T13:55:01.000Z');
+  // With no process holding the queue, the open phase is not progress.
+  assert.equal(jobStatus(config, 'issue-9415', { clock })[2], 'interrupted phase=phase9 elapsed=20700s');
+  fs.writeFileSync(`${config.at(config.queue.file)}.lock`, `${process.pid}`);
+  assert.deepEqual(jobStatus(config, 'issue-9415', { clock }), [
+    'issue-9415  running  queue held',
+    'job=issue-9415 phase=phase9 step=review-2 event=call-fail attempt=2 reason=timeout ms=5',
+    'current phase=phase9 elapsed=20700s',
+    'done phase=phase8 ms=599000',
+    'retries reason=length count=2',
+    'call-fails reason=timeout count=1',
+    'cut event=retry phase=phase9 step=checklist reason=length count=2',
+  ]);
+});
+
+test('job status on a stopped job counts earlier attempts and names where it stopped', () => {
+  const config = fixtureConfig();
+  seedJob(config, { status: 'queued', resume: true, added: '2026-11-01T08:00:00.000Z',
+    failures: [{ at: '2026-11-01T09:00:00.000Z', phase: 'phase9', reason: 'model:length', ms: 1 },
+      { at: '2026-11-01T11:00:00.000Z', phase: 'phase9', reason: 'model:runaway', ms: 1 }] }, [
+    logLine('2026-11-01T08:00:01.000Z', { phase: 'phase8', event: 'pass', ms: 1000 }),
+    logLine('2026-11-01T08:30:00.000Z', { phase: 'phase9', step: 'checklist', event: 'call-fail',
+      attempt: 2, reason: 'length', ms: 1 }),
+    logLine('2026-11-01T10:30:00.000Z', { phase: 'phase9', step: 'checklist', event: 'call-fail',
+      attempt: 2, reason: 'runaway', ms: 1 }),
+  ]);
+  assert.deepEqual(jobStatus(config, 'issue-9415'), [
+    'issue-9415  queued  queue free',
+    'stopped phase=phase9 reason=model:runaway',
+    'done phase=phase8 ms=1000',
+    'call-fails reason=length count=1',
+    'call-fails reason=runaway count=1',
+    'cut event=call-fail phase=phase9 step=checklist reason=length count=1',
+    'cut event=call-fail phase=phase9 step=checklist reason=runaway count=1',
+  ]);
+});
+
+test('job status on a failed row names its stop and keeps phases finished before a re-add', () => {
+  const config = fixtureConfig();
+  seedJob(config, { status: 'failed', phase: 'phase9', reason: 'model:length',
+    added: '2026-11-02T08:00:00.000Z', finished: '2026-11-02T09:00:00.000Z' }, [
+    logLine('2026-11-01T08:00:01.000Z', { phase: 'phase8', event: 'pass', ms: 1000 }),
+  ]);
+  assert.deepEqual(jobStatus(config, 'issue-9415'), [
+    'issue-9415  failed  queue free', 'stopped phase=phase9 reason=model:length', 'done phase=phase8 ms=1000']);
+});
+
+test('job status on a queued row added without a resume shows nothing from the old log', () => {
+  const config = fixtureConfig();
+  seedJob(config, { status: 'queued' }, [
+    logLine('2026-11-01T08:00:01.000Z', { phase: 'phase8', event: 'pass', ms: 1000 })]);
+  assert.deepEqual(jobStatus(config, 'issue-9415'), ['issue-9415  queued  queue free']);
+});
+
+test('queue status without a job lists every row with its phase, reason and last update', () => {
+  const config = fixtureConfig();
+  assert.deepEqual(queueLines(readQueue(config)), ['queue empty']);
+  addJob(config, { issue: '9415' });
+  addJob(config, { issue: '9416' });
+  addJob(config, { issue: '9417' });
+  addJob(config, { issue: '9418' });
+  addJob(config, { issue: '9419' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[3], { status: 'passed', phase: 'done', reason: null,
+    finished: '2026-11-01T13:00:00.000Z',
+    failures: [{ at: '2026-11-01T09:00:00.000Z', phase: 'phase9', reason: 'model:length', ms: 1 }] });
+  Object.assign(queue.jobs[4], { status: 'running', started: '2026-11-01T14:00:00.000Z',
+    failures: [{ at: '2026-11-01T09:00:00.000Z', phase: 'phase9', reason: 'model:runaway', ms: 1 }] });
+  fs.mkdirSync(path.join(config.output, 'issue-9419'), { recursive: true });
+  fs.writeFileSync(path.join(config.output, 'issue-9419', 'status.log'),
+    `${JSON.stringify({ at: '2026-11-01T14:05:00.000Z', job: 'issue-9419', phase: 'phase3', event: 'start' })}\n`);
+  Object.assign(queue.jobs[0], { status: 'failed', phase: 'phase9', reason: 'model:length',
+    finished: '2026-11-01T11:00:00.000Z' });
+  Object.assign(queue.jobs[1], { status: 'queued', resume: true,
+    failures: [{ at: '2026-11-01T09:00:00.000Z', phase: 'phase5', reason: 'interrupted', ms: 1 }] });
+  Object.assign(queue.jobs[2], { status: 'removed', finished: '2026-11-01T12:00:00.000Z' });
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  assert.deepEqual(queueLines(readQueue(config), config), [
+    'issue-9415  status=failed phase=phase9 reason=model:length updated=2026-11-01T11:00:00.000Z',
+    'issue-9416  status=queued phase=phase5 reason=interrupted updated=2026-11-01T09:00:00.000Z',
+    'issue-9417  status=removed phase=- reason=- updated=2026-11-01T12:00:00.000Z',
+    'issue-9418  status=passed phase=done reason=- updated=2026-11-01T13:00:00.000Z',
+    'issue-9419  status=running phase=phase3 reason=- updated=2026-11-01T14:05:00.000Z',
+  ]);
+});
+
+test('the status of a job a queue run finished shows the release line', async () => {
+  const config = releaseConfig();
+  const { id } = addJob(config, { issue: '9415' });
+  await drainQueue(config, { run: okRun, release: fakeRelease([], { status: 1 }).make });
+  assert.deepEqual(jobStatus(config, id), [`${id}  passed  queue free`,
+    `job=${id} phase=release event=fail reason=exit-1 ms=${releaseLines(config, id)[0].ms}`]);
+});
+
+test('the release line follows the job\'s own last line while the row still runs', () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '9415' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], { status: 'running', started: '2026-10-28T10:00:00.000Z' });
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  const dir = path.join(config.output, 'issue-9415');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'status.log'), [
+    { at: '2026-10-28T10:05:00.000Z', job: 'issue-9415', phase: 'phase5', event: 'start' },
+    { at: '2026-10-28T10:06:00.000Z', job: 'issue-9415', phase: 'release', event: 'pass', ms: 900 },
+  ].map((line) => `${JSON.stringify(line)}\n`).join(''));
+  const clock = () => new Date('2026-10-28T10:10:00.000Z');
+  assert.deepEqual(jobStatus(config, 'issue-9415', { clock }), ['issue-9415  running  queue free',
+    'job=issue-9415 phase=phase5 event=start', 'job=issue-9415 phase=release event=pass ms=900',
+    'interrupted phase=phase5 elapsed=300s']);
+});
+
+test('a release failure line does not replace the failed job\'s sheet count in the report', () => {
+  const config = fixtureConfig();
+  const dir = path.join(config.output, 'issue-300');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'status.log'), [
+    { at: '2026-10-28T10:05:00.000Z', job: 'issue-300', phase: 'phase8', event: 'fail', sheets: 3 },
+    { at: '2026-10-28T10:06:00.000Z', job: 'issue-300', phase: 'release', event: 'fail', ms: 9 },
+  ].map((line) => `${JSON.stringify(line)}\n`).join(''));
+  const row = { id: 'issue-300', status: 'failed', phase: 'phase8', reason: 'gate:x', ms: 1,
+    finished: '2026-10-28T10:05:30.000Z', failures: [
+      { at: '2026-10-28T09:00:00.000Z', phase: 'phase8', reason: 'gate:x', ms: 1 },
+      { at: '2026-10-28T10:05:30.000Z', phase: 'phase8', reason: 'gate:x', ms: 1 }] };
+  const data = reportData(config, { jobs: [row] }, { period: 'day',
+    now: new Date('2026-10-28T12:00:00.000Z'), random: seededRandom(1) });
+  assert.equal(data.jobs[0].sheets.fail, 3);
 });
 
 test('the client refuses redirects, so a prompt cannot be handed to another host', async () => {
@@ -1809,6 +1973,92 @@ test('a busy unit is stopped only after its worker exits', async () => {
   assert.equal(sys.verbs().filter((c) => c.includes('start')).length, 2);
 });
 
+test('a busy unit is left running once maxWaitMinutes passes', async () => {
+  const config = pauseConfig({ busyProcess: 'worker', pollSeconds: 5, maxWaitMinutes: 0.25 });
+  const proc = fakeProc([[100, 'worker', '/system.slice/gpu-a.service']]);
+  const sys = fakeSystemctl(['gpu-a.service', 'gpu-b.service']);
+  let t = new Date('2026-10-27T22:00:00').getTime();
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); t += ms; };
+  const lines = [];
+  const pauser = createPauser(config, { exec: sys.exec, log: (l) => lines.push(l), procRoot: proc, sleep,
+    clock: () => new Date(t) });
+  await pauser.pause();
+  assert.deepEqual(sleeps, [5000, 5000, 5000]);
+  assert.ok(lines.includes('pause: left running gpu-a.service'));
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['stop gpu-b.service']);
+  await pauser.resume();
+  assert.deepEqual(sys.verbs().filter((c) => c.includes('start')).map((c) => c.at(-1)), ['gpu-b.service']);
+});
+
+test('maxWaitMinutes 0 stops the idle units and never sleeps', async () => {
+  const config = pauseConfig({ busyProcess: 'worker', maxWaitMinutes: 0 });
+  const proc = fakeProc([[100, 'worker', '/system.slice/gpu-a.service']]);
+  const sys = fakeSystemctl(['gpu-a.service', 'gpu-b.service']);
+  const lines = [];
+  const sleep = async () => assert.fail('slept');
+  const pauser = createPauser(config, { exec: sys.exec, log: (l) => lines.push(l), procRoot: proc, sleep });
+  await pauser.pause();
+  assert.deepEqual(sys.verbs().map((c) => c.at(-1)), ['gpu-b.service']);
+  assert.ok(lines.includes('pause: left running gpu-a.service'));
+});
+
+test('a wait that runs into the cutoff starts no job and starts the units again', async () => {
+  const config = pauseConfig({ busyProcess: 'worker', pollSeconds: 5 });
+  addJob(config, { issue: '1' });
+  const proc = fakeProc([[100, 'worker', '/system.slice/gpu-a.service']]);
+  const sys = fakeSystemctl(['gpu-a.service', 'gpu-b.service']);
+  let t = new Date('2026-10-28T06:59:50').getTime();
+  const clock = () => new Date(t);
+  const sleep = async (ms) => { t += ms; };
+  let ran = 0;
+  const done = await drainQueue(config, { cutoff: '07:00', clock, run: async () => { ran += 1; return { ok: true, ms: 1 }; },
+    pause: quiet(sys, { procRoot: proc, sleep, clock }) });
+  assert.equal(ran, 0);
+  assert.deepEqual(done, []);
+  assert.equal(readQueue(config).jobs[0].status, 'queued');
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['stop gpu-b.service', 'start gpu-b.service']);
+});
+
+test('a unit left busy is stopped before a later job once its worker has finished', async () => {
+  const config = pauseConfig({ busyProcess: 'worker', maxWaitMinutes: 0 });
+  addJob(config, { issue: '1' });
+  addJob(config, { issue: '2' });
+  const proc = fakeProc([[100, 'worker', '/system.slice/gpu-a.service']]);
+  const active = ['gpu-a.service', 'gpu-b.service'];
+  const sys = fakeSystemctl(active);
+  // A stopped unit drops out of the active list, as it does under systemd.
+  const exec = (command, args) => {
+    if (args.includes('stop')) active.splice(active.indexOf(args.at(-1)), 1);
+    return sys.exec(command, args);
+  };
+  const clock = () => new Date('2026-10-27T22:00:00');
+  const seen = [];
+  const run = async () => {
+    seen.push(sys.verbs().map((c) => c.slice(-2).join(' ')));
+    fs.rmSync(path.join(proc, '100'), { recursive: true, force: true });
+    return { ok: true, ms: 1 };
+  };
+  await drainQueue(config, { cutoff: '07:00', clock, run,
+    pause: (cfg) => createPauser(cfg, { exec, log: () => {}, procRoot: proc, clock }) });
+  assert.deepEqual(seen, [['stop gpu-b.service'], ['stop gpu-b.service', 'stop gpu-a.service']]);
+  assert.deepEqual(sys.verbs().filter((c) => c.includes('start')).map((c) => c.at(-1)),
+    ['gpu-b.service', 'gpu-a.service']);
+});
+
+test('a unit that would not stop is tried once, and a unit left busy is reported once', async () => {
+  const config = pauseConfig({ busyProcess: 'worker', maxWaitMinutes: 0 });
+  const proc = fakeProc([[100, 'worker', '/system.slice/gpu-a.service']]);
+  const sys = fakeSystemctl(['gpu-a.service', 'gpu-b.service'], ['stop gpu-b.service']);
+  const lines = [];
+  const pauser = createPauser(config, { exec: sys.exec, log: (l) => lines.push(l), procRoot: proc });
+  await pauser.pause();
+  await pauser.pause();
+  assert.equal(lines.filter((l) => l === 'pause: stop failed gpu-b.service').length, 1);
+  assert.equal(lines.filter((l) => l === 'pause: left running gpu-a.service').length, 1);
+  assert.equal(sys.verbs().filter((c) => c.includes('stop')).length, 1);
+});
+
 test('with no pause config nothing is run', async () => {
   const config = fixtureConfig();
   addJob(config, { issue: '1' });
@@ -1870,8 +2120,160 @@ test('a second resume does nothing, and each stop is recorded as it happens', as
 test('pause config is validated', () => {
   assert.throws(() => pauseConfig({ scope: 'machine' }), /pause.scope/);
   assert.throws(() => pauseConfig({ units: 'gpu.service' }), /pause.units/);
-  assert.deepEqual(fixtureConfig().pause, { units: [], scope: 'system', busyProcess: null, pollSeconds: 5 });
+  assert.throws(() => pauseConfig({ maxWaitMinutes: -1 }), /pause.maxWaitMinutes/);
+  assert.throws(() => pauseConfig({ maxWaitMinutes: 'x' }), /pause.maxWaitMinutes/);
+  assert.throws(() => pauseConfig({ maxWaitMinutes: NaN }), /pause.maxWaitMinutes/);
+  assert.equal(pauseConfig({ maxWaitMinutes: 0 }).pause.maxWaitMinutes, 0);
+  assert.deepEqual(fixtureConfig().pause,
+    { units: [], scope: 'system', busyProcess: null, pollSeconds: 5, maxWaitMinutes: 60 });
 });
+
+const releaseConfig = (release = {}) => fixtureConfig({
+  release: { command: ['lemonade', 'unload'], ...release } });
+
+/** A releaser over a fake command: `status` is its exit code, `events` records order. */
+function fakeRelease(events, { status = 0, error = null, signal = null } = {}) {
+  const lines = [];
+  const exec = (command, args, timeoutMs) => {
+    events.push(['unload', command, ...args, timeoutMs]);
+    return { status, signal, error };
+  };
+  return { lines, make: (cfg) => createReleaser(cfg, { exec, log: (l) => lines.push(l) }) };
+}
+
+const releaseLines = (config, id) => readStatusLog(path.join(config.output, id, 'status.log'))
+  .filter((line) => line.phase === 'release');
+
+test('the model is unloaded once, after the last job and the units start again', async () => {
+  const config = releaseConfig();
+  const first = addJob(config, { issue: '1' });
+  const second = addJob(config, { issue: '2' });
+  const events = [];
+  const fake = fakeRelease(events);
+  const sys = fakeSystemctl(['gpu-a.service']);
+  const pauseCfg = Object.assign(config, { pause: { ...config.pause, units: ['gpu-*.service'] } });
+  const run = async (cfg, job) => { events.push(['run', job.id]); return { ok: true, ms: 1 }; };
+  const spy = (cfg) => {
+    const pauser = quiet(sys)(cfg);
+    return { pause: () => pauser.pause(), resume: async () => { events.push(['resume']); await pauser.resume(); } };
+  };
+  await drainQueue(pauseCfg, { run, pause: spy, release: fake.make });
+  assert.deepEqual(events.map((e) => e[0]), ['run', 'run', 'resume', 'unload']);
+  assert.deepEqual(events.at(-1), ['unload', 'lemonade', 'unload', 60000]);
+  assert.deepEqual(fake.lines, ['release: ok']);
+  const [line] = releaseLines(config, second.id);
+  assert.equal(line.event, 'pass');
+  assert.equal(line.job, second.id);
+  assert.deepEqual(releaseLines(config, first.id), []);
+});
+
+test('a failed job and a job that throws still end with the unload', async () => {
+  for (const run of [async () => ({ ok: false, phase: 'phase3', reason: 'model', ms: 1 }),
+    async () => { throw new Error('boom'); }]) {
+    const config = releaseConfig();
+    addJob(config, { issue: '1' });
+    const events = [];
+    const fake = fakeRelease(events);
+    const done = await drainQueue(config, { run, release: fake.make });
+    assert.equal(events.length, 1);
+    assert.equal(done[0].status, 'queued');
+    assert.equal(done[0].failures.length, 1);
+  }
+});
+
+test('the unload runs when the cutoff ends the run', async () => {
+  const config = releaseConfig();
+  addJob(config, { issue: '1' });
+  addJob(config, { issue: '2' });
+  let now = new Date('2026-01-01T06:00:00');
+  const clock = () => now;
+  const events = [];
+  const fake = fakeRelease(events);
+  const run = async () => { now = new Date('2026-01-01T07:30:00'); return { ok: true, ms: 1 }; };
+  const done = await drainQueue(config, { run, clock, release: fake.make });
+  assert.equal(done.length, 1);
+  assert.equal(events.length, 1);
+});
+
+test('a failed unload is logged and leaves the job result alone', async () => {
+  for (const failure of [{ status: 1 }, { status: null, error: { code: 'ENOENT' } },
+    { status: null, error: { code: 'ETIMEDOUT' } }, { status: null, signal: 'SIGKILL' }]) {
+    const config = releaseConfig();
+    addJob(config, { issue: '1' });
+    const fake = fakeRelease([], failure);
+    const done = await drainQueue(config, { run: okRun, release: fake.make });
+    assert.equal(done[0].status, 'passed');
+    assert.deepEqual(fake.lines, ['release: failed']);
+    const [line] = releaseLines(config, done[0].id);
+    assert.equal(line.event, 'fail');
+    assert.match(line.reason, /^(exit-1|signal|spawn-error|timeout)$/);
+  }
+});
+
+test('a command that throws is a failed unload, not a failed run', async () => {
+  const config = releaseConfig();
+  addJob(config, { issue: '1' });
+  const release = (cfg) => createReleaser(cfg, { log: () => {}, exec: () => { throw new Error('x'); } });
+  const done = await drainQueue(config, { run: okRun, release });
+  assert.equal(done[0].status, 'passed');
+  assert.equal(releaseLines(config, done[0].id)[0].reason, 'spawn-error');
+});
+
+test('the unload still runs when starting the paused units fails', async () => {
+  const config = releaseConfig();
+  addJob(config, { issue: '1' });
+  const events = [];
+  const pause = () => ({ pause: async () => {}, resume: async () => { throw new Error('start'); } });
+  await assert.rejects(drainQueue(config, { run: okRun, pause, release: fakeRelease(events).make }),
+    /start/);
+  assert.equal(events.length, 1);
+});
+
+test('a cancelling signal unloads once and the run ending does not unload again', async () => {
+  const config = releaseConfig();
+  const events = [];
+  const fake = fakeRelease(events);
+  const releaser = fake.make(config);
+  releaser.release();
+  assert.equal(events.length, 0);
+  releaser.note('job-1');
+  releaser.release();
+  releaser.release();
+  assert.equal(events.length, 1);
+  assert.equal(releaseLines(config, 'job-1')[0].event, 'pass');
+});
+
+test('nothing is unloaded when no job started or the command is empty', async () => {
+  const idle = releaseConfig();
+  const events = [];
+  await drainQueue(idle, { run: okRun, release: fakeRelease(events).make });
+  assert.deepEqual(events, []);
+
+  const off = releaseConfig({ command: [] });
+  addJob(off, { issue: '1' });
+  await drainQueue(off, { run: okRun, release: fakeRelease(events).make });
+  assert.deepEqual(events, []);
+});
+
+test('release config has defaults and is validated', () => {
+  assert.deepEqual(loadDefault().release, { command: ['lemonade', 'unload'], timeoutSeconds: 60 });
+  assert.throws(() => releaseConfig({ command: 'lemonade unload' }), /release.command/);
+  assert.throws(() => releaseConfig({ command: ['lemonade', ''] }), /release.command/);
+  assert.throws(() => releaseConfig({ timeoutSeconds: 0 }), /release.timeoutSeconds/);
+  assert.throws(() => fixtureConfig({ release: 'off' }), /release must be an object/);
+  assert.throws(() => fixtureConfig({ release: null }), /release must be an object/);
+});
+
+/** The config with no release block, so the shipped default shows. */
+function loadDefault() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-'));
+  const raw = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipeline.json'), 'utf8'));
+  Object.assign(raw, { repoRoot: FIXTURES, output: path.join(dir, 'out'),
+    queue: { file: path.join(dir, 'queue.json') } });
+  const file = path.join(dir, 'pipeline.json');
+  fs.writeFileSync(file, JSON.stringify(raw));
+  return loadConfig(file);
+}
 
 /** A config whose queue has the given sources, over the fixtures. */
 function sourcedConfig(sources, report = {}) {
@@ -3466,6 +3868,7 @@ test('the fallback window is per slot', async () => {
   assert.equal(await size('--jinja -np 2'), 65536);
   assert.equal(await size('--parallel 4 --jinja'), 32768);
   assert.equal(await size('--jinja'), 131072);
+  assert.equal(await size('--jinja -np 2 -fa on --cache-type-k q8_0 --cache-type-v q8_0'), 65536);
   assert.equal(await size(undefined), 131072);
   assert.equal(await size('-np x'), 131072);
   const saved = windowClient({ '/health': NOT_LOADED, '/models/m%20a%2Fb':
@@ -3689,4 +4092,122 @@ test('a window that is zero, negative, fractional or text falls through to the n
     assert.equal(await windowClient({ '/health': NOT_LOADED,
       '/models/m%20a%2Fb': { recipe_options: { ctx_size: bad } } }).contextWindow(), null);
   }
+});
+
+const MEMINFO = (availableKiB, swapTotalKiB, swapFreeKiB) => `MemTotal:       65536000 kB
+MemAvailable:   ${availableKiB} kB
+SwapTotal:      ${swapTotalKiB} kB
+SwapFree:       ${swapFreeKiB} kB
+`;
+const LIMITS = { minAvailableMiB: 3072, maxSwapPercent: 85, pollSeconds: 30, waitMinutes: 20 };
+const reading = (availableMiB, swapPercent) => ({ availableMiB, swapPercent });
+
+test('meminfo gives available memory and swap use, and no swap is zero percent', () => {
+  assert.deepEqual(parseMeminfo(MEMINFO(4194304, 10485760, 2097152)),
+    { availableMiB: 4096, swapTotalMiB: 10240, swapUsedMiB: 8192, swapPercent: 80 });
+  assert.equal(parseMeminfo(MEMINFO(2048, 0, 0)).swapPercent, 0);
+  assert.equal(parseMeminfo('not meminfo'), null);
+});
+
+test('memory is low under the floor or over the swap ceiling, and not at either limit', () => {
+  assert.equal(memoryLow(reading(3071, 0), LIMITS), true);
+  assert.equal(memoryLow(reading(3072, 85), LIMITS), false);
+  // Full swap counts only while free memory is under twice the floor.
+  assert.equal(memoryLow(reading(5000, 86), LIMITS), true);
+  assert.equal(memoryLow(reading(6144, 99), LIMITS), false);
+  assert.equal(memoryLow(reading(5000, 100), { ...LIMITS, maxSwapPercent: 100 }), false);
+});
+
+test('waiting for memory polls until it recovers, gives up after the wait, and stops at once at 0 minutes', async () => {
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  const run = (readings, limits = LIMITS) => {
+    const list = [...readings];
+    const waits = [];
+    return waitForMemory(limits, { ...clock, read: () => (list.length > 1 ? list.shift() : list[0]),
+      onWait: (m) => waits.push(m) }).then((outcome) => ({ outcome, waits }));
+  };
+  let { outcome, waits } = await run([reading(8000, 10)]);
+  assert.deepEqual([outcome.ok, outcome.polls, waits.length], [true, 0, 0]);
+  ({ outcome, waits } = await run([reading(1000, 10), reading(2000, 10), reading(5000, 10)]));
+  assert.deepEqual([outcome.ok, outcome.polls, waits.length], [true, 2, 1]);
+  t = 0;
+  ({ outcome } = await run([reading(1000, 90)]));
+  assert.deepEqual([outcome.ok, outcome.polls, outcome.waitedMs], [false, 40, 1200000]);
+  // A poll longer than the wait sleeps only the time left.
+  t = 0;
+  ({ outcome } = await run([reading(1000, 90)], { ...LIMITS, waitMinutes: 1, pollSeconds: 90 }));
+  assert.deepEqual([outcome.ok, outcome.waitedMs], [false, 60000]);
+  ({ outcome } = await run([reading(1000, 90)], { ...LIMITS, waitMinutes: 0 }));
+  assert.deepEqual([outcome.ok, outcome.polls], [false, 0]);
+  assert.equal((await waitForMemory(LIMITS, { read: () => null })).unreadable, true);
+});
+
+test('the memory block has defaults and rejects values it cannot use', () => {
+  const config = fixtureConfig({ memory: undefined });
+  assert.deepEqual(config.memory, { enabled: true, ...LIMITS });
+  for (const bad of ['text', [], { minAvailableMB: 6000 }]) {
+    assert.throws(() => fixtureConfig({ memory: bad }), /config memory must be an object/, JSON.stringify(bad));
+  }
+  for (const bad of [{ enabled: 'yes' }, { minAvailableMiB: 0 }, { minAvailableMiB: 1.5 },
+    { maxSwapPercent: 101 }, { pollSeconds: 0 }, { waitMinutes: -1 }, { waitMinutes: 1.5 }]) {
+    assert.throws(() => fixtureConfig({ memory: bad }), /config memory\./, JSON.stringify(bad));
+  }
+});
+
+test('low memory stops a job before a phase at its checkpoint, and a resume carries on from there', async () => {
+  const config = fixtureConfig({ memory: { enabled: true, waitMinutes: 1, pollSeconds: 30 } });
+  const job = { issue: '501', change: '7001' };
+  let low = false;
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  let t = Date.now();
+  const readMemory = () => (low ? parseMeminfo(MEMINFO(1048576, 10485760, 1048576))
+    : parseMeminfo(MEMINFO(8388608, 10485760, 9437184)));
+  // Memory drops once phase 2 has passed.
+  const result = await runJob(config, job, { model, echo: false, now: () => t,
+    readMemory: () => { if (statusSeen(config, job, 'phase2', 'pass')) low = true; return readMemory(); },
+    sleep: async (ms) => { t += ms; } });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'memory:low');
+  assert.equal(result.phase, 'phase3');
+  const checkpoint = JSON.parse(read(path.join(result.outDir, 'work', 'checkpoint.json')));
+  assert.equal(checkpoint.phase, 'phase2');
+  const lines = statusLines(result.outDir);
+  assert.ok(lines.some((l) => l.event === 'wait' && l.reason === 'memory-low' && l.availableMiB === 1024));
+  const last = lines.at(-1);
+  assert.deepEqual([last.event, last.reason, last.polls], ['fail', 'memory:low', 2]);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  low = false;
+  const again = await runJob(config, { ...job, resume: true }, { model, echo: false, readMemory });
+  assert.equal(again.ok, true);
+  assert.ok(statusLines(again.outDir).some((l) => l.event === 'resume' && l.after === 'phase2'));
+});
+
+test('an unreadable /proc/meminfo is noted once and the job carries on', async () => {
+  const config = fixtureConfig({ memory: { enabled: true } });
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false, readMemory: () => null });
+  assert.equal(result.ok, true);
+  assert.equal(statusLines(result.outDir).filter((l) => l.reason === 'meminfo-unreadable').length, 1);
+});
+
+test('a stop for low memory is not one of the job\'s tries, and the drain stops after it', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501', now: true });
+  addJob(config, { issue: '777', now: true });
+  const ran = [];
+  const run = async (_config, job) => {
+    ran.push(job.id);
+    return { ok: false, phase: 'phase3', reason: 'memory:low', ms: 1000 };
+  };
+  const night = (day) => () => new Date(`2026-10-${day}T22:00:00`);
+  for (const day of [27, 28, 29]) await drainQueue(config, { cutoff: '07:00', run, clock: night(day) });
+  // Three stops, one job each night: neither the third stop nor the second job drops anything.
+  assert.deepEqual(ran, ['issue-501', 'issue-501', 'issue-501']);
+  const rows = readQueue(config).jobs;
+  assert.deepEqual(rows.map((r) => r.status), ['queued', 'queued']);
+  assert.equal(rows[0].failures.length, 3);
+  assert.equal(countedTries(rows[0].failures), 0);
+  assert.equal(countedTries([...rows[0].failures, { reason: 'model:no-reply' }]), 1);
+  assert.match(summaryLines(readQueue(config))[0], /retry after stopping at phase3 \(memory:low\)/);
 });

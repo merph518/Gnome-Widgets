@@ -18,7 +18,8 @@
 #   systemctl --user daemon-reload && systemctl --user enable --now build-pack.timer
 #
 # If the pipeline config has a pause block, the run stops those units when its
-# first job starts and starts them again when it ends. With scope "system" that
+# first job starts and starts them again when it ends. A busy unit is waited for
+# at most pause.maxWaitMinutes and never past the cutoff. With scope "system" that
 # needs a sudoers rule for `systemctl stop` and `systemctl start` on each unit;
 # see the skill's "Freeing the machine for a job".
 #

@@ -1,6 +1,7 @@
 // Stops the configured systemd units while a job runs and starts them again
 // afterward, so a job has the machine's memory and GPU for the model. Units
-// that were not running when the run began are never started. Output names
+// that were not running when a job was about to start are never started,
+// except those a dead run left stopped. Output names
 // units from the config and nothing else.
 
 import fs from 'node:fs';
@@ -51,7 +52,9 @@ function unitBusy(procRoot, unit, busyProcess) {
 
 /**
  * A pauser for one run. `pause()` stops the active units the config names,
- * waiting for a busy one to go idle first; `resume()` starts every unit this
+ * waiting for a busy one to go idle first, for at most `maxWaitMinutes` and
+ * never past `until`; a unit still busy then is left running until a later
+ * `pause()` finds its worker finished. `resume()` starts every unit this
  * run stopped, plus those a run that died left in the state file. Neither
  * throws: a failed stop or start is logged and the run carries on.
  *
@@ -59,13 +62,17 @@ function unitBusy(procRoot, unit, busyProcess) {
  * may restore what a dead holder stopped.
  */
 export function createPauser(config, { exec = defaultExec, log = console.log, procRoot = '/proc',
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), leftover = true } = {}) {
-  const { units: patterns, scope, busyProcess, pollSeconds } = config.pause;
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), clock = () => new Date(),
+  leftover = true } = {}) {
+  const { units: patterns, scope, busyProcess, pollSeconds, maxWaitMinutes } = config.pause;
   const user = scope === 'user';
   const file = pausedPath(config);
   const systemctl = (...args) => (user ? exec('systemctl', ['--user', ...args])
     : exec('sudo', ['-n', '/usr/bin/systemctl', ...args]));
   const stopped = [];
+  // A unit that would not stop is not tried again, and a busy one is reported once.
+  const failed = new Set();
+  const reported = new Set();
   const inherited = leftover ? readPaused(file) : [];
   let cancelled = false;
   let resumed = false;
@@ -79,6 +86,7 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
     const result = systemctl('stop', unit);
     if (result.status !== 0) {
       log(`pause: stop failed ${unit}`);
+      failed.add(unit);
       return;
     }
     stopped.push(unit);
@@ -99,9 +107,11 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
   };
 
   return {
-    async pause() {
+    async pause({ until = null } = {}) {
       if (!patterns.length || cancelled || resumed) return;
-      let waiting = activeUnits();
+      const limit = clock().getTime() + maxWaitMinutes * 60000;
+      const deadline = until ? Math.min(limit, until.getTime()) : limit;
+      let waiting = activeUnits().filter((unit) => !failed.has(unit));
       while (waiting.length && !cancelled) {
         const busy = [];
         for (const unit of waiting) {
@@ -109,10 +119,16 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
           else stopOne(unit);
         }
         waiting = busy;
-        if (waiting.length) {
-          log(`pause: waiting for ${waiting.join(' ')}`);
-          await sleep(pollSeconds * 1000);
+        if (!waiting.length) break;
+        const left = deadline - clock().getTime();
+        if (left <= 0) {
+          const fresh = waiting.filter((unit) => !reported.has(unit));
+          fresh.forEach((unit) => reported.add(unit));
+          if (fresh.length) log(`pause: left running ${fresh.join(' ')}`);
+          return;
         }
+        log(`pause: waiting for ${waiting.join(' ')}`);
+        await sleep(Math.min(pollSeconds * 1000, left));
       }
     },
     async resume() {

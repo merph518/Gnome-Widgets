@@ -138,3 +138,6 @@ Revert takes exactly one target.
   activating, deactivating, or reloading is busy, which is also an error. Either way revert
   exits non-zero before it removes any config or package; wait or free some memory, then run
   it again.
+- Changing the swap setup moves what a healthy night looks like. The `memory` block's
+  `minAvailableMiB` and `maxSwapPercent` in the pipeline config come from a run on the
+  earlier setup, so measure a night again after a change and adjust them.

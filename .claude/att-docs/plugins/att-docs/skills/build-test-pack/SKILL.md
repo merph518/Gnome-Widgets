@@ -49,7 +49,7 @@ none, ask the user rather than guessing.
 | `<manifest-check>` | The test that checks every reference document against `<manifest>` |
 | `<shipped-paths>` | The paths that ship beyond the repository and so may not carry reference text |
 | `<component-map>` | Where each repository component `<procedure>` expects loaded is found |
-| `<gold-packs>` | Hand-built packs read for shape and depth |
+| `<baseline-packs>` | Packs kept as the bar a new pack should match or beat, read for shape and depth |
 | `<description-source>` | Where the change or defect description comes from |
 | `<rule-export>` | The command that exports one document's rules from the master |
 | `<folder-export>` | The command that exports a suite folder's rules |
@@ -250,7 +250,7 @@ fail, reason codes, counts and timings.
 <pipeline> run --config <pipeline-config> --suite <code> [--resume]
 <pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 <pipeline> queue start --config <pipeline-config> --job <job-id> [--cutoff HH:MM]
-<pipeline> queue status --config <pipeline-config> --job <job-id>
+<pipeline> queue status --config <pipeline-config> [--job <job-id>]
 <pipeline> queue summary --config <pipeline-config>
 <pipeline> queue remove --config <pipeline-config> --job <job-id>
 <pipeline> queue fill --config <pipeline-config>
@@ -306,6 +306,7 @@ and revalidation calls; the checklist calls do not think and use `model.maxOutpu
 `call-fail` lines in `status.log`: a line whose `reason` is `length` or `runaway`
 was cut off, and its `phase` and `step` say where. A server may leave out the
 token usage on a cut reply, so do not rely on `outputTokens` matching `maxTokens`.
+`queue status --job` counts those lines with their phase and step, and
 `queue status` and the report show `model:runaway` and `model:length` for the jobs
 that failed this way. Set a lower limit for those phases. For a thinking call, space
 for the prompt is budgeted against the larger of `model.reasoningOutput` and
@@ -318,6 +319,32 @@ for `--reasoning-budget` first. If it is there, append `--reasoning-budget N` to
 the model's saved `llamacpp_args`. It caps every thinking call on the server,
 and when the budget runs out the model stops thinking and finishes the reply
 instead of failing at the output limit.
+
+A quantized KV cache is another opt-in that nothing in the pipeline sets. Check
+the bundled binary's `--help` for `--cache-type-k` and `--cache-type-v` first, and
+check that `-fa` takes a value there (`on`, `off` or `auto`). If both flags are
+there and `-fa` takes a value, append `--cache-type-k q8_0 --cache-type-v q8_0` to
+the model's saved `llamacpp_args`, using the load command below. Otherwise skip
+this opt-in. A quantized V cache needs flash attention, so
+`-fa on` has to be in the args too. The flags roughly halve the attention layers'
+cache. The weights and a hybrid model's recurrent state stay the same size, so the
+drop in total memory is smaller. The flags add to a smaller `model.context` and do
+not replace it. Read `mem_info_gtt_used` under `/sys/class/drm/card*/device/` with
+the model loaded before and after the change. Build one pack with the flags and
+one without, then run `compare` on the two packs before keeping the flags, because
+a quantized cache can change what the model writes.
+
+A cap on the server's prompt cache is another opt-in setting that nothing in the
+pipeline sets. `llama-server` keeps earlier prompts in host memory, up to 8192 MiB
+by default, so a new prompt that shares a start with one of them skips re-reading
+it. A hybrid model often has to re-read the whole prompt anyway, and then the cache
+holds memory without saving time. Check the bundled binary's `--help` for
+`--cache-ram` first. If it is there, append `--cache-ram 0` to the model's saved
+`llamacpp_args` to turn the cache off, or `--cache-ram N` to cap it at N MiB. The
+slot's own context checkpoints are a separate store and stay in use. After the
+model loads, the flag shows in the `llamacpp_args` of its entry in `all_models_loaded`
+in `<endpoint>/health`. Compare the prompt eval times in the server log before and
+after; if they do not move, the cache was not helping.
 
 Lemonade keeps the model's window as a saved recipe option on the user model,
 not in `/etc/lemonade` or the systemd unit. In the commands below, `<endpoint>`
@@ -336,9 +363,11 @@ is `model.endpoint` (for example `http://localhost:13305/api/v1`) and `<model na
           -d '{"model_name":"<model name>","ctx_size":<model.context>,"llamacpp_backend":"<saved backend>","llamacpp_args":"<saved args>","save_options":true}'
 
   Take the backend and args from the model's saved `recipe_options`, carrying
-  over every key it has and leaving out one that is not saved, because saving
-  may replace the stored options. A rejected load prints the server's error and
-  exits non-zero. The load reloads the model, so do it when no build is running.
+  over every key it has, including any `--cache-ram`, `--reasoning-budget`,
+  `--cache-type-k`, `--cache-type-v` or `-fa` flag in the args, and leaving out
+  one that is not saved, because saving may replace the stored options. A
+  rejected load prints the server's error and exits non-zero. The load reloads
+  the model, so do it when no build is running.
 
 A job takes an hour or more, so a request made during the day is queued.
 `local/systemd/` holds a user timer that starts `queue run` at 22:00; the queue
@@ -410,10 +439,16 @@ tonight's run take it.
 
 The session reads the outcome with one command, which prints only the row's
 status, whether a live process holds the queue, and the last status line the
-job wrote (phase, event, reason code, counts, timings):
+job wrote (phase, event, reason code, counts, timings). Under those it prints
+the phase now running and how long it has run, or the phase and reason code a
+stopped job ended with, the time each finished phase took, the count of `retry`
+and `call-fail` lines by reason, and a `cut` line for every `length` or
+`runaway` hit with its phase and step. Without `--job` it lists every row in
+the queue with its status, phase, reason code and last update, so a job that
+stopped or can resume shows even when its ID is not remembered:
 
 ```bash
-<pipeline> queue status --config <pipeline-config> --job <job-id>
+<pipeline> queue status --config <pipeline-config> [--job <job-id>]
 ```
 
 A unit needs a moment to take the queue and mark the row `running`, so the
@@ -449,21 +484,26 @@ runs and start again afterward:
   "units": ["<unit-pattern>"],
   "scope": "system",
   "busyProcess": "<worker process name>",
-  "pollSeconds": 5
+  "pollSeconds": 5,
+  "maxWaitMinutes": 60
 }
 ```
 
 `units` takes unit names or patterns, as `systemctl list-units` does. Only
-units that are active when the run begins are stopped, and only those are
-started again. `scope` is `system` (the default) or `user`. With no `units`,
+units that are active when a job is about to start are stopped, and only those, plus
+any a dead run left stopped, are started again. `scope` is `system` (the default) or `user`. With no `units`,
 nothing is stopped and no command runs.
 
 The stop comes when the first job is about to start, so a run with an empty
 queue leaves the units alone. If `busyProcess` is set, a unit with a process of
 that name inside its cgroup is busy: the run polls every `pollSeconds` and
 stops it once the worker has finished, and never stops it while it works. The
-first job waits until every unit is stopped, so it never shares the machine
-with a busy one. The
+first job waits for a busy unit at most `maxWaitMinutes` (60 by default; 0 means
+no wait), and never past the cutoff. A unit still busy then is left running,
+logged as `pause: left running <unit>`, and not started later. The job starts
+anyway unless the cutoff has passed, in which case no job starts and the stopped
+units start again. Before each later job the run looks again and stops any unit
+whose worker has finished. The
 units stopped are listed in a `.paused` file beside the queue file as each one
 stops. The units start again when the run ends, however it ends, and also when
 the process gets SIGTERM, SIGINT or SIGHUP. If a run dies before it can do
@@ -474,17 +514,89 @@ run carries on; a unit that would not stop is not started later. A `run`
 outside the queue stops and starts the units the same way, but holds no queue
 lock, so it leaves a dead run's `.paused` file for the next queue run.
 
+### Checking free memory between phases
+
+Before each phase starts, a job reads `MemAvailable` and swap use from
+`/proc/meminfo`. When free memory is under the floor, or swap use is over the
+ceiling while free memory is under twice the floor, the job waits and polls. If memory is still low when the wait ends, it
+stops at the last checkpoint, so `queue add --resume` carries on later, with no
+finished phase lost. The optional `memory` block sets the limits; these are the
+defaults:
+
+```json
+"memory": {
+  "enabled": true,
+  "minAvailableMiB": 3072,
+  "maxSwapPercent": 85,
+  "pollSeconds": 30,
+  "waitMinutes": 20
+}
+```
+
+The defaults come from one measured night: available memory fell to 4.6 GiB and
+swap held at about 68% the whole night, cold, with steady speeds. Both limits
+sit just past that healthy run, so it would not have tripped them. Swapped pages
+stay in swap after the pressure ends, so swap use over the ceiling counts only
+while free memory is also under twice the floor. Measure again after changing
+the swap setup (`local/memory/README.md`). `maxSwapPercent: 100` turns the swap
+test off, `waitMinutes: 0` stops at once, and `enabled: false` turns the check
+off. The numbers cover the host's own memory, not the graphics memory pool.
+
+The status log carries a `wait` line with the reason `memory-low`, then either
+`memory-ok` (with `polls` and `waitedMs`) or the job's `fail` line with the reason
+`memory:low`. All carry numbers only. If `/proc/meminfo` cannot be read, one
+`warn` line with `meminfo-unreadable` is written and the job carries on. A
+`memory:low` stop does not count as one of a job's tries, so it never drops the
+job, and it waits for the next night. The queue run takes no further job after
+one, since the next would meet the same memory.
+
 With scope `system`, the commands run as `sudo -n /usr/bin/systemctl`, so the
 user running the queue needs a sudoers rule that needs no password. List each
 unit and each verb on its own, for example:
 
 ```
-<user> ALL=(root) NOPASSWD: /usr/bin/systemctl stop <unit>, /usr/bin/systemctl start <unit>
+<user> ALL=(root) NOPASSWD: /usr/bin/systemctl stop <unit>.service, /usr/bin/systemctl start <unit>.service
 ```
+
+sudo matches the arguments exactly, so name each unit in full as
+`systemctl list-units` prints it, `.service` included. Write the rule with
+`sudo visudo -f /etc/sudoers.d/<file>` so a syntax error cannot lock out sudo,
+and check it with `sudo -n -l /usr/bin/systemctl stop <unit>.service`, which
+prints the command when the rule allows it.
 
 A `*` in a sudoers argument also matches spaces, so a pattern there can allow
 more than the unit it was meant for. Listing the units is safer. With scope
 `user`, no sudo is involved.
+
+### Releasing the model
+
+When a queue run ends, the local model is unloaded so its memory is free
+without stopping the model server by hand. The optional `release` block names
+the command and how long to wait for it:
+
+```json
+"release": {
+  "command": ["lemonade", "unload"],
+  "timeoutSeconds": 60
+}
+```
+
+The values above are the defaults, and `lemonade unload` needs no sudo. An
+empty `command` turns the step off.
+
+The unload runs once, when the run ends, after the paused units start again.
+A normal finish, a failed job, the cutoff and a SIGTERM, SIGINT or SIGHUP all
+end the same way, and the model is not reloaded between the jobs of one run. A
+run that started no job, such as one that found the queue held or empty,
+unloads nothing, and neither does a `run` outside the queue.
+
+The outcome is logged as `release: ok` or `release: failed` and as one
+`phase=release` line in the status log of the last job that ran, with the
+event `pass` or `fail`, a reason code (`exit-<n>`, `signal`, `spawn-error` or `timeout`)
+and the time it took. The command's own output is never read. A failed unload
+does not change any job's result. `queue status` shows the line for the job
+that ran last, after that job's own last line while its row still runs and
+alone once the row has finished.
 
 ### Running unattended
 
@@ -589,7 +701,8 @@ reason `interrupted` and no wait. A run that works every queued row takes it at
 once; a `queue start` run works only rows marked `--now`, so it leaves the row
 for the night. `queue start --job <job-id>` on a job waiting for its retry runs
 it without waiting, and so does a `--now` row under a `queue start`. `queue add
---now` only marks the row; the start comes from `queue start`. `queue add` on a
+--now` only marks the row; the start comes from `queue start`. A stop for low
+memory (`memory:low`) is kept in the row's failures but is not counted as a try. `queue add` on a
 dropped job is how a person puts it back.
 
 **The report.** `report` reads the queue file and each job's `status.log`, and
@@ -679,8 +792,8 @@ procedure text, no methodology wording in a card or a note.
 
 `<procedure>` names repository components it expects to have loaded.
 `<component-map>` says where each one is in the repository, so none of them is
-missing. Read `<gold-packs>` for shape and depth; do not copy their cards into a
-new pack.
+missing. Read `<baseline-packs>` for shape and depth; a new pack should match or
+beat them. Do not copy their cards into it.
 
 ## Inputs, and where they come from
 
@@ -819,14 +932,15 @@ columns of the `<coverage-sheet>`, the assumption IDs, and
 `<validation-sheet>`. Do not type those into the pack; a hand-typed count is one
 that drifts from the cards.
 
-The builder also lays each sheet out as the reference pack does: a title row, a
-subtitle row and the headers in row 4, under the sheet and header names in
-`<workbook-standard>`. The `<dashboard-sheet>` labels its rule count "Number of
-Impacted Business Rules", because the count leaves out Not Impacted rules. Two
-choices differ from the reference on purpose, and the comparison records them as
-deliberate: the ALM Upload Test Name is the card ID alone, so a "/" in a title
-never reaches the ALM import, and every step that checks something carries an
-observable Expected Result, where the reference writes one on the final step.
+The builder also lays each sheet out as the reference pack (one of
+`<baseline-packs>`) does: a title row, a subtitle row and the headers in row 4,
+under the sheet and header names in `<workbook-standard>`. The
+`<dashboard-sheet>` labels its rule count "Number of Impacted Business Rules",
+because the count leaves out Not Impacted rules. Two choices differ from the
+reference on purpose, and the comparison records them as deliberate: the ALM
+Upload Test Name is the card ID alone, so a "/" in a title never reaches the ALM
+import, and every step that checks something carries an observable Expected
+Result, where the reference writes one on the final step.
 
 ## The phases
 
@@ -1141,9 +1255,9 @@ Moving the tests and sets out of the staging folders is the reviewer's job in
 
 ## Comparing a pack with a reference pack
 
-`<pipeline> compare` scores a built pack against a reference pack, the rule
-export and the converted document. It needs no job config and no model unless
-`--model` is given:
+`<pipeline> compare` scores a built pack against a reference pack (usually one
+of `<baseline-packs>`), the rule export and the converted document. It needs no
+job config and no model unless `--model` is given:
 
 ```bash
 <pipeline> compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> \
@@ -1246,7 +1360,7 @@ that could not be read.
   test plan import the user loads by hand.
 - The business rule master is read, never changed. A rule found missing from it
   is an `<update-skill>` or `<extract-skill>` job, filed or run separately.
-- `<gold-packs>` are not edited.
+- `<baseline-packs>` are not edited.
 
 ## Report
 
