@@ -42,7 +42,7 @@ reply text: the user does not see it there.**
 | `<labels-note>` | Under Overrides, Labels |
 | `<area-label-rule>` | A title starting `[Tooling]` carries the `Tooling` label; add it when missing, under the same gate |
 | `<reference-docs>` | `README.md` and `docs/` |
-| `<ownership-unit>` | The folder the issue names: `plugins/<group>/skills/<name>/`, `plugins/voice/bridge/`, `plugins/<group>/hooks/`, or a root file |
+| `<ownership-unit>` | The folder the issue names: `plugins/<group>/skills/<name>/`, `plugins/<group>/hooks/`, or a root file |
 | `<ownership-rules>` | Under Overrides, Section 3 |
 | `<main-checkout>` | `~/Code/Overmind`, read-only |
 | `<worktree-script>` | The `EnterWorktree` tool, under Overrides, Section 3 |
@@ -315,7 +315,7 @@ done until it finishes or is skipped.
 
 - **Skip** a pull request whose diff is only documentation (`README.md`, `docs/`, other
   Markdown that no skill reads) or only tests. A change to a `SKILL.md`, a script, a
-  hook, the bridge, a workflow, or a `plugin.json` changes functionality. Say in the
+  hook, a workflow, or a `plugin.json` changes functionality. Say in the
   final report that the step was skipped and why.
 - **Cut the pin.** A pin is a release tag, and this session never tags. First read the
   newest tag with `git ls-remote --tags --sort=-v:refname origin 'v*'`, taking the first

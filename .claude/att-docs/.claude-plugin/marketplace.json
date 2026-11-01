@@ -15,7 +15,7 @@
     {
       "name": "voice",
       "source": "./plugins/voice",
-      "description": "The voice bridge session hooks and the skill that answers a relayed voice request"
+      "description": "The voice session hooks that feed Baton and the skill that answers a relayed voice request"
     }
   ]
 }
