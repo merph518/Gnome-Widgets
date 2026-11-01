@@ -103,6 +103,12 @@ export function loadConfig(configPath) {
   if (raw.exclusiveSets !== undefined && typeof raw.exclusiveSets !== 'boolean') {
     throw new Error('config exclusiveSets must be true or false');
   }
+  const moduleAbbreviations = raw.moduleAbbreviations ?? {};
+  for (const [name, abbreviation] of Object.entries(moduleAbbreviations)) {
+    if (!/^[A-Z0-9]{2,6}$/.test(abbreviation)) {
+      throw new Error(`config moduleAbbreviations.${name} must be 2 to 6 upper-case letters or digits`);
+    }
+  }
   const output = raw.output ?? path.join(os.homedir(), '.local/share/build-pack');
   const outputDir = path.resolve(root, output.replace(/^~(?=\/)/, os.homedir()));
   // Where new jobs are listed; each source is read before the nightly run takes a job.
@@ -148,6 +154,9 @@ export function loadConfig(configPath) {
     allowDerivedRules: raw.allowDerivedRules === true,
     ruleShape: { ...RULE_SHAPE, ...raw.ruleShape },
     builder: { retries: 3, ...raw.builder },
+    // A document's code or module name to the abbreviation its cards and rules carry as their
+    // module, such as INV; a document not listed takes the module and abbreviation Phase 1 names.
+    moduleAbbreviations,
     suiteMerge: raw.suiteMerge,
     // Scenarios written per card call.
     cardScenariosPerCall: raw.cardScenariosPerCall ?? 4,

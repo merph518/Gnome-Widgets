@@ -122,11 +122,18 @@ test('an issue pack builds end to end on the local model alone', async () => {
   // The retired rule keeps its place, says it was removed, and goes to Phase 3 like any other.
   const retired = pack.rules.find((rule) => rule.id === 'BR-LIB.UC01-006');
   assert.match(retired.summary, /^Retired: this rule was removed/);
+  // Its Status says so too, so a builder can show it without reading the summary; every other rule is Active.
+  assert.equal(retired.status, 'Retired');
+  assert.ok(pack.rules.filter((rule) => rule !== retired).every((rule) => rule.status === 'Active'));
   const scoped = model.calls.filter((call) => call.schemaName.startsWith('phase3'))
     .flatMap((call) => Object.keys(call.schema.properties.rules.properties));
   assert.ok(scoped.includes('BR-LIB.UC01-006'));
   const phase1 = model.calls.find((call) => call.schemaName.startsWith('phase1'));
   assert.match(phase1.user, /\[retired\] BR-LIB\.UC01-006/);
+  // The scope and card prompts ask for the retired status, Focus as steps and a result on every checking step.
+  assert.match(model.calls.find((call) => call.schemaName.startsWith('phase3')).user, /never classify it Superseded/);
+  assert.match(model.calls.find((call) => call.schemaName.startsWith('phase6_cards')).user,
+    /Focus lists the tester's actions in order, one item per step[\s\S]*Every step that checks something/);
   assert.ok(pack.testCards.every((card) => /^TC-MOD-501-\d{3}$/.test(card.id)));
   const phases = statusLines(result.outDir).filter((l) => l.event === 'pass').map((l) => l.phase);
   assert.deepEqual(phases, ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6',
@@ -139,6 +146,91 @@ test('an issue pack builds end to end on the local model alone', async () => {
     phase4: false, phase5: true, phase6: false, phase7: false, phase9: true, phase10: false });
   assert.equal(model.calls.find((c) => c.schemaName.startsWith('phase4_impact')).reasoning, true);
   assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a document the config names takes its abbreviation as the module of its rules and cards', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { 'UC01-Card-Renewal': 'INV' } });
+  const model = fakeModel({ intake: (value) => ({ ...value,
+    documents: ['docs/LIB/UC01-Card-Renewal.md'] }) });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.rules.every((rule) => rule.module === 'INV'));
+  assert.ok(pack.testCards.every((card) => card.module === 'INV' && /^TC-INV-501-\d{3}$/.test(card.id)));
+});
+
+/** A model whose Phase 1 puts every document in one module, `Investigation`, abbreviated INV. */
+const oneModule = () => fakeModel({ intake: (value) => ({ ...value,
+  documents: ['docs/LIB/UC01-Card-Renewal.md', 'docs/LIB/UC02-Overdue-Fines.md'] }),
+phase1_understanding: (value) => {
+  for (const row of Object.values(value.modules)) Object.assign(row, { module: 'Investigation', abbreviation: 'INV' });
+  return value;
+} });
+
+test('a document of a module the config named for another document takes the same abbreviation', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { 'UC01-Card-Renewal': 'INV' } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model: oneModule(), echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual([...new Set(pack.rules.map((rule) => rule.sourceDocument))].length, 2);
+  assert.ok(pack.rules.every((rule) => rule.module === 'INV'));
+  assert.ok(pack.testCards.every((card) => card.module === 'INV' && /^TC-INV-501-\d{3}$/.test(card.id)));
+});
+
+test('the abbreviation a config names for one document of a module reaches the others whatever their order', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { 'UC02-Overdue-Fines': 'INV' } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model: oneModule(), echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(new Set(pack.rules.map((rule) => rule.sourceDocument)).size, 2);
+  assert.ok(pack.rules.every((rule) => rule.module === 'INV'));
+});
+
+test('a suite keeps a configured abbreviation for its document whatever the order, and numbers the others apart', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { UC02: 'INV' } });
+  const model = fakeModel({ phase1_understanding: (value) => {
+    for (const row of Object.values(value.modules)) Object.assign(row, { module: 'Investigation', abbreviation: 'INV' });
+    return value;
+  } });
+  const result = await runJob(config, { suite: 'LIB' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const ids = JSON.parse(read(result.packPath)).testCards.map((card) => card.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('two documents of one module cannot be named different abbreviations in an issue pack', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { 'UC01-Card-Renewal': 'INV', 'UC02-Overdue-Fines': 'INX' } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model: oneModule(), echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:abbreviation-shared');
+});
+
+test('a suite cannot give two documents one configured abbreviation, since each numbers its own cards', async () => {
+  const config = fixtureConfig({ moduleAbbreviations: { Investigation: 'INV' } });
+  const model = fakeModel({ phase1_understanding: (value) => {
+    for (const row of Object.values(value.modules)) Object.assign(row, { module: 'Investigation', abbreviation: 'INV' });
+    return value;
+  } });
+  const result = await runJob(config, { suite: 'LIB' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:abbreviation-shared');
+});
+
+test('every rule carries a status: derived rules and a suite\'s merged rules are Active', async () => {
+  const failing = ['node', '-e', 'process.stderr.write("{doc} is not in the doc map"); process.exit(1)'];
+  const allowed = fixtureConfig({ allowDerivedRules: true,
+    inputs: { ...fixtureInputs(), ruleExport: failing, noRules: 'is not in the doc map' } });
+  const derived = await runJob(allowed, { issue: '501', change: '7001' }, { model: fakeModel(), echo: false });
+  assert.equal(derived.ok, true, JSON.stringify(derived));
+  const pack = JSON.parse(read(derived.packPath));
+  assert.ok(pack.rules.length && pack.rules.every((rule) => rule.status === 'Active'));
+  const suite = await runJob(fixtureConfig(), { suite: 'LIB' }, { model: fakeModel(), echo: false });
+  assert.ok(JSON.parse(read(suite.packPath)).rules.every((rule) => rule.status === 'Active'));
+});
+
+test('a configured abbreviation must be 2 to 6 upper-case letters or digits', () => {
+  assert.throws(() => fixtureConfig({ moduleAbbreviations: { UC01: 'inv' } }),
+    /moduleAbbreviations\.UC01/);
 });
 
 test('a suite pack builds through the repository\'s merge', async () => {
@@ -2742,7 +2834,7 @@ test('a workbook too long for one review call is read in parts, and a failing pa
     Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
     return value;
   };
-  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
   const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink, phase9_revalidation: (value, calls) => ({ ...value,
     remaining: [], passed: calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length !== 2 }) });
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
@@ -2792,7 +2884,7 @@ test('every part of a split workbook opens with the rules index, and a job missi
     Object.assign(config.model, { context: 7400, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
     return value;
   };
-  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(100) })) });
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
   const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink });
   await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
   const parts = checksFor(model, 'phase9_checklist');

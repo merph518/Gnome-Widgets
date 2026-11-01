@@ -617,14 +617,45 @@ export async function phase1(ctx) {
   const modules = new Map(answer.modules.map((row) => [row.document, row]));
   const abbreviations = new Map();
   const byModule = new Map();
+  // In an issue pack, every document of a module takes the abbreviation the config names for any
+  // one of them, whatever the order they come in.
+  const adopted = new Map();
+  // The abbreviations the config names, held back from a suite's other documents whatever the order.
+  const reserved = new Set();
+  for (const doc of ctx.documents) {
+    const row = modules.get(doc.key);
+    const named = ctx.config.moduleAbbreviations[doc.key] ?? ctx.config.moduleAbbreviations[row?.module];
+    if (named) reserved.add(named);
+    if (!job.suite && row && ctx.config.moduleAbbreviations[doc.key]) {
+      // Two documents of one module cannot be named different abbreviations.
+      if (adopted.has(row.module) && adopted.get(row.module) !== named) {
+        throw new GateError('phase1', 'abbreviation-shared');
+      }
+      adopted.set(row.module, named);
+    }
+  }
   for (const doc of ctx.documents) {
     const row = modules.get(doc.key);
     if (!row) throw new GateError('phase1', 'module-missing');
+    const fixed = ctx.config.moduleAbbreviations[doc.key] ?? ctx.config.moduleAbbreviations[row.module]
+      ?? (job.suite ? undefined : adopted.get(row.module));
+    if (fixed) {
+      // The config names this document's module, so the abbreviation stands for it in every column.
+      // A suite numbers its cards per document, so a second document cannot share the abbreviation.
+      if (abbreviations.has(fixed) && (job.suite || abbreviations.get(fixed) !== fixed)) {
+        throw new GateError('phase1', 'abbreviation-shared');
+      }
+      doc.module = fixed;
+      doc.abbreviation = fixed;
+      abbreviations.set(fixed, fixed);
+      byModule.set(fixed, fixed);
+      continue;
+    }
     doc.module = row.module;
     // A suite numbers its cards per document, so each document is its own
     // module with its own abbreviation, made unique by its code when two collide.
     if (job.suite && byModule.has(row.module)) doc.module = `${row.module} ${doc.key}`;
-    if (job.suite && abbreviations.has(row.abbreviation)) {
+    if (job.suite && (abbreviations.has(row.abbreviation) || reserved.has(row.abbreviation))) {
       doc.abbreviation = `${row.abbreviation}${doc.key}`.replace(/[^A-Z0-9]/gi, '').toUpperCase();
       byModule.set(doc.module, doc.abbreviation);
     }
@@ -753,6 +784,7 @@ export async function phase2(ctx) {
           sourcePage: String(rule.source_page ?? '') || 'N/A',
           summary: retired ? `${RETIRED_SUMMARY} ${rule.rule_summary ?? ''}`.trim() : rule.rule_summary,
           risk: risks.includes(rule.risk_level) ? rule.risk_level : undefined,
+          status: retired ? 'Retired' : 'Active',
         });
       }
       continue;
@@ -776,7 +808,7 @@ export async function phase2(ctx) {
         rules.push({
           id: `${doc.key} ${page === 'N/A' ? '' : `p${page} `}${row.statement}`,
           name: row.statement, module: doc.module, sourceDocument: doc.name, sourcePage: page,
-          summary: row.summary, risk: row.risk,
+          summary: row.summary, risk: row.risk, status: 'Active',
         });
       }
     }
@@ -820,7 +852,8 @@ export async function phase3(ctx) {
         + ' not touch is Not Impacted. A rule whose summary starts with "Retired:" was removed'
         + ' from the master: it is a Direct Change only when the change description concerns'
         + ' that removal, and Not Impacted otherwise; for a Direct Change, the rationale says its'
-        + ' removal is to be verified. Record each ambiguity as an assumption.',
+        + ' removal is to be verified. A retired rule keeps its Status of Retired; never classify'
+        + ' it Superseded or Removal Verification. Record each ambiguity as an assumption.',
       inputs: [['Change description', ctx.description], ['Project understanding', summaryText(ctx)],
         ['Rules', asLines(group.map(ruleLine))]],
       schema: S.scopeSchema(ids, ctx.builder.IMPACT_CLASSES),
@@ -1154,9 +1187,11 @@ async function designBatch(ctx, doc, { focus, open, written }, objectives, index
     phase: 'phase6', step: `${name}-d${doc.number}-${index}`, reasoning: false, refs,
     task: `Design reusable test cards for these scenarios: ${focus.map((s) => s.id).join(', ')}.`
       + ' Write one card per scenario, only for scenarios no card written so far covers, and name'
-      + ' on each card the scenario it covers. Focus items and steps are actions; expected'
-      + ' results are observable business behavior. A card\'s expected result is its final'
-      + ' step\'s expected result, in the same words. Name on each card and each step only the'
+      + ' on each card the scenario it covers. Focus lists the tester\'s actions in order, one'
+      + ' item per step, matching the steps. Focus items and steps are actions; expected'
+      + ' results are observable business behavior. Every step that checks something has an'
+      + ' observable expected result; only a setup step may leave it blank. A card\'s expected'
+      + ' result is its final step\'s expected result, in the same words. Name on each card and each step only the'
       + ' rules it checks. Mark cards that come from quality thinking rather than a stated rule'
       + ' as Quality. A scenario an existing test already covers, or that no card can cover, is'
       + ' named in skipped with how (reused or gap) and the reason; reused names the test. A'
@@ -1732,6 +1767,8 @@ export function mergeSuite(ctx) {
   const designed = Object.fromEntries(Object.entries(ctx.designed).map(([key, d]) => [key,
     { ...d, cards: d.cards.map(({ scenario, breakIt, key, ...card }) => card) }]));
   const merged = ctx.suiteMerge.mergeSuitePack({ exportJson: ctx.exportJson, designed, narrative });
+  // A suite takes the active rules only.
+  for (const rule of merged.rules ?? []) rule.status ??= 'Active';
   // The merge carries the narrative's coverage rows only for uncovered rules;
   // the review's rows ride on top.
   const rows = new Map(merged.coverage.map((row) => [row.ruleId, row]));

@@ -9,16 +9,17 @@
 //                  session tools take the number in place of the name, or a nickname given by
 //                  nickname_session, which the listing says. A status the sidebar title ends
 //                  in is dropped from the name; idle and waiting on you give way to the live
-//                  state, and stuck, stopped and waiting on CI are said as "marked" only on
-//                  the idle line, and only while the session is not waiting. A session in a
-//                  worktree on a branch also names the open pull request from that branch
-//                  and the issues it closes, or with no pull request, the In Progress issues
-//                  the branch name carries. gh is asked about each branch at most once a
-//                  minute. An idle session says how its last turn ended: finished, or
-//                  stalled on an error, an interrupt, a call it stopped partway through, or a
-//                  closing promise of more work with nothing due to wake it, which
-//                  background_pending.py reads from the transcript; with background work
-//                  due, it is waiting on that work. An idle session whose catchup.py ledger,
+//                  state, and stuck, stopped, waiting on CI, needs you and working are said
+//                  as "marked" only on the idle line, and only while the session is not
+//                  waiting. A session in a worktree on a branch also names the open pull
+//                  request from that branch and the issues it closes, or with no pull
+//                  request, the In Progress issues the branch name carries. gh is asked about
+//                  each branch at most once a minute. An idle session says how its last turn
+//                  ended: finished, or stalled on an error, an interrupt, a call it stopped
+//                  partway through, or a closing promise of more work with nothing due to
+//                  wake it, which background_pending.py reads from the transcript; with
+//                  background work due, it is waiting on that work. An idle session whose
+//                  catchup.py ledger,
 //                  the one transcript.py reads its commands as naming, holds an open issue
 //                  row, or an open row for a pull request that is not its own, is blocked on
 //                  that issue or pull request, in place of a finished or waking verdict and
@@ -850,6 +851,12 @@ const LIVE_STATUSES = ['idle', 'waiting on you'];
 // "Merge (idle) 2". Group 1 is the status and group 2 the number.
 const NUMBERED_STATUS = new RegExp(`\\s+\\((${STATUSES.join('|')})\\)(\\s+\\d+)?$`);
 
+// A title without the status it ends in, keeping a number Claude Code added after it.
+function withoutStatus(title) {
+  const found = title.match(NUMBERED_STATUS);
+  return found ? `${title.slice(0, found.index).trim()}${found[2] ?? ''}` : title;
+}
+
 // Claude Code keeps one file per running session in its sessions folder, named for the
 // process id. It carries the title shown in the app's sidebar, the inbox socket, the working
 // directory and whether a turn is running. The .key files beside them hold secrets and are
@@ -893,8 +900,7 @@ export function listSessions({ sessionsDir, procDir, roots, appSessionsDir, brid
     const found = raw.match(NUMBERED_STATUS);
     sessions.push({
       key,
-      name: (found ? `${raw.slice(0, found.index).trim()}${found[2] ?? ''}` : raw)
-        || path.basename(cwd),
+      name: withoutStatus(raw) || path.basename(cwd),
       sidebar: raw,
       marked: found?.[1] ?? '',
       busy: entry.status === 'busy',
@@ -1025,13 +1031,16 @@ export function setNickname(session, args, { sessions, numbersFile }) {
     return `${session.name} has no nickname now.`;
   }
   const nickname = sessionTitle(said, '');
-  const spoken = asNumbers(words(nickname).filter(word => !SESSION_FILLER.includes(word)));
+  const spoken = asNumbers(words(withoutStatus(nickname))
+    .filter(word => !SESSION_FILLER.includes(word)));
   if (spoken.length === 0 || (spoken.length === 1 && /^\d+$/.test(spoken[0]))) {
     throw new Error(`${nickname} reads as a session number, so it would hide session `
       + `${spoken[0] ?? 'numbers'}. Pick a nickname with words in it.`);
   }
+  const unmarked = withoutStatus(String(nickname).trim());
   const holder = sessions.find(s => s.key !== session.key
-    && (sameTitle(s.name, nickname) || (s.nickname && sameTitle(s.nickname, nickname))));
+    && (sameTitle(s.name, unmarked)
+      || (s.nickname && sameTitle(withoutStatus(s.nickname), unmarked))));
   if (holder) {
     throw new Error(`${sessionLabel(holder)} already answers to ${nickname}. Pick another `
       + `nickname for ${session.name}.`);
@@ -3764,8 +3773,11 @@ function renameFromFacts(updates, { paths, sessions, config, now }) {
 // The room a task name needs in a title to be worth writing.
 const MIN_TASK_CHARS = 8;
 // The statuses a session sets itself that say more than the bridge can tell, kept when a
-// title ends in one; any other status is replaced by the one the bridge reads.
-const KEPT_STATUS = /^\s+\((?:stuck|stopped|waiting on CI|needs you|working)\)$/;
+// title ends in one: stuck, stopped, waiting on CI, needs you and working, every status except
+// the live ones, which the bridge reads fresh. Any other status is replaced by the one the
+// bridge reads.
+const KEPT_STATUS = new RegExp(`^\\s+\\((?:${STATUSES.filter(s => !LIVE_STATUSES.includes(s))
+  .join('|')})\\)$`);
 
 // The task a session's title names: the work name it set itself, else its open pull request
 // with its title, else the issue it works, else the start of what it last said.
@@ -3862,9 +3874,9 @@ export async function renameAllSessions(sessions, { paths, config, tracker, now 
     }
     try {
       if (wanted.length > MAX_NAME_CHARS) throw new Error(`${base} leaves no room for a state.`);
-      checkRename(s, wanted, sessions);
       const twin = chosen.find(other => sameTitle(other.title, wanted));
       if (twin) throw new Error(`${twin.name} is getting the same title`);
+      checkRename(s, wanted, sessions);
     } catch (error) {
       left.push(`${s.name} (${error.message.replace(/\.$/, '')})`);
       continue;
@@ -5825,8 +5837,9 @@ export const TOOLS = [
     description: 'List the Claude Code sessions running on the workstation that the voice '
       + 'bridge can reach, by their numbers and their titles in the app sidebar, whether each '
       + 'is busy, and how long ago each last replied and, during a turn, last wrote a note. '
-      + 'A name leaves off a status the sidebar title ends in, such as (idle); stuck, stopped '
-      + 'or waiting on CI, a status the session set itself, is said as ", marked <status>" '
+      + 'A name leaves off a status the sidebar title ends in, such as (idle); stuck, stopped, '
+      + 'waiting on CI, needs you or working, a status the session set itself, is said as '
+      + '", marked <status>" '
       + 'only while the session is idle and not waiting. '
       + 'A session keeps its number until it ends, whatever else starts or ends. A session '
       + 'working an issue or a pull request names it, such as working issue 5190, pull '
@@ -11464,18 +11477,29 @@ function workTitle(title, work) {
 // answer to "session two" before the session with that number does, and one another session
 // is called or nicknamed would reach the wrong one.
 function checkRename(session, name, sessions) {
-  const spoken = asNumbers(words(name).filter(word => !SESSION_FILLER.includes(word)));
+  // The listed names leave off a status, so the name asked for is compared the same way.
+  const unmarked = withoutStatus(String(name).trim());
+  const spoken = asNumbers(words(unmarked).filter(word => !SESSION_FILLER.includes(word)));
   if (spoken.length === 1 && /^\d+$/.test(spoken[0])) {
     throw new Error(`${name} reads as a session number, so it would hide session `
       + `${spoken[0]}. Pick a name with words in it.`);
   }
-  const holder = sessions.find(s => s.key !== session.key && sameTitle(s.name, name));
+  // Two sessions that share a base may differ in status, but never take the same whole title.
+  const twin = sessions.find(s => s.key !== session.key
+    && sameTitle(titleOf(s), String(name).trim()));
+  if (twin) {
+    throw new Error(`${sessionLabel(twin)} is already called ${titleOf(twin)}. Pick another `
+      + `name for ${session.name}.`);
+  }
+  // A rename that keeps the session's own base and changes only its status adds no clash.
+  if (sameTitle(withoutStatus(titleOf(session)), unmarked)) return;
+  const holder = sessions.find(s => s.key !== session.key && sameTitle(s.name, unmarked));
   if (holder) {
     throw new Error(`${sessionLabel(holder)} is already called ${holder.name}. Pick another `
       + `name for ${session.name}.`);
   }
   const nicknamed = sessions.find(s => s.key !== session.key && s.nickname
-    && sameTitle(s.nickname, name));
+    && sameTitle(withoutStatus(s.nickname), unmarked));
   if (nicknamed) {
     throw new Error(`${sessionLabel(nicknamed)} already answers to ${name}. Pick another `
       + `name for ${session.name}.`);
@@ -11860,8 +11884,8 @@ export async function callTool(name, args, {
       const kind = s.background ? ', background' : '';
       const loaded = loadText(load, { busy: s.busy, now: at, window });
       const idle = `idle${loaded}${verdicts[i] && `, ${verdicts[i]}`}`;
-      // A status the title carries is the session's own word, not the live state. idle and
-      // waiting on you give way to that state; the others show only while the session is
+      // A status the title carries is the session's own word, not the live state. idle
+      // and waiting on you give way to that state; the others show only while the session is
       // idle and not waiting.
       const marked = s.busy || waiting || !s.marked || LIVE_STATUSES.includes(s.marked)
         ? '' : `, marked ${s.marked}`;

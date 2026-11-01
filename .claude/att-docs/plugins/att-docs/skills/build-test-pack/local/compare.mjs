@@ -79,7 +79,7 @@ export function almStyle(pack) {
     steps: pack.steps.length, cards: perCard.filter((s) => s.length).length,
     stepsPerCard: counts.length ? { min: counts[0], median: counts[Math.floor(counts.length / 2)], max: counts.at(-1) } : null,
     stepNames: names.every((n) => /^Step \d+$/.test(n)) ? 'Step N' : 'other',
-    expectedOnFinalStepOnly: finalOnly && finalHas,
+    expectedOnFinalStepOnly: finalOnly && finalHas, expectedOnFinalStep: Boolean(finalHas),
     expectedOnEveryStep: expected.every((r) => r.every(Boolean)),
     ruleReferencesIn: where, testNameForm: form, types: [...new Set(pack.steps.map((s) => s.type))],
   };
@@ -101,13 +101,30 @@ export function headerDiff(expected, actual) {
   return { missing, extra, renamed };
 }
 
+const FINAL_STEP_CHECK = 'Expected Result only on the final step';
+const TEST_NAME_CHECK = 'Test Name form';
+/**
+ * The format differences the pack makes on purpose, each keyed by its check name and given the
+ * pack's ALM style: the reason when the pack is in the intended state, else false. A pack in any
+ * other state (a Test Name that is sometimes a title too) is still a plain difference.
+ */
+export const DELIBERATE = {
+  [FINAL_STEP_CHECK]: (style) => style.steps > 0 && style.expectedOnFinalStep && !style.expectedOnFinalStepOnly
+    && 'A step before the final one that checks something carries its own Expected Result, so a tester sees what to verify there.',
+  [TEST_NAME_CHECK]: (style) => style.steps > 0 && style.testNameForm === 'card ID only'
+    && 'The Test Name is the card ID alone, so a "/" in a card title never reaches the ALM import.',
+};
+
 const place = (found) => (found ? `row ${found.n}` : 'none');
 
 /** The sheet inventory, layout, header and style checks of a pack against the reference. */
 export function formatChecks(reference, pack, standard) {
   const checks = [];
-  const add = (area, name, expected, actual, pass = same(expected, actual)) =>
-    checks.push({ area, name, reference: String(expected), pack: String(actual), pass });
+  const add = (area, name, expected, actual, pass = same(expected, actual), style = null) => {
+    const deliberate = pass ? false : DELIBERATE[name]?.(style) || false;
+    checks.push({ area, name, reference: String(expected), pack: String(actual), pass,
+      ...(deliberate ? { deliberate } : {}) });
+  };
   const refNames = reference.sheets.map((s) => s.name);
   const names = pack.sheets.map((s) => s.name);
   const inOrder = refNames.filter((n) => names.some((m) => same(m, n)));
@@ -129,12 +146,15 @@ export function formatChecks(reference, pack, standard) {
   const a = almStyle(reference);
   const b = almStyle(pack);
   add('alm', 'step names', a.stepNames, b.stepNames);
-  add('alm', 'Expected Result only on the final step', a.expectedOnFinalStepOnly, b.expectedOnFinalStepOnly);
+  add('alm', FINAL_STEP_CHECK, a.expectedOnFinalStepOnly, b.expectedOnFinalStepOnly,
+    undefined, b);
   add('alm', 'rule references in the Description', a.ruleReferencesIn, b.ruleReferencesIn);
-  add('alm', 'Test Name form', a.testNameForm, b.testNameForm);
+  add('alm', TEST_NAME_CHECK, a.testNameForm, b.testNameForm, undefined, b);
   add('alm', 'Type', a.types.join(','), b.types.join(','));
   const score = checks.length ? checks.filter((c) => c.pass).length / checks.length : 1;
+  const deliberate = checks.filter((c) => c.deliberate).length;
   return { score, passed: checks.filter((c) => c.pass).length, total: checks.length, checks,
+    deliberate, differences: checks.filter((c) => !c.pass && !c.deliberate).length,
     style: { reference: a, pack: b }, standard: standard ? { reference: standardChecks(reference, standard), pack: standardChecks(pack, standard) } : null };
 }
 
@@ -389,7 +409,7 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
     ['Cited rule IDs missing from a sheet or the rules', t.reference.citedMissing.length, t.pack.citedMissing.length],
   ]));
   p('');
-  p(`- Format: ${card.format.passed} of ${card.format.total} reference format checks matched (${pct(card.format.score)}).`);
+  p(`- Format: ${card.format.passed} of ${card.format.total} reference format checks matched (${pct(card.format.score)}); ${card.format.deliberate} deliberate, ${card.format.differences} other.`);
   const matched = f.crosswalk.filter((r) => r.matched).length;
   p(`- Floor: ${matched} of ${f.crosswalk.length} reference cards are matched by a pack card; unmatched: ${list(f.unmatched)}.`);
   p(`- Truth: retired rules the pack does not record: ${list(t.pack.retiredMissing)}.`);
@@ -397,9 +417,12 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
 
   h('## Format');
   p(`Score: ${card.format.passed} of ${card.format.total} checks (${pct(card.format.score)}). Rows are Excel rows.`);
-  const failed = card.format.checks.filter((c) => !c.pass);
+  const failed = card.format.checks.filter((c) => !c.pass && !c.deliberate);
   h('### Checks that differ from the reference');
   p(table(['Area', 'Check', names.reference, names.pack], failed.map((c) => [c.area, c.name, c.reference, c.pack])));
+  h('### Deliberate differences');
+  p(table(['Area', 'Check', names.reference, names.pack, 'Why'],
+    card.format.checks.filter((c) => c.deliberate).map((c) => [c.area, c.name, c.reference, c.pack, c.deliberate])));
   h('### ALM step style');
   const [a, b] = [card.format.style.reference, card.format.style.pack];
   const range = (s) => (s ? `${s.min} to ${s.max} (median ${s.median})` : 'none');
@@ -576,7 +599,7 @@ export async function runCompare(args, { makeClient } = {}) {
   fs.writeFileSync(path.join(out, 'compare.md'), reportOf(card));
   const t = card.truth;
   return [
-    `format  ${card.format.passed}/${card.format.total} checks matched`,
+    `format  ${card.format.passed}/${card.format.total} checks matched, ${card.format.deliberate} deliberate, ${card.format.differences} other`,
     `floor   reference cards=${card.floor.reference.cards} pack cards=${card.floor.pack.cards} `
       + `repeats=${card.floor.pack.repeats} unmatched=${card.floor.unmatched.length}`,
     `truth   retired-missing=${t.pack.retiredMissing.length} untrue-rows=${t.pack.untrueRows.length} `

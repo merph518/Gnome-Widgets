@@ -1192,6 +1192,18 @@ test('rename_all_sessions replaces a work name the listing gave, and keeps a wor
     } finally {
       await second.close();
     }
+    // A stuck the session set says more than the bridge can tell, so it is kept.
+    const stuck = readyWorkMachine({ name: 'MR phase fix - issue #57 build (stuck)',
+      ready: false });
+    const third = await listenForRenames(stuck.socket);
+    try {
+      const said = await callTool('rename_all_sessions', {}, stuck.context);
+      await settled();
+      assert.deepEqual(third.lines, []);
+      assert.match(said, /Already fit: /);
+    } finally {
+      await third.close();
+    }
   });
 
 test('rename_all_sessions refreshes a task it wrote, but never one the session set',
@@ -1215,6 +1227,32 @@ test('rename_all_sessions refreshes a task it wrote, but never one the session s
         ['MR phase fix - PR #325 Other title (idle)']);
     } finally {
       await inbox.close();
+    }
+  });
+
+test('rename_all_sessions renames one of two sessions that share a base and leaves the other while it holds the title it wants',
+  async () => {
+    const root = tempDir();
+    const paths = fakeMachine([
+      { pid: 83, cwd: path.join(root, 'repo', 'a'), name: 'Merge (waiting on you)', startedAt: 1, sessionId: 'a1' },
+      { pid: 84, cwd: path.join(root, 'repo', 'b'), name: 'Merge (idle)', startedAt: 2, sessionId: 'b2',
+        status: 'busy' },
+    ], root);
+    const context = { paths, config: { roots: [path.join(root, 'repo')] } };
+    const sockets = path.dirname(paths.sessionsDir);
+    const one = await listenForRenames(path.join(sockets, '83.sock'));
+    const two = await listenForRenames(path.join(sockets, '84.sock'));
+    try {
+      const said = await callTool('rename_all_sessions', {}, context);
+      await settled();
+      // The idle title is still the other session's when the first is asked, so it waits for
+      // the next run rather than taking a title another session holds.
+      assert.deepEqual(one.lines, []);
+      assert.deepEqual(two.lines.map(line => line.name), ['Merge (working)']);
+      assert.match(said, /^Renamed 1 of 2 sessions\.[\s\S]*Left alone: Merge \(Merge 2 is already called Merge \(idle\)/);
+    } finally {
+      await one.close();
+      await two.close();
     }
   });
 
@@ -2742,6 +2780,17 @@ test('list_sessions reports the live state, not a stale waiting suffix', async (
   fs.writeFileSync(marker, JSON.stringify({ at: Date.now() / 1000 - 5, reason: 'a question' }));
   const waiting = await callTool('list_sessions', {}, context);
   assert.match(waiting, /^Merge, idle.*, waiting on a question/m);
+});
+
+test('list_sessions says needs you and working as marked, like stuck', async () => {
+  const paths = fakeMachine([
+    { pid: 46, cwd: '/repo/a', name: 'Ship - PR #5 fix (working)' },
+    { pid: 47, cwd: '/repo/b', name: 'Land - PR #6 fix (needs you)' },
+  ]);
+  const context = { paths, config: { roots: ['/repo'] }, followWaitMs: 0 };
+  const listed = await callTool('list_sessions', {}, context);
+  assert.match(listed, /^Ship - PR #5 fix, idle.*, marked working/m);
+  assert.match(listed, /^Land - PR #6 fix, idle.*, marked needs you/m);
 });
 
 test('list_sessions keeps a deliberate status only while idle and not waiting', async () => {
@@ -4617,6 +4666,7 @@ test('nickname_session refuses a taken nickname or a number alone', async () => 
   await assert.rejects(give('session 2', 'docs sweep'), /Session 3 already answers/);
   await assert.rejects(give('session 2', 'number two'), /reads as a session number/);
   await assert.rejects(give('session 2', '3'), /reads as a session number/);
+  await assert.rejects(give('session 2', '2 (idle)'), /reads as a session number/);
   // Its own nickname again is not a collision.
   assert.match(await give('session 1', 'first'), /^Voice Bridge is nicknamed first\./);
 });
@@ -4807,6 +4857,79 @@ test('rename_session refuses a taken, empty, or number-only name and posts nothi
     await inbox.close();
   }
 });
+
+test('rename_session refuses a name with a status tail that another session\'s title holds',
+  async () => {
+    for (const held of ['X - t', 'X - t (working)']) {
+      const root = tempDir();
+      const other = { pid: 95, cwd: '/repo/b', name: 'Y', startedAt: 2, sessionId: 'b2' };
+      const paths = {
+        ...fakeMachine([
+          { pid: 94, cwd: '/repo/a', name: held, startedAt: 1, sessionId: 'a1' }, other,
+        ], root),
+        numbersFile: numbersAt(root),
+      };
+      const inbox = await sessionInbox(path.join(root, '95.sock'));
+      try {
+        await assert.rejects(callTool('rename_session',
+          { session: 'session 2', name: 'X - t (idle)' }, { paths, config: { roots: ['/repo'] } }),
+        /Session 1 is already called X - t\./);
+        assert.deepEqual(inbox.lines, []);
+      } finally {
+        await inbox.close();
+      }
+    }
+  });
+
+test('rename_session lets a session change only its status when another shares its base',
+  async () => {
+    const root = tempDir();
+    const paths = {
+      ...fakeMachine([
+        { pid: 94, cwd: '/repo/a', name: 'Merge (idle)', startedAt: 1, sessionId: 'a1' },
+        { pid: 95, cwd: '/repo/b', name: 'Merge (stopped)', startedAt: 2, sessionId: 'b2' },
+      ], root),
+      numbersFile: numbersAt(root),
+    };
+    const inbox = await sessionInbox(path.join(root, '95.sock'));
+    try {
+      const context = { paths, config: { roots: ['/repo'] }, renameWaitMs: 50 };
+      await callTool('rename_session', { session: 'session 2', name: 'Merge (stuck)' }, context);
+      assert.deepEqual(inbox.lines.map(line => line.name), ['Merge (stuck)']);
+      await assert.rejects(callTool('rename_session', { session: 'session 2', name: '2 (idle)' },
+        context), /reads as a session number/);
+      // Another session's exact title is refused, and nothing reaches the inbox.
+      await assert.rejects(callTool('rename_session', { session: 'session 2',
+        name: 'Merge (idle)' }, context), /is already called Merge \(idle\)/);
+      assert.deepEqual(inbox.lines.map(line => line.name), ['Merge (stuck)']);
+    } finally {
+      await inbox.close();
+    }
+  });
+
+test('rename_all_sessions never gives a session the exact title an idle one already fits',
+  async () => {
+    const root = tempDir();
+    const paths = fakeMachine([
+      { pid: 83, cwd: path.join(root, 'repo', 'a'), name: 'Merge (idle)', startedAt: 1, sessionId: 'a1' },
+      { pid: 84, cwd: path.join(root, 'repo', 'b'), name: 'Merge (waiting on you)', startedAt: 2, sessionId: 'b2' },
+    ], root);
+    const context = { paths, config: { roots: [path.join(root, 'repo')] } };
+    const sockets = path.dirname(paths.sessionsDir);
+    const one = await listenForRenames(path.join(sockets, '83.sock'));
+    const two = await listenForRenames(path.join(sockets, '84.sock'));
+    try {
+      const said = await callTool('rename_all_sessions', {}, context);
+      await settled();
+      assert.deepEqual(one.lines, []);
+      assert.deepEqual(two.lines, []);
+      assert.match(said, /Left alone: /);
+      assert.match(said, /is already called Merge \(idle\)/);
+    } finally {
+      await one.close();
+      await two.close();
+    }
+  });
 
 test('rename_session says what the title reads when it is not the name asked for', async () => {
   const { paths, fix, socket, context } = renameMachine();
