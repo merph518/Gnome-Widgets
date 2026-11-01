@@ -2155,9 +2155,9 @@ const issueText = (ctx) => list(ctx.reviewFindings)
 /**
  * Phase 9 runs as four steps, each a checkpoint of its own, so no one call
  * thinks through the whole review. The first runs the checklist over the built
- * workbook, in parts when it is long: issues, the coverage rows for rules not
- * plainly Covered, and assumptions. `again` is a check after a fix round, which
- * replaces the issues and keeps the rest.
+ * workbook with thinking off, in parts when it is long: issues, the coverage
+ * rows for rules not plainly Covered, and assumptions. `again` is a check after
+ * a fix round, which replaces the issues and keeps the rest.
  */
 export async function phase9Checklist(ctx, pack, { again = false } = {}) {
   const refs = [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')];
@@ -2169,7 +2169,7 @@ export async function phase9Checklist(ctx, pack, { again = false } = {}) {
   const answers = [];
   for (const [i, view] of views.entries()) {
     answers.push(await ask(ctx, {
-      phase: 'phase9', step: again ? 'checklist-again' : 'checklist', reasoning: true, refs,
+      phase: 'phase9', step: again ? 'checklist-again' : 'checklist', reasoning: false, refs,
       inputs: [['Change description', ctx.description], ...view],
       task: 'Run the Validation checklist against this pack. List each issue and its fix. A fix'
         + ' names the card or rule to change and what to change it to; leave it blank for an'

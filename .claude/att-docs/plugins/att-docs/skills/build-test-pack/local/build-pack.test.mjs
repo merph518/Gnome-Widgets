@@ -145,6 +145,9 @@ test('an issue pack builds end to end on the local model alone', async () => {
   assert.deepEqual(Object.fromEntries(thinking), { intake: false, phase1: true, phase3: true,
     phase4: false, phase5: true, phase6: false, phase7: false, phase9: true, phase10: false });
   assert.equal(model.calls.find((c) => c.schemaName.startsWith('phase4_impact')).reasoning, true);
+  // Phase 9's checklist is a reading pass with thinking off; its other calls think.
+  const checklist = model.calls.filter((c) => c.schemaName.startsWith('phase9_checklist'));
+  assert.ok(checklist.length && checklist.every((c) => c.reasoning === false));
   assertContentFree(read(path.join(result.outDir, 'status.log')));
 });
 
@@ -2763,6 +2766,24 @@ test('the review reads the built workbook, applies a fix through repair, and rer
   const validation = readPack(result.workbook).sheet('Workbook Validation');
   assert.ok(validation.rows.every((row) => row.cells.Status !== 'FAIL'));
   assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('the checklist calls run with thinking off; confidence, senior review and revalidation think', async () => {
+  const config = fixtureConfig();
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const checks = checksFor(model, 'phase9_checklist');
+  assert.deepEqual(checks.map((c) => c.schemaName), ['phase9_checklist', 'phase9_checklist_again']);
+  for (const call of checks) {
+    assert.equal(call.reasoning, false);
+    assert.equal(call.maxTokens, config.model.maxOutput);
+  }
+  for (const name of ['phase9_confidence_overall', 'phase9_confidence_', 'phase9_senior', 'phase9_revalidation']) {
+    const calls = checksFor(model, name);
+    assert.ok(calls.length, name);
+    assert.ok(calls.every((c) => c.reasoning === true), name);
+  }
 });
 
 test('a finding repair cannot fix gets two rounds, then revalidation fails: Workbook Validation FAIL and a stop code', async () => {

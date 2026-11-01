@@ -266,9 +266,11 @@ Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
 (issues, coverage rows, assumptions, the fix rounds), `phase9-confidence` (the
 overall level and each field of the assessment, one call per field),
 `phase9-senior` (the senior review and tester notes, written last), and
-`phase9-revalidate` (the rebuild and the revalidation). Each call thinks through
-one part of the review, and a job resumed in Phase 9 keeps the steps that
-passed.
+`phase9-revalidate` (the rebuild and the revalidation). The checklist calls, the
+first read and each read after a fix round, run with thinking off and an output
+limit of `model.maxOutput`. The confidence, senior review and revalidation calls
+think, each through one part of the review. A job resumed in Phase 9 keeps the
+steps that passed.
 
 A reasoning call can think for up to `model.reasoningOutput` tokens (40,960 by
 default), which takes well over an hour at local generation speeds, inside a
@@ -296,7 +298,9 @@ off at `model.maxOutput`.
 `model.reasoningOutputByPhase` lowers the thinking limit for single phases, for
 example `{ "phase9": 16384 }`. Its keys are `phase1`, `phase3`, `phase4`,
 `phase5` and `phase9`, and each value is a whole number from 1024 to
-`model.reasoningOutput`. `model.retryOutput` is a whole number from 1024 to
+`model.reasoningOutput`. In Phase 9 the limit covers the confidence, senior review
+and revalidation calls; the checklist calls do not think and use `model.maxOutput`.
+`model.retryOutput` is a whole number from 1024 to
 `model.maxOutput`; when `model.maxOutput` is smaller than 8192 it defaults to
 `model.maxOutput`. To find the phases that hit their limit, read the `retry` and
 `call-fail` lines in `status.log`: a line whose `reason` is `length` or `runaway`
