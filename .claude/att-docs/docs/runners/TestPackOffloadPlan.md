@@ -138,7 +138,7 @@ work repository's documents and tools are on MTabletPC is open question 2.
 | 7 | Ask the user about each missing input; offer extract, update, or go ahead with limitations | `SKILL.md`, "Before a job is run or queued" | Judgment and a question to the user | In: the `check` lines. Out: the user's decision. | Not applicable. | Keep in the session. |
 | 8 | `queue add`, `queue remove`, `queue fill` | `build-pack.mjs: addJob`, `removeJob`, `fillQueue`, `jobFromLine`; `sources.mjs: sourceLines` | Mechanical | In: job fields; for `fill`, the folder, records glob or command in `queue.sources`. Out: edits to the queue file under the queue lock. | The queue file and lock are local to the host and take a PID and start time (`lockQueue`, `holderAlive`). Only a tablet runner is on that host, and it runs as the same user, so it could reach both. A Windows runner would split the queue in two. | Already off the session, in the sense that it is a single command. Leave on MTabletPC. |
 | 9 | Start a job now | `SKILL.md`, "Starting a job now"; `local/systemd/build-pack-now@.service` | Mechanical: `systemctl --user start --no-block` | In: job id. Needs the user manager on MTabletPC. | A Windows runner cannot. A tablet runner runs as `michael` on that host, but a system service does not necessarily have the user manager's environment; that was not checked. | Keep in the session (it is one command). |
-| 10 | Read the outcome | `build-pack.mjs: jobStatus`, `queue status`, `queue summary`; `status.mjs: statusFields` | Mechanical and already content-safe: `statusFields` refuses any value that is not a short code | In: queue file, `status.log`. Out: one status line. | Same host constraint as row 8. | Already off the session apart from the polling; leave. |
+| 10 | Read the outcome | `build-pack.mjs: jobStatus`, `queue status`, `queue summary`; `status.mjs: statusFields` | Mechanical and already content-safe: `statusFields` refuses any value that is not a short code | In: queue file, `status.log`. Out: the status line, the phase detail lines, and the queue listing. | Same host constraint as row 8. | Already off the session apart from the polling; leave. |
 
 ### Inside a job (`run.mjs: runJob`)
 
@@ -176,7 +176,7 @@ which only matters if a runner could receive the pack file. See open question 3.
 | 31 | Morning report and queue summary | `report.mjs: writeReports`; `build-pack.mjs: summaryLines`; `build-pack-report.timer` | Mechanical; reads only the queue file and `status.log`. Holds job ids, reason codes, counts, confidence ratings and run times, so `SKILL.md` says a file "can be opened or sent anywhere". | In: queue file, `status.log`. Out: `daily-<date>.md`, weekly on Monday. | The one output in the whole process that is safe to leave the machine. Only a tablet runner has the queue file. | Already off the session. See S4 for publishing it. |
 | 32 | Spot-check list | `report.mjs: spotChecks` (`maxPriority`, `sample`, `seededRandom`) | Mechanical | | Same as row 31. | Already off the session. |
 | 33 | Give the user the workbook | `SKILL.md`, "Where the workbook lands"; `<send-file>` | Mechanical (copy or send a file) | In: the `.xlsx`. | The workbook is the work content. | Keep in the session as a path report; the session must not read the file. |
-| 34 | Compare a pack with a reference pack | `build-pack.mjs: compareCommand`; `compare.mjs: runCompare`, `compare`, `formatChecks`, `truthOf`; `truth.mjs`; `floor.mjs`; `consistency.mjs`; `xlsx.mjs: readXlsx`; `SKILL.md`, "Comparing a pack with a reference pack" | Mechanical without `--model`: no job config, no model, dependency-free zip reader. With `--model` it asks the local model two questions per card, so that mode is AI. | In: reference `.xlsx`, pack `.xlsx`, rule export or workbook, converted document. Out: `compare.json`, `compare.md`. Both outputs quote work content (card names, rule text, document lines). | The best fit in terms of code: one command, no machine state. The blockers are the inputs (the reference pack is the supervisor's hand-built work) and the output (`compare.md` is work content, so it cannot be an artifact or appear in a log). Effort S if inputs can be reached, since the Node code needs nothing installed. | Offload now, but only as a job whose inputs sit on the runner's own disk and whose output stays there, printing the exit code and the counts the console already limits itself to ("The console prints only counts and the output names"). See Job B. |
+| 34 | Compare a pack with a reference pack | `build-pack.mjs: compareCommand`; `compare.mjs: runCompare`, `compare`, `formatChecks`, `truthOf`; `truth.mjs`; `floor.mjs`; `consistency.mjs`; `xlsx.mjs: readXlsx`; `SKILL.md`, "Comparing a pack with a reference pack" | Mechanical without `--model`: no job config, no model, dependency-free zip reader. With `--model` it asks the local model two questions per card, so that mode is AI. | In: reference `.xlsx`, pack `.xlsx`, rule export or workbook, converted document. Out: `compare.json`, `compare.md`. Both outputs quote work content (card names, rule text, document lines). | The best fit in terms of code: one command, no machine state. The blockers are the inputs (the reference pack is a baseline pack, which is work content) and the output (`compare.md` is work content, so it cannot be an artifact or appear in a log). Effort S if inputs can be reached, since the Node code needs nothing installed. | Offload now, but only as a job whose inputs sit on the runner's own disk and whose output stays there, printing the exit code and the counts the console already limits itself to ("The console prints only counts and the output names"). See Job B. |
 | 35 | Load a suite pack into the test tool, dry run | `<testpack-command> --doc <committed-pack>`; `<upload-script>` (`SKILL.md`, "Loading a suite pack into the test tool") | Mechanical. Everything is looked up before anything is written, and "a repeat dry run plans no writes". | In: the committed suite pack file, the test tool (ALM) over the network, requirement ids from the rule master. Out: a plan of folders, tests and sets to create. | Needs the ALM account and a route to ALM from the runner. The Linux guest in `LinuxRunnerMigration.md` shows that route can be built on a work-side runner, but none of the allowed `overmind` runners is documented as having one (open question 4). The plan output names tests and rules, so it is work content in a log. | Offload after a split: the lookup and plan are mechanical; the send is an approval step. See Job C. |
 | 36 | Load a suite pack, send | `<testpack-command> --doc <committed-pack> --send` | Mechanical, but writes to ALM and `SKILL.md` says "a send only when the user asks for one" | As row 35, plus write access. | As row 35. | Keep in the session as a user-approved step. Do not schedule it. |
 | 37 | Upload a suite's rules and record their test-tool ids | `<rule-upload>` (`SKILL.md`, "Loading a suite pack ..."; `business-rule-update` upload) | Mechanical, writes to ALM; the loader refuses to run until it is done | | As row 36. | Keep in the session. |
@@ -319,10 +319,10 @@ tablet runner, while no queue run is active (the nightly run, a `--now` job, a
 - **Must not log or upload.** `compare.md` and `compare.json` (they quote cards,
   rule text and document lines). No `actions/upload-artifact`. A final cleanup
   step removes the inputs and outputs.
-- **Honest caveat.** The inputs are the supervisor's reference pack and a built
-  pack, so they would have to be copied onto the runner first. That copy is the
-  exposure. If the answer to open question 2 is that no runner can hold them, this
-  job is not worth building and `compare` stays a desktop command.
+- **Honest caveat.** The inputs are a baseline pack, used as the reference, and
+  a built pack, so they would have to be copied onto the runner first. That copy
+  is the exposure. If the answer to open question 2 is that no runner can hold
+  them, this job is not worth building and `compare` stays a desktop command.
 
 ### Job C. Suite pack loader dry run
 
@@ -357,8 +357,8 @@ pause, and any step that writes to ALM.
 The user asked for this section alongside the offload plan: what else, beyond
 trimming the context window (issue 273), would ease the low-memory trouble
 during the overnight build of October 29. It is a list of suggestions,
-nothing here is changed yet, and each one wants a measured build before it is
-kept.
+nothing here is changed on the machine yet, and each one wants a measured build
+before it is kept.
 
 ### What the machine showed that night
 
@@ -446,27 +446,33 @@ These come from system logs and counters only (`sar`, the `lemond` journal,
    affected, so the saving is smaller than half of the whole. It stacks with issue
    273's smaller window rather than replacing it. Compare one pack's output
    against a pack built without it before keeping it.
-4. **Pause the Actions runner units while a job runs.** `pause.mjs` already stops
-   the systemd units the config names when the first job is about to start and
-   starts them after. The runners are system units, so
-   `"units": ["actions.runner.*"]`, `"scope": "system"` and
-   `"busyProcess": "Runner.Worker"` fit. With `busyProcess` set, a runner that is
-   running a CI job is waited for, polling every `pollSeconds`, and is stopped
-   when the worker finishes. The first build job waits until every runner is
-   stopped, so a long CI run delays the build. `pause()` has no timeout and does
-   not check the cutoff, so steady CI load could hold off the build. The runners
-   start again when the run ends, and a run that died is cleaned up by the next
-   one.
+
+   Status (issue 287): the opt-in and the measurement steps are in the
+   `build-test-pack` `SKILL.md`. The saved arguments on the machine are not
+   changed. Still to fill in after the measured build: GTT before and after
+   (idle and at peak), and the `compare` result.
+4. **Pause the Actions runner units while a job runs.** The work repository's
+   pipeline config lists the four runner units with `"scope": "system"` and
+   `"busyProcess": "Runner.Worker"`. `pause.mjs` stops them when the first job is
+   about to start and starts them after. A runner that is running a CI job is
+   waited for, polling every `pollSeconds`, and is stopped when the worker
+   finishes. The wait ends at the earlier of `pause.maxWaitMinutes` (60 by
+   default) and the queue cutoff, so steady CI load cannot hold off the build
+   past either. A runner still busy then is left running and logged as
+   `pause: left running <unit>`, and the run checks again before each later job.
+   The runners start again when the run ends, and a run that died is cleaned up
+   by the next one.
+
+   What remains is the sudoers file on MTabletPC, which `RunnerRegistration.md`
+   ("Stopping the tablet runners for a test pack build") gives. Until it exists,
+   every stop logs `pause: stop failed` and the build runs beside CI.
 
    The cost is that runs of `ci.yml` `test-all` and `release.yml` (both run only
    on the four tablet runners) wait until the queue run ends: when no job is
    left, or once the job running at the 07:00 cutoff finishes. A daytime `--now`
-   job pauses them too. The user running the queue also needs a sudoers rule for
-   each unit and verb, as `SKILL.md` ("Freeing the machine for a job")
-   describes. A gentler
-   alternative is a `MemoryHigh` drop-in on the four runner units, so CI is
-   throttled instead of stopped and cannot take memory the model needs. Either
-   one would have kept the CI runs off the model's memory at 9 PM.
+   job pauses them too. A gentler addition is a `MemoryHigh` limit on the four
+   runner units, so a runner left running at the timeout is throttled and cannot
+   take memory the model needs; `RunnerRegistration.md` has the command.
 5. **Stop the desktop apps for the night with a separate pre-run step.** The
    pause list cannot do this. `pause` takes a single `scope`, `system` or
    `user` (`config.mjs`, `pause.mjs`), so apps under the user manager and the
@@ -484,6 +490,9 @@ These come from system logs and counters only (`sar`, the `lemond` journal,
    finished calls. The thresholds would be config values, set from a measured
    run. Given that the swap that night was cold, this is worth less than it
    looks.
+   Done: the check runs at each phase boundary (`local/meminfo.mjs`) with
+   defaults set from the measured night, and the `SKILL.md` section "Checking
+   free memory between phases" describes it.
 7. **Protect the model process.** `lemonade-server.service` has
    `OOMScoreAdjust=0` and `ManagedOOMPreference=none` now, and `llama-server`
    inherits both as its child. Setting `OOMScoreAdjust=-500` and

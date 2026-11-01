@@ -123,6 +123,57 @@ New runners register on the organization from the start: the same
 scripts make, with an organization registration token and the labels from the
 table.
 
+## Stopping the tablet runners for a test pack build
+
+A test pack build needs the memory the model uses, so the nightly queue run
+stops the four tablet runner units while a job runs and starts them again after.
+The work repository's pipeline config (`.claude/skills/build-test-pack/pipeline.json`)
+already lists the units, with `"scope": "system"` and `"busyProcess": "Runner.Worker"`.
+A runner with a CI job in progress is waited for, at most `pause.maxWaitMinutes`
+(60 by default) and never past the queue cutoff. `ci.yml` and `release.yml` wait
+until the queue run ends.
+
+The one host step is a sudoers file for the user that runs the queue. Create it
+with `sudo visudo -f /etc/sudoers.d/build-pack-runners` and mode 0440:
+
+```
+Cmnd_Alias BUILD_PACK_RUNNERS = \
+  /usr/bin/systemctl stop actions.runner.MRF-ORG.tablet-runner-1.service, \
+  /usr/bin/systemctl start actions.runner.MRF-ORG.tablet-runner-1.service, \
+  /usr/bin/systemctl stop actions.runner.MRF-ORG.tablet-runner-2.service, \
+  /usr/bin/systemctl start actions.runner.MRF-ORG.tablet-runner-2.service, \
+  /usr/bin/systemctl stop actions.runner.MRF-ORG.tablet-runner-3.service, \
+  /usr/bin/systemctl start actions.runner.MRF-ORG.tablet-runner-3.service, \
+  /usr/bin/systemctl stop actions.runner.MRF-ORG.tablet-runner-4.service, \
+  /usr/bin/systemctl start actions.runner.MRF-ORG.tablet-runner-4.service
+michael ALL=(root) NOPASSWD: BUILD_PACK_RUNNERS
+```
+
+Check one rule with
+`sudo -n -l /usr/bin/systemctl stop actions.runner.MRF-ORG.tablet-runner-1.service`,
+which prints the command when the rule allows it. After the next nightly run,
+`journalctl --user -u build-pack.service | grep 'pause:'` shows `stopped` and
+`started` lines, not `stop failed`.
+
+A runner can take a job between the busy check and the stop. The unit files use
+`KillMode=process`, so the stop ends the listener and the new `Runner.Worker`
+keeps running until it finishes. This is rare and is not handled.
+
+### Limiting runner memory
+
+A `MemoryHigh` limit throttles a runner instead of stopping it. It matters when a
+runner is left running at the timeout, or when the pause is off. Measure first
+with `systemctl show -p MemoryPeak actions.runner.MRF-ORG.tablet-runner-1.service`
+after a `test-all` run, then set the limits from the peak. The values below are
+starting points, not measurements, and apply without a restart:
+
+```bash
+for n in 1 2 3 4; do sudo systemctl set-property actions.runner.MRF-ORG.tablet-runner-$n.service MemoryHigh=4G MemoryMax=6G; done
+```
+
+This writes drop-ins under `/etc/systemd/system.control/`. Revert with
+`MemoryHigh=infinity MemoryMax=infinity`.
+
 ## Docker on the tablet runners
 
 A tablet runner needs Docker from the `docker.io` apt package

@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { MAX_TRIES } from './config.mjs';
+import { countedTries, MAX_TRIES } from './config.mjs';
 import { readStatusLog } from './status.mjs';
 
 const DAY = 86400000;
@@ -43,10 +43,11 @@ function jobEntry(config, row) {
   const failures = row.failures ?? [];
   const passed = row.status === 'passed';
   const state = passed ? 'PASS' : row.status === 'queued' ? 'RETRY'
-    : failures.length >= MAX_TRIES ? 'DROPPED' : 'FAIL';
+    : countedTries(failures) >= MAX_TRIES ? 'DROPPED' : 'FAIL';
   const entries = readStatusLog(path.join(config.output, row.id, 'status.log'));
   const done = entries.findLast((e) => e.phase === 'done' && e.event === 'pass');
-  const failed = entries.findLast((e) => e.event === 'fail');
+  // The release line is written after the job settles and says nothing about its sheets.
+  const failed = entries.findLast((e) => e.event === 'fail' && e.phase !== 'release');
   const confidence = entries.findLast((e) => e.phase === 'phase9-confidence' && e.event === 'pass')
     ?.confidence;
   const last = failures.at(-1);
@@ -104,7 +105,7 @@ export function reportData(config, queue, { period = 'day', now = new Date(), ra
   return {
     period, since: new Date(since), now, jobs,
     counts: { pass: count('PASS'), fail: count('FAIL'), retry: count('RETRY'), dropped: count('DROPPED') },
-    queue: { depth: waiting.length, retrying: waiting.filter((row) => row.failures?.length).length,
+    queue: { depth: waiting.length, retrying: waiting.filter((row) => countedTries(row.failures) > 0).length,
       running: rows.filter((row) => row.status === 'running').length },
     failing: jobs.filter((job) => job.state !== 'PASS'),
     spot: spotChecks(jobs.filter((job) => job.state === 'PASS'), config.report, random),

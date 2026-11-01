@@ -8,6 +8,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { fill, loadReference } from './config.mjs';
+import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { ModelError, modelClient } from './model.mjs';
 import { jobLogs } from './status.mjs';
 import * as P from './phases.mjs';
@@ -59,7 +60,8 @@ function readCheckpoint(outDir) {
   }
 }
 
-export async function runJob(config, job, { model, echo = true, now = Date.now } = {}) {
+export async function runJob(config, job, { model, echo = true, now = Date.now, readMemory = readMeminfo,
+  sleep } = {}) {
   const id = job.id ?? jobId(job);
   const outDir = path.join(config.output, id);
   const saved = job.resume ? readCheckpoint(outDir) : null;
@@ -119,9 +121,27 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
   };
 
   let phase = 'intake';
+  let warned = false;
+  // Before a phase starts, the work so far is checkpointed, so this is where a stop loses nothing.
+  const checkMemory = async (name) => {
+    if (!config.memory.enabled) return;
+    const outcome = await waitForMemory(config.memory, { read: readMemory, now, sleep,
+      onWait: (m) => logs.status({ job: id, phase: name, event: 'wait', reason: 'memory-low',
+        availableMiB: m.availableMiB, swapPercent: m.swapPercent }) });
+    if (outcome.unreadable) {
+      if (!warned) logs.status({ job: id, phase: name, event: 'warn', reason: 'meminfo-unreadable' });
+      warned = true;
+    } else if (outcome.polls > 0 && outcome.ok) {
+      logs.status({ job: id, phase: name, event: 'memory-ok', polls: outcome.polls, waitedMs: outcome.waitedMs });
+    } else if (!outcome.ok) {
+      throw new MemoryLow({ polls: outcome.polls, waitedMs: outcome.waitedMs,
+        availableMiB: outcome.availableMiB, swapPercent: outcome.swapPercent });
+    }
+  };
   const step = async (name, fn) => {
     phase = name;
     if (PHASES.indexOf(name) <= done) return {};
+    await checkMemory(name);
     const t = now();
     logs.status({ job: id, phase: name, event: 'start' });
     const counts = await fn();
@@ -205,9 +225,10 @@ export async function runJob(config, job, { model, echo = true, now = Date.now }
       ...summary };
   } catch (error) {
     const reason = error instanceof P.GateError ? `gate:${error.code}`
-      : error instanceof ModelError ? `model:${error.code}` : 'error';
+      : error instanceof ModelError ? `model:${error.code}`
+        : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
     logs.detail('stopped', error.stack ?? String(error));
-    const counts = error instanceof P.GateError ? error.counts : {};
+    const counts = error instanceof P.GateError || error instanceof MemoryLow ? error.counts : {};
     logs.status({ job: id, phase, event: 'fail', reason, ms: now() - started, calls: ctx.calls,
       ...counts });
     if (Object.keys(ctx.pack).length) {

@@ -50,8 +50,15 @@ plugins/<group>/
   skills/<name>/SKILL.md          the general skill, plus any scripts it runs
   shared/                         helpers and notes that more than one skill uses
 docs/<subject>/                   documents that have no place in the AZDO repository
+scripts/                          repository scripts, their tests, and the session guard
 package.json                      dependencies the shared scripts import
 ```
+
+The guard in `scripts/guard-main-checkout.sh`, wired up in `.claude/settings.json`,
+refuses file edits and the git verbs checkout, switch, restore, stash, reset, merge,
+rebase and pull in the shared main checkout, so a session works in a worktree made with
+the EnterWorktree tool. Other commands, such as commit, are not blocked. A
+`git pull --ff-only` of main is allowed.
 
 `docs/` holds the documents about the harness on the repository side: the runners and
 their registration under `docs/runners/`, and the tester hand-off plan under

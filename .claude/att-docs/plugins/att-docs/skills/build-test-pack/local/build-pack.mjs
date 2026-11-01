@@ -10,7 +10,7 @@
 //   node build-pack.mjs queue check --config <pipeline.json>
 //   node build-pack.mjs queue run --config <pipeline.json> [--cutoff HH:MM]
 //   node build-pack.mjs queue start --config <pipeline.json> --job <id> [--cutoff HH:MM]
-//   node build-pack.mjs queue status --config <pipeline.json> --job <id>
+//   node build-pack.mjs queue status --config <pipeline.json> [--job <id>]
 //   node build-pack.mjs queue summary --config <pipeline.json>
 //   node build-pack.mjs report --config <pipeline.json> [--period day|week|auto] [--seed <n>]
 //   node build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <pipeline.json>]
@@ -24,10 +24,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCompare, UsageError } from './compare.mjs';
-import { fill, globFiles, loadConfig, MAX_TRIES } from './config.mjs';
+import { countedTries, fill, globFiles, loadConfig, MAX_TRIES, MEMORY_STOP } from './config.mjs';
 import { modelClient } from './model.mjs';
 import { createPauser } from './pause.mjs';
 import { documentRules, USABLE_RULE_CODES } from './phases.mjs';
+import { createReleaser } from './release.mjs';
 import { seededRandom, writeReports } from './report.mjs';
 import { jobId, runJob } from './run.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
@@ -42,7 +43,7 @@ const USAGE = `usage:
   build-pack.mjs queue check --config <file>
   build-pack.mjs queue run --config <file> [--cutoff HH:MM]
   build-pack.mjs queue start --config <file> --job <id> [--cutoff HH:MM]
-  build-pack.mjs queue status --config <file> --job <id>
+  build-pack.mjs queue status --config <file> [--job <id>]
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <file>]
@@ -391,7 +392,8 @@ function lockQueue(config) {
 export async function drainQueue(config, { cutoff = config.queue.cutoff, start = null,
   only = null, nowOnly = false, wait = false, onBusy = () => {}, run = runJob, refill = null,
   clock = () => new Date(), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  settleMs = 2000, pollMs = 30000, pause = (cfg) => createPauser(cfg) } = {}) {
+  settleMs = 2000, pollMs = 30000, pause = (cfg) => createPauser(cfg),
+  release = (cfg) => createReleaser(cfg) } = {}) {
   const stopAt = cutoffAfter(clock(), cutoff);
   if (start && cutoffAfter(clock(), start) < stopAt) return [];
   let unlock = lockQueue(config);
@@ -415,20 +417,32 @@ export async function drainQueue(config, { cutoff = config.queue.cutoff, start =
     }
     if (interrupted.length) writeQueue(config, stale);
     if (refill) refill(config);
-    return await drainLocked(config, { stopAt, only, nowOnly, run, clock, pause });
+    return await drainLocked(config, { stopAt, only, nowOnly, run, clock, pause, release });
   } finally {
     unlock();
   }
 }
 
-async function drainLocked(config, { pause, ...rest }) {
+async function drainLocked(config, { pause, release, run, ...rest }) {
   // Made now so units a dead holder left stopped are found and restored even
   // when no job runs; nothing is stopped until a job is about to start.
   const pauser = pause(config);
+  // The model is unloaded once, after the last job and after the units start
+  // again, so a normal finish, a failure and the cutoff all end the same way
+  // and no model is reloaded between jobs.
+  const releaser = release(config);
+  const noted = (cfg, job) => {
+    releaser.note(job.id);
+    return run(cfg, job);
+  };
   try {
-    return await drainJobs(config, { ...rest, pauser });
+    return await drainJobs(config, { ...rest, run: noted, pauser });
   } finally {
-    await pauser.resume();
+    try {
+      await pauser.resume();
+    } finally {
+      releaser.release();
+    }
   }
 }
 
@@ -454,7 +468,7 @@ function settleRow(row, result, at, config) {
   // A failed revalidation is the review's verdict on the finished pack; a resume would skip
   // every phase and build the same pack again, so the job is not retried.
   const retry = result.reason !== 'gate:revalidation-failed';
-  if (!result.ok && retry && failures.length < MAX_TRIES) {
+  if (!result.ok && retry && countedTries(failures) < MAX_TRIES) {
     const wait = result.reason !== 'interrupted' && inNightWindow(config, at);
     Object.assign(row, { status: 'queued', resume: true, failures,
       ...(wait ? { notBefore: cutoffAfter(at, config.queue.cutoff).toISOString() } : {}) });
@@ -486,8 +500,13 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     first = null;
     if (!paused) {
       paused = true;
-      await pauser.pause();
+      await pauser.pause({ until: stopAt });
+    } else {
+      // A unit left busy before an earlier job is stopped now if its worker has finished.
+      await pauser.pause({ until: clock() });
     }
+    // The wait can run into the cutoff; the units start again when the run ends.
+    if (clock() >= stopAt) break;
     // Stopping the units can take minutes, so the row is claimed in a fresh read of the
     // queue file, which keeps a job added in the meantime.
     const fresh = readQueue(config);
@@ -514,6 +533,8 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     tried.add(id);
     writeQueue(config, after);
     done.push(row);
+    // The next job would meet the same low memory.
+    if (result.reason === MEMORY_STOP) break;
   }
   return done;
 }
@@ -524,35 +545,130 @@ export function summaryLines(queue) {
     const minutes = row.ms ? `${Math.round(row.ms / 60000)} min` : '';
     const last = row.failures?.at(-1);
     const where = row.status === 'failed' ? `stopped at ${row.phase} (${row.reason})`
-      + (row.failures?.length >= MAX_TRIES ? `, dropped after failing ${MAX_TRIES} times` : '')
+      + (countedTries(row.failures) >= MAX_TRIES ? `, dropped after failing ${MAX_TRIES} times` : '')
       : row.status === 'passed' ? row.workbook ?? ''
         : row.status === 'queued' && last ? `retry after stopping at ${last.phase} (${last.reason})` : '';
     return [row.id, row.status, minutes, where].filter(Boolean).join('  ');
   });
 }
 
+/** A status line's label and fields as text; statusFields refuses any value that is not a short code. */
+const fieldText = (label, fields) =>
+  `${label} ${Object.entries(statusFields(fields)).map(([k, v]) => `${k}=${v}`).join(' ')}`;
+
+/** How many of the entries share each combination of the given fields, in first-seen order. */
+function tally(entries, keys) {
+  const counts = new Map();
+  for (const entry of entries) {
+    const fields = Object.fromEntries(keys.map((key) => [key, entry[key] ?? '-']));
+    const key = JSON.stringify(fields);
+    counts.set(key, { fields, count: (counts.get(key)?.count ?? 0) + 1 });
+  }
+  return [...counts.values()];
+}
+
 /**
  * One job's state in content-free fields: its row's status, the last status
- * line its run wrote, and whether a live process holds the queue.
+ * line its run wrote, and whether a live process holds the queue. Under those:
+ * the phase now running and how long it has run, where a job that is not
+ * running stopped, how long each finished phase took, and how many `retry` and
+ * `call-fail` lines the job wrote by reason, with the phase and step of every
+ * `length` and `runaway` cut. `clock` supplies the current time.
  */
-export function jobStatus(config, id) {
+export function jobStatus(config, id, { clock = () => new Date() } = {}) {
   const row = readQueue(config).jobs.findLast((r) => r.id === id);
   const lines = [`${id}  ${row ? row.status : 'not queued'}  queue ${lockHeld(config) ? 'held' : 'free'}`];
+  if (!row) return lines;
   const log = path.join(config.output, id, 'status.log');
-  if (row?.started && fs.existsSync(log)) {
-    // A line cut off mid-write does not parse and is skipped. A resumed job
-    // appends to its earlier log, so only a line written since this row
-    // started belongs to this attempt.
-    const entries = readStatusLog(log);
-    const last = entries.at(-1);
-    if (last && new Date(last.at) >= new Date(row.started)) {
-      // statusFields refuses any value that is not a short code, so a line that
-      // carried text throws here instead of reaching the console.
-      const { at, ...fields } = statusFields(last);
-      lines.push(Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' '));
-    }
+  // A line cut off mid-write does not parse and is skipped.
+  const all = fs.existsSync(log) ? readStatusLog(log) : [];
+  // The release line is written after the run ends, so it is shown on its own
+  // and counts as none of the job's phases.
+  const entries = all.filter((entry) => entry.phase !== 'release');
+  const failures = row.failures ?? [];
+  // Every attempt of a job appends to one log in the job's folder, and a row
+  // added again for a resume starts after the phases that already passed, so
+  // the finished phases and the counts read the whole log.
+  // A queued row added without a resume starts over, and the run clears the
+  // old log, so it carries nothing forward.
+  const own = row.status === 'queued' && !row.resume ? [] : entries;
+  // A resumed job appends to its earlier log, so only a line written since this
+  // row started belongs to this attempt.
+  const attempt = row.started
+    ? entries.filter((entry) => new Date(entry.at) >= new Date(row.started)) : [];
+  const last = attempt.at(-1);
+  if (last) {
+    // statusFields refuses any value that is not a short code, so a line that
+    // carried text throws here instead of reaching the console.
+    const { at, ...fields } = statusFields(last);
+    lines.push(Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' '));
+  }
+  // A finished row no longer holds its start, so it has no job line above; the
+  // release line follows the job's own last line when there is one.
+  const from = row.finished ?? row.started;
+  const released = from
+    ? all.findLast((entry) => entry.phase === 'release' && new Date(entry.at) >= new Date(from)) : null;
+  if (released) {
+    const { at, ...fields } = statusFields(released);
+    lines.push(Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' '));
+  }
+  const lastStart = attempt.findLastIndex((entry) => entry.event === 'start');
+  const open = lastStart >= 0 && !attempt.slice(lastStart).some((entry) =>
+    entry.event === 'pass' && entry.phase === attempt[lastStart].phase);
+  if (row.status === 'running' && open) {
+    const seconds = Math.max(0, Math.floor((clock() - new Date(attempt[lastStart].at)) / 1000));
+    // A row still marked running with no live process was left by a run that
+    // died, so its elapsed time is not progress.
+    lines.push(fieldText(lockHeld(config) ? 'current' : 'interrupted',
+      { phase: attempt[lastStart].phase, elapsed: `${seconds}s` }));
+  } else if (row.status === 'failed' || row.status === 'queued') {
+    const where = row.status === 'failed' ? row : failures.at(-1);
+    if (where) lines.push(fieldText('stopped', { phase: where.phase ?? '-', reason: where.reason ?? '-' }));
+  }
+  const finished = new Map();
+  for (const entry of own) {
+    if (entry.event === 'pass' && entry.phase !== 'done') finished.set(entry.phase, entry.ms ?? 0);
+  }
+  for (const [phase, ms] of finished) lines.push(fieldText('done', { phase, ms }));
+  for (const [event, label] of [['retry', 'retries'], ['call-fail', 'call-fails']]) {
+    const hits = own.filter((entry) => entry.event === event);
+    for (const { fields, count } of tally(hits, ['reason'])) lines.push(fieldText(label, { ...fields, count }));
+  }
+  const cuts = own.filter((entry) => ['retry', 'call-fail'].includes(entry.event)
+    && ['length', 'runaway'].includes(entry.reason));
+  for (const { fields, count } of tally(cuts, ['event', 'phase', 'step', 'reason'])) {
+    lines.push(fieldText('cut', { ...fields, count }));
   }
   return lines;
+}
+
+/**
+ * Every queue row in content-free fields, oldest first: its job ID, status,
+ * the phase and reason code it stopped with, and when it last changed, so a
+ * job that stopped or can resume shows without its ID being known.
+ */
+export function queueLines(queue, config) {
+  if (!queue.jobs.length) return ['queue empty'];
+  return queue.jobs.map((row) => {
+    const failed = row.failures?.at(-1);
+    let fields;
+    if (row.status === 'running') {
+      // A running row has no phase of its own; the last line its run wrote has.
+      const entries = config ? readStatusLog(path.join(config.output, row.id, 'status.log')) : [];
+      const last = entries.filter((e) => e.phase !== 'release'
+        && new Date(e.at) >= new Date(row.started)).at(-1);
+      fields = { phase: last?.phase ?? '-', reason: '-', updated: last?.at ?? row.started ?? '-' };
+    } else if (row.status === 'queued') {
+      fields = { phase: failed?.phase ?? '-', reason: failed?.reason ?? '-',
+        updated: failed?.at ?? row.added ?? '-' };
+    } else {
+      fields = { phase: row.phase ?? '-', reason: row.reason ?? '-',
+        updated: row.finished ?? row.added ?? '-' };
+    }
+    fields = { id: row.id, status: row.status, ...fields };
+    const { id, ...rest } = statusFields(fields);
+    return `${id}  ${Object.entries(rest).map(([k, v]) => `${k}=${v}`).join(' ')}`;
+  });
 }
 
 /**
@@ -600,7 +716,7 @@ export async function precheckQueue(config, { clock = () => new Date(),
       const id = jobId(job);
       if (job.status === 'running') {
         // Settling counts the interrupted try; on its last try the row is dropped, not run.
-        if ((job.failures?.length ?? 0) + 1 >= MAX_TRIES) {
+        if (countedTries(job.failures) + 1 >= MAX_TRIES) {
           lines.push(`${id}  running  stale-row-dropped`);
           continue;
         }
@@ -650,19 +766,28 @@ async function main(argv) {
   const config = loadConfig(args.config);
   // While units are stopped, a signal starts them again before the process exits.
   const pausers = [];
+  const releasers = [];
   const track = (cfg, deps) => {
     const pauser = createPauser(cfg, deps);
     pausers.push(pauser);
     return pauser;
   };
+  const trackRelease = (cfg) => {
+    const releaser = createReleaser(cfg);
+    releasers.push(releaser);
+    return releaser;
+  };
   const onSignal = (name) => {
     Promise.all(pausers.map((p) => p.resume()))
-      .finally(() => process.exit(128 + os.constants.signals[name]));
+      .finally(() => {
+        for (const releaser of releasers) releaser.release();
+        process.exit(128 + os.constants.signals[name]);
+      });
   };
   const handlers = ['SIGTERM', 'SIGINT', 'SIGHUP'].map((name) => [name, () => onSignal(name)]);
   for (const [name, handler] of handlers) process.on(name, handler);
   try {
-    return await dispatch(args, command, sub, config, track);
+    return await dispatch(args, command, sub, config, track, trackRelease);
   } finally {
     for (const [name, handler] of handlers) process.off(name, handler);
   }
@@ -717,8 +842,9 @@ async function compareCommand(args) {
   }
 }
 
-async function dispatch(args, command, sub, config, track) {
+async function dispatch(args, command, sub, config, track, trackRelease) {
   const pause = (cfg) => track(cfg);
+  const release = (cfg) => trackRelease(cfg);
   if (command === 'run') {
     // No queue lock is held here, so this run leaves another holder's stopped units alone.
     const pauser = track(config, { leftover: false });
@@ -777,8 +903,8 @@ async function dispatch(args, command, sub, config, track) {
     const fillFirst = (cfg) => printFill(fillQueue(cfg));
     // A cutoff given on the command line is a deliberate run, outside the nightly window.
     const done = await drainQueue(config, args.cutoff
-      ? { cutoff: args.cutoff, wait: true, pause, refill: fillFirst }
-      : { cutoff: config.queue.cutoff, start: config.queue.start, wait: true, pause,
+      ? { cutoff: args.cutoff, wait: true, pause, release, refill: fillFirst }
+      : { cutoff: config.queue.cutoff, start: config.queue.start, wait: true, pause, release,
         refill: fillFirst });
     console.log(`ran ${done.length} job(s)`);
     for (const line of summaryLines(readQueue(config))) console.log(line);
@@ -790,7 +916,7 @@ async function dispatch(args, command, sub, config, track) {
     // The cutoff is the configured one unless the command line gives another;
     // the nightly window does not apply to a job started on request.
     const done = await drainQueue(config, { cutoff: args.cutoff ?? config.queue.cutoff,
-      only: args.job, nowOnly: true, pause, onBusy: () => { busy = true; } });
+      only: args.job, nowOnly: true, pause, release, onBusy: () => { busy = true; } });
     if (busy) {
       const row = readQueue(config).jobs.findLast((r) => r.id === args.job);
       console.log(row?.status === 'running' ? `${args.job} is already running`
@@ -803,8 +929,8 @@ async function dispatch(args, command, sub, config, track) {
     return 0;
   }
   if (command === 'queue' && sub === 'status') {
-    if (!args.job) throw new Error('--job takes a job ID');
-    for (const line of jobStatus(config, args.job)) console.log(line);
+    const lines = args.job ? jobStatus(config, args.job) : queueLines(readQueue(config), config);
+    for (const line of lines) console.log(line);
     return 0;
   }
   if (command === 'queue' && sub === 'summary') {

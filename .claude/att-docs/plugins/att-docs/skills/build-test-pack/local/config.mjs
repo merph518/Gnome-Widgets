@@ -31,6 +31,12 @@ export const REASONING_PHASES = ['phase1', 'phase3', 'phase4', 'phase5', 'phase9
 /** How many times a job is tried before it is flagged and dropped from the queue. */
 export const MAX_TRIES = 2;
 
+/** The reason a run stops when memory stays low; such a stop is not one of a job's tries. */
+export const MEMORY_STOP = 'memory:low';
+
+/** The failures that count toward MAX_TRIES: a stop for low memory says nothing about the job. */
+export const countedTries = (failures = []) => failures.filter((f) => f.reason !== MEMORY_STOP).length;
+
 const fill = (template, values) => String(template).replace(/\{(\w+)\}/g, (whole, key) =>
   (values[key] === undefined ? whole : String(values[key])));
 export { fill };
@@ -84,7 +90,7 @@ export function loadConfig(configPath) {
   for (const key of ['module', 'command']) {
     if (!raw.builder?.[key]) throw new Error(`config builder.${key} is missing`);
   }
-  const pause = { units: [], scope: 'system', busyProcess: null, pollSeconds: 5, ...raw.pause };
+  const pause = { units: [], scope: 'system', busyProcess: null, pollSeconds: 5, maxWaitMinutes: 60, ...raw.pause };
   if (!Array.isArray(pause.units) || pause.units.some((unit) => typeof unit !== 'string' || !unit)) {
     throw new Error('config pause.units must be a list of unit names');
   }
@@ -93,6 +99,45 @@ export function loadConfig(configPath) {
   }
   if (!Number.isFinite(pause.pollSeconds) || pause.pollSeconds <= 0) {
     throw new Error('config pause.pollSeconds must be a positive number');
+  }
+  // Run once when a queue run ends, to unload the model; an empty command turns it off.
+  if (raw.release !== undefined
+    && (!raw.release || typeof raw.release !== 'object' || Array.isArray(raw.release))) {
+    throw new Error('config release must be an object');
+  }
+  const release = { command: ['lemonade', 'unload'], timeoutSeconds: 60, ...raw.release };
+  if (!Array.isArray(release.command)
+    || release.command.some((word) => typeof word !== 'string' || !word)) {
+    throw new Error('config release.command must be a list of words');
+  }
+  if (!Number.isFinite(release.timeoutSeconds) || release.timeoutSeconds <= 0) {
+    throw new Error('config release.timeoutSeconds must be a positive number');
+  }
+  if (!Number.isFinite(pause.maxWaitMinutes) || pause.maxWaitMinutes < 0) {
+    throw new Error('config pause.maxWaitMinutes must be a number of minutes, 0 or more');
+  }
+  // The floor and ceiling come from the measured night in docs/runners/TestPackOffloadPlan.md:
+  // available memory fell to 4.6 GiB and swap held about 68% (cold, speeds steady) all night,
+  // so both defaults sit just past a healthy run. Measure again after changing the swap setup.
+  const memoryKeys = ['enabled', 'minAvailableMiB', 'maxSwapPercent', 'pollSeconds', 'waitMinutes'];
+  if (raw.memory !== undefined && (!raw.memory || typeof raw.memory !== 'object' || Array.isArray(raw.memory)
+    || Object.keys(raw.memory).some((key) => !memoryKeys.includes(key)))) {
+    throw new Error(`config memory must be an object with only ${memoryKeys.join(', ')}`);
+  }
+  const memory = { enabled: true, minAvailableMiB: 3072, maxSwapPercent: 85, pollSeconds: 30,
+    waitMinutes: 20, ...raw.memory };
+  if (typeof memory.enabled !== 'boolean') throw new Error('config memory.enabled must be true or false');
+  if (!Number.isInteger(memory.minAvailableMiB) || memory.minAvailableMiB < 1) {
+    throw new Error('config memory.minAvailableMiB must be a positive whole number');
+  }
+  if (!Number.isFinite(memory.maxSwapPercent) || memory.maxSwapPercent < 0 || memory.maxSwapPercent > 100) {
+    throw new Error('config memory.maxSwapPercent must be a number from 0 to 100');
+  }
+  if (!Number.isFinite(memory.pollSeconds) || memory.pollSeconds <= 0) {
+    throw new Error('config memory.pollSeconds must be a positive number');
+  }
+  if (!Number.isInteger(memory.waitMinutes) || memory.waitMinutes < 0) {
+    throw new Error('config memory.waitMinutes must be a whole number of 0 or more');
   }
   if (raw.cardRulesPerCall !== undefined) {
     throw new Error('config cardRulesPerCall is replaced by cardScenariosPerCall');
@@ -168,6 +213,8 @@ export function loadConfig(configPath) {
     exclusiveSets: raw.exclusiveSets === true,
     output: outputDir,
     pause,
+    release,
+    memory,
     queue,
     report,
   };
