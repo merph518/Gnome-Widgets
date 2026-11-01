@@ -8,7 +8,7 @@ trap 'rm -rf "$work"' EXIT
 fail=0
 export HOME=$work/nohome
 mkdir -p "$HOME"
-# A running bridge's voice-bridge/plugin would hand every call to the real runner.
+# A running Baton's voice-bridge/plugin would hand every call to the real runner.
 export XDG_RUNTIME_DIR=$work/runtime
 unset VOICE_HOOKS_LIVE
 
@@ -69,7 +69,7 @@ printf '%s\n' 'import sys; sys.exit(3)' >"$work/plugin/skills/voice-bridge-hooks
 CLAUDE_PROJECT_DIR=$work/bare "$run" fail.py </dev/null
 check "the script's exit code passes through" 3 $?
 
-# The bridge's plugin folder: a second copy whose probe says which copy ran.
+# Baton's plugin folder: a second copy whose probe says which copy ran.
 mkdir -p "$work/live/hooks" "$work/live/skills/voice-bridge-hooks" "$XDG_RUNTIME_DIR/voice-bridge"
 cp "$here/run.sh" "$work/live/hooks/run.sh"
 printf '{}\n' >"$work/live/skills/voice-bridge-hooks/defaults.json"
@@ -78,11 +78,11 @@ printf '%s\n' 'import sys; print("live", *sys.argv[1:], sys.stdin.read().strip()
 live_defaults="$work/live/skills/voice-bridge-hooks/defaults.json"
 pointer=$XDG_RUNTIME_DIR/voice-bridge/plugin
 printf '%s\n' "$work/live" >"$pointer"
-check "the bridge's plugin folder runs the hook" "live --config $live_defaults x payload" \
+check "Baton's plugin folder runs the hook" "live --config $live_defaults x payload" \
   "$(CLAUDE_PROJECT_DIR=$work/bare "$run" probe.py x <<<payload)"
-check "the bridge's runner runs its own copy" "live --config $live_defaults x payload" \
+check "Baton's runner runs its own copy" "live --config $live_defaults x payload" \
   "$(CLAUDE_PROJECT_DIR=$work/bare "$work/live/hooks/run.sh" probe.py x <<<payload)"
-check "the bridge's runner still steps aside" "" \
+check "Baton's runner still steps aside" "" \
   "$(CLAUDE_PROJECT_DIR=$work/hooked "$run" probe.py x <<<payload)"
 
 printf '%s\n' "$work/plugin" >"$pointer"

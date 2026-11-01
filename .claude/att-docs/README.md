@@ -38,7 +38,7 @@ This repository is private and for my own use.
 | `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
-| `voice` | `voice-request` | Answer a request the user spoke on their phone and the voice bridge relayed |
+| `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
 
 ## Layout
 
@@ -60,7 +60,7 @@ their registration under `docs/runners/`, and the tester hand-off plan under
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, `general` holds the workflow skills that serve any repository (implementing
-issues), and `voice` holds the voice bridge hooks and the skill that answers a relayed
+issues), and `voice` holds the hooks that feed Baton and the skill that answers a relayed
 request. All three install at user scope; `voice` is still its own group because its
 subject is different. Further groups sit beside them and
 follow the same layout and the same extension contract. A group's `hooks/hooks.json`
@@ -171,7 +171,8 @@ prefix, and the extension keeps the plain name.
 See [Install and manage plugins](https://code.claude.com/docs/en/discover-plugins)
 for the install scopes and the `#ref` form.
 
-The `voice` plugin registers the voice bridge hooks. Installed at user scope, it gives a
+The `voice` plugin registers the voice hooks, which feed Baton (the voice bridge service in
+`merph518/Code-Conductor`). Installed at user scope, it gives a
 session in any repository the reply relay, spoken replies and attention announcements,
 with no hook entries in the repository. A repository adds its own values with an extension file at
 `.claude/skills/voice-bridge-hooks/extension.json`. See the `voice-bridge-hooks`
@@ -179,14 +180,14 @@ skill's Wiring section. A session can also be read in a voice of its own: the sp
 saves the choice as `<session id>.voice` in the hook's state folder, and the hook speaks that
 session's lines in it, falling back to the global voice when the name is not installed.
 
-Every `send` through the voice bridge reaches a session as `Voice request: `, then a fixed
+Every `send` through Baton reaches a session as `Voice request: `, then a fixed
 header, then the phone voice chat's wording of what the user said. The header is a claim, not
-proof: it says the bridge posted the message from the user's phone, explains why Claude
+proof: it says Baton posted the message from the user's phone, explains why Claude
 Code labels it as from another session, and says the message is not the user's confirmation,
 approves no permission prompt and grants no escalation. A consumer needs the `voice` plugin
 installed and kept current with `claude plugin update voice@att-docs` after a version bump.
-`update_bridge` moves the bridge checkout and its hooks, but the skill loads from the plugin
-install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
+`update_bridge` updates a Baton run from a checkout, along with the hooks it vendors (a
+packaged Baton is updated with apt), but the skill loads from the plugin install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
 `.claude/att-docs/` is not loaded as a skill.
 
 The `general` plugin also registers four repo hooks: a gate that refuses a pull request
@@ -197,21 +198,21 @@ from `.claude/skills/repo-hooks/extension.json`, one section per hook, and a rep
 without that file gets no hook. A repository that vendors this one registers
 `plugins/general/hooks/run.sh` in its own settings. See the `repo-hooks` skill.
 
-The voice bridge server itself is in `plugins/voice/bridge/` and runs from a checkout of
-this repository: `node plugins/voice/bridge/voice-bridge.mjs --config <extension.json>
-serve`. The extension file also names the bridge's repository values: `inProgressLabel`,
-`mainBranch`, `reviewLabel` and `startRequest` (with `<N>` for the issue number). A field
-left out keeps its default, and the repository the file sits in is the one the bridge lists
-sessions under. `systemd/` holds the user units; their `--config` path names the repository
-the bridge serves. `update_bridge` fast-forwards this checkout and restarts the unit, and
-fast-forwards the served repository's checkout too when it is clean and on its main branch,
-since that repository's scripts and tool module are what the bridge runs for it.
+Baton, the voice bridge server, is in `merph518/Code-Conductor` under `baton/`. The extension
+file at `.claude/skills/voice-bridge-hooks/extension.json` also names Baton's repository
+values: `inProgressLabel`, `mainBranch`, `reviewLabel` and `startRequest` (with `<N>` for
+the issue number). A field left out keeps its default, and the repository the file sits in is
+the one Baton lists sessions under. A packaged Baton reports its version from `update_bridge`
+and is updated with apt; a Baton run from a Code Conductor checkout fast-forwards that
+checkout and restarts, and fast-forwards the served repository's checkout too when it is
+clean and on its main branch, since that repository's scripts and tool module are what Baton
+runs for it.
 
 A repository adds tools of its own with `"bridge": { "module": "<path>" }` in the same file.
-The bridge imports that module, relative to the repository, and calls its
+Baton imports that module, relative to the repository, and calls its
 `register(core)`, which returns `{ tools: [{ definition, call(args, context) }] }`. `core`
 holds `repoRoot()`, the extension file's `extension` fields, and a `helpers` object with
-the bridge's own `runFile`, `runGh`, `runGit`, `spawnCaptured`, `ghJson`, `takeReadBack` and
+Baton's own `runFile`, `runGh`, `runGit`, `spawnCaptured`, `ghJson`, `takeReadBack` and
 `readBackRefusal`, among others. `context` has the call's `paths`, `config`, `pages`, `now`,
 `gh`, `git` and `tracker`, plus any option the caller passes. A repository with no module is
 offered none of them.
