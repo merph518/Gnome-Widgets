@@ -17,7 +17,7 @@ export const RETIRED_SHARE = 0.5;
 
 const RETIRED_CLASS = /supersed|retire|remov/i;
 export const isRetiredRow = (row) => RETIRED_CLASS.test(row.classification)
-  || /^\s*retired\b/i.test(row.summary);
+  || /^\s*retired\b/i.test(row.summary) || /^\s*retired\s*$/i.test(row.status);
 
 /**
  * The approved rules the document has struck through: { id -> { span, struck,

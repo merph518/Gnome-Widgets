@@ -143,7 +143,7 @@ const source = () => {
   return { rules, doc, retired: retiredRules(rules, doc) };
 };
 
-const IMPACT = ['Rule ID', 'Rule Name', 'Module', 'Source Document', 'Source Page', 'Rule Summary', 'Risk Level', 'Impact Classification', 'Rationale'];
+const IMPACT = ['Rule ID', 'Rule Name', 'Module', 'Source Document', 'Source Page', 'Rule Summary', 'Risk Level', 'Impact Classification', 'Rationale', 'Status'];
 const CARDS = ['Module', 'Source Document', 'Test Case ID', 'Test Case Title', 'Mission', 'Focus', 'Expected Result', 'Rules Covered', 'Generated Markdown'];
 const ALM = ['Subject', 'Test Name', 'Type', 'Step Name', 'Description', 'Expected Result'];
 const LAB = ['Test Set #', 'Test Set Name', 'Objective', 'Scope', 'Business Rule Summary', 'Test Cards Covered', 'Generated Markdown'];
@@ -154,7 +154,7 @@ function packSheets({ titled = false, impact = [], cards = [], steps = [], sets 
     ? { name, rows: [['Title of the pack'], ['A subtitle'], [], headers, ...data], merges: ['A1:C1', 'A2:C2'] }
     : { name, rows: [headers, ...data] });
   return [
-    sheet('Impact Analysis', IMPACT, impact.map((r) => [r.id, r.name ?? '', 'RX', 'Role', r.page ?? '1', r.summary, r.risk ?? 'High', r.cls ?? 'Regression', 'why'])),
+    sheet('Impact Analysis', IMPACT, impact.map((r) => [r.id, r.name ?? '', 'RX', 'Role', r.page ?? '1', r.summary, r.risk ?? 'High', r.cls ?? 'Regression', 'why', r.status ?? 'Active'])),
     sheet('Test Cards Markdown', CARDS, cards.map((c) => ['RX', 'Role', c.id, c.title, c.mission ?? '', c.focus, c.expected, c.rules ?? '', ''])),
     sheet('Test Lab Markdown', LAB, sets.map((s) => [s.number, s.name, s.objective ?? s.name, 'scope', 'summary', s.cards, ''])),
     sheet('ALM Upload', ALM, steps.map((s) => ['RX - Role', s.name, 'Manual', s.step, s.description ?? 'do it', s.expected ?? ''])),
@@ -314,6 +314,9 @@ test('a pack that omits a retired rule is told so, and one that records it is no
   assert.equal(record([{ id: 'RX-003', summary: 'x', cls: 'Regression' }]).status, 'unmarked');
   assert.equal(record([{ id: 'RX-003', summary: 'x', cls: 'Superseded / Removal Verification' }]).status, 'recorded');
   assert.equal(record([{ id: 'RX-003', summary: 'Retired: warning', cls: 'Direct Change' }]).status, 'recorded');
+  // The Status column alone marks a retired rule: Direct Change, Status Retired, no prefix in the summary.
+  assert.equal(record([{ id: 'RX-003', summary: 'x', cls: 'Direct Change', status: 'Retired' }]).status, 'recorded');
+  assert.equal(record([{ id: 'RX-003', summary: 'x', cls: 'Direct Change', status: 'Active' }]).status, 'unmarked');
 });
 
 test('wording only retired text has marks a live rule row as untrue, with the doc line', () => {
@@ -521,6 +524,33 @@ test('the format score is the share of reference checks the pack matches', () =>
   assert.equal(idShape('TC-INV-9415-001'), 'AA-AAA-9999-999');
   assert.deepEqual(headerDiff(['Test Set #', 'Name'], ['Test Set Number', 'Extra']),
     { missing: ['Name'], extra: ['Extra'], renamed: [{ from: 'Test Set #', to: 'Test Set Number' }] });
+});
+
+test('an ID-only Test Name and an Expected Result on every checking step are deliberate differences', () => {
+  const card = { id: 'TC-RX-100-001', title: 't', focus: 'f', expected: 'e' };
+  const book = (name, expected) => readPack(write(tmp(), 'b.xlsx', xlsx(packSheets({ titled: true,
+    impact: [{ id: 'RX-001', summary: 'x' }], cards: [card],
+    steps: [{ name, step: 'Step 1', expected: expected[0] }, { name, step: 'Step 2', expected: expected[1] }] }))));
+  const reference = book('TC-RX-100-001 - t', ['', 'e']);
+  const mine = formatChecks(reference, book('TC-RX-100-001', ['saved', 'e']));
+  assert.equal(mine.differences, 0);
+  assert.equal(mine.deliberate, 2);
+  assert.deepEqual(mine.checks.filter((c) => c.deliberate).map((c) => c.name),
+    ['Expected Result only on the final step', 'Test Name form']);
+  assert.ok(mine.checks.filter((c) => c.deliberate).every((c) => !c.pass && c.deliberate.length > 20));
+  assert.ok(mine.score < 1, 'the score still counts a deliberate difference');
+  assert.match(reportOf({ ...fakeScorecard(), format: mine }), /### Deliberate differences\n[\s\S]*Test Name form/);
+  // A Test Name that is only sometimes the bare ID is a real difference, not a deliberate one.
+  const mixed = readPack(write(tmp(), 'm.xlsx', xlsx(packSheets({ titled: true, impact: [{ id: 'RX-001', summary: 'x' }],
+    cards: [card], steps: [{ name: 'TC-RX-100-001', step: 'Step 1', expected: 'a' },
+      { name: 'TC-RX-100-001 - t', step: 'Step 2', expected: 'e' }] }))));
+  const result = formatChecks(reference, mixed);
+  assert.deepEqual(result.checks.filter((c) => !c.pass && !c.deliberate).map((c) => c.name), ['Test Name form']);
+  assert.equal(result.differences, 1);
+  // A pack with no ALM steps has no Test Name form to call deliberate.
+  const bare = formatChecks(reference, readPack(write(tmp(), 'n.xlsx', xlsx(packSheets({ titled: true,
+    impact: [{ id: 'RX-001', summary: 'x' }], cards: [card] })))));
+  assert.equal(bare.deliberate, 0);
 });
 
 test('a workbook standard lists its worksheets and the items each must hold', () => {
@@ -741,7 +771,10 @@ function fakeScorecard() {
   const truth = { ruleRows: 0, matchedById: 0, matchedByText: 0, matchedAmbiguously: 0, notInSource: 0, retiredRules: 0, retiredMissing: [],
     retiredUnmarked: [], differenceList: [], unmatchedStatements: [], untrueRows: [], untrueCards: [], contradictions: [], citedMissing: [] };
   const detail = { retired: { rules: [], spans: [] }, differences: [], rows: [] };
-  return { truth: { reference: truth, pack: truth, source: { approvedRules: 0, struckSpans: 0, retiredByDocument: [] } },
+  const checked = { dashboardCounts: [], confidence: { values: {}, consistent: true },
+    matrixCards: { ran: true, problems: [], reason: null }, objectiveCards: { ran: true, problems: [], reason: null } };
+  return { consistency: { reference: checked, pack: checked },
+    truth: { reference: truth, pack: truth, source: { approvedRules: 0, struckSpans: 0, retiredByDocument: [] } },
     floor: { crosswalk: [], unmatched: [], reference: side, pack: side }, model: { run: false, reason: 'x' },
     format: { passed: 0, total: 0, score: 1, checks: [], style: { reference: {}, pack: {} }, standard: null },
     detail: { reference: detail, pack: detail } };

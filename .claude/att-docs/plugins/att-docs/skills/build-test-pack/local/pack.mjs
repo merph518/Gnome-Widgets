@@ -129,6 +129,7 @@ export function packFromSheets(sheets) {
   const ruleRows = (impactSheet?.rows ?? []).filter((r) => cell(r, 'Rule ID') || cell(r, 'Rule Name')).map((r) => ({
     n: r.n, id: cell(r, 'Rule ID'), name: cell(r, 'Rule Name'), summary: cell(r, 'Rule Summary'),
     page: cell(r, 'Source Page'), risk: cell(r, 'Risk Level'), classification: cell(r, 'Impact Classification'),
+    status: cell(r, 'Status', 'Rule Status'),
   }));
   return { sheets, cards, steps, sets, ruleRows, sheet: (name) => find(sheets, name.toLowerCase()) };
 }

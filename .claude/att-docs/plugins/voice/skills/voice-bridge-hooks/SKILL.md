@@ -40,7 +40,7 @@ All of them ship in this folder.
 | `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle` and `managed <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
 | `sessions.py` | Lists the open Claude sessions the way the bridge's `list_sessions` does; imported by `speechctl` | no |
 | `speak_pending.py` | Picks the text blocks a turn has not had read aloud yet | no |
-| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; it talks to the session's own inbox, never to the voice bridge. The bridge drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped` and `waiting on CI` as "marked ..." only on the idle line, and only while the session is not waiting | no |
+| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; it talks to the session's own inbox, never to the voice bridge. The bridge drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped`, `waiting on CI`, `needs you` and `working` as "marked ..." only on the idle line, and only while the session is not waiting | no |
 | `background_pending.py` | Names the background work still due to wake a session, so a stop stays quiet; `--describe` also says what each item is, for the bridge's session list | no |
 | `hook_config.py` | Reads `<config>` | |
 | `defaults.json` | The config for a repository with no extension file; the plugin's `hooks/run.sh` passes it | |
@@ -219,10 +219,12 @@ The bridge's `rename_all_sessions` tool gives each running session the title `<b
 task is the work name the session set, else its open pull request with its title, else its
 issue, else the start of its latest reply. The state is `needs you` (it waits or asks, or
 reported a pull request ready), `working` or `idle`. A status the session set that says more,
-`stuck`, `stopped` or `waiting on CI`, is kept. A title that already reads so, the Session
+`stuck`, `stopped`, `waiting on CI`, `needs you` or `working`, is kept; `idle` and `waiting on
+you` are read fresh each time, so one of them left on a session is replaced. A session is never
+given the exact title another session holds. A title that already reads so, the Session
 Launcher and a session the user stopped following are left alone, and the answer lists what
-changed and what was left. `session_title.py` and the bridge share the status words, so a
-title written by either is taken apart the same way by both.
+changed and what was left. `session_title.py` and the bridge share the status words, so a title
+written by either is taken apart the same way by both.
 
 ## Tests
 

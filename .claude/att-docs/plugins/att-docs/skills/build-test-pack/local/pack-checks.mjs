@@ -12,7 +12,11 @@ const list = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
 const blank = (v) => list(v).every((x) => String(x ?? '').trim() === '');
 const ids = (text) => String(text ?? '').split(/[;\n,]+/).map((s) => s.trim()).filter(Boolean);
 
-/** Sheets as readSheet reads them from a builder's rows: row 1 holds the headers, column 1 the first cell. */
+/**
+ * Sheets as readSheet reads them from a builder's rows, which lead with the headers; readSheet
+ * also reads a sheet with a title and a subtitle above its headers, so a builder that writes
+ * them in row 4 is read the same way.
+ */
 const sheetOf = (name, rows) => readSheet({ name, rows: [[], ...rows.map((r) => ['', ...r])] });
 
 /** The pack's sheets as { name, rows }, worked out from the pack the way a builder lays them out. */
@@ -34,8 +38,8 @@ export function derivedSheets(pack) {
       ['Overall Confidence', overall]]],
     ['Executive Summary', ['Item', 'Value'], [['Confidence', pack.executiveSummary?.confidence ?? '']]],
     ['Confidence Assessment', ['Item', 'Value'], [['Confidence level', overall]]],
-    ['Impact Analysis', ['Rule ID', 'Risk Level', 'Impact Classification'],
-      rules.map((rule) => [rule.id, rule.risk ?? '', rule.impact])],
+    ['Impact Analysis', ['Rule ID', 'Risk Level', 'Impact Classification', 'Status'],
+      rules.map((rule) => [rule.id, rule.risk ?? '', rule.impact, rule.status ?? ''])],
     ['Objective Matrix', ['Testing Objective', 'Applicable / Not Applicable', 'Related Test Cards',
       'Related Test Lab Test Set'], [...new Set(sets.map((set) => set.objective))].map((objective) => {
       const held = sets.filter((set) => set.objective === objective);

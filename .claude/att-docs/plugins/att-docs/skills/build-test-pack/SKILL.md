@@ -193,8 +193,10 @@ config, off by default. Use it only when the user chooses to go ahead without
 extracted rules; Job Intake then records the limitation. A retired rule stays in
 the pack with a summary that starts "Retired:", and Phase 3 classifies it like
 any other rule: Direct Change only when the change description concerns that
-removal, Not Impacted otherwise. Phase 6 gives every retired Direct Change rule a
-card that verifies the behavior is gone.
+removal, Not Impacted otherwise. A retired rule's `status` is `Retired` (every
+other rule's is `Active`), and it keeps that status whatever its class: there is
+no "Superseded / Removal Verification" class. Phase 6 gives every retired Direct
+Change rule a card that verifies the behavior is gone.
 
 ### Before a job is run or queued
 
@@ -792,10 +794,10 @@ the phase that fills them:
 | `suite`, `suiteInput` | intake | a suite pack only, in place of the issue and change numbers |
 | `sourceDocuments` | 1 | `{ name, inclusion, authority, reason }`; inclusion is `Included`, `Supporting Context Only` or `Excluded` |
 | `intake` | intake, 1 | `{ received, missing, authority, contextOnly, assumptionsToProceed, readiness }`; readiness `READY` or `READY WITH ASSUMPTIONS` builds, the other two stop |
-| `rules` | 2, 3 | `{ id, name, module, sourceDocument, sourcePage, summary, risk, impact, rationale }`; impact is `Direct Change`, `Indirect Impact`, `Regression` or `Not Impacted` |
+| `rules` | 2, 3 | `{ id, name, module, sourceDocument, sourcePage, summary, risk, impact, rationale, status }`; impact is `Direct Change`, `Indirect Impact`, `Regression` or `Not Impacted`; status is `Active` or `Retired`, and the builder writes it in the Impact Analysis Status column; `module` is the abbreviation, such as `INV`, for a document the config key `moduleAbbreviations` names (a document code or module name mapped to its abbreviation) |
 | `executiveSummary` | 4 | `{ scope, modules, sourceDocuments, strategy, execution, risks, confidence }` |
 | `objectives` | 5 | `{ objective, applicable, reason }` for each of `<workbook-standard>`'s `<objective-count>` |
-| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, steps[] }`; derivation is `Requirement` or `Quality`; each step is `{ description, expected, rules[] }` |
+| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, steps[] }`; `focus[]` lists the tester's actions in order, one item per step, and the builder writes it as numbered steps; derivation is `Requirement` or `Quality`; each step is `{ description, expected, rules[] }` |
 | `testSets` | 7 | `{ number, name, objective, scope, ruleSummary[], cards[] }` |
 | `coverage` | 9 | `{ ruleId, status, strength, gap, recommendation }`, only where a rule is not plainly Covered |
 | `assumptions` | 9 | `{ assumption, why, impact, clarification }` |
@@ -812,6 +814,15 @@ columns, every `<upload-sheet>` row, the `<rule-matrix-sheet>`, the derived
 columns of the `<coverage-sheet>`, the assumption IDs, and
 `<validation-sheet>`. Do not type those into the pack; a hand-typed count is one
 that drifts from the cards.
+
+The builder also lays each sheet out as the reference pack does: a title row, a
+subtitle row and the headers in row 4, under the sheet and header names in
+`<workbook-standard>`. The `<dashboard-sheet>` labels its rule count "Number of
+Impacted Business Rules", because the count leaves out Not Impacted rules. Two
+choices differ from the reference on purpose, and the comparison records them as
+deliberate: the ALM Upload Test Name is the card ID alone, so a "/" in a title
+never reaches the ALM import, and every step that checks something carries an
+observable Expected Result, where the reference writes one on the final step.
 
 ## The phases
 
@@ -884,8 +895,9 @@ not have, are dropped before the build.
 
 **Phase 6, Reusable Test Design.** One card per business decision, per the
 `<methodology>` chapters on decisions and on test cards. Test case IDs are
-`<case-id>`. Focus steps are actions; the expected result is observable business
-behavior. Mark quality-derived cards. A card an existing `<test-tool>` asset or
+`<case-id>`. Focus lists the tester's actions in order, one item per step and matching
+the steps; the expected result is observable business behavior, and every step
+that checks something has one (a setup step may leave it blank). Mark quality-derived cards. A card an existing `<test-tool>` asset or
 manual test already covers is reused by name in `<notes-sheet>` rather than
 written again.
 
@@ -1150,7 +1162,12 @@ as the pack:
 - **Format**: the sheet inventory and order, the title, subtitle and header
   rows, the header names, the test case ID shape, and the ALM step style
   (step names, where Expected Result and rule references sit). The score is the
-  share of the reference's format checks the pack matches.
+  share of the reference's format checks the pack matches. A check the pack
+  fails on purpose is listed apart as a deliberate difference with its reason:
+  the Test Name that is the card ID alone, and an Expected Result on every
+  checking step rather than the final step only. `format.differences` counts the
+  failed checks that are not deliberate, and a pack that matches the reference's
+  format has none.
 - **Truth**: each rule row is matched to an approved rule by ID, else by the
   words it shares with the rule's summary, name or quoted text (a Dice share of
   at least 0.4). A row of several statements is also split at commas, semicolons

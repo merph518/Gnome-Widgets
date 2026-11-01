@@ -4,11 +4,16 @@
 //   node --test plugins/att-docs/skills/build-test-pack/local/pack-checks.test.mjs
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GateError, phase8, reconcile } from './phases.mjs';
+import { almStyle } from './compare.mjs';
 import { checkPack, derivedSheets } from './pack-checks.mjs';
+import { readPack } from './pack.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const stub = await import(pathToFileURL(path.join(HERE, 'fixtures', 'builder-stub.mjs')).href);
@@ -114,6 +119,34 @@ test('a rule count that leaves Not Impacted rules out passes only when the label
   });
   assert.deepEqual(warnings(goodPack(), edit('Number of Impacted Business Rules')), {});
   assert.match(warnings(goodPack(), edit('Number of Business Rules'))['dashboard-count'], /reads 2, but .* has 3/);
+});
+
+test('sheets with a title and a subtitle above their headers are checked like sheets that lead with them', () => {
+  const titled = (edit = () => {}) => {
+    const sheets = derivedSheets(goodPack());
+    edit(sheets);
+    return { sheets: sheets.map(({ name, rows }) => ({ name, rows: [[`${name} title`], ['A subtitle'], [], ...rows] })) };
+  };
+  assert.deepEqual(warnings(goodPack(), titled()), {});
+  const wrong = titled((all) => { sheetNamed(all, 'Dashboard').rows.find((r) => /test cards/i.test(r[0]))[1] = 5; });
+  assert.match(warnings(goodPack(), wrong)['dashboard-count'], /Number of Reusable Test Cards reads 5/);
+});
+
+test('the stub builder writes the reference pack\'s layout: title, subtitle, headers in row 4, an ID-only Test Name', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stub-layout-'));
+  const pack = goodPack();
+  fs.writeFileSync(path.join(dir, 'pack.json'), JSON.stringify(pack));
+  const run = spawnSync(process.execPath, [path.join(HERE, 'fixtures', 'builder-stub.mjs'), path.join(dir, 'pack.json'),
+    '--out', dir], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const book = readPack(path.join(dir, 'ISSUE501_Pack.xlsx'));
+  for (const sheet of book.sheets) {
+    assert.equal(sheet.headerRow, 4, sheet.name);
+    assert.ok(sheet.title && sheet.subtitle, sheet.name);
+  }
+  assert.deepEqual(book.steps.map((s) => s.testName), ['TC-MOD-501-001', 'TC-MOD-501-002']);
+  assert.equal(almStyle(book).testNameForm, 'card ID only');
+  assert.ok(book.sheet('dashboard').rows.some((r) => r.cells.Item === 'Number of Impacted Business Rules'));
 });
 
 // ---- 3. covered rows ------------------------------------------------------
