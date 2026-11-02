@@ -8,6 +8,10 @@
 # as running. A nightly run that starts while this unit still holds the queue
 # waits for it.
 #
+# A stop (systemctl stop, or `queue cancel`) sends SIGTERM to the node process
+# alone and allows three minutes: the job's model call ends, its row is marked
+# stopped, the paused units start again and the model unloads.
+#
 # Install beside build-pack.service:
 #   cp build-pack-now@.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
@@ -18,6 +22,9 @@
 # If another queue run holds the queue, this unit exits at once and leaves the
 # job queued. A nightly run takes it when it is due; a run that works only
 # start-now rows takes it only if it is marked now with `queue add --now`.
+#
+# Desktop apps named in the config's closeApps block stay open for this unit
+# unless closeApps.onNow is true.
 
 [Unit]
 Description=Build the queued test pack %i now
@@ -27,3 +34,5 @@ Type=oneshot
 EnvironmentFile=%h/.config/build-pack/env
 ExecStart=/usr/bin/node ${BUILD_PACK_SCRIPT} queue start --config ${BUILD_PACK_CONFIG} --job %i
 Nice=10
+KillMode=mixed
+TimeoutStopSec=180

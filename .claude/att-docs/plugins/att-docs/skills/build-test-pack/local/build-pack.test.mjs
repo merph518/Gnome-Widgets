@@ -7,24 +7,28 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { getEventListeners } from 'node:events';
+import http from 'node:http';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { addJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld,
-  parseArgs, queueLines, readQueue, removeJob,
+import { addJob, cancelJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld,
+  markRestore, parseArgs, queueLines, readQueue, removeJob, restoreLines, restorePaused, restoreUnits,
   summaryLines }
   from './build-pack.mjs';
-import { countedTries, loadConfig, RULE_SHAPE } from './config.mjs';
+import { countedTries, loadConfig, MAX_MEMORY_STOPS, memoryStops, RULE_SHAPE } from './config.mjs';
 import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
-import { createPauser, pausedPath } from './pause.mjs';
-import { ModelError, localEndpoint, modelClient } from './model.mjs';
+import { createAppCloser } from './close-apps.mjs';
+import { createPauser, markRestoreFile, onPauseList, pausedPath, readPaused } from './pause.mjs';
+import { Cancelled, ModelError, localEndpoint, modelClient } from './model.mjs';
 import { almDescriptions, batches, documentInputs, dropUnfoundedAssumptions, expectedProblems, phase5,
   resultsAgree, setsOf, splitText } from './phases.mjs';
 import { jobId, runJob } from './run.mjs';
 import { memoryLow, parseMeminfo, waitForMemory } from './meminfo.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { createReleaser } from './release.mjs';
-import { readStatusLog, statusFields } from './status.mjs';
+import { sleepUnlessAborted } from './abort.mjs';
+import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 import { readPack } from './pack.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -2110,11 +2114,142 @@ test('a second resume does nothing, and each stop is recorded as it happens', as
   const sys = fakeSystemctl(['gpu-a.service']);
   const pauser = createPauser(config, { exec: sys.exec, log: () => {} });
   await pauser.pause();
-  assert.deepEqual(JSON.parse(fs.readFileSync(pausedPath(config), 'utf8')), ['gpu-a.service']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(pausedPath(config), 'utf8')), { stopped: ['gpu-a.service'], restore: [] });
   await pauser.resume();
   const calls = sys.calls.length;
   await pauser.resume();
   assert.equal(sys.calls.length, calls);
+});
+
+test('a unit marked to restore is started when the run ends, though it was down at the start', async () => {
+  const config = pauseConfig();
+  addJob(config, { issue: '1' });
+  assert.ok(markRestore(config, 'issue-1', ['gpu-c.service']));
+  const sys = fakeSystemctl(['gpu-a.service']);
+  await drainQueue(config, { run: okRun, pause: quiet(sys) });
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')),
+    ['stop gpu-a.service', 'start gpu-a.service', 'start gpu-c.service']);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+  assert.equal(readQueue(config).jobs[0].restore, undefined);
+});
+
+test('a marked unit is started after a failed job too', async () => {
+  const config = pauseConfig();
+  addJob(config, { issue: '1' });
+  markRestore(config, 'issue-1', ['gpu-c.service']);
+  const sys = fakeSystemctl([]);
+  await drainQueue(config, { run: async () => ({ ok: false, phase: 'intake', ms: 1 }), pause: quiet(sys) });
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['start gpu-c.service']);
+  assert.equal(readQueue(config).jobs[0].restore, undefined);
+});
+
+test('cancel starts a unit marked on the running job', async () => {
+  const config = pauseConfig();
+  addJob(config, { issue: '501' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], { status: 'running', started: '2026-10-28T10:00:00.000Z' });
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  assert.ok(markRestore(config, 'issue-501', ['gpu-c.service']));
+  assert.deepEqual(JSON.parse(fs.readFileSync(pausedPath(config), 'utf8')), { stopped: [], restore: ['gpu-c.service'] });
+  const sys = fakeSystemctl([]);
+  const hooks = { ...countingHooks(), pause: quiet(sys) };
+  const result = await cancelJob(config, 'issue-501', hooks);
+  assert.equal(result.cancelled, true);
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['start gpu-c.service']);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+});
+
+test('a mark written while a pauser runs survives, and resume clears only what it started', async () => {
+  const config = pauseConfig();
+  const sys = fakeSystemctl(['gpu-a.service']);
+  const pauser = createPauser(config, { exec: sys.exec, log: () => {} });
+  await pauser.pause();
+  markRestoreFile(config, ['gpu-c.service']);
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: ['gpu-c.service'] });
+  assert.deepEqual(await pauser.resume(), []);
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')),
+    ['stop gpu-a.service', 'start gpu-a.service', 'start gpu-c.service']);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+});
+
+test('a run without the queue leaves another run\'s marks alone', async () => {
+  const config = pauseConfig();
+  markRestoreFile(config, ['gpu-c.service']);
+  const sys = fakeSystemctl(['gpu-a.service']);
+  const pauser = createPauser(config, { exec: sys.exec, log: () => {}, leftover: false });
+  await pauser.pause();
+  await pauser.resume();
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['stop gpu-a.service', 'start gpu-a.service']);
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: [], restore: ['gpu-c.service'] });
+});
+
+test('the state file of an earlier version, a bare list, still counts as stopped units', () => {
+  const config = pauseConfig();
+  fs.writeFileSync(pausedPath(config), JSON.stringify(['gpu-a.service', 'bad name']));
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: [] });
+});
+
+test('only a unit on the pause list can be marked', () => {
+  const config = pauseConfig({ units: ['gpu-*.service', 'runner?.service', 'tab-[1-4].service', 'x-[!a].service', 'bad['] });
+  const units = restoreUnits(config, parseArgs(['--restore', 'gpu-a.service', '--restore', 'runner1.service',
+    '--restore', 'tab-3.service', '--restore', 'x-b.service']));
+  assert.deepEqual(units, ['gpu-a.service', 'runner1.service', 'tab-3.service', 'x-b.service']);
+  assert.throws(() => restoreUnits(config, parseArgs(['--restore', 'tab-5.service'])), /not on pause.units/);
+  assert.throws(() => restoreUnits(config, parseArgs(['--restore', 'x-a.service'])), /not on pause.units/);
+  // A bracket that opens no class is literal, and `[!]` is not a class that matches anything.
+  assert.equal(onPauseList(['a[!].service'], 'ax.service'), false);
+  assert.equal(onPauseList(['b[x.service'], 'bx.service'), false);
+  assert.equal(onPauseList(['[^a].service'], 'a.service'), false);
+  assert.equal(onPauseList(['[^a].service'], 'b.service'), true);
+  assert.throws(() => restoreUnits(config, parseArgs(['--restore', 'sshd.service'])),
+    /--restore sshd.service is not on pause.units/);
+  assert.throws(() => restoreUnits(config, parseArgs(['--restore', 'gpu-a.service; reboot'])), /not on pause.units/);
+  assert.ok(onPauseList(['gpu-*'], 'gpu-a.service'));
+  assert.ok(!onPauseList(['gpu-*.service'], 'gpu-a.timer'));
+});
+
+test('--restore repeats and --restore-paused takes no value', () => {
+  const args = parseArgs(['--issue', '5', '--restore', 'a.service', '--restore', 'b.service', '--restore-paused']);
+  assert.deepEqual(args.restore, ['a.service', 'b.service']);
+  assert.equal(args.restorePaused, true);
+  assert.deepEqual(jobFrom(args), { issue: '5' });
+});
+
+test('--restore-paused marks the pause-list units that are down', () => {
+  const config = pauseConfig({ scope: 'user' });
+  const calls = [];
+  const exec = (command, args) => {
+    calls.push([command, ...args]);
+    return { status: 0, stdout: 'gpu-b.service loaded inactive dead Test\ngpu-c.service loaded failed failed Test\n' };
+  };
+  assert.deepEqual(restoreUnits(config, { restorePaused: true, restore: ['gpu-b.service'] }, { exec }),
+    ['gpu-b.service', 'gpu-c.service']);
+  assert.deepEqual(calls[0], ['systemctl', '--user', 'list-units', '--plain', '--no-legend', '--all',
+    '--state=inactive,failed', 'gpu-*.service']);
+});
+
+test('markRestore refuses a job that is not waiting or running', () => {
+  const config = pauseConfig();
+  assert.equal(markRestore(config, 'issue-9', ['gpu-c.service']), false);
+  addJob(config, { issue: '1' });
+  markRestore(config, 'issue-1', ['gpu-c.service']);
+  markRestore(config, 'issue-1', ['gpu-c.service', 'gpu-d.service']);
+  assert.deepEqual(readQueue(config).jobs[0].restore, ['gpu-c.service', 'gpu-d.service']);
+});
+
+test('queue status lists the units waiting to be restored, and queue restore starts them', async () => {
+  const config = pauseConfig();
+  addJob(config, { issue: '1' });
+  markRestore(config, 'issue-1', ['gpu-c.service']);
+  markRestoreFile(config, ['gpu-d.service']);
+  assert.deepEqual(restoreLines(config), ['restore pending gpu-d.service gpu-c.service']);
+  const sys = fakeSystemctl([], ['start gpu-d.service']);
+  const failedStart = await restorePaused(config, { pause: quiet(sys) });
+  assert.deepEqual(failedStart, ['gpu-d.service']);
+  assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['start gpu-d.service', 'start gpu-c.service']);
+  // A unit that did not start stays recorded for the next try.
+  assert.deepEqual(restoreLines(config), ['restore pending gpu-d.service']);
+  assert.equal(readQueue(config).jobs[0].restore, undefined);
 });
 
 test('pause config is validated', () => {
@@ -2482,7 +2617,7 @@ test('the daily report lists each job, the queue depth and the failing jobs', ()
   assert.deepEqual(data.jobs.map((j) => [j.id, j.state]), [
     ['issue-104', 'PASS'], ['issue-103', 'PASS'], ['issue-102', 'PASS'], ['issue-101', 'PASS'],
     ['issue-100', 'PASS'], ['issue-400', 'RETRY'], ['issue-300', 'DROPPED']]);
-  assert.deepEqual(data.counts, { pass: 5, fail: 0, retry: 1, dropped: 1 });
+  assert.deepEqual(data.counts, { pass: 5, fail: 0, retry: 1, dropped: 1, memory: 0, stopped: 0 });
   assert.deepEqual(data.queue, { depth: 2, retrying: 1, running: 1 });
   assert.deepEqual(data.failing.map((j) => j.id), ['issue-400', 'issue-300']);
   const text = renderReport(data);
@@ -2503,7 +2638,7 @@ test('the weekly rollup covers seven days and counts them by day', () => {
   const config = fixtureConfig();
   const data = reportData(config, reportQueue(config), { period: 'week', now: NOW, random: seededRandom(1) });
   assert.equal(data.jobs.length, 8);
-  assert.deepEqual(data.counts, { pass: 6, fail: 0, retry: 1, dropped: 1 });
+  assert.deepEqual(data.counts, { pass: 6, fail: 0, retry: 1, dropped: 1, memory: 0, stopped: 0 });
   const text = renderReport(data);
   assert.match(text, /weekly rollup, 2026-10-28/);
   assert.match(text, /\| 2026-10-25 \| 1 \| 0 \|/);
@@ -4183,6 +4318,57 @@ test('low memory stops a job before a phase at its checkpoint, and a resume carr
   assert.ok(statusLines(again.outDir).some((l) => l.event === 'resume' && l.after === 'phase2'));
 });
 
+/** A run that stops for low memory before intake passes, so it leaves no checkpoint. */
+async function stopBeforeIntake(config, job, model) {
+  let t = Date.now();
+  const result = await runJob(config, job, { model, echo: false, now: () => t,
+    readMemory: () => parseMeminfo(MEMINFO(1048576, 10485760, 1048576)),
+    sleep: async (ms) => { t += ms; } });
+  assert.equal(result.reason, 'memory:low');
+  assert.equal(result.phase, 'intake');
+  assert.equal(fs.existsSync(path.join(result.outDir, 'work', 'checkpoint.json')), false);
+  return result;
+}
+
+test('a resume after a low-memory stop before intake keeps the status log', async () => {
+  const config = fixtureConfig({ memory: { enabled: true, waitMinutes: 1, pollSeconds: 30 } });
+  const job = { issue: '501', change: '7001' };
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  const first = await stopBeforeIntake(config, job, model);
+  const before = statusLines(first.outDir);
+  assert.ok(before.some((l) => l.event === 'wait' && l.reason === 'memory-low'));
+  // The release line a finished job gets after the stop does not hide the stop.
+  jobLogs(first.outDir, { echo: false }).status({ job: first.id, phase: 'release', event: 'pass' });
+  const withRelease = statusLines(first.outDir);
+  const again = await runJob(config, { ...job, resume: true }, { model, echo: false,
+    readMemory: () => parseMeminfo(MEMINFO(8388608, 10485760, 9437184)) });
+  assert.equal(again.ok, true);
+  const lines = statusLines(again.outDir);
+  assert.deepEqual(lines.slice(0, withRelease.length), withRelease);
+  assert.ok(lines.length > withRelease.length);
+  assert.deepEqual([lines.at(-1).phase, lines.at(-1).event], ['done', 'pass']);
+  assertContentFree(read(path.join(again.outDir, 'status.log')));
+});
+
+test('a run started over for any other reason starts with an empty status log', async () => {
+  const config = fixtureConfig({ memory: { enabled: true, waitMinutes: 1, pollSeconds: 30 } });
+  const job = { issue: '501', change: '7001' };
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  const memory = () => parseMeminfo(MEMINFO(8388608, 10485760, 9437184));
+  // The same stop, run again without resume.
+  const first = await stopBeforeIntake(config, job, model);
+  const fresh = await runJob(config, job, { model, echo: false, readMemory: memory });
+  assert.equal(fresh.ok, true);
+  assert.equal(statusLines(fresh.outDir).some((l) => l.event === 'wait'), false);
+  // A resume with no checkpoint whose last stop was something else.
+  fs.rmSync(path.join(first.outDir, 'work', 'checkpoint.json'));
+  const log = jobLogs(first.outDir, { echo: false });
+  log.status({ job: first.id, phase: 'intake', event: 'fail', reason: 'gate:old-failure', ms: 1 });
+  const resumed = await runJob(config, { ...job, resume: true }, { model, echo: false, readMemory: memory });
+  assert.equal(resumed.ok, true);
+  assert.equal(statusLines(resumed.outDir).some((l) => l.reason === 'gate:old-failure'), false);
+});
+
 test('an unreadable /proc/meminfo is noted once and the job carries on', async () => {
   const config = fixtureConfig({ memory: { enabled: true } });
   const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
@@ -4201,13 +4387,472 @@ test('a stop for low memory is not one of the job\'s tries, and the drain stops 
     return { ok: false, phase: 'phase3', reason: 'memory:low', ms: 1000 };
   };
   const night = (day) => () => new Date(`2026-10-${day}T22:00:00`);
-  for (const day of [27, 28, 29]) await drainQueue(config, { cutoff: '07:00', run, clock: night(day) });
-  // Three stops, one job each night: neither the third stop nor the second job drops anything.
-  assert.deepEqual(ran, ['issue-501', 'issue-501', 'issue-501']);
+  for (const day of [27, 28]) await drainQueue(config, { cutoff: '07:00', run, clock: night(day) });
+  // Two stops, one job each night: neither drops anything, and the second job never runs.
+  assert.deepEqual(ran, ['issue-501', 'issue-501']);
   const rows = readQueue(config).jobs;
   assert.deepEqual(rows.map((r) => r.status), ['queued', 'queued']);
-  assert.equal(rows[0].failures.length, 3);
+  assert.equal(rows[0].failures.length, 2);
   assert.equal(countedTries(rows[0].failures), 0);
   assert.equal(countedTries([...rows[0].failures, { reason: 'model:no-reply' }]), 1);
   assert.match(summaryLines(readQueue(config))[0], /retry after stopping at phase3 \(memory:low\)/);
+});
+
+test('the third low-memory stop in a row drops the job, and the next job runs the night after', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501', now: true });
+  addJob(config, { issue: '777', now: true });
+  const ran = [];
+  const run = async (_config, job) => {
+    ran.push(job.id);
+    return { ok: false, phase: 'phase3', reason: 'memory:low', ms: 1000 };
+  };
+  const night = (day) => () => new Date(`2026-10-${day}T22:00:00`);
+  for (const day of [27, 28, 29, 30]) await drainQueue(config, { cutoff: '07:00', run, clock: night(day) });
+  assert.deepEqual(ran, ['issue-501', 'issue-501', 'issue-501', 'issue-777']);
+  const rows = readQueue(config).jobs;
+  assert.deepEqual(rows.map((r) => r.status), ['failed', 'queued']);
+  assert.equal(rows[0].reason, 'memory:low');
+  assert.equal(memoryStops(rows[0].failures), MAX_MEMORY_STOPS);
+  assert.match(summaryLines(readQueue(config))[0], /dropped after 3 low-memory stops in a row/);
+  // A person puts it back with queue add, which starts it with no failures.
+  addJob(config, { issue: '501', now: true });
+  const again = readQueue(config).jobs.filter((r) => r.id === 'issue-501');
+  assert.deepEqual(again.map((r) => r.status), ['failed', 'queued']);
+  assert.equal(again[1].failures, undefined);
+});
+
+test('a failure of another kind between low-memory stops resets the count', () => {
+  const stop = { reason: 'memory:low' };
+  assert.equal(memoryStops([stop, stop, { reason: 'model:no-reply' }, stop]), 1);
+  assert.equal(memoryStops([{ reason: 'model:no-reply' }, stop, stop]), 2);
+  assert.equal(memoryStops([]), 0);
+  assert.equal(memoryStops(undefined), 0);
+});
+
+test('the report shows a job held by repeated low-memory stops as needing a person', () => {
+  const config = fixtureConfig();
+  const queue = reportQueue(config);
+  const stops = (n) => Array.from({ length: n }, (_, i) => ({ at: hoursAgo(5 - i), phase: 'phase3', reason: 'memory:low', ms: 1 }));
+  queue.jobs.push({ id: 'issue-910', status: 'failed', finished: hoursAgo(2), phase: 'phase3',
+    reason: 'memory:low', failures: stops(3) });
+  queue.jobs.push({ id: 'issue-920', status: 'queued', failures: stops(1) });
+  const data = reportData(config, queue, { period: 'day', now: NOW, random: seededRandom(1) });
+  const state = (id) => data.jobs.find((j) => j.id === id)?.state;
+  assert.equal(state('issue-910'), 'MEMORY');
+  assert.equal(state('issue-920'), 'RETRY');
+  assert.equal(data.counts.memory, 1);
+  const text = renderReport(data);
+  assert.match(text, /Stopped 3 times in a row for low memory and dropped from the queue: 1/);
+  assert.match(text, /issue-910: stopped for low memory 3 times in a row, last at phase3\. Dropped from the queue; it needs a person/);
+});
+
+/** A pauser and a releaser that only count their calls. */
+function countingHooks() {
+  const calls = { resume: 0, release: 0, noted: [] };
+  return {
+    calls,
+    pause: () => ({ pause: async () => {}, resume: async () => { calls.resume += 1; } }),
+    release: () => ({ note: (id) => calls.noted.push(id), release: () => { calls.release += 1; } }),
+  };
+}
+
+test('a run stopped on request marks its row stopped at the phase, counts no try, and ends the run', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  addJob(config, { issue: '777' });
+  const hooks = countingHooks();
+  const stop = new AbortController();
+  const ran = [];
+  const run = async (_config, job, { signal }) => {
+    ran.push(job.id);
+    assert.equal(signal, stop.signal);
+    stop.abort();
+    return { ok: false, phase: 'phase4', reason: 'cancelled', ms: 5 };
+  };
+  const done = await drainQueue(config, { cutoff: '07:00', run, ...hooks, signal: stop.signal,
+    clock: () => new Date('2026-10-28T10:00:00') });
+  // The second row waits for the next run, and the units and the model are handled once.
+  assert.deepEqual(ran, ['issue-501']);
+  assert.equal(done.length, 1);
+  assert.deepEqual([hooks.calls.resume, hooks.calls.release, hooks.calls.noted], [1, 1, ['issue-501']]);
+  const [first, second] = readQueue(config).jobs;
+  assert.deepEqual([first.status, first.phase, first.reason, first.resume], ['stopped', 'phase4', 'cancelled', true]);
+  assert.equal(first.failures, undefined);
+  assert.equal(second.status, 'queued');
+  assert.match(summaryLines(readQueue(config))[0], /stopped at phase4 \(cancelled\), resumable/);
+  assert.match(queueLines(readQueue(config))[0], /status=stopped phase=phase4 reason=cancelled/);
+  assert.equal(lockHeld(config), false);
+  // `queue add --resume --now` queues the job again, and the row's checkpoint is what it resumes from.
+  assert.equal(addJob(config, { issue: '501', resume: true, now: true }).added, true);
+  const rows = readQueue(config).jobs;
+  assert.deepEqual(rows.map((r) => r.status), ['stopped', 'queued', 'queued']);
+  assert.deepEqual([rows[2].resume, rows[2].now], [true, true]);
+});
+
+test('a stop that arrives while the units are being stopped starts no job', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  const stop = new AbortController();
+  const pause = () => ({ pause: async ({ signal }) => { stop.abort(); assert.equal(signal.aborted, true); },
+    resume: async () => {} });
+  const run = async () => { throw new Error('no job should start'); };
+  const done = await drainQueue(config, { cutoff: '07:00', run, pause, signal: stop.signal,
+    clock: () => new Date('2026-10-28T10:00:00') });
+  assert.deepEqual(done, []);
+  assert.equal(readQueue(config).jobs[0].status, 'queued');
+});
+
+test('a pauser wait ends at once when the stop signal aborts', async () => {
+  const stop = new AbortController();
+  const lines = [];
+  const config = fixtureConfig({ pause: { units: ['x.service'], scope: 'user', busyProcess: 'worker',
+    pollSeconds: 3600, maxWaitMinutes: 60 } });
+  const exec = (command, args) => (args.includes('list-units')
+    ? { status: 0, stdout: 'x.service loaded active running\n' } : { status: 0, stdout: '' });
+  // A unit with a busy worker inside it is waited for.
+  const proc = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'));
+  fs.mkdirSync(path.join(proc, '42'));
+  fs.writeFileSync(path.join(proc, '42', 'comm'), 'worker\n');
+  fs.writeFileSync(path.join(proc, '42', 'cgroup'), '0::/system.slice/x.service\n');
+  const busy = createPauser(config, { exec, log: (l) => lines.push(l), sleep: () => new Promise(() => {}),
+    procRoot: proc });
+  const waiting = busy.pause({ signal: stop.signal });
+  setTimeout(() => stop.abort(), 20);
+  await waiting;
+  assert.ok(lines.includes('pause: waiting for x.service'));
+});
+
+test('a model call in flight ends as Cancelled when the signal aborts, and the server sees it close', async () => {
+  let closed;
+  const seen = new Promise((resolve) => { closed = resolve; });
+  const server = http.createServer((req, res) => {
+    req.resume();
+    res.on('close', closed);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const stop = new AbortController();
+    const client = modelClient({ endpoint: `http://127.0.0.1:${server.address().port}/v1`, name: 'm',
+      signal: stop.signal });
+    const call = client.json({ system: 's', user: 'u', schema: { type: 'object' }, schemaName: 'n',
+      reasoning: false, maxTokens: 10 });
+    setTimeout(() => stop.abort(), 50);
+    await assert.rejects(call, (error) => error instanceof Cancelled && !(error instanceof ModelError));
+    await seen;
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a job stopped during a model call keeps its checkpoint, retries nothing, and resumes at the phase', async () => {
+  const config = fixtureConfig();
+  const job = { issue: '501', change: '7001' };
+  const stop = new AbortController();
+  const base = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  const model = {
+    ...base,
+    async json(request) {
+      if (request.schemaName.startsWith('phase3')) {
+        stop.abort();
+        throw new Cancelled();
+      }
+      return base.json(request);
+    },
+  };
+  const result = await runJob(config, job, { model, echo: false, signal: stop.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'cancelled');
+  assert.equal(result.phase, 'phase3');
+  const checkpoint = JSON.parse(read(path.join(result.outDir, 'work', 'checkpoint.json')));
+  assert.equal(checkpoint.phase, 'phase2');
+  const lines = statusLines(result.outDir);
+  assert.ok(!lines.some((l) => ['retry', 'call-fail'].includes(l.event)));
+  assert.equal(lines.at(-1).reason, 'cancelled');
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  const again = await runJob(config, { ...job, resume: true }, { model: base, echo: false });
+  assert.equal(again.ok, true);
+  assert.ok(statusLines(again.outDir).some((l) => l.event === 'resume' && l.after === 'phase2'));
+});
+
+test('an aborted signal stops a job between phases, at the next phase', async () => {
+  const config = fixtureConfig();
+  const stop = new AbortController();
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  stop.abort();
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false, signal: stop.signal });
+  assert.deepEqual([result.ok, result.reason, result.phase], [false, 'cancelled', 'intake']);
+  assert.equal(model.calls.length, 0);
+});
+
+test('cancel settles a row a stopped run left running, restarts the units and unloads the model', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], { status: 'running', started: '2026-10-28T10:00:00.000Z' });
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  const dir = path.join(config.output, 'issue-501');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'status.log'), [
+    { at: '2026-10-28T10:01:00.000Z', job: 'issue-501', phase: 'phase2', event: 'pass', ms: 5 },
+    { at: '2026-10-28T10:02:00.000Z', job: 'issue-501', phase: 'phase3', event: 'start' },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const hooks = countingHooks();
+  const result = await cancelJob(config, 'issue-501', hooks);
+  assert.deepEqual(result, { id: 'issue-501', cancelled: true, phase: 'phase3' });
+  assert.deepEqual([hooks.calls.resume, hooks.calls.release], [1, 1]);
+  assert.deepEqual(jobStatus(config, 'issue-501').slice(0, 1), ['issue-501  stopped  queue free']);
+  // A job that is not running, or not in the queue, is not cancelled.
+  assert.deepEqual(await cancelJob(config, 'issue-501', hooks), { id: 'issue-501', cancelled: false, status: 'stopped' });
+  assert.equal((await cancelJob(config, 'issue-9', hooks)).status, 'not queued');
+});
+
+test('cancel gives up and says so when the holder keeps the queue', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  const queue = readQueue(config);
+  queue.jobs[0].status = 'running';
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  fs.writeFileSync(`${config.at(config.queue.file)}.lock`, String(process.pid));
+  const sent = [];
+  let t = 0;
+  const result = await cancelJob(config, 'issue-501', { kill: (pid, name) => sent.push([pid, name]),
+    clock: () => new Date(t), sleep: async (ms) => { t += ms; }, waitMs: 5000, pollMs: 1000 });
+  assert.deepEqual(result, { id: 'issue-501', cancelled: false, timedOut: true });
+  assert.deepEqual(sent, [[process.pid, 'SIGTERM']]);
+});
+
+test('queue cancel stops a real run during a model call, frees the queue, and leaves a resumable row', async () => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    if (req.url.endsWith('/chat/completions')) {
+      requests.push(req.url);
+      req.resume();
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const marker = path.join(os.tmpdir(), `released-${process.pid}-${Date.now()}`);
+  try {
+    const config = fixtureConfig({
+      model: { endpoint: `http://127.0.0.1:${server.address().port}/api/v1`, name: 'test-model' },
+      release: { command: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] },
+    });
+    const script = path.join(HERE, 'build-pack.mjs');
+    const cli = (...args) => spawnSync(process.execPath, [script, 'queue', ...args, '--config', config.file],
+      { encoding: 'utf8' });
+    assert.equal(cli('add', '--issue', '501', '--change', '7001', '--now').status, 0);
+    const child = spawn(process.execPath, [script, 'queue', 'start', '--config', config.file,
+      '--job', 'issue-501-change-7001'], { stdio: 'ignore' });
+    const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    for (let i = 0; i < 200 && !requests.length; i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(requests.length, 'the run reached its first model call');
+    assert.deepEqual(cli('status', '--job', 'issue-501-change-7001').stdout.split('\n')[0],
+      'issue-501-change-7001  running  queue held');
+    const cancelled = cli('cancel', '--job', 'issue-501-change-7001');
+    assert.equal(cancelled.status, 0, cancelled.stderr);
+    assert.match(cancelled.stdout, /^cancelled issue-501-change-7001$/m);
+    assert.match(cancelled.stdout, /^issue-501-change-7001  stopped  queue free$/m);
+    assert.match(cancelled.stdout, /^stopped phase=intake reason=cancelled$/m);
+    const { code } = await exited;
+    assert.equal(code, 0);
+    assert.equal(fs.existsSync(marker), true, 'the model was released');
+    const row = readQueue(config).jobs[0];
+    assert.deepEqual([row.status, row.phase, row.resume, row.failures], ['stopped', 'intake', true, undefined]);
+    assert.equal(lockHeld(config), false);
+    const again = cli('cancel', '--job', 'issue-501-change-7001');
+    assert.equal(again.status, 1);
+    assert.match(again.stderr, /is not running \(stopped\)/);
+    assert.equal(cli('add', '--issue', '501', '--change', '7001', '--resume', '--now').status, 0);
+    assert.equal(readQueue(config).jobs.at(-1).status, 'queued');
+  } finally {
+    fs.rmSync(marker, { force: true });
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('waiting on a stop signal leaves no listener behind, and an aborted signal ends the wait', async () => {
+  const stop = new AbortController();
+  for (let i = 0; i < 30; i += 1) await sleepUnlessAborted(async () => {}, 1, stop.signal);
+  // Each wait removes its own listener, so none pile up on the signal.
+  assert.equal(getEventListeners(stop.signal, 'abort').length, 0);
+  const waiting = sleepUnlessAborted(() => new Promise(() => {}), 1e9, stop.signal);
+  stop.abort();
+  await waiting;
+  assert.equal(await sleepUnlessAborted(() => new Promise(() => {}), 1e9, stop.signal), undefined);
+});
+
+test('a stop while a run waits for the queue ends the wait without taking a job', async () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  fs.writeFileSync(`${config.at(config.queue.file)}.lock`, String(process.pid));
+  const stop = new AbortController();
+  let slept = 0;
+  const sleep = async () => { slept += 1; if (slept === 2) stop.abort(); };
+  const run = async () => { throw new Error('no job should start'); };
+  const done = await drainQueue(config, { cutoff: '07:00', wait: true, run, sleep, signal: stop.signal,
+    clock: () => new Date('2026-10-28T10:00:00') });
+  assert.deepEqual(done, []);
+  assert.equal(readQueue(config).jobs[0].status, 'queued');
+});
+
+test('a stop during the low-memory wait stops the job at its checkpoint as cancelled', async () => {
+  const config = fixtureConfig({ memory: { enabled: true, waitMinutes: 20, pollSeconds: 30 } });
+  const job = { issue: '501', change: '7001' };
+  const stop = new AbortController();
+  const model = fakeModel({ intake: (value) => ({ ...value, description: 'Card renewal sets the expiry from the old date' }) });
+  const low = parseMeminfo(MEMINFO(1048576, 10485760, 1048576));
+  const result = await runJob(config, job, { model, echo: false, signal: stop.signal, readMemory: () => low,
+    sleep: async () => { stop.abort(); } });
+  assert.deepEqual([result.ok, result.reason, result.phase], [false, 'cancelled', 'intake']);
+  assert.equal(model.calls.length, 0);
+});
+
+test('the report counts a stopped job apart from failures', () => {
+  const config = fixtureConfig();
+  addJob(config, { issue: '501' });
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], { status: 'stopped', phase: 'phase3', reason: 'cancelled', resume: true,
+    finished: '2026-10-28T10:00:00.000Z', ms: 5 });
+  const data = reportData(config, queue, { now: new Date('2026-10-28T12:00:00.000Z') });
+  assert.equal(data.counts.stopped, 1);
+  assert.equal(data.counts.fail + data.counts.dropped + data.counts.retry, 0);
+  assert.equal(data.failing.length, 0);
+  assert.match(renderReport(data), /Stopped on request and waiting to resume: 1/);
+});
+
+const APP_SCOPES = ['app-com.google.Chrome-*.scope', 'snap.spotify.spotify-*.scope'];
+const closeConfig = (closeApps = {}) => fixtureConfig({ closeApps: { scopes: APP_SCOPES, keepIfRunning: ['sessiond'], ...closeApps } });
+
+/** A closer over a fake systemctl and /proc; `lines` records its log. */
+function fakeCloser(active, { failing = [], procs = [], selfCgroup = '0::/user.slice/other.scope\n' } = {}) {
+  const sys = fakeSystemctl(active, failing);
+  const lines = [];
+  const make = (cfg) => createAppCloser(cfg, { exec: sys.exec, log: (l) => lines.push(l),
+    procRoot: fakeProc(procs), selfCgroup });
+  return { sys, lines, make };
+}
+
+test('apps are off unless the config lists scopes', () => {
+  const fake = fakeCloser(['app-com.google.Chrome-1.scope']);
+  fake.make(fixtureConfig()).close();
+  assert.deepEqual(fake.sys.calls, []);
+});
+
+test('active app scopes are stopped for the user, once, and never started again', () => {
+  const fake = fakeCloser(['app-com.google.Chrome-1.scope', 'snap.spotify.spotify-2.scope']);
+  const closer = fake.make(closeConfig());
+  closer.close();
+  closer.close();
+  assert.deepEqual(fake.sys.calls[0].slice(0, 3), ['systemctl', '--user', 'list-units']);
+  assert.deepEqual(fake.sys.verbs(), [
+    ['systemctl', '--user', 'stop', 'app-com.google.Chrome-1.scope'],
+    ['systemctl', '--user', 'stop', 'snap.spotify.spotify-2.scope']]);
+  assert.deepEqual(fake.lines, ['close: closed app-com.google.Chrome-1.scope',
+    'close: closed snap.spotify.spotify-2.scope']);
+});
+
+test('a scope with a kept process or this process in it is left open and sessions are counted', () => {
+  const chrome = 'app-com.google.Chrome-1.scope';
+  const desktop = 'app-com.example.Editor-3.scope';
+  const fake = fakeCloser([chrome, desktop, 'snap.spotify.spotify-2.scope'], {
+    procs: [[10, 'sessiond', `/user.slice/${desktop}`], [11, 'sessiond', '/user.slice/term.scope'],
+      [12, 'chrome', `/user.slice/${chrome}`]],
+    selfCgroup: '0::/user.slice/snap.spotify.spotify-2.scope\n' });
+  fake.make(closeConfig({ scopes: ['app-com.*.scope', ...APP_SCOPES] })).close();
+  assert.deepEqual(fake.sys.verbs(), [['systemctl', '--user', 'stop', chrome]]);
+  assert.deepEqual(fake.lines, [`close: closed ${chrome}`, `close: left open ${desktop}`,
+    'close: left open snap.spotify.spotify-2.scope', 'close: sessiond processes open 2']);
+});
+
+test("an app's helper scope stays open with the scope that holds a kept process", () => {
+  const main = 'app-com.example.Editor-7.scope';
+  const helper = 'app-gnome-com.example.Editor-7.scope';
+  const other = 'app-gnome-other-8.scope';
+  const sameAppOtherPid = 'app-gnome-com.example.Editor-8.scope';
+  const fake = fakeCloser([main, helper, other, sameAppOtherPid], { procs: [[10, 'sessiond', `/user.slice/${main}`]] });
+  fake.make(closeConfig({ scopes: ['app-com.example.*.scope', 'app-gnome-*.scope'] })).close();
+  assert.deepEqual(fake.sys.verbs(), [['systemctl', '--user', 'stop', other],
+    ['systemctl', '--user', 'stop', sameAppOtherPid]]);
+  assert.deepEqual(fake.lines.slice(0, 2), [`close: left open ${main}`, `close: left open ${helper}`]);
+});
+
+test('every close log line carries only a fixed word, a scope or process name and a count', () => {
+  const scope = 'app-com.google.Chrome-1.scope';
+  const fake = fakeCloser([scope, 'snap.spotify.spotify-2.scope'], { failing: [`stop ${scope}`],
+    procs: [[10, 'sessiond', '/user.slice/x.scope']] });
+  fake.make(closeConfig()).close();
+  assert.ok(fake.lines.length >= 3);
+  for (const line of fake.lines) {
+    assert.match(line, /^close: (closed|left open|stop failed) \S+\.scope$|^close: sessiond processes open \d+$/, line);
+  }
+});
+
+test('keepIfRunning can be emptied to close the scope that holds sessions', () => {
+  const desktop = 'app-com.example.Editor-3.scope';
+  const fake = fakeCloser([desktop], { procs: [[10, 'sessiond', `/user.slice/${desktop}`]] });
+  fake.make(closeConfig({ scopes: ['app-com.example.Editor-*.scope'], keepIfRunning: [] })).close();
+  assert.deepEqual(fake.sys.verbs(), [['systemctl', '--user', 'stop', desktop]]);
+});
+
+test('a failed stop or list is logged and nothing throws', () => {
+  const scope = 'app-com.google.Chrome-1.scope';
+  const failing = fakeCloser([scope], { failing: [`stop ${scope}`] });
+  failing.make(closeConfig()).close();
+  assert.deepEqual(failing.lines, [`close: stop failed ${scope}`]);
+  const lines = [];
+  createAppCloser(closeConfig(), { exec: () => ({ status: 1, stdout: '' }), log: (l) => lines.push(l),
+    procRoot: fakeProc([]), selfCgroup: '' }).close();
+  assert.deepEqual(lines, ['close: list failed']);
+});
+
+test('a name that is not a plain scope name is never passed to systemctl', () => {
+  const fake = fakeCloser(['evil.service', '-rf.scope', 'app-ok.scope']);
+  fake.make(closeConfig({ scopes: ['app-ok*.scope'] })).close();
+  assert.deepEqual(fake.sys.verbs(), [['systemctl', '--user', 'stop', 'app-ok.scope']]);
+});
+
+test('a queue run closes apps once, before the first job and before units stop', async () => {
+  const config = closeConfig();
+  addJob(config, { issue: '1' });
+  addJob(config, { issue: '2' });
+  const events = [];
+  const closer = { close: () => events.push('close') };
+  const pause = () => ({ pause: async () => { events.push('pause'); }, resume: async () => {} });
+  const run = async (cfg, job) => { events.push(`run ${job.id}`); return { ok: true, ms: 1 }; };
+  await drainQueue(config, { run, pause, closeApps: () => closer });
+  assert.deepEqual(events.map((e) => e.split(' ')[0]), ['close', 'pause', 'run', 'pause', 'run']);
+});
+
+test('an empty queue closes nothing', async () => {
+  const closer = { close: () => assert.fail('closed') };
+  await drainQueue(closeConfig(), { run: okRun, closeApps: () => closer });
+});
+
+test('a job started now leaves apps open unless onNow is set', async () => {
+  for (const [onNow, expected] of [[false, 0], [true, 1]]) {
+    const config = closeConfig({ onNow });
+    addJob(config, { issue: '5', now: true });
+    let closed = 0;
+    await drainQueue(config, { nowOnly: true, run: okRun, closeApps: () => ({ close: () => { closed += 1; } }) });
+    assert.equal(closed, expected, `onNow ${onNow}`);
+  }
+});
+
+test('closeApps config is checked', () => {
+  assert.deepEqual(fixtureConfig().closeApps, { scopes: [], onNow: false, keepIfRunning: ['claude'] });
+  for (const bad of [[], 'x', { other: 1 }]) {
+    assert.throws(() => fixtureConfig({ closeApps: bad }), /config closeApps must be an object/, JSON.stringify(bad));
+  }
+  for (const scopes of [['foo.service'], ['app-*.scope'], ['snap.*.scope'], ['app-x.slice'], 'app-x.scope', [3]]) {
+    assert.throws(() => fixtureConfig({ closeApps: { scopes } }), /config closeApps\.scopes/, JSON.stringify(scopes));
+  }
+  assert.throws(() => fixtureConfig({ closeApps: { onNow: 'yes' } }), /closeApps\.onNow/);
+  assert.throws(() => fixtureConfig({ closeApps: { keepIfRunning: [''] } }), /closeApps\.keepIfRunning/);
+  assert.throws(() => fixtureConfig({ closeApps: { keepIfRunning: ['sixteen-chars-xxx'] } }),
+    /up to 15 characters/);
 });

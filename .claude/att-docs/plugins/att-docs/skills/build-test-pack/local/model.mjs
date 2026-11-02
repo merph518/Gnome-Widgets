@@ -35,6 +35,14 @@ export class ModelError extends Error {
   }
 }
 
+/** The run was told to stop. Not a ModelError, so no phase retries it. */
+export class Cancelled extends Error {
+  constructor() {
+    super('the run was cancelled');
+    this.name = 'Cancelled';
+  }
+}
+
 /**
  * A fetch-shaped request over node:http. Node's own fetch gives up when no
  * response headers arrive within five minutes, and a local server answering
@@ -62,11 +70,12 @@ export function localFetch(url, { method = 'GET', headers = {}, body, signal } =
 
 /**
  * A client for one model on one endpoint. `fetchImpl` stands in for fetch in
- * tests. `tokenize` asks the loaded llama.cpp backend for an exact count and
- * falls back to the estimate when the server offers none.
+ * tests. `signal` stops a call in flight; the call then throws Cancelled.
+ * `tokenize` asks the loaded llama.cpp backend for an exact count and falls
+ * back to the estimate when the server offers none.
  */
 export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes = 150,
-  fetchImpl = localFetch }) {
+  fetchImpl = localFetch, signal: stop = null }) {
   const base = localEndpoint(endpoint);
   let tokenizeUrl;
 
@@ -188,7 +197,8 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
         // A redirect could hand the prompt to another host.
         redirect: 'error',
         headers: { 'content-type': 'application/json' },
-        signal: AbortSignal.timeout(timeoutMinutes * 60000),
+        signal: stop ? AbortSignal.any([stop, AbortSignal.timeout(timeoutMinutes * 60000)])
+          : AbortSignal.timeout(timeoutMinutes * 60000),
         body: JSON.stringify({
           model: name,
           temperature,
@@ -202,6 +212,7 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
         }),
       });
     } catch {
+      if (stop?.aborted) throw new Cancelled();
       // The cause can quote the request, so only the code goes on.
       throw new ModelError('network', 'model endpoint could not be reached');
     }

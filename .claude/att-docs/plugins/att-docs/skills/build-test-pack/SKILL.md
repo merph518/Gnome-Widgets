@@ -253,6 +253,7 @@ fail, reason codes, counts and timings.
 <pipeline> queue status --config <pipeline-config> [--job <job-id>]
 <pipeline> queue summary --config <pipeline-config>
 <pipeline> queue remove --config <pipeline-config> --job <job-id>
+<pipeline> queue cancel --config <pipeline-config> --job <job-id>
 <pipeline> queue fill --config <pipeline-config>
 <pipeline> report --config <pipeline-config> [--period day|week|auto] [--seed <n>]
 ```
@@ -462,7 +463,9 @@ without opening the journal. `running` with the queue `free` is a row left by a
 dead process: report it, and the next run marks it `interrupted`. `failed`
 with the queue `free` is a job that stopped in its first phase and has already
 released the queue; the status line names the phase and the reason code, and
-the session reports them. `failed` or `passed` is final, whether the queue
+the session reports them. `stopped` with the queue `free` is a job
+that `queue cancel` ended; the status line names the phase it stopped in, and
+`queue add --resume` carries on from there. `failed` or `passed` is final, whether the queue
 shows `held` or `free`; the queue may be held by another job's run. `not queued`
 means no row has that job ID, so the `--job` value or the `queue add` is wrong.
 A lock file is not evidence of a live process; `queue status` checks the
@@ -514,6 +517,125 @@ run carries on; a unit that would not stop is not started later. A `run`
 outside the queue stops and starts the units the same way, but holds no queue
 lock, so it leaves a dead run's `.paused` file for the next queue run.
 
+A unit that was taken down by hand before the job, and was therefore not
+running when the run began, is not started when the run ends unless the job
+marks it. `queue add` and `queue start` take `--restore <unit>`, which can be
+repeated, and `--restore-paused`:
+
+```bash
+<pipeline> queue add --config <pipeline-config> --issue <n> --restore <unit> --restore <unit>
+<pipeline> queue start --config <pipeline-config> --job <job-id> --restore-paused
+```
+
+Each `--restore` unit must match a `pause.units` entry, or the command stops
+with `--restore <unit> is not on pause.units`. Patterns match the way `systemctl list-units` reads them, with `*`, `?` and
+`[...]`. `--restore-paused` marks every
+`pause.units` match that systemd lists and that is not active when the
+command runs, and the command prints the units it marked. A unit systemd has
+not loaded does not show up there; name it with `--restore`.
+
+The marks ride on the job's row until the run takes the job, then move into the
+`.paused` file, which holds `{"stopped": [...], "restore": [...]}`. A file that
+is a bare list of unit names counts as the stopped units. The marked units start
+when the run ends through a normal finish, a failure, the cutoff, a signal or
+`queue cancel`, and on a running job `--restore` writes to the file directly. A
+run that reaches the cutoff before it takes the job leaves the marks on the row
+for the next run. `queue status` lists the units waiting as
+`restore pending <units>`. To start them by hand and clear the record:
+
+```bash
+<pipeline> queue restore --config <pipeline-config>
+```
+
+It exits 0 when every unit started, and 1 when one did not start or the queue is
+running, since the running run restores its own units. A unit that does not start
+stays recorded for the next run or `queue restore`. To drop the record of a unit
+that can never start, such as a masked or misnamed one, remove its name from the
+`.paused` file beside the queue file.
+
+### Stopping a job
+
+When the machine is needed before a job ends, stop it with the queue's own
+command instead of stopping the unit:
+
+```bash
+<pipeline> queue cancel --config <pipeline-config> --job <job-id>
+```
+
+The command signals the process that holds the queue, whether the nightly unit
+or a `build-pack-now@` unit started it, and waits for it to end, for up to
+150 seconds. The run ends the model call in flight, keeps the job's checkpoint,
+marks the row `stopped` with the phase it stopped in, starts the paused units
+again, unloads the model the way a finished run does, and frees the queue. A
+stop is not a failed try, so it never counts toward dropping the job. The
+rows still waiting stay queued for the next run, and a nightly run does not
+take the stopped row. When the command ends it prints `cancelled <job-id>`
+and the same lines `queue status --job` prints, which show the row `stopped`,
+its phase, and the queue `free`.
+
+Resume the job when the machine is free again; it starts at the phase it
+stopped in, with the phases before it kept:
+
+```bash
+<pipeline> queue add --config <pipeline-config> --issue <n> --resume --now
+```
+
+Exit codes: 0 the job stopped, 1 the job is not running (the line says what
+status the row has), 4 the queue was still held after the wait. A row left
+`running` by a run that was killed has no process to signal; `queue cancel` marks it
+`stopped`, starts the units that run paused, and unloads the model. The units
+ask for the same clean end when they are stopped with `systemctl`: both unit
+files send the stop signal to the node process alone and allow it three
+minutes. A stop that way marks the row `stopped` too. Send the signal a second
+time, or let the three minutes pass, and the process starts the units, unloads
+the model and exits at once, leaving the row `running` for the next run to
+settle. The process cannot act on the signal while it waits on a builder
+command, so a builder that runs past the three minutes ends the same way.
+
+### Closing desktop apps before a run
+
+`pause` takes one scope, and desktop apps run as transient `app-*.scope` user
+units that `systemctl start` cannot bring back, so they have a separate block.
+`pause.units` stays for system units. The optional `closeApps` block names the
+apps to close when the first job is about to start:
+
+```json
+"closeApps": {
+  "scopes": ["app-com.google.Chrome-*.scope", "snap.spotify.spotify-*.scope"],
+  "onNow": false,
+  "keepIfRunning": ["<process name>"]
+}
+```
+
+`scopes` takes patterns, as `systemctl --user list-units` does. Each must start
+with `app-` or `snap.`, end in `.scope`, and have a literal part before its first
+wildcard, so a pattern never matches a service or a system unit. Scope names
+carry a process ID that changes on every launch, so use a wildcard for it. With no
+`scopes`, nothing is closed (the default). Each active scope is stopped with
+`systemctl --user stop`, which sends the apps SIGTERM and ends them if they stay
+past the scope's stop timeout. Nothing starts them again. An app with unsaved
+work loses it, so close the ones you care about by hand first.
+
+The close comes when the first job is about to start, before the pause, so a
+run with an empty queue closes nothing. It runs for a `queue run`, including one
+with `--cutoff`, and not for `run`. A job started with `queue start --job`, such
+as `build-pack-now@.service`, leaves the apps open unless `onNow` is `true`, so a
+daytime job does not close what you are working in.
+
+A scope is also left open when it holds the build itself, or holds a process
+named in `keepIfRunning`, a list of process names of up to 15 characters (the
+kernel's limit). Its default holds the process name of a long-running session.
+Sessions started from a desktop app run inside its scope, so closing that scope
+would end them. The app's helper scope, such as `app-gnome-<app>-<pid>.scope`
+beside `app-<app>-<pid>.scope`, stays open with it. Each scope left open is
+logged as `close: left open <scope>`, followed by `close: <name> processes open
+<n>` for each kept name, which counts the processes with that name, terminal
+sessions included. A session whose process has another name is not counted or
+kept. Those sessions are never closed for you: end them by hand before
+leaving for the night, or set `keepIfRunning` to `[]` to close the app and its
+sessions anyway. A stop that fails is logged as `close: stop failed <scope>` and
+the run carries on.
+
 ### Checking free memory between phases
 
 Before each phase starts, a job reads `MemAvailable` and swap use from
@@ -542,13 +664,23 @@ the swap setup (`local/memory/README.md`). `maxSwapPercent: 100` turns the swap
 test off, `waitMinutes: 0` stops at once, and `enabled: false` turns the check
 off. The numbers cover the host's own memory, not the graphics memory pool.
 
+If memory does run out, `local/oom/README.md` sets up the kernel and `systemd-oomd` to prefer
+ending a desktop app over the model.
+
 The status log carries a `wait` line with the reason `memory-low`, then either
 `memory-ok` (with `polls` and `waitedMs`) or the job's `fail` line with the reason
 `memory:low`. All carry numbers only. If `/proc/meminfo` cannot be read, one
 `warn` line with `meminfo-unreadable` is written and the job carries on. A
-`memory:low` stop does not count as one of a job's tries, so it never drops the
-job, and it waits for the next night. The queue run takes no further job after
-one, since the next would meet the same memory.
+`memory:low` stop does not count as one of a job's tries, so it waits for the
+next night. After 3 such stops in a row (a failure of any other kind resets the
+count) the job is dropped from the queue like one that failed twice, and the
+report shows it as `MEMORY`, needing a person; `queue add` puts it back. The
+queue run takes no further job after a memory stop, since the next would meet
+the same memory. A job stopped this way before its
+first phase passes has no checkpoint, so a resumed run starts over from intake.
+It keeps the earlier `status.log` and adds to it, so the `wait` and `fail` lines
+stay as evidence the host ran short. The rest of the job folder is cleared, and
+a start over after any other stop begins with an empty log.
 
 With scope `system`, the commands run as `sudo -n /usr/bin/systemctl`, so the
 user running the queue needs a sudoers rule that needs no password. List each
@@ -561,8 +693,10 @@ unit and each verb on its own, for example:
 sudo matches the arguments exactly, so name each unit in full as
 `systemctl list-units` prints it, `.service` included. Write the rule with
 `sudo visudo -f /etc/sudoers.d/<file>` so a syntax error cannot lock out sudo,
-and check it with `sudo -n -l /usr/bin/systemctl stop <unit>.service`, which
-prints the command when the rule allows it.
+and check it with `check --config <pipeline.json>` (see "Setting up a host"),
+which reads `sudo -n -l` and passes a unit only when both commands sit under
+`NOPASSWD:`. `sudo -n -l /usr/bin/systemctl stop <unit>.service` alone also
+succeeds for a command that still asks for a password, so it proves nothing.
 
 A `*` in a sudoers argument also matches spaces, so a pattern there can allow
 more than the unit it was meant for. Listing the units is safer. With scope
@@ -597,6 +731,44 @@ and the time it took. The command's own output is never read. A failed unload
 does not change any job's result. `queue status` shows the line for the job
 that ran last, after that job's own last line while its row still runs and
 alone once the row has finished.
+
+### Setting up a host
+
+Install these in order, then run the setup check as the last step:
+
+1. The repository, the model server and the pipeline config.
+2. The env file at `~/.config/build-pack/env`, with `BUILD_PACK_SCRIPT` and
+   `BUILD_PACK_CONFIG` and a full `PATH=` line.
+3. Every file in `local/systemd/`, copied to `~/.config/systemd/user/`, which
+   includes `build-pack-now@.service`, then `systemctl --user daemon-reload` and
+   `systemctl --user enable --now build-pack.timer build-pack-check.timer build-pack-report.timer`.
+4. For a `system` pause scope, the sudoers rule from "Freeing the machine for a
+   job".
+5. The setup check:
+
+```
+node build-pack.mjs check --config <pipeline.json>
+```
+
+Each line reads `<area>  <name>  pass|fail  <code>` and names units, variables
+and config fields only. No value from the env file is printed. The check covers:
+
+- each unit in `local/systemd/`: installed, loaded, and for a timer, enabled. A
+  missing unit fails with the file to copy and where
+- the env file: present, `BUILD_PACK_SCRIPT` and `BUILD_PACK_CONFIG` set and
+  naming files that exist, and a `PATH` line
+- each `pause.units` entry: found in the scope, and for scope `system`, a
+  sudoers rule that lets the queue user stop and start it without a password
+- the model server: answers at `model.endpoint` and lists `model.name`
+- the `release` command: found on the env file's `PATH`. It is looked up and
+  never run, since running it would unload a model another job may be using
+
+The exit code is 0 when every check passes and 1 when any fails, 2 for a config
+that does not load. `check` with `--issue` is the input gate described under
+"Before a job is run or queued", and with neither `--issue` nor `--suite` it is
+this check. `build-pack-check.service` runs it after the queue check each day,
+so a host that drifts shows as a failed unit; on a day the queue check itself
+exits 1, the setup check is skipped.
 
 ### Running unattended
 
@@ -702,8 +874,8 @@ once; a `queue start` run works only rows marked `--now`, so it leaves the row
 for the night. `queue start --job <job-id>` on a job waiting for its retry runs
 it without waiting, and so does a `--now` row under a `queue start`. `queue add
 --now` only marks the row; the start comes from `queue start`. A stop for low
-memory (`memory:low`) is kept in the row's failures but is not counted as a try. `queue add` on a
-dropped job is how a person puts it back.
+memory (`memory:low`) is kept in the row's failures but is not counted as a try, until the third
+in a row drops the job. `queue add` on a dropped job is how a person puts it back.
 
 **The report.** `report` reads the queue file and each job's `status.log`, and
 writes `daily-<date>.md`; on the configured weekday (`report.weeklyDay`, 1 for
@@ -713,10 +885,10 @@ count for each day. The files go in the output folder's `reports/` folder, or in
 confidence ratings and run times, and nothing a document or the model said, so
 a file can be opened or sent anywhere. Each has:
 
-- a summary: jobs passed, jobs waiting to retry, jobs dropped, and the queue's
-  depth;
-- a table with each job's result (PASS, PASS WITH LIMITATIONS, RETRY or
-  DROPPED), the phase and reason code of the gate that stopped it, the sheet
+- a summary: jobs passed, jobs waiting to retry, jobs dropped, jobs dropped
+  for repeated low-memory stops, and the queue's depth;
+- a table with each job's result (PASS, PASS WITH LIMITATIONS, RETRY, DROPPED
+  or MEMORY), the phase and reason code of the gate that stopped it, the sheet
   counts (pass, limited, fail), the confidence rating and the run time;
 - the jobs that keep failing, with every reason code and whether each retries or
   has been dropped;
@@ -769,14 +941,16 @@ half an hour after the queue's default cutoff.
   model server, the pipeline config and the env file at
   `~/.config/build-pack/env`, then copy `build-pack.service`, `build-pack.timer`,
   `build-pack-check.service`, `build-pack-check.timer`,
-  `build-pack-report.service` and `build-pack-report.timer` to
+  `build-pack-now@.service`, `build-pack-report.service` and
+  `build-pack-report.timer` to
   `~/.config/systemd/user/` and run `systemctl --user daemon-reload` and
   `systemctl --user enable --now build-pack.timer build-pack-check.timer build-pack-report.timer`. Run
   `loginctl enable-linger <user>` on the new host as well, or user timers stop
   when that user logs out and the night's run never starts. Copy the queue file
   (`queue.file`) and the pipeline's output folder (the jobs' status logs and the
   reports) from the old host so the queue and its history carry over, and run
-  `queue status` for a waiting job to check it is read. Then
+  `queue status` for a waiting job to check it is read, and
+  `check --config <pipeline.json>` to confirm the host is ready. Then
   `systemctl --user disable --now build-pack.timer build-pack-check.timer build-pack-report.timer` on
   the old host. Two hosts with the timer on would build the same jobs twice,
   since the queue lock is per host.

@@ -670,6 +670,15 @@ test('the command writes compare.json and compare.md and prints only counts', ()
   assert.ok(fs.existsSync(path.join(out, 'compare.json')) && fs.existsSync(path.join(out, 'compare.md')));
   assert.doesNotMatch(run.stdout, /TC-RX|RX-00|FATL|warning/);
   assert.match(run.stdout, /floor   reference cards=2 pack cards=3 repeats=2 unmatched=1/);
+  // The console's line shapes are fixed: a log filter outside this folder matches them exactly.
+  assert.deepEqual(run.stdout.trim().split('\n').map((line) => line.replace(/\d+/g, 'N')), [
+    'format  N/N checks matched, N deliberate, N other',
+    'floor   reference cards=N pack cards=N repeats=N unmatched=N',
+    'truth   retired-missing=N untrue-rows=N contradictions=N cited-missing=N',
+    'truth   reference: untrue-rows=N contradictions=N cited-missing=N',
+    'model   not run',
+    'wrote compare.json and compare.md',
+  ]);
   const defaulted = spawnSync(process.execPath, [BUILD_PACK, 'compare', '--reference', f.reference, '--pack', f.pack, '--rules', f.rules,
     '--doc', f.doc], { encoding: 'utf8' });
   assert.equal(defaulted.status, 0, defaulted.stderr);

@@ -1,0 +1,233 @@
+// The setup check: says whether this host is ready to build test packs, so a
+// missing unit or an unreachable model shows up before a job needs it. It reads
+// the installed units, the env file, the pause targets, the model server and
+// the release command. Every line is `<area>  <name>  pass|fail  <code>` and
+// names units, variables and config fields only; no value from the env file is
+// ever printed.
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { localEndpoint, localFetch } from './model.mjs';
+import { UNIT_NAME } from './pause.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REQUIRED_ENV = ['BUILD_PACK_SCRIPT', 'BUILD_PACK_CONFIG'];
+
+/** Runs one command with an argument array, never a shell. */
+function defaultExec(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 15000 });
+  return { status: result.error ? null : result.status, stdout: result.stdout ?? '' };
+}
+
+/** The NAME=value lines of an env file, as systemd reads them. Values stay in memory. */
+export function parseEnvFile(text) {
+  const env = new Map();
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue;
+    const eq = line.indexOf('=');
+    if (eq < 1) continue;
+    let value = line.slice(eq + 1).trim();
+    if (value.length > 1 && /^(["']).*\1$/.test(value)) value = value.slice(1, -1);
+    env.set(line.slice(0, eq).trim(), value);
+  }
+  return env;
+}
+
+const isFile = (file, access) => {
+  try {
+    access(file);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+
+const isExecutable = (file) => isFile(file, (f) => fs.accessSync(f, fs.constants.X_OK));
+
+/** True when `word` names an executable, directly or in a directory of `searchPath`. */
+function onPath(word, searchPath) {
+  if (word.includes('/')) return isExecutable(word);
+  return String(searchPath ?? '').split(':').filter(Boolean)
+    .some((dir) => isExecutable(path.join(dir, word)));
+}
+
+// A command written without arguments allows any arguments, as in sudoers.
+const globToRegExp = (pattern) => new RegExp(`^${pattern.split('*').map((part) => part
+  .replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}${pattern.includes(' ') ? '' : '( .*)?'}$`);
+
+/**
+ * Whether `sudo -l` output lets the user run `command` with no password. Rules
+ * are read in order and the last one that matches decides, as sudo does. A
+ * `NOPASSWD:` tag holds for the commands after it on the same line until a
+ * `PASSWD:` tag, and `!command` takes a command away. `sudo -l <command>` is not
+ * used: it succeeds for a command that still asks for a password.
+ */
+export function sudoersAllows(listing, command) {
+  let allowed = false;
+  for (const raw of listing.split('\n')) {
+    const runas = /^\(([^)]*)\)\s*/.exec(raw.trim());
+    // pause.mjs runs the commands as root.
+    if (!runas || !runas[1].split(':')[0].split(',').some((u) => ['root', 'ALL'].includes(u.trim()))) continue;
+    const line = raw.trim().slice(runas[0].length);
+    let noPassword = false;
+    for (let token of line.split(',').map((t) => t.trim())) {
+      // Options such as CWD=* come before the tags.
+      token = token.replace(/^([A-Z_]+=\S+\s+)+/, '');
+      for (;;) {
+        const tag = /^([A-Z_]+):\s*/.exec(token);
+        if (!tag) break;
+        if (tag[1] === 'NOPASSWD') noPassword = true;
+        else if (tag[1] === 'PASSWD') noPassword = false;
+        token = token.slice(tag[0].length);
+      }
+      const negated = token.startsWith('!');
+      const rule = negated ? token.slice(1).trim() : token;
+      if (rule === 'ALL' || globToRegExp(rule).test(command)) allowed = !negated && noPassword;
+    }
+  }
+  return allowed;
+}
+
+function checkUnits({ unitsDir, home, exec }, out) {
+  const installed = path.join(home, '.config', 'systemd', 'user');
+  const units = fs.readdirSync(unitsDir).filter((f) => /\.(service|timer)$/.test(f)).sort();
+  let reachable = true;
+  for (const unit of units) {
+    if (!fs.existsSync(path.join(installed, unit))) {
+      out('unit', unit, false,
+        `missing; copy local/systemd/${unit} to ~/.config/systemd/user/ and run systemctl --user daemon-reload`);
+      continue;
+    }
+    if (!reachable) continue;
+    // A template is asked about through an instance of it.
+    const name = unit.replace('@.', '@check.');
+    const load = exec('systemctl', ['--user', 'show', '-p', 'LoadState', '--value', name]);
+    if (load.status !== 0) {
+      reachable = false;
+      out('unit', unit, false, 'systemd-user-manager-unreachable');
+      continue;
+    }
+    const loaded = load.stdout.trim() === 'loaded';
+    out('unit', unit, loaded, loaded ? 'installed' : 'not-loaded; run systemctl --user daemon-reload');
+    if (loaded && unit.endsWith('.timer')) {
+      const enabled = exec('systemctl', ['--user', 'is-enabled', unit]).stdout.trim() === 'enabled';
+      out('timer', unit, enabled, enabled ? 'enabled' : `not-enabled; run systemctl --user enable --now ${unit}`);
+    }
+  }
+}
+
+/** Checks the env file and returns its PATH, or null, for the release check. */
+function checkEnv({ home }, out) {
+  const file = path.join(home, '.config', 'build-pack', 'env');
+  let env;
+  try {
+    env = parseEnvFile(fs.readFileSync(file, 'utf8'));
+  } catch {
+    out('env', '~/.config/build-pack/env', false, 'missing');
+    return null;
+  }
+  for (const name of REQUIRED_ENV) {
+    if (!env.has(name) || !env.get(name)) out('env', name, false, 'not-set');
+    else {
+      const found = isFile(env.get(name), fs.accessSync);
+      out('env', name, found, found ? 'present' : 'file-not-found');
+    }
+  }
+  if (!env.has('PATH')) out('env', 'PATH', false, 'not-set; systemd does not pass the login PATH');
+  return env.get('PATH') ?? null;
+}
+
+function checkPause({ exec }, config, out) {
+  const { units: patterns, scope } = config.pause;
+  const user = scope === 'user';
+  let sudoListing;
+  for (const pattern of patterns) {
+    // A unit that other units refer to but that is not installed lists as `not-found`.
+    const names = (result) => [...new Set(result.stdout.split('\n').map((l) => l.trim().split(/\s+/))
+      .filter(([u, load]) => UNIT_NAME.test(u ?? '') && load !== 'not-found').map(([u]) => u))];
+    const scopeArgs = user ? ['--user'] : [];
+    // `--` keeps a pattern from being read as an option. A unit systemd generates has
+    // no file, so a pattern with no match among the files is tried among loaded units.
+    let listed = exec('systemctl', [...scopeArgs, 'list-unit-files', '--plain', '--no-legend', '--', pattern]);
+    let units = listed.status === 0 ? names(listed) : [];
+    if (!units.length) {
+      listed = exec('systemctl', [...scopeArgs, 'list-units', '--all', '--plain', '--no-legend', '--', pattern]);
+      units = listed.status === 0 ? names(listed) : [];
+    }
+    if (!units.length) {
+      out('pause', pattern, false, `missing; scope ${scope}`);
+      continue;
+    }
+    sudoListing ??= user ? '' : exec('sudo', ['-n', '-l']).stdout;
+    for (const unit of units) {
+      if (user) {
+        out('pause', unit, true, 'found; scope user');
+        continue;
+      }
+      const refused = ['stop', 'start']
+        .filter((verb) => !sudoersAllows(sudoListing, `/usr/bin/systemctl ${verb} ${unit}`));
+      out('pause', unit, !refused.length,
+        refused.length ? `sudoers-refused ${refused.join(' ')}` : 'found; sudoers allows stop and start');
+    }
+  }
+}
+
+async function checkModel({ fetchImpl }, config, out) {
+  const { endpoint, name } = config.model;
+  let reply;
+  try {
+    reply = await fetchImpl(`${localEndpoint(endpoint)}/models`,
+      { redirect: 'error', signal: AbortSignal.timeout(5000) });
+  } catch {
+    out('model', endpoint, false, 'unreachable');
+    return;
+  }
+  if (!reply.ok) {
+    out('model', endpoint, false, `answered-${reply.status}`);
+    return;
+  }
+  let listed;
+  try {
+    listed = (await reply.json()).data?.map((m) => m.id) ?? [];
+  } catch {
+    out('model', endpoint, false, 'no-model-list');
+    return;
+  }
+  out('model', name, listed.includes(name), listed.includes(name) ? 'listed' : 'not-listed');
+}
+
+function checkRelease(config, envPath, out) {
+  const [program] = config.release.command;
+  // The unit runs with the env file's PATH, not the login shell's.
+  if (!program) {
+    out('release', 'off', true, 'command-empty');
+    return;
+  }
+  const found = onPath(program, envPath ?? process.env.PATH);
+  out('release', program, found, found ? 'found' : 'not-found-on-PATH');
+}
+
+/**
+ * Checks this host. Returns the lines and whether every check passed. The
+ * release command is looked up, never run: running it would unload a model
+ * another job may be using.
+ */
+export async function setupCheck(config, { exec = defaultExec, fetchImpl = localFetch,
+  home = os.homedir(), unitsDir = path.join(HERE, 'systemd') } = {}) {
+  const lines = [];
+  let ok = true;
+  const out = (area, name, pass, code) => {
+    ok &&= pass;
+    lines.push(`${area}  ${name}  ${pass ? 'pass' : 'fail'}  ${code}`);
+  };
+  checkUnits({ unitsDir, home, exec }, out);
+  const envPath = checkEnv({ home }, out);
+  checkPause({ exec }, config, out);
+  await checkModel({ fetchImpl }, config, out);
+  checkRelease(config, envPath, out);
+  return { lines, ok };
+}

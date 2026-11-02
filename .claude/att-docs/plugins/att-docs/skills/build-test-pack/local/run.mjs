@@ -7,10 +7,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { fill, loadReference } from './config.mjs';
+import { fill, loadReference, MEMORY_STOP } from './config.mjs';
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
-import { ModelError, modelClient } from './model.mjs';
-import { jobLogs } from './status.mjs';
+import { Cancelled, ModelError, modelClient } from './model.mjs';
+import { jobLogs, readStatusLog } from './status.mjs';
 import * as P from './phases.mjs';
 
 /** The objective config names for a set, else the usual name if the builder lists it, else none. */
@@ -61,13 +61,27 @@ function readCheckpoint(outDir) {
 }
 
 export async function runJob(config, job, { model, echo = true, now = Date.now, readMemory = readMeminfo,
-  sleep } = {}) {
+  sleep, signal = null } = {}) {
   const id = job.id ?? jobId(job);
   const outDir = path.join(config.output, id);
   const saved = job.resume ? readCheckpoint(outDir) : null;
   // A job run again from the start begins with an empty folder, so no file from
   // the last run is read as this one's. A resumed job keeps its folder and logs.
-  if (!saved) fs.rmSync(outDir, { recursive: true, force: true });
+  // A job that stopped for low memory before any phase passed has no checkpoint,
+  // but its status.log keeps the wait and fail lines that show the host ran short,
+  // so that log carries over into the new run.
+  if (!saved) {
+    const statusFile = path.join(outDir, 'status.log');
+    const stop = job.resume
+      ? readStatusLog(statusFile).filter((e) => e.phase !== 'release').at(-1) : null;
+    const kept = stop?.event === 'fail' && stop.reason === MEMORY_STOP
+      ? fs.readFileSync(statusFile, 'utf8') : null;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    if (kept) {
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(statusFile, kept.endsWith('\n') ? kept : `${kept}\n`);
+    }
+  }
   fs.mkdirSync(path.join(outDir, 'work'), { recursive: true });
   const logs = jobLogs(outDir, { echo });
   const started = now();
@@ -83,7 +97,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   const builder = { ...DEFAULTS, ...builderModule };
   const ctx = {
     config, job: { ...job, id }, logs, builder, suiteMerge,
-    model: model ?? modelClient(config.model),
+    model: model ?? modelClient({ ...config.model, signal }),
     ref: loadReference(config),
     pack: {},
     riskLevels: config.riskLevels ?? ['High', 'Medium', 'Low'],
@@ -125,9 +139,11 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   // Before a phase starts, the work so far is checkpointed, so this is where a stop loses nothing.
   const checkMemory = async (name) => {
     if (!config.memory.enabled) return;
-    const outcome = await waitForMemory(config.memory, { read: readMemory, now, sleep,
+    const outcome = await waitForMemory(config.memory, { read: readMemory, now, sleep, signal,
       onWait: (m) => logs.status({ job: id, phase: name, event: 'wait', reason: 'memory-low',
         availableMiB: m.availableMiB, swapPercent: m.swapPercent }) });
+    // A stop during the wait ends it; nothing has started in this phase.
+    if (signal?.aborted) throw new Cancelled();
     if (outcome.unreadable) {
       if (!warned) logs.status({ job: id, phase: name, event: 'warn', reason: 'meminfo-unreadable' });
       warned = true;
@@ -141,6 +157,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   const step = async (name, fn) => {
     phase = name;
     if (PHASES.indexOf(name) <= done) return {};
+    // A stop between phases loses nothing: the last phase that passed is checkpointed.
+    if (signal?.aborted) throw new Cancelled();
     await checkMemory(name);
     const t = now();
     logs.status({ job: id, phase: name, event: 'start' });
@@ -224,7 +242,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     return { ok: true, id, outDir, packPath, workbook: workbook && path.join(outDir, workbook),
       ...summary };
   } catch (error) {
-    const reason = error instanceof P.GateError ? `gate:${error.code}`
+    const reason = error instanceof Cancelled ? 'cancelled' : error instanceof P.GateError ? `gate:${error.code}`
       : error instanceof ModelError ? `model:${error.code}`
         : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
     logs.detail('stopped', error.stack ?? String(error));

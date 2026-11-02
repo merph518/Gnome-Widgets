@@ -12,6 +12,10 @@
 # `systemctl --user status build-pack-check` shows a problem without opening
 # the file. Rows whose rules went unchecked (exit 3) do not fail it.
 #
+# The second command is the setup check: units, env file, pause units, model
+# server and release command. It runs after the queue check, so a day the queue
+# check fails skips it.
+#
 # Install beside build-pack.service, which owns the env file:
 #   cp build-pack-check.service build-pack-check.timer ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now build-pack-check.timer
@@ -23,6 +27,7 @@ Description=Check the test pack queue before the nightly run
 Type=oneshot
 EnvironmentFile=%h/.config/build-pack/env
 ExecStart=/usr/bin/node ${BUILD_PACK_SCRIPT} queue check --config ${BUILD_PACK_CONFIG}
+ExecStart=/usr/bin/node ${BUILD_PACK_SCRIPT} check --config ${BUILD_PACK_CONFIG}
 SuccessExitStatus=3
 # A rule export that never answers is stopped before the nightly run; the file
 # then still reads `precheck  running`.

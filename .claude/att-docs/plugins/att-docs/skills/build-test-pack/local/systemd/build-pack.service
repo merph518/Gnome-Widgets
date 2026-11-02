@@ -23,6 +23,14 @@
 # needs a sudoers rule for `systemctl stop` and `systemctl start` on each unit;
 # see the skill's "Freeing the machine for a job".
 #
+# A stop (systemctl stop, or `queue cancel`) sends SIGTERM to the node process
+# alone and allows three minutes: the job's model call ends, its row is marked
+# stopped, the paused units start again and the model unloads.
+#
+# If the pipeline config has a closeApps block, the run also closes those desktop
+# app scopes before the pause and does not start them again; see "Closing desktop
+# apps before a run".
+#
 # The journal holds the status lines and the morning summary, which carry no
 # content: job IDs, phases, reason codes, counts and timings.
 
@@ -34,3 +42,5 @@ Type=oneshot
 EnvironmentFile=%h/.config/build-pack/env
 ExecStart=/usr/bin/node ${BUILD_PACK_SCRIPT} queue run --config ${BUILD_PACK_CONFIG}
 Nice=10
+KillMode=mixed
+TimeoutStopSec=180
