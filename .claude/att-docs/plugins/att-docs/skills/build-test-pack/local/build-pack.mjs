@@ -4,12 +4,15 @@
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
 //   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
-//   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
+//   node build-pack.mjs check --config <pipeline.json>
+//   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
 //   node build-pack.mjs queue remove --config <pipeline.json> --job <id>
 //   node build-pack.mjs queue fill --config <pipeline.json>
 //   node build-pack.mjs queue check --config <pipeline.json>
 //   node build-pack.mjs queue run --config <pipeline.json> [--cutoff HH:MM]
-//   node build-pack.mjs queue start --config <pipeline.json> --job <id> [--cutoff HH:MM]
+//   node build-pack.mjs queue start --config <pipeline.json> --job <id> [--cutoff HH:MM] [--restore <unit>]... [--restore-paused]
+//   node build-pack.mjs queue restore --config <pipeline.json>
+//   node build-pack.mjs queue cancel --config <pipeline.json> --job <id>
 //   node build-pack.mjs queue status --config <pipeline.json> [--job <id>]
 //   node build-pack.mjs queue summary --config <pipeline.json>
 //   node build-pack.mjs report --config <pipeline.json> [--period day|week|auto] [--seed <n>]
@@ -23,31 +26,41 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setupCheck } from './check.mjs';
 import { runCompare, UsageError } from './compare.mjs';
-import { countedTries, fill, globFiles, loadConfig, MAX_TRIES, MEMORY_STOP } from './config.mjs';
+import { sleepUnlessAborted } from './abort.mjs';
+import { countedTries, fill, globFiles, loadConfig, MAX_MEMORY_STOPS, MAX_TRIES, MEMORY_STOP,
+  memoryStops } from './config.mjs';
 import { modelClient } from './model.mjs';
-import { createPauser } from './pause.mjs';
+import { createAppCloser } from './close-apps.mjs';
+import { createPauser, downUnits, markRestoreFile, onPauseList, pendingRestore } from './pause.mjs';
 import { documentRules, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
 import { seededRandom, writeReports } from './report.mjs';
-import { jobId, runJob } from './run.mjs';
+import { jobId, PHASES, runJob } from './run.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
   build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
   build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
-  build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now]
+  build-pack.mjs check --config <file>
+  build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
   build-pack.mjs queue remove --config <file> --job <id>
   build-pack.mjs queue fill --config <file>
   build-pack.mjs queue check --config <file>
   build-pack.mjs queue run --config <file> [--cutoff HH:MM]
-  build-pack.mjs queue start --config <file> --job <id> [--cutoff HH:MM]
+  build-pack.mjs queue start --config <file> --job <id> [--cutoff HH:MM] [--restore <unit>]... [--restore-paused]
+  build-pack.mjs queue restore --config <file>
+  build-pack.mjs queue cancel --config <file> --job <id>
   build-pack.mjs queue status --config <file> [--job <id>]
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <file>]
 exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
+exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
+exit codes of check --config <file> alone, the setup check: 0 every check passed, 1 any failed, 2 bad config
+exit codes of queue cancel: 0 the job stopped, 1 the job is not running, 4 the queue stayed held after the stop request
 exit codes of compare: 0 the comparison was written, 1 it failed while running, 2 bad arguments or unreadable input`;
 
 export function parseArgs(argv) {
@@ -59,13 +72,15 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume, --now, --allow-derived-rules and --model take no value.
-    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model') {
+    // --resume, --now, --allow-derived-rules, --restore-paused and --model take no value.
+    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model'
+      || flag === '--restore-paused') {
       args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
     }
     i += 1;
     if (flag === '--doc') args.docs.push(value);
+    else if (flag === '--restore') (args.restore ??= []).push(value);
     else args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = value;
   }
   return args;
@@ -131,6 +146,9 @@ export function checkJob(config, job) {
   return { lines: lines.map((line) => line.text), ok: lines.every((line) => line.present), unchecked };
 }
 
+// How long a stopped run has to end its own cleanup before the process exits anyway.
+const STOP_GRACE_MS = 120000;
+
 const queuePath = (config) => config.at(config.queue.file);
 
 export function readQueue(config) {
@@ -175,6 +193,70 @@ export function addJob(config, job, now = new Date()) {
   queue.jobs.push({ id, ...job, status: 'queued', added: now.toISOString() });
   writeQueue(config, queue);
   return { id, added: true };
+}
+
+/**
+ * The units a command line marks to be restored: each `--restore` unit must be
+ * on the pause list, and `--restore-paused` adds the pause-list units that are
+ * down now. Throws when a unit is not on the list.
+ */
+export function restoreUnits(config, args, { exec } = {}) {
+  const units = [];
+  for (const unit of args.restore ?? []) {
+    if (!onPauseList(config.pause.units, unit)) throw new Error(`--restore ${unit} is not on pause.units`);
+    units.push(unit);
+  }
+  if (args.restorePaused) units.push(...downUnits(config, { exec }));
+  return [...new Set(units)];
+}
+
+/**
+ * Marks units to start when the job's run ends. A waiting row carries them
+ * until the run takes it; for a row that is running, the run already holds the
+ * queue, so they go to the state file its pauser reads when it ends. Returns
+ * false when the job is neither waiting nor running.
+ */
+export function markRestore(config, id, units) {
+  if (!units.length) return true;
+  const queue = readQueue(config);
+  const row = queue.jobs.findLast((r) => r.id === id && ['queued', 'running'].includes(r.status));
+  if (!row) return false;
+  if (row.status === 'running') {
+    markRestoreFile(config, units);
+    return true;
+  }
+  row.restore = [...new Set([...(row.restore ?? []), ...units])];
+  writeQueue(config, queue);
+  return true;
+}
+
+/** The units waiting to be started: those the state file holds and those a waiting row carries. */
+export function restoreLines(config) {
+  const units = new Set(pendingRestore(config));
+  for (const row of readQueue(config).jobs) {
+    if (row.status === 'queued') (row.restore ?? []).forEach((unit) => units.add(unit));
+  }
+  return units.size ? [`restore pending ${[...units].join(' ')}`] : [];
+}
+
+/**
+ * Starts every unit the state file holds and drops the marks from waiting
+ * rows. Run it with the queue held. Returns the units that did not start.
+ */
+export async function restorePaused(config, { pause = (cfg) => createPauser(cfg) } = {}) {
+  const queue = readQueue(config);
+  // Marks still on waiting rows are recorded first, so the same start covers them.
+  markRestoreFile(config, queue.jobs.filter((row) => row.status === 'queued').flatMap((row) => row.restore ?? []));
+  const failedStart = await pause(config).resume();
+  let changed = false;
+  for (const row of queue.jobs) {
+    if (row.restore && row.status === 'queued') {
+      delete row.restore;
+      changed = true;
+    }
+  }
+  if (changed) writeQueue(config, queue);
+  return failedStart;
 }
 
 /**
@@ -257,16 +339,19 @@ export function cutoffAfter(from, hhmm) {
 
 const lockPath = (config) => `${queuePath(config)}.lock`;
 
-/** A process's start time in clock ticks since boot (Linux), or null where /proc has none. */
-function processStart(pid) {
+/** The fields of /proc/<pid>/stat after the command name, or null where /proc has none. */
+function procFields(pid) {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
     // The command name in field 2 may hold spaces, so count from the last ")".
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null;
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ');
   } catch {
     return null;
   }
 }
+
+/** A process's start time in clock ticks since boot (Linux), or null where /proc has none. */
+const processStart = (pid) => procFields(pid)?.[19] ?? null;
 
 /** What a lock file holds: the holder's PID and, where known, its start time. */
 const lockText = () => [process.pid, processStart(process.pid)].filter(Boolean).join(' ');
@@ -284,6 +369,8 @@ function holderAlive(text) {
   } catch {
     return false;
   }
+  // A process that has exited but not been collected by its parent still answers a signal.
+  if (procFields(pid)?.[0] === 'Z') return false;
   return !start || processStart(pid) === start;
 }
 
@@ -393,17 +480,19 @@ export async function drainQueue(config, { cutoff = config.queue.cutoff, start =
   only = null, nowOnly = false, wait = false, onBusy = () => {}, run = runJob, refill = null,
   clock = () => new Date(), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   settleMs = 2000, pollMs = 30000, pause = (cfg) => createPauser(cfg),
-  release = (cfg) => createReleaser(cfg) } = {}) {
+  release = (cfg) => createReleaser(cfg), closeApps = (cfg) => createAppCloser(cfg),
+  signal = null } = {}) {
   const stopAt = cutoffAfter(clock(), cutoff);
   if (start && cutoffAfter(clock(), start) < stopAt) return [];
   let unlock = lockQueue(config);
   if (!unlock) {
-    await sleep(settleMs);
-    unlock = lockQueue(config);
+    await sleepUnlessAborted(sleep, settleMs, signal);
+    unlock = signal?.aborted ? null : lockQueue(config);
   }
-  while (!unlock && wait && clock() < stopAt) {
-    await sleep(pollMs);
-    unlock = lockQueue(config);
+  // A stop request ends the wait, so the run does not take the queue after it.
+  while (!unlock && wait && clock() < stopAt && !signal?.aborted) {
+    await sleepUnlessAborted(sleep, pollMs, signal);
+    unlock = signal?.aborted ? null : lockQueue(config);
   }
   if (!unlock) {
     onBusy();
@@ -417,13 +506,13 @@ export async function drainQueue(config, { cutoff = config.queue.cutoff, start =
     }
     if (interrupted.length) writeQueue(config, stale);
     if (refill) refill(config);
-    return await drainLocked(config, { stopAt, only, nowOnly, run, clock, pause, release });
+    return await drainLocked(config, { stopAt, only, nowOnly, run, clock, pause, release, closeApps, signal });
   } finally {
     unlock();
   }
 }
 
-async function drainLocked(config, { pause, release, run, ...rest }) {
+async function drainLocked(config, { pause, release, closeApps, run, signal, ...rest }) {
   // Made now so units a dead holder left stopped are found and restored even
   // when no job runs; nothing is stopped until a job is about to start.
   const pauser = pause(config);
@@ -433,10 +522,10 @@ async function drainLocked(config, { pause, release, run, ...rest }) {
   const releaser = release(config);
   const noted = (cfg, job) => {
     releaser.note(job.id);
-    return run(cfg, job);
+    return run(cfg, job, { signal });
   };
   try {
-    return await drainJobs(config, { ...rest, run: noted, pauser });
+    return await drainJobs(config, { ...rest, run: noted, pauser, closer: closeApps(config), signal });
   } finally {
     try {
       await pauser.resume();
@@ -459,16 +548,26 @@ function inNightWindow(config, at) {
 // and one that works only `now` rows leaves it for the night.
 function settleRow(row, result, at, config) {
   const failures = [...(row.failures ?? [])];
+  if (result.reason === 'cancelled') {
+    // A stop on request says nothing about the job: no failure is counted, and the
+    // row keeps its checkpoint, so `queue add --resume` starts at the phase it stopped in.
+    for (const field of ['started', 'now', 'ms', 'phase', 'reason', 'workbook', 'outDir', 'notBefore',
+      'finished']) delete row[field];
+    Object.assign(row, { status: 'stopped', resume: true, phase: result.phase ?? 'unknown',
+      reason: 'cancelled', finished: at.toISOString(), ms: result.ms ?? 0,
+      ...(failures.length ? { failures } : {}) });
+    return;
+  }
   if (!result.ok) {
     failures.push({ at: at.toISOString(), phase: result.phase ?? 'unknown',
       reason: result.reason ?? 'error', ms: result.ms ?? 0 });
   }
   for (const field of ['started', 'now', 'finished', 'ms', 'phase', 'reason', 'workbook', 'outDir',
-    'notBefore']) delete row[field];
+    'notBefore', 'restore']) delete row[field];
   // A failed revalidation is the review's verdict on the finished pack; a resume would skip
   // every phase and build the same pack again, so the job is not retried.
   const retry = result.reason !== 'gate:revalidation-failed';
-  if (!result.ok && retry && countedTries(failures) < MAX_TRIES) {
+  if (!result.ok && retry && countedTries(failures) < MAX_TRIES && memoryStops(failures) < MAX_MEMORY_STOPS) {
     const wait = result.reason !== 'interrupted' && inNightWindow(config, at);
     Object.assign(row, { status: 'queued', resume: true, failures,
       ...(wait ? { notBefore: cutoffAfter(at, config.queue.cutoff).toISOString() } : {}) });
@@ -482,14 +581,14 @@ function settleRow(row, result, at, config) {
   });
 }
 
-async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) {
+async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser, closer, signal }) {
   const done = [];
   let first = only;
   let paused = false;
   // A job that failed in this run waits for a later one.
   const tried = new Set();
   for (;;) {
-    if (clock() >= stopAt) break;
+    if (clock() >= stopAt || signal?.aborted) break;
     const queue = readQueue(config);
     // A request to start a job now, by its ID or with --now, ignores the wait for the next nightly run.
     const next = queue.jobs.find((row) => row.status === 'queued' && !tried.has(row.id)
@@ -500,13 +599,15 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     first = null;
     if (!paused) {
       paused = true;
-      await pauser.pause({ until: stopAt });
+      // A job started by hand with --now leaves the apps open unless the config says otherwise.
+      if (!nowOnly || config.closeApps.onNow) closer.close();
+      await pauser.pause({ until: stopAt, signal });
     } else {
       // A unit left busy before an earlier job is stopped now if its worker has finished.
-      await pauser.pause({ until: clock() });
+      await pauser.pause({ until: clock(), signal });
     }
     // The wait can run into the cutoff; the units start again when the run ends.
-    if (clock() >= stopAt) break;
+    if (clock() >= stopAt || signal?.aborted) break;
     // Stopping the units can take minutes, so the row is claimed in a fresh read of the
     // queue file, which keeps a job added in the meantime.
     const fresh = readQueue(config);
@@ -514,8 +615,11 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     if (!claimed) continue;
     claimed.status = 'running';
     claimed.started = clock().toISOString();
+    // The marks go to the state file before the claim is written, so a run that dies
+    // between the two does not lose them with the row's settled fields.
+    if (claimed.restore?.length) pauser.mark(claimed.restore);
     writeQueue(config, fresh);
-    const { id, status, added, started, now: _now, failures, notBefore, ...job } = claimed;
+    const { id, status, added, started, now: _now, failures, notBefore, restore: _restore, ...job } = claimed;
     let result;
     try {
       result = await run(config, { ...job, id });
@@ -533,10 +637,74 @@ async function drainJobs(config, { stopAt, only, nowOnly, run, clock, pauser }) 
     tried.add(id);
     writeQueue(config, after);
     done.push(row);
-    // The next job would meet the same low memory.
-    if (result.reason === MEMORY_STOP) break;
+    // The next job would meet the same low memory. A stop on request frees the machine, so
+    // the rows still waiting stay queued for the next run.
+    if (result.reason === MEMORY_STOP || result.reason === 'cancelled') break;
   }
   return done;
+}
+
+/** The phase a job was in when its run ended, read from the last line it wrote. */
+function stoppedPhase(config, row) {
+  const entries = readStatusLog(path.join(config.output, row.id, 'status.log'))
+    .filter((e) => PHASES.includes(e.phase) && (!row.started || new Date(e.at) >= new Date(row.started)));
+  const last = entries.at(-1);
+  if (!last) return 'unknown';
+  // A phase that passed leaves the next one as the phase a resume starts at.
+  const next = last.event === 'pass' ? PHASES[PHASES.indexOf(last.phase) + 1] : null;
+  return next ?? last.phase;
+}
+
+/**
+ * Stops a running job and waits for its run to end. The lock's holder is sent
+ * SIGTERM: it ends the model call, keeps the checkpoint, marks the row
+ * `stopped`, starts the paused units again, unloads the model and frees the
+ * queue. A row marked running with no live holder, left by a run that was
+ * stopped from outside, is settled here the same way. Returns `cancelled` with
+ * the row's phase, or the status the row has instead, or `timedOut` when the
+ * queue stayed held for `waitMs`.
+ */
+export async function cancelJob(config, id, { clock = () => new Date(), kill = process.kill,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), waitMs = 150000, pollMs = 1000,
+  pause = (cfg) => createPauser(cfg), release = (cfg) => createReleaser(cfg) } = {}) {
+  const current = () => readQueue(config).jobs.findLast((r) => r.id === id);
+  const first = current();
+  if (first?.status !== 'running') return { id, cancelled: false, status: first?.status ?? 'not queued' };
+  const holder = readLock(lockPath(config));
+  if (holder !== null && holderAlive(holder)) {
+    try {
+      kill(Number(holder.trim().split(/\s+/)[0]), 'SIGTERM');
+    } catch {
+      // The holder ended on its own; the wait below finds the lock free.
+    }
+    const giveUp = clock().getTime() + waitMs;
+    // The signalled process is waited for, not the lock: a run that was waiting for the
+    // queue may take it the moment this process lets go.
+    while (holderAlive(holder)) {
+      if (clock().getTime() >= giveUp) return { id, cancelled: false, timedOut: true };
+      await sleep(pollMs);
+    }
+  }
+  let row = current();
+  if (row?.status === 'running') {
+    const held = withQueue(config, async () => {
+      const queue = readQueue(config);
+      const stale = queue.jobs.findLast((r) => r.id === id && r.status === 'running');
+      if (stale) {
+        settleRow(stale, { ok: false, phase: stoppedPhase(config, stale), reason: 'cancelled' }, clock(), config);
+        writeQueue(config, queue);
+      }
+      await pause(config).resume();
+      const releaser = release(config);
+      releaser.note(id);
+      releaser.release();
+    });
+    if (!held) return { id, cancelled: false, timedOut: true };
+    await held.value;
+    row = current();
+  }
+  return row?.status === 'stopped' ? { id, cancelled: true, phase: row.phase }
+    : { id, cancelled: false, status: row?.status ?? 'not queued' };
 }
 
 /** The morning summary: one content-free line per job. */
@@ -544,8 +712,10 @@ export function summaryLines(queue) {
   return queue.jobs.filter((row) => row.status !== 'removed').map((row) => {
     const minutes = row.ms ? `${Math.round(row.ms / 60000)} min` : '';
     const last = row.failures?.at(-1);
-    const where = row.status === 'failed' ? `stopped at ${row.phase} (${row.reason})`
+    const where = row.status === 'stopped' ? `stopped at ${row.phase} (${row.reason}), resumable`
+      : row.status === 'failed' ? `stopped at ${row.phase} (${row.reason})`
       + (countedTries(row.failures) >= MAX_TRIES ? `, dropped after failing ${MAX_TRIES} times` : '')
+      + (memoryStops(row.failures) >= MAX_MEMORY_STOPS ? `, dropped after ${MAX_MEMORY_STOPS} low-memory stops in a row` : '')
       : row.status === 'passed' ? row.workbook ?? ''
         : row.status === 'queued' && last ? `retry after stopping at ${last.phase} (${last.reason})` : '';
     return [row.id, row.status, minutes, where].filter(Boolean).join('  ');
@@ -621,8 +791,8 @@ export function jobStatus(config, id, { clock = () => new Date() } = {}) {
     // died, so its elapsed time is not progress.
     lines.push(fieldText(lockHeld(config) ? 'current' : 'interrupted',
       { phase: attempt[lastStart].phase, elapsed: `${seconds}s` }));
-  } else if (row.status === 'failed' || row.status === 'queued') {
-    const where = row.status === 'failed' ? row : failures.at(-1);
+  } else if (['failed', 'stopped', 'queued'].includes(row.status)) {
+    const where = row.status === 'queued' ? failures.at(-1) : row;
     if (where) lines.push(fieldText('stopped', { phase: where.phase ?? '-', reason: where.reason ?? '-' }));
   }
   const finished = new Map();
@@ -777,17 +947,37 @@ async function main(argv) {
     releasers.push(releaser);
     return releaser;
   };
-  const onSignal = (name) => {
+  const exitNow = (name) => {
     Promise.all(pausers.map((p) => p.resume()))
       .finally(() => {
         for (const releaser of releasers) releaser.release();
         process.exit(128 + os.constants.signals[name]);
       });
   };
+  // While a command runs jobs, the first signal stops the job in flight and lets the
+  // run finish its own cleanup: the row is settled, the units start again, the model
+  // unloads and the queue frees. A second signal, or a run that does not end in time,
+  // starts the units and unloads the model here and exits.
+  const control = { abort: null };
+  let stopSignal = null;
+  const onSignal = (name) => {
+    if (control.abort && !control.abort.signal.aborted) {
+      stopSignal = name;
+      control.abort.abort();
+      setTimeout(() => exitNow(name), STOP_GRACE_MS).unref();
+      return;
+    }
+    exitNow(name);
+  };
   const handlers = ['SIGTERM', 'SIGINT', 'SIGHUP'].map((name) => [name, () => onSignal(name)]);
   for (const [name, handler] of handlers) process.on(name, handler);
   try {
-    return await dispatch(args, command, sub, config, track, trackRelease);
+    const code = await dispatch(args, command, sub, config, track, trackRelease, control);
+    // A stop that ended the run cleanly exits with the command's own code: 0 for a queue
+    // command, 1 for `run`, whose job did not finish. A timer left from an interrupted wait would
+    // keep the process alive, so it exits here; the forced path in exitNow exits 128 + signal.
+    if (stopSignal) process.exit(code);
+    return code;
   } finally {
     for (const [name, handler] of handlers) process.off(name, handler);
   }
@@ -797,11 +987,17 @@ async function main(argv) {
 function withQueue(config, fn) {
   const unlock = lockQueue(config);
   if (!unlock) return null;
+  let value;
   try {
-    return { value: fn() };
-  } finally {
+    value = fn();
+  } catch (error) {
     unlock();
+    throw error;
   }
+  // An async step keeps the lock until it settles.
+  if (value instanceof Promise) return { value: value.finally(unlock) };
+  unlock();
+  return { value };
 }
 
 function busyQueue() {
@@ -842,19 +1038,27 @@ async function compareCommand(args) {
   }
 }
 
-async function dispatch(args, command, sub, config, track, trackRelease) {
+async function dispatch(args, command, sub, config, track, trackRelease, control) {
   const pause = (cfg) => track(cfg);
   const release = (cfg) => trackRelease(cfg);
   if (command === 'run') {
     // No queue lock is held here, so this run leaves another holder's stopped units alone.
     const pauser = track(config, { leftover: false });
+    control.abort = new AbortController();
+    const { signal } = control.abort;
     try {
-      await pauser.pause();
-      const result = await runJob(config, jobFrom(args));
+      await pauser.pause({ signal });
+      const result = await runJob(config, jobFrom(args), { signal });
       return result.ok ? 0 : 1;
     } finally {
       await pauser.resume();
     }
+  }
+  if (command === 'check' && !args.issue && !args.suite && args.change === undefined
+    && !args.docs.length && !args.allowDerivedRules) {
+    const { lines, ok } = await setupCheck(config);
+    for (const line of lines) console.log(line);
+    return ok ? 0 : 1;
   }
   if (command === 'check') {
     const job = jobFrom(args);
@@ -864,8 +1068,10 @@ async function dispatch(args, command, sub, config, track, trackRelease) {
     return !ok ? 1 : unchecked ? 3 : 0;
   }
   if (command === 'queue' && sub === 'add') {
+    const units = restoreUnits(config, args);
     const { id, added, marked, merged, running } = addJob(config,
       { ...jobFrom(args), ...(args.now ? { now: true } : {}) });
+    if (markRestore(config, id, units) && units.length) console.log(`${id} restores ${units.join(' ')} when it ends`);
     if (added) console.log(`queued ${id}`);
     else if (marked || merged?.length) {
       if (marked) console.log(`${id} is marked to start now`);
@@ -901,22 +1107,29 @@ async function dispatch(args, command, sub, config, track, trackRelease) {
   }
   if (command === 'queue' && sub === 'run') {
     const fillFirst = (cfg) => printFill(fillQueue(cfg));
+    control.abort = new AbortController();
+    const { signal } = control.abort;
     // A cutoff given on the command line is a deliberate run, outside the nightly window.
     const done = await drainQueue(config, args.cutoff
-      ? { cutoff: args.cutoff, wait: true, pause, release, refill: fillFirst }
+      ? { cutoff: args.cutoff, wait: true, pause, release, refill: fillFirst, signal }
       : { cutoff: config.queue.cutoff, start: config.queue.start, wait: true, pause, release,
-        refill: fillFirst });
+        refill: fillFirst, signal });
     console.log(`ran ${done.length} job(s)`);
     for (const line of summaryLines(readQueue(config))) console.log(line);
     return 0;
   }
   if (command === 'queue' && sub === 'start') {
     if (!args.job) throw new Error('--job takes a job ID');
+    const units = restoreUnits(config, args);
+    if (!markRestore(config, args.job, units)) throw new Error(`${args.job} is not queued or running`);
+    if (units.length) console.log(`${args.job} restores ${units.join(' ')} when it ends`);
     let busy = false;
+    control.abort = new AbortController();
     // The cutoff is the configured one unless the command line gives another;
     // the nightly window does not apply to a job started on request.
     const done = await drainQueue(config, { cutoff: args.cutoff ?? config.queue.cutoff,
-      only: args.job, nowOnly: true, pause, release, onBusy: () => { busy = true; } });
+      only: args.job, nowOnly: true, pause, release, signal: control.abort.signal,
+      onBusy: () => { busy = true; } });
     if (busy) {
       const row = readQueue(config).jobs.findLast((r) => r.id === args.job);
       console.log(row?.status === 'running' ? `${args.job} is already running`
@@ -928,10 +1141,33 @@ async function dispatch(args, command, sub, config, track, trackRelease) {
     for (const line of jobStatus(config, args.job)) console.log(line);
     return 0;
   }
+  if (command === 'queue' && sub === 'cancel') {
+    if (!args.job) throw new Error('--job takes a job ID');
+    const result = await cancelJob(config, args.job);
+    if (result.cancelled) {
+      console.log(`cancelled ${args.job}`);
+      for (const line of jobStatus(config, args.job)) console.log(line);
+      return 0;
+    }
+    if (result.timedOut) {
+      console.error(`${args.job} did not stop in time; the queue is still held`);
+      return 4;
+    }
+    console.error(result.status === 'running' ? `${args.job} is running`
+      : `${args.job} is not running (${result.status})`);
+    return 1;
+  }
   if (command === 'queue' && sub === 'status') {
     const lines = args.job ? jobStatus(config, args.job) : queueLines(readQueue(config), config);
-    for (const line of lines) console.log(line);
+    for (const line of [...lines, ...restoreLines(config)]) console.log(line);
     return 0;
+  }
+  if (command === 'queue' && sub === 'restore') {
+    const held = withQueue(config, () => restorePaused(config, { pause }));
+    if (!held) return busyQueue();
+    const failedStart = await held.value;
+    console.log(failedStart.length ? `could not start ${failedStart.join(' ')}` : 'restored the paused units');
+    return failedStart.length ? 1 : 0;
   }
   if (command === 'queue' && sub === 'summary') {
     for (const line of summaryLines(readQueue(config))) console.log(line);

@@ -5,6 +5,7 @@
 // module, which is what status.log allows.
 
 import fs from 'node:fs';
+import { sleepUnlessAborted } from './abort.mjs';
 
 const MIB_PER_KIB = 1 / 1024;
 
@@ -58,10 +59,12 @@ export class MemoryLow extends Error {
  * `waitMinutes`. Returns { ok, unreadable, polls, waitedMs, availableMiB, swapPercent };
  * `ok` is false when memory is still low at the end of the wait. `onWait` is
  * called once with the first low reading. An unreadable /proc/meminfo is ok
- * with `unreadable` set, since there is nothing to judge by.
+ * with `unreadable` set, since there is nothing to judge by. A `signal` that
+ * aborts ends the wait at once, with `ok` false, so the caller can stop.
  */
 export async function waitForMemory(settings, { read = readMeminfo, onWait = () => {},
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now } = {}) {
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now,
+  signal = null } = {}) {
   let reading = read();
   if (!reading) return { ok: true, unreadable: true, polls: 0, waitedMs: 0 };
   const result = (ok, polls, waitedMs) => ({ ok, polls, waitedMs,
@@ -71,8 +74,9 @@ export async function waitForMemory(settings, { read = readMeminfo, onWait = () 
   const started = now();
   const limit = settings.waitMinutes * 60000;
   let polls = 0;
-  while (now() - started < limit) {
-    await sleep(Math.min(settings.pollSeconds * 1000, limit - (now() - started)));
+  while (now() - started < limit && !signal?.aborted) {
+    await sleepUnlessAborted(sleep, Math.min(settings.pollSeconds * 1000, limit - (now() - started)), signal);
+    if (signal?.aborted) break;
     polls += 1;
     reading = read() ?? reading;
     if (!memoryLow(reading, settings)) return result(true, polls, now() - started);

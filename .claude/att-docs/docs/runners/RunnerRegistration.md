@@ -123,6 +123,39 @@ New runners register on the organization from the start: the same
 scripts make, with an organization registration token and the labels from the
 table.
 
+## Pack comparison on the desktop runners
+
+The `Pack comparison` workflow (`.github/workflows/pack-compare.yml`) runs
+`build-pack.mjs compare` without a model on a `pw-ci-runner-desktop-*` runner. It runs
+only from `main`, by hand, and prints the exit code and the counts the command prints.
+It uploads nothing and writes no step summary.
+
+To use it:
+
+1. Install Node 18 or later on the runner, on the PATH of the runner service account.
+   The workflow checks for it and fails with a message when it is missing; it installs
+   nothing.
+2. Copy the files into one folder on the runner, with these names: `reference.xlsx`,
+   `pack.xlsx`, `doc.md`, one of `rules.json` or `rules.xlsx`, and optionally
+   `standard.md`. The default folder is `C:\pack-compare`. The folder is the workflow's
+   one input. Give it a name with no work content in it, because dispatch inputs are
+   visible on the run. It cannot be a drive root, the runner account's profile folder, or the runner
+   workspace, or inside one. The step deletes any file in it with one of the fixed
+   names, so never point it at a folder that holds the only copy of a pack.
+3. Dispatch the workflow. The job's `[self-hosted, overmind, Windows]` labels match any
+   of the five runners, so the files must be on the machine that picks the job up. This
+   works only when the five runners share one machine.
+4. The last step deletes the six fixed file names from the folder, removes the folder
+   when it is then empty, and deletes the report folder under the runner's temp folder.
+   It runs after a failure or a cancel too, but deletes the staged files only when this
+   run's checkout succeeded. When the run stops earlier (a ref other than `main`, Node
+   missing or too old, a failed checkout), it removes only the report and fails with a
+   message, so delete the staged files by hand. The same applies if the machine itself
+   is lost mid-run.
+
+The report is never kept. If a run's counts need a look at the report, run `compare` on
+the desktop instead.
+
 ## Stopping the tablet runners for a test pack build
 
 A test pack build needs the memory the model uses, so the nightly queue run

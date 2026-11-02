@@ -1,12 +1,13 @@
 // Stops the configured systemd units while a job runs and starts them again
 // afterward, so a job has the machine's memory and GPU for the model. Units
 // that were not running when a job was about to start are never started,
-// except those a dead run left stopped. Output names
-// units from the config and nothing else.
+// except those a dead run left stopped and those a request marked to be
+// restored. Output names units from the config and nothing else.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { sleepUnlessAborted } from './abort.mjs';
 
 /** Runs one command with an argument array, never a shell. */
 function defaultExec(command, args) {
@@ -15,22 +16,103 @@ function defaultExec(command, args) {
 }
 
 // A unit name from systemctl is passed on as an argument, so only plain names go on.
-const UNIT_NAME = /^[A-Za-z0-9][A-Za-z0-9@_.:\\-]*$/;
+export const UNIT_NAME = /^[A-Za-z0-9][A-Za-z0-9@_.:\\-]*$/;
 
 /** The state file lives beside the queue file, so a later run that takes the queue finds it. */
 export const pausedPath = (config) => `${config.at(config.queue.file)}.paused`;
 
-function readPaused(file) {
+/**
+ * The state file holds `{"stopped": [...], "restore": [...]}`: the units a run
+ * stopped, and the units marked to start when a build ends even though they
+ * were not running when it began. A file that is a bare list of names counts
+ * as the stopped units.
+ */
+export function readPaused(file) {
+  const clean = (list) => (Array.isArray(list)
+    ? list.filter((u) => typeof u === 'string' && UNIT_NAME.test(u)) : []);
   try {
-    const units = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(units) ? units.filter((u) => typeof u === 'string' && UNIT_NAME.test(u)) : [];
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Array.isArray(state)) return { stopped: clean(state), restore: [] };
+    return { stopped: clean(state?.stopped), restore: clean(state?.restore) };
   } catch {
-    return [];
+    return { stopped: [], restore: [] };
   }
 }
 
+/** Writes the state in one step, and removes the file when nothing is left in it. */
+function writePaused(file, { stopped, restore }) {
+  if (!stopped.length && !restore.length) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, `${JSON.stringify({ stopped, restore })}\n`);
+  fs.renameSync(temp, file);
+}
+
+/** Adds units to the restore list of the state file beside the queue. */
+export function markRestoreFile(config, units) {
+  const file = pausedPath(config);
+  const state = readPaused(file);
+  writePaused(file, { stopped: state.stopped, restore: [...new Set([...state.restore, ...units])] });
+}
+
+/** The units the state file still holds to start, stopped or marked. */
+export function pendingRestore(config) {
+  const state = readPaused(pausedPath(config));
+  return [...new Set([...state.stopped, ...state.restore])];
+}
+
+/** A shell-style pattern as a regular expression: `*`, `?`, and `[...]` classes, with `[!...]` or `[^...]` negating. */
+function globRegex(pattern) {
+  let out = '';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const c = pattern[i];
+    if (c === '*') out += '.*';
+    else if (c === '?') out += '.';
+    else if (c === '[') {
+      const negated = pattern[i + 1] === '!' || pattern[i + 1] === '^';
+      const first = i + 1 + (negated ? 1 : 0);
+      // A `]` right after the opening bracket is a member of the class, not its end.
+      const end = pattern.indexOf(']', first + 1);
+      if (end === -1) {
+        out += '\\[';
+        continue;
+      }
+      const body = pattern.slice(first, end).replace(/[\\\]^]/g, '\\$&');
+      out += `[${negated ? '^' : ''}${body}]`;
+      i = end;
+    } else out += c.replace(/[.+^${}()|\\\]]/g, '\\$&');
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/** True when `unit` is a plain name that one of the configured pause patterns matches. */
+export function onPauseList(patterns, unit) {
+  if (!UNIT_NAME.test(unit ?? '')) return false;
+  return patterns.some((pattern) => {
+    try {
+      return globRegex(pattern).test(unit);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The pause-list units systemd has loaded that are not running now. */
+export function downUnits(config, { exec = defaultExec } = {}) {
+  const { units: patterns, scope } = config.pause;
+  if (!patterns.length) return [];
+  const result = exec('systemctl', [...(scope === 'user' ? ['--user'] : []), 'list-units', '--plain',
+    '--no-legend', '--all', '--state=inactive,failed', ...patterns]);
+  if (result.status !== 0) return [];
+  return [...new Set(result.stdout.split('\n').map((line) => line.trim().split(/\s+/)[0])
+    .filter((unit) => UNIT_NAME.test(unit ?? '')))];
+}
+
 /** True when a process named `busyProcess` runs inside the unit's cgroup. */
-function unitBusy(procRoot, unit, busyProcess) {
+export function unitBusy(procRoot, unit, busyProcess) {
   let pids;
   try {
     pids = fs.readdirSync(procRoot).filter((name) => /^\d+$/.test(name));
@@ -52,10 +134,11 @@ function unitBusy(procRoot, unit, busyProcess) {
 
 /**
  * A pauser for one run. `pause()` stops the active units the config names,
- * waiting for a busy one to go idle first, for at most `maxWaitMinutes` and
- * never past `until`; a unit still busy then is left running until a later
- * `pause()` finds its worker finished. `resume()` starts every unit this
- * run stopped, plus those a run that died left in the state file. Neither
+ * waiting for a busy one to go idle first, for at most `maxWaitMinutes`,
+ * never past `until`, and never past a `signal` that aborts; a unit still
+ * busy then is left running until a later `pause()` finds its worker finished. `resume()` starts every unit this
+ * run stopped or was told to restore, plus those a run that died left in the
+ * state file. Neither
  * throws: a failed stop or start is logged and the run carries on.
  *
  * `leftover` is true for a run that holds the queue lock, the only run that
@@ -73,13 +156,15 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
   // A unit that would not stop is not tried again, and a busy one is reported once.
   const failed = new Set();
   const reported = new Set();
-  const inherited = leftover ? readPaused(file) : [];
+  const marked = new Set();
   let cancelled = false;
   let resumed = false;
 
+  // Merged with what the file holds, so a mark written meanwhile is not lost.
   const record = () => {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify([...new Set([...inherited, ...stopped])])}\n`);
+    const state = readPaused(file);
+    writePaused(file, { stopped: [...new Set([...state.stopped, ...stopped])],
+      restore: [...new Set([...state.restore, ...marked])] });
   };
 
   const stopOne = (unit) => {
@@ -107,12 +192,12 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
   };
 
   return {
-    async pause({ until = null } = {}) {
-      if (!patterns.length || cancelled || resumed) return;
+    async pause({ until = null, signal = null } = {}) {
+      if (!patterns.length || cancelled || resumed || signal?.aborted) return;
       const limit = clock().getTime() + maxWaitMinutes * 60000;
       const deadline = until ? Math.min(limit, until.getTime()) : limit;
       let waiting = activeUnits().filter((unit) => !failed.has(unit));
-      while (waiting.length && !cancelled) {
+      while (waiting.length && !cancelled && !signal?.aborted) {
         const busy = [];
         for (const unit of waiting) {
           if (busyProcess && unitBusy(procRoot, unit, busyProcess)) busy.push(unit);
@@ -128,18 +213,38 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
           return;
         }
         log(`pause: waiting for ${waiting.join(' ')}`);
-        await sleep(Math.min(pollSeconds * 1000, left));
+        // A stop request ends the wait at once.
+        await sleepUnlessAborted(sleep, Math.min(pollSeconds * 1000, left), signal);
       }
     },
+    /** Units to start when the run ends, though they were not running when it began. */
+    mark(units) {
+      if (!units.length || resumed) return;
+      units.forEach((unit) => marked.add(unit));
+      record();
+    },
+    /** Starts every unit this run stopped or marked, plus, for the queue holder, those the file holds. Returns the units that did not start. */
     async resume() {
-      if (resumed) return;
+      if (resumed) return [];
       resumed = true;
       cancelled = true;
-      for (const unit of new Set([...inherited, ...stopped])) {
+      const state = readPaused(file);
+      const targets = new Set([...stopped, ...marked,
+        ...(leftover ? [...state.stopped, ...state.restore] : [])]);
+      const failedStart = [];
+      for (const unit of targets) {
         const result = systemctl('start', unit);
+        if (result.status !== 0) failedStart.push(unit);
         log(result.status === 0 ? `pause: started ${unit}` : `pause: start failed ${unit}`);
       }
-      if (inherited.length || stopped.length) fs.rmSync(file, { force: true });
+      if (targets.size) {
+        const left = readPaused(file);
+        // A unit that did not start stays recorded, so a later run or `queue restore` tries it again.
+        const done = (u) => targets.has(u) && !failedStart.includes(u);
+        writePaused(file, { stopped: left.stopped.filter((u) => !done(u)),
+          restore: left.restore.filter((u) => !done(u)) });
+      }
+      return failedStart;
     },
   };
 }

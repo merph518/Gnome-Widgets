@@ -108,6 +108,9 @@ request and on each push to `main`. `shellcheck` also runs when it is installed,
 its findings are advisory and never fail the run. The runners need `node`, `python3`,
 `jq` and `bash`.
 
+`.github/workflows/pack-compare.yml` is run by hand and compares two staged test packs on a
+desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files.
+
 ## How a repository uses it
 
 1. **Install by vendoring.** The whole repository is copied into the consuming

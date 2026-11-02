@@ -314,11 +314,15 @@ tablet runner, while no queue run is active (the nightly run, a `--now` job, a
   see a direct `run`, so only the runner pause (suggestion 4) keeps the job
   clear of one.
 - **Reads.** The four inputs, from the runner's own disk.
-- **Writes.** `compare.json` and `compare.md` beside the pack, on the runner's
-  disk, deleted at the end of the job.
+- **Writes.** `compare.json` and `compare.md` in a folder under the runner's
+  temp folder, deleted at the end of the job. The inputs are staged in one folder
+  with fixed file names, and the cleanup step deletes only those names, because
+  deleting the paths a person typed could remove the baseline pack itself.
 - **Must not log or upload.** `compare.md` and `compare.json` (they quote cards,
   rule text and document lines). No `actions/upload-artifact`. A final cleanup
   step removes the inputs and outputs.
+- **Built.** `.github/workflows/pack-compare.yml` and `.github/scripts/pack-compare.mjs`,
+  described in `RunnerRegistration.md`, "Pack comparison on the desktop runners".
 - **Honest caveat.** The inputs are a baseline pack, used as the reference, and
   a built pack, so they would have to be copied onto the runner first. That copy
   is the exposure. If the answer to open question 2 is that no runner can hold
@@ -481,7 +485,10 @@ These come from system logs and counters only (`sar`, the `lemond` journal,
    cannot restart. So the apps get closed by a step that runs before the job and
    does not try to bring them back, and `pause.units` stays for system units.
    Claude Code sessions left open overnight are the ones to close by hand. This
-   frees memory without touching the model.
+   frees memory without touching the model. The `closeApps` config block does
+   this: it stops the listed user scopes before the pause, leaves the desktop app
+   open while Claude Code sessions run inside it (they run in its scope), and
+   skips a `--now` job unless `onNow` is set.
 6. **Check free memory between phases.** `run.mjs: runJob` already writes a
    checkpoint after each phase. A check of `MemAvailable` and swap use before
    each model call could wait, or stop at the checkpoint and let `resume`
@@ -499,6 +506,8 @@ These come from system logs and counters only (`sar`, the `lemond` journal,
    `ManagedOOMPreference=avoid` in a drop-in, and putting the desktop apps in a
    slice with a `MemoryHigh` limit, means that if memory does run out the kernel
    and `systemd-oomd` take an app rather than the model in the middle of a job.
+   Done: `local/oom/oom-setup.sh` installs the drop-in and the app limit, and
+   `local/oom/README.md` says where each file lives and how to check it.
 8. **Use a smaller quantization of the same model.** A `Q6_K` build of the model
    is about a quarter smaller than `Q8_0`, a saving of about 6 GiB at this size,
    with a small loss in quality. That is less than the prompt cache's 8 GiB at

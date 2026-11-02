@@ -37,6 +37,16 @@ export const MEMORY_STOP = 'memory:low';
 /** The failures that count toward MAX_TRIES: a stop for low memory says nothing about the job. */
 export const countedTries = (failures = []) => failures.filter((f) => f.reason !== MEMORY_STOP).length;
 
+/** How many low-memory stops in a row a job gets before it is dropped for a person to look at. */
+export const MAX_MEMORY_STOPS = 3;
+
+/** The low-memory stops at the end of a job's failures; a failure of any other kind resets the count. */
+export const memoryStops = (failures = []) => {
+  let stops = 0;
+  for (let i = failures.length - 1; i >= 0 && failures[i].reason === MEMORY_STOP; i -= 1) stops += 1;
+  return stops;
+};
+
 const fill = (template, values) => String(template).replace(/\{(\w+)\}/g, (whole, key) =>
   (values[key] === undefined ? whole : String(values[key])));
 export { fill };
@@ -115,6 +125,25 @@ export function loadConfig(configPath) {
   }
   if (!Number.isFinite(pause.maxWaitMinutes) || pause.maxWaitMinutes < 0) {
     throw new Error('config pause.maxWaitMinutes must be a number of minutes, 0 or more');
+  }
+  // Desktop apps closed before a queue run. Scope patterns must start with a literal app- or
+  // snap. prefix and end in .scope, so a pattern can never match a service or a system unit.
+  const closeAppsKeys = ['scopes', 'onNow', 'keepIfRunning'];
+  if (raw.closeApps !== undefined && (!raw.closeApps || typeof raw.closeApps !== 'object'
+    || Array.isArray(raw.closeApps) || Object.keys(raw.closeApps).some((key) => !closeAppsKeys.includes(key)))) {
+    throw new Error(`config closeApps must be an object with only ${closeAppsKeys.join(', ')}`);
+  }
+  const closeApps = { scopes: [], onNow: false, keepIfRunning: ['claude'], ...raw.closeApps };
+  const scopePattern = /^(app-|snap\.)(?=[^*?]*[A-Za-z0-9])[A-Za-z0-9@_.:\\*?-]+\.scope$/;
+  if (!Array.isArray(closeApps.scopes)
+    || closeApps.scopes.some((scope) => typeof scope !== 'string' || !scopePattern.test(scope))) {
+    throw new Error('config closeApps.scopes must be a list of app-*.scope or snap.*.scope patterns with a literal part');
+  }
+  if (typeof closeApps.onNow !== 'boolean') throw new Error('config closeApps.onNow must be true or false');
+  if (!Array.isArray(closeApps.keepIfRunning)
+    || closeApps.keepIfRunning.some((name) => typeof name !== 'string' || !name || Buffer.byteLength(name) > 15)) {
+    // The kernel cuts a process name to 15 characters, so a longer one could never match.
+    throw new Error('config closeApps.keepIfRunning must be a list of process names of up to 15 characters');
   }
   // The floor and ceiling come from the measured night in docs/runners/TestPackOffloadPlan.md:
   // available memory fell to 4.6 GiB and swap held about 68% (cold, speeds steady) all night,
@@ -213,6 +242,7 @@ export function loadConfig(configPath) {
     exclusiveSets: raw.exclusiveSets === true,
     output: outputDir,
     pause,
+    closeApps,
     release,
     memory,
     queue,
