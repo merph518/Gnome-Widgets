@@ -10,6 +10,8 @@ import { loadConfig } from './config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures');
+// The fixtures can sit in a worktree of this repository; the worktree check has its own tests.
+process.env.BUILD_PACK_ALLOW_WORKTREE = '1';
 const UNITS = path.join(HERE, 'systemd');
 const SECRET = 'sentinel-token-7731';
 

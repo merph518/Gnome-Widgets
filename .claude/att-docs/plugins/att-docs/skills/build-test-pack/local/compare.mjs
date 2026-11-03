@@ -16,6 +16,8 @@ import path from 'node:path';
 import { consistencyChecks } from './consistency.mjs';
 import { controlNames, crosswalkCards, repeatedCards, scenarioModel, setReport, splitGroups } from './floor.mjs';
 import { readPack, stepsOf } from './pack.mjs';
+import { qualityChecks } from './quality.mjs';
+import { impossibleSteps, stepRules, stepSchema, STEP_QUESTION } from './steps.mjs';
 import { dice, loadRules, parseDoc, quoteOf, wordSet, words } from './source.mjs';
 import { citedIds, citedRules, crosswalkRows, expectedResultChecks, retiredRecord, retiredRules, staleHits,
   struckOnlyWords } from './truth.mjs';
@@ -151,9 +153,14 @@ export function formatChecks(reference, pack, standard) {
   add('alm', 'rule references in the Description', a.ruleReferencesIn, b.ruleReferencesIn);
   add('alm', TEST_NAME_CHECK, a.testNameForm, b.testNameForm, undefined, b);
   add('alm', 'Type', a.types.join(','), b.types.join(','));
-  const score = checks.length ? checks.filter((c) => c.pass).length / checks.length : 1;
+  // How alike the layouts are. It says nothing about whether the pack is right, so it is reported, not scored,
+  // whenever a workbook standard is there to score against.
+  const referenceSimilarity = checks.length ? checks.filter((c) => c.pass).length / checks.length : 1;
+  const against = standard ? standardChecks(pack, standard) : null;
+  const score = against ? against.score : referenceSimilarity;
+  const scoredAgainst = against ? 'standard' : 'reference layout (no standard given)';
   const deliberate = checks.filter((c) => c.deliberate).length;
-  return { score, passed: checks.filter((c) => c.pass).length, total: checks.length, checks,
+  return { score, scoredAgainst, referenceSimilarity, passed: checks.filter((c) => c.pass).length, total: checks.length, checks,
     deliberate, differences: checks.filter((c) => !c.pass && !c.deliberate).length,
     style: { reference: a, pack: b }, standard: standard ? { reference: standardChecks(reference, standard), pack: standardChecks(pack, standard) } : null };
 }
@@ -186,7 +193,8 @@ export function truthOf(pack, source) {
   const { rules, doc, retired } = source;
   const rows = crosswalkRows(pack, rules, retired, doc);
   const struckOnly = struckOnlyWords(doc);
-  const differences = rows.filter((r) => r.match).flatMap((r) => {
+  // A row whose ID no rule's wording backs has nothing sound to compare risk and page against.
+  const differences = rows.filter((r) => r.match && r.match.how !== 'id-unconfirmed').flatMap((r) => {
     const rule = r.match.rule;
     const found = [];
     if (rule.risk && r.row.risk && level(rule.risk) !== level(r.row.risk)) found.push({ field: 'risk', pack: r.row.risk, approved: rule.risk });
@@ -226,8 +234,8 @@ const cardText = (c) => `Title: ${c.title}\nMission: ${c.mission}\nFocus: ${c.fo
  * takes it out of the group; see `splits`). `client` is a model client; a reply
  * that cannot be had is recorded by its error code and the pass goes on.
  */
-export async function modelPass({ client, reference, pack, rules, unmatched, retired = new Map(), stale = new Map(), doc = null, doubtful = {}, maxTokens = 2048 }) {
-  const out = { run: true, follows: [], same: [], grouped: [], errors: 0 };
+export async function modelPass({ client, reference, pack, rules, unmatched, retired = new Map(), stale = new Map(), doc = null, doubtful = {}, controls = null, maxTokens = 2048 }) {
+  const out = { run: true, follows: [], same: [], grouped: [], steps: [], errors: 0 };
   const ask = async (schemaName, schema, system, user) => {
     try {
       return (await client.json({ system, user, schema, schemaName, maxTokens })).value;
@@ -265,6 +273,21 @@ export async function modelPass({ client, reference, pack, rules, unmatched, ret
         `Rules:\n${cited.map(line).join('\n')}\n\nCard:\n${cardText(card)}\n\n`
         + 'Does the card\'s Expected Result follow from these rules, where retired rules do not apply and stale rules are replaced by the document\'s text?');
       out.follows.push({ workbook: label, card: card.id, ...answer });
+    }
+  }
+  // With the source's control names, each card's steps are checked against the rules that govern them.
+  if (controls) {
+    for (const [label, workbook] of [['reference', reference], ['pack', pack]]) {
+      for (const card of workbook.pack.cards) {
+        const steps = stepsOf(workbook.pack, card.id).map((s) => ({ description: s.description, expected: s.expected }));
+        const shown = stepRules({ rules: workbook.truth.cardRules.get(card.id)?.ids ?? [], steps }, rules, controls);
+        if (!steps.length || !shown.length) continue;
+        const answer = await ask('steps', stepSchema(['C1']),
+          'You check a test card\'s steps against business rules. The document is the authority. Answer only from the text given.',
+          `Rules:\n${shown.map(line).join('\n')}\n\nCard ${card.id}:\n${steps.map((s, i) => `Step ${i + 1}: ${s.description} => ${s.expected}`).join('\n')}\n\n${STEP_QUESTION}`);
+        out.steps.push({ workbook: label, card: card.id, flagged: answer.error ? [] : impossibleSteps(answer.cards?.[0]),
+          ...(answer.error ? { error: answer.error } : {}) });
+      }
     }
   }
   for (const miss of unmatched) {
@@ -328,7 +351,7 @@ export async function compare({ reference, pack, rules, doc, standard, client })
     unmatched: crosswalk.filter((r) => !r.matched).map((r) => r.card),
   };
   const model = client ? await modelPass({ client, reference: ref, pack: mine, rules, doc, retired: source.retired, stale: staleRules(rules, doc, source.retired),
-    unmatched: crosswalk.filter((r) => !r.matched),
+    unmatched: crosswalk.filter((r) => !r.matched), controls: controlNames(sourceTexts),
     doubtful: { reference: floor.reference.doubtful, pack: floor.pack.doubtful } })
     : { run: false, reason: 'not requested; no model was called' };
   if (model.run) {
@@ -347,9 +370,21 @@ export async function compare({ reference, pack, rules, doc, standard, client })
     },
     floor,
     consistency: { reference: consistencyChecks(reference), pack: consistencyChecks(pack) },
+    quality: { reference: qualityChecks(reference, ref.truth, source.retired), pack: qualityChecks(pack, mine.truth, source.retired) },
     model,
+    // The pack was scored with every check a gate relies on: the standard, and the model's answers with none lost.
+    gate: gateOf({ standard, model }),
     detail: { reference: ref.truth, pack: mine.truth, source },
   };
+}
+
+/** Whether the scorecard is complete enough for a gate to rely on, and what is missing when it is not. */
+export function gateOf({ standard, model }) {
+  const reasons = [];
+  if (!standard) reasons.push('no workbook standard, so the format was not scored against one');
+  if (!model.run) reasons.push('the model pass was not run');
+  else if (model.errors) reasons.push(`${model.errors} model question(s) could not be answered`);
+  return { complete: reasons.length === 0, reasons };
 }
 
 function summarizeTruth(t) {
@@ -358,6 +393,9 @@ function summarizeTruth(t) {
     ruleRows: t.rows.length,
     matchedById: t.rows.filter((r) => r.match?.how === 'id').length,
     matchedByText: t.rows.filter((r) => r.match?.how === 'text').length,
+    renumbered: t.rows.filter((r) => r.match?.how === 'renumbered').map((r) => ({ row: r.row.n,
+      claimed: r.match.claimedId, matched: r.match.rule.id })),
+    unconfirmedIds: t.rows.filter((r) => r.match?.how === 'id-unconfirmed').map((r) => ({ row: r.row.n, id: r.match.rule.id })),
     matchedAmbiguously: t.rows.filter((r) => r.match?.close.length).length,
     notInSource: t.notInSource.length,
     retiredRules: t.retired.rules.length, retiredMissing: missing.map((r) => r.id),
@@ -409,14 +447,14 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
     ['Cited rule IDs missing from a sheet or the rules', t.reference.citedMissing.length, t.pack.citedMissing.length],
   ]));
   p('');
-  p(`- Format: ${card.format.passed} of ${card.format.total} reference format checks matched (${pct(card.format.score)}); ${card.format.deliberate} deliberate, ${card.format.differences} other.`);
+  p(`- Format: ${pct(card.format.score)} against the ${card.format.scoredAgainst}. Layout like the reference: ${card.format.passed} of ${card.format.total} checks (${pct(card.format.referenceSimilarity)}), reported only; ${card.format.deliberate} deliberate, ${card.format.differences} other.`);
   const matched = f.crosswalk.filter((r) => r.matched).length;
   p(`- Floor: ${matched} of ${f.crosswalk.length} reference cards are matched by a pack card; unmatched: ${list(f.unmatched)}.`);
   p(`- Truth: retired rules the pack does not record: ${list(t.pack.retiredMissing)}.`);
   p(`- Model pass: ${card.model.run ? 'run' : 'not run'}.`);
 
   h('## Format');
-  p(`Score: ${card.format.passed} of ${card.format.total} checks (${pct(card.format.score)}). Rows are Excel rows.`);
+  p(`Score: ${pct(card.format.score)} against the ${card.format.scoredAgainst}. Layout likeness to the reference, ${card.format.passed} of ${card.format.total} checks (${pct(card.format.referenceSimilarity)}), is not part of the score. Rows are Excel rows.`);
   const failed = card.format.checks.filter((c) => !c.pass && !c.deliberate);
   h('### Checks that differ from the reference');
   p(table(['Area', 'Check', names.reference, names.pack], failed.map((c) => [c.area, c.name, c.reference, c.pack])));
@@ -449,7 +487,8 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
   for (const [key, label] of [['reference', names.reference], ['pack', names.pack]]) {
     const w = card.detail[key];
     h(`### ${label}`);
-    p(`- ${t[key].ruleRows} rule rows: ${t[key].matchedById} matched by ID, ${t[key].matchedByText} by wording (${t[key].matchedAmbiguously} with a close second), ${t[key].notInSource} not in the source.`);
+    p(`- ${t[key].ruleRows} rule rows: ${t[key].matchedById} matched by ID, ${t[key].matchedByText} by wording (${t[key].matchedAmbiguously} with a close second), ${t[key].renumbered.length} renumbered, ${t[key].unconfirmedIds.length} with an unconfirmed ID, ${t[key].notInSource} not in the source.`);
+    p(`- Rule IDs the wording does not back: ${t[key].renumbered.length} rows are renumbered (matched by wording to a different rule: ${list(t[key].renumbered.map((r) => `row ${r.row} writes ${r.claimed}, reads like ${r.matched}`))}); ${t[key].unconfirmedIds.length} rows keep an ID no rule's wording confirms (${list(t[key].unconfirmedIds.map((r) => `row ${r.row} ${r.id}`))}), so their risk and page are not compared.`);
     p(`- Retired rules (${t[key].retiredRules}): ${t[key].retiredMissing.length} not recorded${t[key].retiredMissing.length ? ` (${list(t[key].retiredMissing)})` : ''}, ${t[key].retiredUnmarked.length} present but not marked retired.`);
     h('Rule rows untrue to the source');
     p(table(['Row', 'Words', 'Doc line', 'Why'], t[key].untrueRows.map((r) => [r.row, r.words.join(', '), r.line, r.reason])));
@@ -519,6 +558,29 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
     p('');
   }
 
+  h('## Quality');
+  const quality = [
+    ['junkCells', 'Cells holding only punctuation, a program value or a JSON fragment', (x) => `${x.sheet} row ${x.row}, ${x.column}: ${x.kind}`],
+    ['pipelineVocabulary', 'Assumptions and notes written in the pipeline\'s words', (x) => `${x.sheet} row ${x.row}, ${x.column}: "${x.word}"`],
+    ['designableNotApplicable', 'Objectives marked Not Applicable for a reason that says they apply', (x) => `row ${x.row} ${x.objective}: ${x.reason}`],
+    ['unreviewedStrength', 'Coverage rows rated Strong that were not reviewed', (x) => `row ${x.row} ${x.rule}`],
+    ['impactedWithoutCard', 'Impacted rules no card cites', (x) => `row ${x.row} ${x.rule} (${x.classification})`],
+    ['validationFailures', 'Workbook Validation rows that are not PASS', (x) => `row ${x.row} ${x.check}: ${x.status}`],
+    ['paddingCards', 'Cards that cite only rules the document retired', (x) => `${x.card} (row ${x.row}): ${x.rules.join(', ')}`],
+  ];
+  for (const [key, label] of [['reference', names.reference], ['pack', names.pack]]) {
+    p(`**${label}**`);
+    for (const [check, text, show] of quality) {
+      const found = card.quality[key][check];
+      p(`- ${text}: ${found.length}${found.length ? ` (${list(found.map(show), 4)})` : ''}.`);
+    }
+    p('');
+  }
+
+  h('## Gate');
+  p(card.gate.complete ? 'Complete: the format was scored against the standard and the model pass ran with every question answered.'
+    : `Incomplete, so a gate must not rely on this scorecard: ${card.gate.reasons.join('; ')}.`);
+
   h('## Model pass');
   if (!card.model.run) p(`Not run: ${card.model.reason}. "Does the Expected Result follow from the cited rules?" and "same scenario?" were not asked.`);
   else {
@@ -530,6 +592,14 @@ export function reportOf(card, names = { reference: 'Reference', pack: 'Pack' })
     p('');
     p(table(['Workbook', 'Card', 'Follows', 'Reason'], no.map((x) => [x.workbook, x.card, 'no', x.reason])));
     p('');
+    const flagged = (card.model.steps ?? []).filter((x) => x.flagged.length);
+    const answered = (card.model.steps ?? []).filter((x) => !x.error);
+    p(`Asked ${answered.length} "can each step be done" questions (${flagged.length} cards have a step the rules forbid); ${(card.model.steps ?? []).length - answered.length} could not be answered.`);
+    p('');
+    if (flagged.length) {
+      p(table(['Workbook', 'Card', 'Step', 'Reason'], flagged.flatMap((x) => x.flagged.map((f) => [x.workbook, x.card, f.step, f.why]))));
+      p('');
+    }
     p(table(['Reference card', 'Nearest pack card', 'Same scenario', 'Reason'], card.model.same.map((x) => [x.reference, x.pack, x.same ? 'yes' : 'no', x.reason])));
   }
   return `${out.join('\n')}\n`;
@@ -588,9 +658,18 @@ export function inputsFrom(given) {
  * compare.md. `makeClient(config)` builds the model client when `--model` is
  * given. Returns the content-free count lines for the console.
  */
-export async function runCompare(args, { makeClient } = {}) {
+export async function runCompare(args, { makeClient, standardFrom } = {}) {
   const inputs = inputsFrom(args);
-  const client = args.model ? makeClient(args.config) : null;
+  // With no --standard, the job config's own workbook standard is the one to score against.
+  if (!inputs.standard && args.config && standardFrom) {
+    const text = standardFrom(args.config);
+    if (text) inputs.standard = parseStandard(text);
+  }
+  // The model pass runs whenever a config says where the model is, so a gate that scores a pack never
+  // reads a floor and truth score the model did not check. --no-model turns it off.
+  if (args.noModel && args.model) throw new UsageError('--model and --no-model cannot both be given');
+  const useModel = !args.noModel && Boolean(args.config);
+  const client = useModel ? makeClient(args.config) : null;
   const card = await compare({ ...inputs, client });
   const out = args.out ?? path.dirname(path.resolve(args.pack));
   fs.mkdirSync(out, { recursive: true });

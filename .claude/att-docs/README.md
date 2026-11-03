@@ -35,6 +35,7 @@ This repository is private and for my own use.
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
+| `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
 | `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |

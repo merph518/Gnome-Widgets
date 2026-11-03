@@ -39,7 +39,7 @@
 
 # When the hook started, in epoch ms: an event the app delivers from then on
 # starts a turn after this stop.
-stop_at=$(date +%s%3N)
+stop_at=$(($(date +%s%N) / 1000000))
 
 if [[ ${1:-} == --config && -f ${2:-} ]]; then
   config=$2

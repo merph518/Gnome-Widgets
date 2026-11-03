@@ -108,13 +108,31 @@ function coverage(row, rule, rare) {
  * and `close` lists other rules that scored within a hundredth of the best.
  */
 export function matchRuleRow(row, rules, prepared = prepareRules(rules)) {
-  const { texts, rare } = prepared;
+  const { texts } = prepared;
   const id = [row.id, idOfName(row.name)].map((s) => s.trim().toUpperCase())
     .find((s) => rules.some((r) => r.id.toUpperCase() === s));
-  if (id) {
-    const rule = rules.find((r) => r.id.toUpperCase() === id);
-    return { rule, rules: [rule], how: 'id', score: 1, close: [] };
+  if (!id) return textMatch(row, rules, prepared);
+  const rule = rules.find((r) => r.id.toUpperCase() === id);
+  const mine = rowTexts(row);
+  const own = Math.max(0, ...mine.flatMap((a) => texts.get(rule.id).map((b) => dice(a, b))));
+  // A row with no wording of its own has nothing to check an ID against.
+  if (!mine.length || own >= TEXT_MATCH) return { rule, rules: [rule], how: 'id', score: 1, close: [] };
+  // The ID names a rule the row does not read like. A rule it does read like, clearly better, is
+  // what the row is: the workbook was numbered against an older rule set. Otherwise the ID stands, unconfirmed.
+  const text = textMatch(row, rules, prepared);
+  if (text && text.rule.id !== rule.id && text.score - own >= ID_MISMATCH_MARGIN) {
+    return { ...text, how: 'renumbered', claimedId: rule.id };
   }
+  return { rule, rules: [rule], how: 'id-unconfirmed', score: own, close: [] };
+}
+
+// A row whose ID names a rule it does not read like is taken as renumbered when another rule reads
+// this much more like it (Dice).
+export const ID_MISMATCH_MARGIN = 0.1;
+
+/** The wording half of matchRuleRow: the rules a row reads like, whatever ID it carries. */
+function textMatch(row, rules, prepared) {
+  const { texts, rare } = prepared;
   const mine = rowTexts(row);
   const scored = rules.map((rule) => {
     let score = 0;
@@ -213,6 +231,9 @@ export function struckOnlyWords(doc) {
 // A comma part that opens with one of these and runs on is a statement of its own, not a list item.
 const NEW_SUBJECT = /^(?:the|a|an|this|that|these|those|each|it|they|he|she|there|then|user|users|system)$/;
 const NEGATING = /^(no|not|without|never|retired|removed|absent|longer|neither|nor|cannot)$|n't$/;
+// A word that follows the behavior it takes away ("Warning Removal", "warning suppressed"), and how far back it reaches.
+const REMOVAL = /^(?:removal|removed|suppress\w*|absence|absent)$/;
+const REMOVAL_REACH = 2;
 
 /**
  * Struck-only words a piece of text uses as live behavior. A negation reaches
@@ -236,8 +257,14 @@ export function staleHits(text, struckOnly) {
         continue;
       }
       if (negated) continue;
+      // "Warning Removal": a word followed within a few words by a removal says the behavior is gone.
+      const gone = new Set();
+      tokens.forEach((t, i) => {
+        if (!REMOVAL.test(t)) return;
+        for (const before of tokens.slice(Math.max(0, i - REMOVAL_REACH), i)) for (const w of words(before)) gone.add(w);
+      });
       for (const word of words(part)) {
-        if (struckOnly.has(word) && !hits.has(word)) hits.set(word, struckOnly.get(word));
+        if (struckOnly.has(word) && !hits.has(word) && !gone.has(word)) hits.set(word, struckOnly.get(word));
       }
     }
   }

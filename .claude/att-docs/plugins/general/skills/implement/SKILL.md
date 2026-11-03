@@ -288,7 +288,7 @@ script and one of these words:
   running, and nothing waits on the user.
 
 ```bash
-python3 <voice-bridge-hooks folder>/session_title.py status "needs you"
+python3 <voice-bridge-hooks folder>/session_title.py status "stuck"
 ```
 
 The next section says when to set it, so the sidebar and the voice bridge show
@@ -303,9 +303,53 @@ and the session reports for it.
 
 ### Keep the title current
 
-At the end of every turn, before the final reply, check whether the session's
-work or status changed since its title was last set, and set the title only
-when it did. Read the title first:
+When the voice plugin's hooks run, they set the status on their own and never change
+the work name: `working` when a prompt arrives, and at each stop `needs you` when the
+reply's last line ends in `?`, the wrap-up box asks something, or the turn added the
+review label to a pull request, `working` when background work is due to wake the
+session, and `idle` otherwise. The review label is the `reviewLabel` in the extension
+file, `.claude/skills/voice-bridge-hooks/extension.json`, or `Ready for Review` where
+the repository has no extension file; an extension file without `reviewLabel` and
+`readyLine` gives none. They run when the voice plugin is enabled and no settings file
+registers voice hook scripts of its own. Check once, when the work starts. The loop
+prints a `registers` line for each settings file that registers such scripts as hooks
+(permission rules that only name a script do not count), and a `plugin` line for each
+`voice@…` plugin setting a file holds, with its value. The files are read local settings
+first, then project, then user, and the first `plugin` line decides whether the plugin is
+enabled, because a higher scope overrides a lower one:
+
+```bash
+p=${CLAUDE_PROJECT_DIR:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}
+for f in "$p/.claude/settings.local.json" "$p/.claude/settings.json" ~/.claude/settings.json; do
+  jq -e '[.hooks[]?[]?.hooks[]?.command // empty]
+    | any(test("voice_bridge_reply|speak-attention|session_title"))' "$f" >/dev/null 2>&1 \
+    && echo "registers: $f"
+  jq -r --arg f "$f" '.enabledPlugins // {} | to_entries[]
+    | select(.key | startswith("voice@")) | "plugin: \($f): \(.key)=\(.value)"' "$f" 2>/dev/null
+done
+```
+
+A first `plugin` line that ends `=true` and no `registers` line: the plugin's hooks run.
+A `registers` line: the status is set by hooks only when that file also registers
+`session_title.py hook prompt` and `session_title.py hook stop`; otherwise follow the rule
+for when they do not run, below. A first `plugin` line that ends `=false`, or no `plugin`
+line: the plugin is not enabled in these files, so follow that rule too. When in doubt,
+follow it as well: the hooks recompute `working` and `idle` at every stop, so setting them
+as well does no harm.
+
+When the hooks run, do not set `working` or `idle`. Before the final reply, set only a
+status they cannot work out: `waiting on CI`, `stuck` or `stopped`, or `needs you` for a
+decision, or a ready pull request that the reply neither asks about with a `?` nor
+labels with the hooks' review label in this turn (a different ready label does not
+count). A stop leaves these four words on the title, and a prompt the user types ends
+them, so set one again at the end of a turn that is still in that state. An automated
+event, such as a finished background task, leaves `waiting on CI`, `stuck` and `stopped`
+in place, so once one no longer holds, take it away with `status ""` and the next stop
+sets the right word.
+
+When the hooks do not run, at the end of every turn, before the final reply, check
+whether the session's work or status changed since its title was last set, and set the
+title only when it did. Read the title first:
 
 ```bash
 python3 <voice-bridge-hooks folder>/session_title.py show
@@ -331,8 +375,8 @@ status words, keeps a work name set here, and refreshes only one it wrote
 itself. The bridge's session listing renames only the work names it gave itself,
 so a name set here is left alone.
 
-Pick the status from what the session is doing at the end of the turn, from the
-words above only:
+When the hooks do not run, pick the status from what the session is doing at the end of
+the turn, from the words above only:
 
 - work goes on after this turn, such as a background task still running:
   `working`;

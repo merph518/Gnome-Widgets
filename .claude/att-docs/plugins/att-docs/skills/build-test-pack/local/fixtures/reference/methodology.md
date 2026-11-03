@@ -6,6 +6,8 @@
 # Chapter 10 — Contents entry
 # Chapter 13 — Contents entry
 # Chapter 14 — Contents entry
+# Chapter 11 — Contents entry
+# Chapter 12 — Contents entry
 
 # Chapter 4 — Synthetic chapter 4
 
@@ -31,3 +33,11 @@ Chapter 13 body: decide, design, select, analyse, review or rate as the step nee
 
 Chapter 14 body: decide, design, select, analyse, review or rate as the step needs.
 
+
+# Chapter 11 — Synthetic chapter 11
+
+Chapter 11 body: decide, design, select, analyse, review or rate as the step needs.
+
+# Chapter 12 — Synthetic chapter 12
+
+Chapter 12 body: decide, design, select, analyse, review or rate as the step needs.

@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { GateError, phase8, reconcile } from './phases.mjs';
+import { fixTargets, GateError, mergeChecks, phase8, reconcile, tidyCard } from './phases.mjs';
 import { almStyle } from './compare.mjs';
 import { checkPack, derivedSheets } from './pack-checks.mjs';
 import { readPack } from './pack.mjs';
@@ -119,6 +119,22 @@ test('a rule count that leaves Not Impacted rules out passes only when the label
   });
   assert.deepEqual(warnings(goodPack(), edit('Number of Impacted Business Rules')), {});
   assert.match(warnings(goodPack(), edit('Number of Business Rules'))['dashboard-count'], /reads 2, but .* has 3/);
+});
+
+test('a rule count that reads "N impacted of M" is checked against both counts, and a mismatch says what the sheet holds', () => {
+  const edit = (value) => built(goodPack(), (all) => {
+    sheetNamed(all, 'Dashboard').rows.find((r) => /rules/i.test(r[0]))[1] = value;
+  });
+  assert.deepEqual(warnings(goodPack(), edit('2 impacted of 3')), {});
+  assert.deepEqual(warnings(goodPack(), edit('2 of 3')), {});
+  const sets = built(goodPack(), (all) => {
+    sheetNamed(all, 'Dashboard').rows.find((r) => /test sets/i.test(r[0]))[1] = '1 of 2';
+  });
+  assert.deepEqual(warnings(goodPack(), sets), {});
+  assert.match(warnings(goodPack(), edit('3 impacted of 3'))['dashboard-count'],
+    /reads 3, but the sheet it counts has 2 \(3 rule rows, 2 of them impacted\)\./);
+  assert.match(warnings(goodPack(), edit('2 impacted of 5'))['dashboard-count'],
+    /reads 5, but the sheet it counts has 3 \(3 rule rows, 2 of them impacted\)\./);
 });
 
 test('sheets with a title and a subtitle above their headers are checked like sheets that lead with them', () => {
@@ -302,6 +318,76 @@ test('Phase 8 sends a failed check to repair, and the repaired pack passes', asy
   assert.deepEqual(checkPack(pack).failed, []);
 });
 
+test('Phase 8 states the Phase 3 rationale as the reason for a High-risk Not Impacted rule without asking the model', async () => {
+  const pack = goodPack();
+  Object.assign(pack.rules[2], { risk: 'High', rationale: 'The change does not touch it.' });
+  const { ctx, calls } = context(pack, { reply: () => assert.fail('the model was asked') });
+  await phase8(ctx, pack);
+  assert.equal(calls.length, 0);
+  const row = pack.coverage.find((r) => r.ruleId === 'BR-3');
+  assert.equal(row.status, 'Not Applicable');
+  assert.match(row.gap, /^The change does not touch it; no regression card is needed\./);
+  assert.deepEqual(checkPack(pack).failed, []);
+});
+
+test('Phase 8 keeps a covering status when a card covers the rule and states the rationale as the reason', async () => {
+  const pack = goodPack();
+  Object.assign(pack.rules[2], { risk: 'High', rationale: 'The change does not touch it.' });
+  pack.testCards[0].rules.push('BR-3');
+  pack.coverage.push({ ruleId: 'BR-3', status: 'Weakly Covered', strength: 'Weak', gap: 'Not stated by the review.', recommendation: 'Confirm it.' });
+  const { ctx } = context(pack, { reply: (r) => assert.fail(r.user) });
+  await phase8(ctx, pack);
+  assert.equal(pack.coverage.find((r) => r.ruleId === 'BR-3').status, 'Weakly Covered');
+});
+
+test('Phase 8 leaves other problems to the model and never shows it the reason it filled in code', async () => {
+  const pack = goodPack();
+  Object.assign(pack.rules[2], { risk: 'High', rationale: 'The change does not touch it.' });
+  pack.testCards[0].rules = ['BR-1', 'BR-99'];
+  const { ctx, calls } = context(pack, { reply: nothing });
+  ctx.description = 'Removes the warning.';
+  ctx.summary = { existingBehavior: 'A warning shows today.', newBehavior: 'No warning shows.' };
+  await phase8(ctx, pack).catch(() => {});
+  assert.ok(calls.length >= 1);
+  assert.doesNotMatch(calls[0].user, /BR-3 is High risk/);
+  assert.doesNotMatch(calls[0].user, /Coverage Matrix:\s*(\n\n|$)/);
+  assert.match(calls[0].user, /Existing behavior[\s\S]*A warning shows today\./);
+  assert.match(calls[0].user, /New behavior[\s\S]*No warning shows\./);
+  assert.match(calls[0].user, /Change description[\s\S]*Removes the warning\./);
+});
+
+test('Phase 8 moves a stale covering row to Not Applicable when no card covers the rule', async () => {
+  const pack = goodPack();
+  Object.assign(pack.rules[2], { risk: 'High', rationale: 'The change does not touch it.' });
+  pack.coverage.push({ ruleId: 'BR-3', status: 'Covered', strength: 'Strong', gap: '', recommendation: '' });
+  const { ctx } = context(pack, { reply: (r) => assert.fail(r.user) });
+  await phase8(ctx, pack);
+  const row = pack.coverage.find((r) => r.ruleId === 'BR-3');
+  assert.equal(row.status, 'Not Applicable');
+  assert.match(row.gap, /^The change does not touch it; no regression card is needed\./);
+});
+
+test('a repair sends a High-risk Not Impacted rule with a thin rationale to the model', async () => {
+  const pack = goodPack();
+  Object.assign(pack.rules[2], { risk: 'High', rationale: 'Not affected.' });
+  const { ctx, calls } = context(pack, { reply: () => ({ cards: [], limitations: [], coverage: [] }) });
+  await phase8(ctx, pack).catch(() => {});
+  assert.match(calls[0].user, /BR-3 is High risk and Not Impacted/);
+});
+
+test('tidyCard gives a blank setup step a result and leaves the last step alone', () => {
+  const tidy = tidyCard({ rules: ['BR-1'], steps: [
+    { description: 'Sign in', expected: '', rules: [] },
+    { description: 'Open the page', expected: '  ', rules: [] },
+    { description: 'Check the page', expected: 'The page shows the role.', rules: ['BR-1'] }] }, new Set(['BR-1']));
+  assert.deepEqual(tidy.steps.map((step) => step.expected), [
+    'The step completes with no error shown.', 'The step completes with no error shown.',
+    'The page shows the role.']);
+  const blankLast = tidyCard({ rules: ['BR-1'], steps: [
+    { description: 'Check', expected: '', rules: ['BR-1'] }] }, new Set(['BR-1']));
+  assert.equal(blankLast.steps[0].expected, '');
+});
+
 test('Phase 8 fails the build when a check still fails after the repairs', async () => {
   const pack = goodPack();
   pack.testCards[0].rules = ['BR-1', 'BR-99'];
@@ -369,4 +455,35 @@ test('reconcile leaves a Covered row that states a gap as written', () => {
   pack.coverage[0].gap = 'Only the happy path.';
   reconcile({}, pack);
   assert.equal(pack.coverage.find((r) => r.ruleId === 'BR-1').gap, 'Only the happy path.');
+});
+
+// ---- Phase 9 fix routing -----------------------------------------------------
+
+test('fixTargets reads whole card IDs, rule IDs and sheet names from a finding', () => {
+  const pack = { testCards: [{ id: 'TC-1', rules: ['BR-1'] }], rules: [{ id: 'BR-1' }, { id: 'BR-10' }] };
+  const ctx = { builder: stub };
+  const to = fixTargets(ctx, pack, { issue: 'BR-10 is thin in the coverage matrix', fix: 'Raise BR-10 on TC-1' });
+  assert.deepEqual(to.rules, ['BR-10']);
+  assert.deepEqual(to.cards, ['TC-1']);
+  assert.ok(to.sheets.includes('Coverage Matrix'));
+  assert.equal(fixTargets(ctx, pack, { issue: 'BR-1 is thin', fix: 'N/A' }), null);
+  assert.equal(fixTargets(ctx, pack, { issue: 'Something', fix: 'Review everything again' }), null);
+});
+
+test('mergeChecks fails a check one part fails, passes one a part shows passing, fails one no part shows', () => {
+  const NOT = 'not shown in this part';
+  const row = (check, verdict, why = '', fix = '') => ({ check, verdict, why, fix });
+  const all = (verdict) => ['All issues resolved', 'No regressions introduced', 'Requirement ID references preserved',
+    'Requirements Matrix integrity preserved', 'Traceability complete',
+    'No uncovered Requirement IDs remain unless explicitly documented',
+    'Test pack is ready for ALM execution'].map((check) => row(check, verdict));
+  const one = { checks: all('pass').map((r) => (r.check === 'Traceability complete' ? row(r.check, 'fail', 'Lost', 'Fix it') : r)) };
+  const two = { checks: all(NOT) };
+  const merged = mergeChecks([one, two]);
+  assert.equal(merged.passed, false);
+  assert.deepEqual(merged.remaining, ['Traceability complete: Lost']);
+  assert.equal(mergeChecks([{ checks: all('pass') }, two]).passed, true);
+  const none = mergeChecks([two]);
+  assert.equal(none.remaining.length, 7);
+  assert.match(none.remaining[0], /Not evidenced/);
 });

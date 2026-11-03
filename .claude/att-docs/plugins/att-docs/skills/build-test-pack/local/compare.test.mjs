@@ -13,7 +13,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { parseArgs } from './build-pack.mjs';
-import { compare, formatChecks, headerDiff, idShape, modelPass, parseStandard, reportOf, runCompare } from './compare.mjs';
+import { compare, formatChecks, gateOf, headerDiff, idShape, modelPass, parseStandard, reportOf, runCompare, truthOf } from './compare.mjs';
+import { junkKind, qualityChecks } from './quality.mjs';
 import { confidenceValues, dashboardCountMismatches, matrixCardProblems, objectiveCardProblems } from './consistency.mjs';
 import { controlNames, crosswalkCards, repeatedCards, scenarioModel, setReport, splitGroups } from './floor.mjs';
 import { expandIds, readPack } from './pack.mjs';
@@ -775,9 +776,12 @@ test('self-checks read TS-prefixed set names, newline lists and flexible headers
   assert.match(report, /not checked, the Objective Matrix sheet has no related test cards column/);
 });
 
+const emptyQuality = () => ({ junkCells: [], pipelineVocabulary: [], designableNotApplicable: [], unreviewedStrength: [],
+  impactedWithoutCard: [], validationFailures: [], paddingCards: [] });
+
 function fakeScorecard() {
   const side = { cards: 1, sets: 1, groups: [], repeats: 0, perSet: [], fullCoverage: null };
-  const truth = { ruleRows: 0, matchedById: 0, matchedByText: 0, matchedAmbiguously: 0, notInSource: 0, retiredRules: 0, retiredMissing: [],
+  const truth = { ruleRows: 0, matchedById: 0, matchedByText: 0, renumbered: [], unconfirmedIds: [], matchedAmbiguously: 0, notInSource: 0, retiredRules: 0, retiredMissing: [],
     retiredUnmarked: [], differenceList: [], unmatchedStatements: [], untrueRows: [], untrueCards: [], contradictions: [], citedMissing: [] };
   const detail = { retired: { rules: [], spans: [] }, differences: [], rows: [] };
   const checked = { dashboardCounts: [], confidence: { values: {}, consistent: true },
@@ -785,7 +789,8 @@ function fakeScorecard() {
   return { consistency: { reference: checked, pack: checked },
     truth: { reference: truth, pack: truth, source: { approvedRules: 0, struckSpans: 0, retiredByDocument: [] } },
     floor: { crosswalk: [], unmatched: [], reference: side, pack: side }, model: { run: false, reason: 'x' },
-    format: { passed: 0, total: 0, score: 1, checks: [], style: { reference: {}, pack: {} }, standard: null },
+    format: { passed: 0, total: 0, score: 1, scoredAgainst: 'standard', referenceSimilarity: 1, checks: [], style: { reference: {}, pack: {} }, standard: null },
+    quality: { reference: emptyQuality(), pack: emptyQuality() }, gate: { complete: true, reasons: [] },
     detail: { reference: detail, pack: detail } };
 }
 
@@ -906,4 +911,188 @@ test('control names stop at a clause break and drop a screen section only where 
   const text = 'Upon selecting "Ok," the error message will close, and the "Verified Role" dropdown shows. The Role Detail section opens. Select Role Detail.';
   assert.deepEqual(controlNames([text]).sort(), ['Ok', 'Role Detail']);
   assert.deepEqual(controlNames(['Select Save, Reset and Save & Close.']).sort(), ['Reset', 'Save', 'Save & Close']);
+});
+
+// ---- wording before ID, the standard, the gate and the quality checks ----------
+
+test('a row whose ID the wording does not back is renumbered or unconfirmed, and only then is risk and page left alone', () => {
+  const { rules, doc, retired } = source();
+  const own = { id: 'RX-001', name: '', summary: 'System saves the selected role when the user selects Save.' };
+  assert.equal(matchRuleRow(own, rules).how, 'id');
+  // The wording is RX-002's; the number is an old one.
+  const old = { id: 'RX-001', name: '', summary: 'System blocks a downgrade for a child with a substantiated sex abuse allegation.' };
+  const renumbered = matchRuleRow(old, rules);
+  assert.deepEqual([renumbered.how, renumbered.rule.id, renumbered.claimedId], ['renumbered', 'RX-002', 'RX-001']);
+  // No rule reads like it: the ID stays, and says it is unconfirmed.
+  const odd = { id: 'RX-001', name: '', summary: 'The printer toner runs out.' };
+  const unconfirmed = matchRuleRow(odd, rules);
+  assert.deepEqual([unconfirmed.how, unconfirmed.rule.id], ['id-unconfirmed', 'RX-001']);
+  const pack = readPack(write(tmp(), 'p.xlsx', xlsx(packSheets({ impact: [
+    { id: 'RX-001', summary: old.summary, risk: 'Low', page: '9' }, { id: 'RX-001', summary: odd.summary, risk: 'Low', page: '9' }] }))));
+  const truth = truthOf(pack, { rules, doc, retired });
+  // The renumbered row is held to RX-002's risk and page; the unconfirmed row is held to nothing.
+  assert.deepEqual(truth.differences.map((d) => [d.row, d.rule, d.field]), [[2, 'RX-002', 'risk'], [2, 'RX-002', 'page']]);
+});
+
+test('a renumbered row with the right risk and page makes no difference', () => {
+  const { rules, doc, retired } = source();
+  const pack = readPack(write(tmp(), 'p.xlsx', xlsx(packSheets({ impact: [
+    { id: 'RX-001', summary: 'System blocks a downgrade for a child with a substantiated sex abuse allegation.', risk: 'High', page: '1' }] }))));
+  assert.deepEqual(truthOf(pack, { rules, doc, retired }).differences, []);
+});
+
+test('the format score is against the standard, and matching the reference layout does not raise it', () => {
+  const data = { impact: [{ id: 'RX-001', summary: 'x' }], cards: [{ id: 'TC-RX-100-001', title: 't', focus: 'f', expected: 'e' }],
+    steps: [{ name: 'TC-RX-100-001', step: 'Step 1', expected: 'e' }] };
+  const dir = tmp();
+  const reference = readPack(write(dir, 'r.xlsx', xlsx(packSheets({ titled: true, ...data }))));
+  const lookalike = readPack(write(dir, 's.xlsx', xlsx(packSheets({ titled: true, ...data }))));
+  const plain = readPack(write(dir, 'p.xlsx', xlsx(packSheets(data))));
+  const standard = parseStandard('## Required Worksheets\n\n1. Impact Analysis\n2. Gate Sheet\n');
+  const copy = formatChecks(reference, lookalike, standard);
+  assert.equal(copy.referenceSimilarity, 1);
+  assert.equal(copy.scoredAgainst, 'standard');
+  assert.equal(copy.score, 0.5, 'the copy lacks a sheet the standard requires');
+  const other = formatChecks(reference, plain, parseStandard('## Required Worksheets\n\n1. Impact Analysis\n2. Test Cards Markdown\n'));
+  assert.ok(other.referenceSimilarity < 1);
+  assert.equal(other.score, 1, 'the layout differs from the reference, but the standard is met');
+  assert.equal(formatChecks(reference, plain).scoredAgainst, 'reference layout (no standard given)');
+});
+
+test('a config turns the model pass and the config standard on, --no-model turns the model off, and the gate says what is missing', async () => {
+  const f = fixtureFiles();
+  const client = { json: async (r) => ({ value: r.schemaName === 'follows' ? { follows: true, reason: 'ok' } : { same: true, reason: 'ok' } }) };
+  const base = { reference: f.reference, pack: f.pack, rules: f.rules, docs: [f.doc] };
+  const standard = '## Required Worksheets\n\n1. Impact Analysis\n';
+  const on = await runCompare({ ...base, out: path.join(f.dir, 'o1'), config: 'x.json' }, { makeClient: () => client, standardFrom: () => standard });
+  assert.ok(on.some((l) => l.includes('model   run')));
+  const scorecard = JSON.parse(fs.readFileSync(path.join(f.dir, 'o1', 'compare.json'), 'utf8'));
+  assert.equal(scorecard.format.scoredAgainst, 'standard');
+  assert.deepEqual(scorecard.gate, { complete: true, reasons: [] });
+  const off = await runCompare({ ...base, out: path.join(f.dir, 'o2'), config: 'x.json', noModel: true },
+    { makeClient: () => { throw new Error('no client'); }, standardFrom: () => standard });
+  assert.ok(off.some((l) => l.includes('model   not run')));
+  const gate = JSON.parse(fs.readFileSync(path.join(f.dir, 'o2', 'compare.json'), 'utf8')).gate;
+  assert.equal(gate.complete, false);
+  assert.match(gate.reasons.join(' '), /model pass was not run/);
+  await assert.rejects(runCompare({ ...base, out: path.join(f.dir, 'o3'), config: 'x.json', model: true, noModel: true },
+    { makeClient: () => client }), /cannot both be given/);
+  assert.deepEqual(parseArgs(['compare', '--no-model']).noModel, true);
+  assert.equal(gateOf({ standard: {}, model: { run: true, errors: 2 } }).complete, false);
+  assert.match(gateOf({ standard: null, model: { run: true, errors: 0 } }).reasons[0], /no workbook standard/);
+});
+
+test('junk cells are found by kind, and ordinary text is not junk', () => {
+  for (const [value, kind] of [['[', 'only punctuation'], [' ]; ', 'only punctuation'], ['undefined', 'a program value'],
+    ['[object Object]', 'a program value'], ['{"level": "High"}', 'a JSON fragment']]) assert.equal(junkKind(value), kind, value);
+  for (const value of ['', 'High', 'Role (see page 2)', '- not a junk cell, it has words', 'null pointer handling is out of scope']) {
+    assert.equal(junkKind(value), null, value);
+  }
+});
+
+test('the quality checks find each problem the shipped workbook had, and a clean workbook has none', () => {
+  const sheets = (extra) => packSheets({ impact: [
+    { id: 'RX-001', summary: 'System saves the selected role when the user selects Save.' },
+    { id: 'RX-002', summary: 'System blocks a downgrade for a child with a sex abuse allegation.' }],
+  cards: [{ id: 'TC-RX-100-001', title: 'Save', focus: 'Select Save.', expected: 'Saved.', rules: 'RX-001' },
+    { id: 'TC-RX-100-002', title: 'Old warning', focus: 'Select Save.', expected: 'A warning shows.', rules: 'RX-003' }], extra });
+  const { rules, doc, retired } = source();
+  const run = (extra) => {
+    const pack = readPack(write(tmp(), 'q.xlsx', xlsx(sheets(extra))));
+    return qualityChecks(pack, truthOf(pack, { rules, doc, retired }), retired);
+  };
+  const dirty = run([
+    sheet('Confidence Assessment', ['Item', 'Detail'], ['Overall', '[']),
+    sheet('Assumptions', ['Assumption ID', 'Assumption', 'Why Required'], ['A-1', 'The project understanding says the role saves.', 'Needed'],
+      ['A-2', 'Roles are unique.', 'Not stated by the review.']),
+    sheet('Objective Matrix', ['Testing Objective', 'Status', 'Reason'], ['Role / Population', 'Not Applicable', 'No test card could be designed in this run.'],
+      ['Audit', 'Not Applicable', 'The page has no audit trail.']),
+    sheet('Coverage Matrix', ['Rule ID', 'Coverage Status', 'Coverage Strength', 'Gap / Concern'], ['RX-001', 'Covered', 'Strong', 'Not reviewed; coverage rests on the card mapping.'],
+      ['RX-002', 'Covered', 'Strong', 'Checked against the page.']),
+    sheet('Workbook Validation', ['Check', 'Status', 'Notes'], ['Cards', 'PASS', ''], ['Sets', 'FAIL', 'One set is empty.']),
+  ]);
+  assert.deepEqual(dirty.junkCells.map((x) => [x.sheet, x.row]), [['Confidence Assessment', 2]]);
+  assert.deepEqual(dirty.pipelineVocabulary.map((x) => [x.sheet, x.row, x.column]), [['Assumptions', 2, 'Assumption'], ['Assumptions', 3, 'Why Required']]);
+  assert.deepEqual(dirty.designableNotApplicable.map((x) => x.objective), ['Role / Population']);
+  assert.deepEqual(dirty.unreviewedStrength.map((x) => x.rule), ['RX-001']);
+  assert.deepEqual(dirty.validationFailures.map((x) => [x.check, x.status]), [['Sets', 'FAIL']]);
+  assert.deepEqual(dirty.impactedWithoutCard.map((x) => x.rule), ['RX-002']);
+  assert.deepEqual(dirty.paddingCards.map((x) => [x.card, x.rules]), [['TC-RX-100-002', ['RX-003']]]);
+  const clean = run([
+    sheet('Assumptions', ['Assumption ID', 'Assumption', 'Why Required'], ['A-1', 'Roles are unique.', 'The page lists one role per child.']),
+    sheet('Objective Matrix', ['Testing Objective', 'Status', 'Reason'], ['Audit', 'Not Applicable', 'The page has no audit trail.']),
+    sheet('Coverage Matrix', ['Rule ID', 'Coverage Status', 'Coverage Strength', 'Gap / Concern'], ['RX-001', 'Covered', 'Strong', 'Checked against the page.']),
+    sheet('Workbook Validation', ['Check', 'Status', 'Notes'], ['Cards', 'PASS', '']),
+  ]);
+  for (const key of ['junkCells', 'pipelineVocabulary', 'designableNotApplicable', 'unreviewedStrength', 'validationFailures']) {
+    assert.deepEqual(clean[key], [], key);
+  }
+});
+
+test('a card about removing a warning, or asserting it is absent, does not use the retired warning', () => {
+  const struckOnly = struckOnlyWords(source().doc);
+  assert.ok(struckOnly.has('warn'), 'the struck text makes "warning" retired wording');
+  assert.deepEqual(staleHits('FATL Downgrade Warning Removal - Save', struckOnly), []);
+  assert.deepEqual(staleHits('The warning is suppressed and the role saves.', struckOnly), []);
+  assert.deepEqual(staleHits('The role saves and does not display the warning.', struckOnly), []);
+  assert.equal(staleHits('A warning shows before the role saves.', struckOnly).length, 1);
+});
+
+test('cards that only share an action with a reference card never make it covered', () => {
+  const controls = ['Save', 'Reset'];
+  const reference = [card('r1', 'Save then reset', 'Select Save, then select Reset for the account.')];
+  const pack = [card('p1', 'Reset only', 'Select Reset for the account.')];
+  const found = crosswalkCards(reference, pack, () => [], scenarioModel([...reference, ...pack], { controls }));
+  assert.notEqual(found[0].status, 'covered');
+  assert.notEqual(found[0].status, 'unmatched');
+  // Two cards that each do one action do not add up to a card that does both.
+  const split = [card('p2', 'Save it', 'Select Save for the account.'), card('p3', 'Reset it', 'Select Reset for the account.')];
+  const parts = crosswalkCards(reference, split, () => [], scenarioModel([...reference, ...split], { controls }));
+  assert.notEqual(parts[0].status, 'covered');
+  // A strong card that does it all is still covered when a weaker card was combined first.
+  const both = [card('p4', 'Save then reset', 'Select Save, then select Reset for the account.'), ...split];
+  assert.equal(crosswalkCards(reference, both, () => [], scenarioModel([...reference, ...both], { controls }))[0].status, 'covered');
+});
+
+test('a placeholder dash, a passed row and a rule that applies elsewhere are not quality problems', () => {
+  assert.equal(junkKind('-'), null);
+  assert.equal(junkKind('.'), null);
+  assert.equal(junkKind('The label "Role": "shows" the name'), null);
+  const pack = readPack(write(tmp(), 'v.xlsx', xlsx([
+    sheet('Workbook Validation', ['Check', 'Status', 'Notes'], ['Cards', 'Passed', '']),
+    sheet('Objective Matrix', ['Testing Objective', 'Status', 'Reason'], ['Adults', 'Not Applicable', 'The rule only applies to adults.'])])));
+  const found = qualityChecks(pack, { rows: [], cardRules: new Map() }, new Map());
+  assert.deepEqual([found.validationFailures, found.designableNotApplicable], [[], []]);
+});
+
+test('the model pass flags a step a rule forbids, including a rule the card does not cite', async () => {
+  const rules = [{ id: 'VS-030', summary: 'Selecting Save stores the role.' },
+    { id: 'VS-032', summary: 'The Save button is enabled only after the dropdown value changes.' }];
+  const mkPack = () => ({ cards: [{ id: 'TC-001', title: 't', mission: 'm', focus: 'f', expected: 'The role saves.' }],
+    steps: [{ testName: 'TC-001-01', description: 'Leave the dropdown unchanged', expected: 'No change' },
+      { testName: 'TC-001-02', description: 'Select Save', expected: 'The role saves' }] });
+  const prompts = [];
+  const client = { json: async (request) => {
+    prompts.push(request);
+    if (request.schemaName !== 'steps') return { value: { follows: true, reason: 'ok', same: true } };
+    return { value: { cards: [{ card: 'C1', steps: [{ step: 1, possible: true, why: 'fine' },
+      { step: 2, possible: false, why: 'VS-032 keeps Save disabled until a change' }] }] } };
+  } };
+  const truth = { cardRules: new Map([['TC-001', { ids: ['VS-030'] }]]) };
+  const out = await modelPass({ client, rules, unmatched: [], controls: ['Save'],
+    reference: { pack: { cards: [], steps: [] }, truth: { cardRules: new Map() } }, pack: { pack: mkPack(), truth } });
+  assert.deepEqual(out.steps.map((s) => [s.workbook, s.card, s.flagged]),
+    [['pack', 'TC-001', [{ step: 2, why: 'VS-032 keeps Save disabled until a change' }]]]);
+  const asked = prompts.find((p) => p.schemaName === 'steps');
+  assert.match(asked.user, /VS-032: The Save button is enabled only after/);
+  assert.equal(out.errors, 0);
+});
+
+test('without control names the model pass asks no step question', async () => {
+  const asked = [];
+  const client = { json: async (request) => { asked.push(request.schemaName); return { value: { follows: true, reason: '' } }; } };
+  const out = await modelPass({ client, rules: [], unmatched: [], reference: { pack: { cards: [], steps: [] }, truth: { cardRules: new Map() } },
+    pack: { pack: { cards: [], steps: [] }, truth: { cardRules: new Map() } } });
+  assert.deepEqual(out.steps, []);
+  assert.ok(!asked.includes('steps'));
 });

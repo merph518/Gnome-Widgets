@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { countedTries, MAX_MEMORY_STOPS, MAX_TRIES, memoryStops } from './config.mjs';
+import { countedTries, heldRow, MAX_MEMORY_STOPS, MAX_TRIES, memoryStops } from './config.mjs';
 import { readStatusLog } from './status.mjs';
 
 const DAY = 86400000;
@@ -42,15 +42,15 @@ const endedAt = (row) => row.finished ?? row.failures?.at(-1)?.at ?? null;
 function jobEntry(config, row) {
   const failures = row.failures ?? [];
   const passed = row.status === 'passed';
-  const state = passed ? 'PASS' : row.status === 'queued' ? 'RETRY' : row.status === 'stopped' ? 'STOPPED'
+  const state = passed ? 'PASS' : row.status === 'queued' ? 'RETRY' : row.status === 'stopped' ? (heldRow(row) ? 'HELD' : 'STOPPED')
     : memoryStops(failures) >= MAX_MEMORY_STOPS ? 'MEMORY'
       : countedTries(failures) >= MAX_TRIES ? 'DROPPED' : 'FAIL';
   const entries = readStatusLog(path.join(config.output, row.id, 'status.log'));
   const done = entries.findLast((e) => e.phase === 'done' && e.event === 'pass');
   // The release line is written after the job settles and says nothing about its sheets.
   const failed = entries.findLast((e) => e.event === 'fail' && e.phase !== 'release');
-  const confidence = entries.findLast((e) => e.phase === 'phase9-confidence' && e.event === 'pass')
-    ?.confidence;
+  const confidence = entries.findLast((e) => ['phase9-confidence', 'phase9-revalidate'].includes(e.phase)
+    && e.event === 'pass' && e.confidence)?.confidence;
   const last = failures.at(-1);
   const sheets = passed ? { pass: done?.sheetsPass ?? 0, limited: done?.sheetsLimited ?? 0, fail: 0 }
     : { pass: null, limited: null, fail: failed?.sheets ?? null };
@@ -106,7 +106,7 @@ export function reportData(config, queue, { period = 'day', now = new Date(), ra
   return {
     period, since: new Date(since), now, jobs,
     counts: { pass: count('PASS'), fail: count('FAIL'), retry: count('RETRY'), dropped: count('DROPPED'),
-      memory: count('MEMORY'), stopped: count('STOPPED') },
+      memory: count('MEMORY'), stopped: count('STOPPED'), held: count('HELD') },
     queue: { depth: waiting.length, retrying: waiting.filter((row) => countedTries(row.failures) > 0).length,
       running: rows.filter((row) => row.status === 'running').length },
     failing: jobs.filter((job) => !['PASS', 'STOPPED'].includes(job.state)),
@@ -133,6 +133,7 @@ export function renderReport(data) {
     `- Failed ${MAX_TRIES} times and dropped from the queue: ${counts.dropped}`,
     `- Stopped ${MAX_MEMORY_STOPS} times in a row for low memory and dropped from the queue: ${counts.memory}`,
     ...(counts.fail ? [`- Failed with no retry left: ${counts.fail}`] : []),
+    ...(counts.held ? [`- Stopped on a gate a retry cannot change, waiting for a person: ${counts.held}`] : []),
     ...(counts.stopped ? [`- Stopped on request and waiting to resume: ${counts.stopped}`] : []),
     `- Queue depth: ${data.queue.depth} waiting (${data.queue.retrying} of them retrying), `
       + `${data.queue.running} running`,
@@ -175,6 +176,9 @@ export function renderReport(data) {
       : job.state === 'DROPPED'
       ? `- ${code(job.id)}: failed ${job.reasons.length} times, last ${where}. Dropped from the queue; `
         + 'it needs a person.'
+      : job.state === 'HELD'
+      ? `- ${code(job.id)}: stopped ${where}. A retry cannot change it; fix the document or its rules, then `
+        + '`queue add --resume`.'
       : job.state === 'RETRY' ? `- ${code(job.id)}: failed ${where}. Retries on its next run.`
         : `- ${code(job.id)}: failed ${where}. Not retried.`);
   }

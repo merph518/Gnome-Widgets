@@ -297,8 +297,22 @@ export function crosswalkCards(reference, pack, rulesOf, model, floor = MATCH_FL
     }
     const share = wantedTotal ? [...held].reduce((n, k) => n + wanted.get(k), 0) / wantedTotal : 0;
     const top = strong.filter((x) => x.score >= strong[0].score - 0.05);
+    // Covered takes cards that do the same thing. Cards that only share an action with the reference card
+    // fill in a part of it and cannot, however many join, make it covered. And everything the card does
+    // (each action it takes) has to be done by one strong card.
+    const strongHeld = new Set();
+    for (const x of strong) {
+      for (const k of model.features(model.scenario(x.card), true).keys()) if (wanted.has(k)) strongHeld.add(k);
+    }
+    const strongShare = wantedTotal ? [...strongHeld].reduce((n, k) => n + wanted.get(k), 0) / wantedTotal : 0;
+    const actions = [...wanted.keys()].filter((k) => k.startsWith('do:'));
+    const doneByOne = strong.some((x) => {
+      const have = model.features(model.scenario(x.card), true);
+      return actions.every((k) => have.has(k));
+    });
     return { card: card.id, row: card.n, scenario: describe(s), matched: scored.length > 0,
-      status: !wantedTotal ? 'no features' : !scored.length ? 'unmatched' : strong.length && share >= COVERED_SHARE ? 'covered' : 'partly covered',
+      status: !wantedTotal ? 'no features' : !scored.length ? 'unmatched'
+        : strong.length && strongShare >= COVERED_SHARE && doneByOne ? 'covered' : 'partly covered',
       share, matches: top.map((x) => ({ card: x.id, score: x.score })),
       parts: parts.map((x) => x.id), candidates: scored.length };
   });

@@ -92,10 +92,13 @@ gives a session without the skill the same claim and limits.
   `read_reply`, which waits about three seconds for it, so a quick answer is
   there on the first check. Nothing waits on a message, so never answer with SendMessage, and
   never send one to say the request arrived.
-- Retitle the session before the final reply when its work or status changed this
-  turn, with `session_title.py` from the `voice-bridge-hooks` skill and the rule
-  "Keep the title current" in the `implement` skill. A turn that changed neither
-  sets nothing.
+- The plugin's hooks from the `voice-bridge-hooks` skill set the session's status
+  (`working`, `needs you`, `idle`) at each prompt and each stop. Retitle the session before
+  the final reply when its work changed, when the status is one the hooks never set
+  (`stuck`, `stopped`, `waiting on CI`), or when the plugin's hooks do not run in this
+  repository because it registers its own voice hooks, with `session_title.py` from that
+  skill and the rule "Keep the title current" in the `implement` skill. A turn that changed
+  none of these sets nothing.
 - Write the reply as you would for typed input, in normal Markdown, with tables,
   lists, headings and code blocks where they help. Say what was done or found
   and what is next.

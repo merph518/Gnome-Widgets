@@ -89,6 +89,11 @@
             "type": "command",
             "command": "K=${CLAUDE_CODE_MESSAGING_SOCKET##*/}; test -e \"${XDG_RUNTIME_DIR:-/tmp}/voice-bridge/attention/${K%.sock}.json\" || exit 0; exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" voice_bridge_reply.py attention",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" session_title.py hook prompt",
+            "timeout": 10
           }
         ]
       }
@@ -112,6 +117,11 @@
             "command": "K=${CLAUDE_CODE_MESSAGING_SOCKET##*/}; F=\"${XDG_RUNTIME_DIR:-/tmp}/voice-bridge/follow/${K%.sock}\"; test -e \"$F.mode\" || exit 0; exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" voice_bridge_reply.py milestone",
             "async": true,
             "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" session_title.py hook stop",
+            "timeout": 10
           }
         ]
       }
