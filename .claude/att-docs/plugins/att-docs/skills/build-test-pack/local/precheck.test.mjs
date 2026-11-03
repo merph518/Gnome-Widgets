@@ -15,6 +15,8 @@ import { loadConfig } from './config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures');
+// The fixtures can sit in a worktree of this repository; the worktree check has its own tests.
+process.env.BUILD_PACK_ALLOW_WORKTREE = '1';
 const UC01 = 'docs/LIB/UC01-Card-Renewal.md';
 
 /** A config over the fixtures whose output and queue land in a temp folder the test removes. */
@@ -201,4 +203,90 @@ test('a queue file that does not parse still rewrites the status file', (t) => {
   assert.equal(result.stdout.trim(), 'precheck  failed  SyntaxError');
   assert.equal(fs.readFileSync(precheckPath(config), 'utf8').trim().split('\n')[1],
     'precheck  failed  SyntaxError');
+});
+
+const UC09 = 'docs/OTHER/UC09-Unmapped.md';
+
+/** Writes the checkpoint a job saved after `phase`, holding `documents`, as a run would. */
+function writeCheckpoint(config, id, phase, documents) {
+  const dir = path.join(config.output, id, 'work');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'checkpoint.json'), JSON.stringify({ phase, state: { documents } }));
+}
+
+const included = (number, file, ruleCode) => ({ number, file, inclusion: 'Included', ruleCode });
+
+test('a resumed row whose checkpoint names a document with no usable rules is reported missing with its code', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001', docs: [UC01], resume: true });
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1', [included(1, UC09)]);
+  const { lines, code } = await precheckQueue(config);
+  assert.equal(code, 1);
+  assert.ok(lines.includes('issue-501-change-7001  checkpoint  present  phase1'));
+  assert.ok(lines.includes('issue-501-change-7001  document-1  missing  rules-not-extracted'));
+  assert.ok(!lines.some((line) => line.includes('rules-ok')), 'the --doc path is not what the run reads');
+  assert.ok(!lines.join('\n').includes('Unmapped'), 'no document name reaches the lines');
+});
+
+test('a checkpoint holding an absolute worktree path is checked against the root the check has', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001', resume: true });
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1', [
+    included(1, `/elsewhere/.claude/worktrees/w1/${UC09}`),
+    included(2, `/elsewhere/.claude/worktrees/w1/${UC01}`),
+    included(3, 'docs/LIB/Not-There.md')]);
+  const { lines } = await precheckQueue(config);
+  assert.ok(lines.includes('issue-501-change-7001  document-1  missing  rules-not-extracted'));
+  assert.ok(lines.includes('issue-501-change-7001  document-2  present  rules-ok'));
+  assert.ok(lines.includes('issue-501-change-7001  document-3  missing  document-file'));
+});
+
+test('a held document whose export now fails is present, as Phase 2 keeps its rules', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001', resume: true });
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1', [included(1, UC09, 'rules-ok')]);
+  const { lines, code } = await precheckQueue(config);
+  assert.ok(lines.includes('issue-501-change-7001  document-1  present  rules-not-extracted'));
+  assert.equal(code, 0);
+});
+
+test('a context-only document and a checkpoint past Phase 2 run no export', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001', resume: true });
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1',
+    [{ ...included(1, UC09), inclusion: 'Supporting Context Only' }]);
+  let { lines } = await precheckQueue(config);
+  assert.ok(lines.includes('issue-501-change-7001  document-1  present  context-only'));
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase3', [included(1, UC09)]);
+  ({ lines } = await precheckQueue(config));
+  assert.ok(lines.includes('issue-501-change-7001  documents  present  past-phase2'));
+});
+
+test('a resumed row with no checkpoint is checked from its --doc as a fresh job is', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001', docs: [UC01], resume: true });
+  const { lines, code } = await precheckQueue(config);
+  assert.equal(code, 0);
+  assert.ok(lines.includes('issue-501-change-7001  document-1  present  rules-ok'));
+  assert.ok(!lines.some((line) => line.includes('checkpoint')));
+});
+
+test('check --resume reads the checkpoint and exits 1 for a document with no rules', (t) => {
+  const { config, file } = fixtureConfig(t);
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1', [included(1, UC09)]);
+  const run = spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'check', '--config', file,
+    '--issue', '501', '--change', '7001', '--doc', UC01, '--resume'], { encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /^document-1  missing  rules-not-extracted$/m);
+});
+
+test('a stale running row is checked against its checkpoint, as the nightly settle resumes it', async (t) => {
+  const { config } = fixtureConfig(t);
+  addJob(config, { issue: '501', change: '7001' });
+  setRow(config, 'issue-501-change-7001', { status: 'running', started: new Date().toISOString() });
+  writeCheckpoint(config, 'issue-501-change-7001', 'phase1', [included(1, UC09)]);
+  const { lines, code } = await precheckQueue(config);
+  assert.equal(code, 1);
+  assert.ok(lines.includes('issue-501-change-7001  running  stale-row'));
+  assert.ok(lines.includes('issue-501-change-7001  document-1  missing  rules-not-extracted'));
 });

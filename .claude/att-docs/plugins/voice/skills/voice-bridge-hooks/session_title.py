@@ -4,6 +4,7 @@
 usage: session_title.py work "<work name>"
        session_title.py status "<status>"
        session_title.py show
+       session_title.py [--config <extension.json>] hook prompt|stop < <hook payload>
 
 A session title reads "<base>", "<base> - <work>", and, when the session has stopped or is
 waiting, "<base> - <work> (<status>)". The base is the title the session started with, such
@@ -18,15 +19,49 @@ which is the Claude Code process whose shell ran this script. The title is chang
 /rename does it: the same control message the app's session list sends is written to the
 session's own inbox socket, then the session's file is read until it shows the new title.
 
+hook is the entry point for a hooks file to call, so the status follows the session without
+the session setting it. It reads the hook payload on stdin, never changes the work name, waits at
+most RENAME_WAIT_SECONDS for the rename to show so the next hook reads it, and always exits 0
+without a word, since a title is never worth a failed turn. `hook prompt` (UserPromptSubmit)
+sets "working": the user has answered, so a status is over. `hook stop` (Stop) sets one of:
+
+- "needs you", when the turn leaves the user something to answer: a question in the wrap-up
+  box, a last line that ends in a question mark, or the review label added to a pull request.
+  A permission prompt blocks inside a turn and is answered before the turn can stop, so a
+  stop never sees one;
+- "working", when background work is due to wake the session, or an event was delivered
+  after the stop;
+- "idle", otherwise.
+
+A "stuck", "stopped", "waiting on CI" or "needs you" already on the title is kept at a stop,
+since the prompt set "working" at the start of the turn and the session set it since. When
+the payload says another Stop hook blocked and the turn went on (stop_hook_active), no prompt
+came first, so a "needs you" may be this hook's own and is recomputed. A prompt the user types
+sets "working", and naming new work takes any status away, so either ends it. A prompt that is
+an automated event leaves a "stuck", "stopped" or "waiting on CI" and sets "working" over any
+other status. The hook does nothing for a subagent (a payload with an agent_id), for any event
+but the one the command names, for a session with no title, for a stop with no transcript,
+when another rename changed the title while it ran, or when the
+payload's session is not this one. The extension file's review label is read when --config
+names one that reads; without one the label check is skipped.
+
 SESSION_TITLE_SESSIONS_DIR, SESSION_TITLE_PROC_DIR and SESSION_TITLE_PID point it at fixtures
 in tests. It prints what happened and exits 0, or prints why not to stderr and exits 1.
 """
+import contextlib
+import io
 import json
 import os
 import re
 import socket
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import background_pending  # noqa: E402
+import hook_config  # noqa: E402
+import stop_attention  # noqa: E402
+from transcript import EVENT_TAG, REMINDER, read_transcript  # noqa: E402
 
 STATUSES = ("idle", "waiting on you", "stuck", "stopped", "waiting on CI", "needs you", "working")
 SEPARATOR = " - "
@@ -142,23 +177,157 @@ def send_rename(entry, name):
         conn.sendall((json.dumps(message) + "\n").encode("utf-8"))
 
 
-def wait_for_title(sessions_dir, pid, name, wait=None):
+def wait_for_title(sessions_dir, pid, name, wait=None, same=None):
     """Whether the session's file shows `name` within `wait` seconds (WAIT_SECONDS by
-    default)."""
+    default). `same(shown, name)` says whether a title the file shows counts as `name`; the
+    default is that they are equal."""
     deadline = time.monotonic() + (WAIT_SECONDS if wait is None else wait)
     while True:
         entry = _read_json(os.path.join(sessions_dir, "%d.json" % pid))
-        if isinstance(entry, dict) and str(entry.get("name") or "").strip() == name:
+        shown = str(entry.get("name") or "").strip() if isinstance(entry, dict) else None
+        if shown is not None and (same(shown, name) if same else shown == name):
             return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(POLL_SECONDS)
 
 
-def main(argv, out=None, err=None):
+HOOK_EVENTS = {"prompt": "UserPromptSubmit", "stop": "Stop"}
+# The statuses only the session can know. The hook only ever writes working, needs you and
+# idle, so one of these on the title is the session's own, and the hook leaves it. A prompt
+# the user types sets working, which ends it; so does the session naming new work.
+KEPT_ACROSS_EVENTS = ("stuck", "stopped", "waiting on CI")
+# At a stop, "needs you" is also the session's: a prompt sets working at the start of the
+# turn, so one on the title at the stop was set during it. A prompt that is an automated event
+# does not end it as a user's prompt does, so the hook cannot tell its own "needs you" from
+# the session's there and replaces it with working.
+KEPT_STATUSES = KEPT_ACROSS_EVENTS + ("needs you",)
+# How long the hook waits for its rename to show in the session's file, so a hook that runs
+# right after it reads the title it set. A short turn can end that fast.
+RENAME_WAIT_SECONDS = 1.0
+
+
+def shows_rename(shown, wanted):
+    """Whether the title the session's file shows is the rename asked for. Claude Code may add
+    a number after the status of a title another session holds, so the work name and the
+    status are what must agree."""
+    return split_title(shown)[1:] == split_title(wanted)[1:]
+
+
+def stop_status(payload, entries, pid, proc_dir, stop_ms, labeling=True):
+    """The status a stopped session shows: needs you, working or idle, in that order."""
+    turn = stop_attention.last_turn(entries)
+    asking = stop_attention.asked(turn) \
+        or stop_attention.ends_in_question(payload.get("last_assistant_message"))
+    if not asking and labeling:
+        try:
+            asking = stop_attention.labeled(turn)
+        except BaseException:  # an unreadable config only skips the label check
+            asking = False
+    if asking:
+        return "needs you"
+    started = background_pending.started_ms(pid, proc=proc_dir)
+    if background_pending.pending(entries, started_ms=started) \
+            or background_pending.unanswered(
+                entries, stop_ms - background_pending.STOP_SLACK_MS):
+        return "working"
+    return "idle"
+
+
+def hook_main(event, stdin, sessions_dir, proc_dir, start, config=None):
+    """The hook for `event` ("prompt" or "stop"). Returns 0 whatever happens, and writes
+    nothing, not even the message the extension file reader prints before it gives up."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            _hook(event, stdin, sessions_dir, proc_dir, start, config)
+        except BaseException:  # a title is never worth a failed turn
+            pass
+    return 0
+
+
+def _load_config(config):
+    """Whether the extension file read, so the review label can be checked. A file that is
+    missing or does not read only skips that check."""
+    if not config or not os.path.isfile(config):
+        return False
+    try:
+        hook_config.use(config)
+    except SystemExit:
+        return False
+    # Both fields build the label patterns the check reads.
+    return hook_config.has("reviewLabel") and hook_config.has("readyLine")
+
+
+def _hook(event, stdin, sessions_dir, proc_dir, start, config):
+    # This process started just after the stop it answers, and an event delivered from then on
+    # has started a turn after it. The clock is the fallback where /proc cannot say.
+    stop_ms = background_pending.started_ms(os.getpid()) or time.time() * 1000
+    payload = json.loads(stdin.read())
+    if not isinstance(payload, dict) or payload.get("agent_id") \
+            or payload.get("hook_event_name") != HOOK_EVENTS[event]:
+        return
+    entry = find_own_session(sessions_dir, proc_dir, start)
+    if entry is None:
+        return
+    if payload.get("session_id") and entry.get("sessionId") \
+            and payload["session_id"] != entry["sessionId"]:
+        return
+    current = str(entry.get("name") or "").strip()
+    if not current:
+        # A session with no title has no base to keep, and a bare status is not a title.
+        return
+    if event == "prompt":
+        # An event the app delivers as a prompt is not the user answering, so a status only
+        # the session can know stays. The turn it starts is work, so any other status goes.
+        if EVENT_TAG.match(REMINDER.sub("", str(payload.get("prompt") or ""))) \
+                and split_title(current)[2] in KEPT_ACROSS_EVENTS:
+            return
+        status = "working"
+    else:
+        # A turn that goes on after another Stop hook blocked has no prompt hook ahead of it,
+        # so a "needs you" on the title may be this hook's own from the stop before.
+        kept = KEPT_ACROSS_EVENTS if payload.get("stop_hook_active") else KEPT_STATUSES
+        if split_title(current)[2] in kept:
+            return
+        path = payload.get("transcript_path") or ""
+        entries = read_transcript(path) if os.path.isfile(path) else []
+        if not entries:
+            # With no transcript to read, the turn's work is unknown, so the title stays.
+            return
+        status = stop_status(payload, entries, int(entry["pid"]), proc_dir, stop_ms,
+                             _load_config(config))
+    name = new_title(current, "status", status)
+    if name == current:
+        return
+    shown = _read_json(os.path.join(sessions_dir, "%d.json" % int(entry["pid"])))
+    if not isinstance(shown, dict) or str(shown.get("name") or "").strip() != current:
+        # Another hook or the user renamed the session while this one read the transcript.
+        return
+    send_rename(entry, name)
+    wait_for_title(sessions_dir, int(entry["pid"]), name, wait=RENAME_WAIT_SECONDS,
+                   same=shows_rename)
+
+
+def main(argv, out=None, err=None, stdin=None):
     out = out or sys.stdout
     err = err or sys.stderr
     args = argv[1:]
+    config = None
+    # run.sh puts --config <extension.json> ahead of the script's own arguments.
+    if args and args[0] == "--config":
+        config = args[1] if len(args) > 1 else None
+        args = args[2:]
+    elif args and args[0].startswith("--config="):
+        config = args[0].split("=", 1)[1]
+        args = args[1:]
+    if args and args[0] == "hook":
+        given = os.environ.get("SESSION_TITLE_PID") or str(os.getppid())
+        if len(args) != 2 or args[1] not in HOOK_EVENTS or not re.fullmatch(r"[0-9]+", given):
+            return 0
+        return hook_main(
+            args[1], stdin or sys.stdin,
+            os.environ.get("SESSION_TITLE_SESSIONS_DIR", os.path.expanduser("~/.claude/sessions")),
+            os.environ.get("SESSION_TITLE_PROC_DIR", "/proc"), int(given), config)
     if not args or args[0] not in ("work", "status", "show") \
             or (args[0] != "show" and len(args) != 2) or (args[0] == "show" and len(args) != 1):
         print(__doc__.strip().splitlines()[2], file=err)

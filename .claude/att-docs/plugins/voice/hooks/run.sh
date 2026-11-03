@@ -34,7 +34,7 @@ project=${CLAUDE_PROJECT_DIR:-$PWD}
 # usage: registers <settings file>; succeeds when a hook command in it runs a voice script.
 registers() {
   jq -e '[.hooks[]?[]?.hooks[]?.command // empty]
-    | any(test("voice_bridge_reply|speak-attention"))' "$1" >/dev/null 2>&1
+    | any(test("voice_bridge_reply|speak-attention|session_title"))' "$1" >/dev/null 2>&1
 }
 for settings in "$project/.claude/settings.json" "$project/.claude/settings.local.json" \
   "$HOME/.claude/settings.json"; do

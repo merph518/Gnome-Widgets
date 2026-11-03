@@ -12,10 +12,11 @@
   "scope": "reference/scope.md",
   "validation": "reference/validation.md",
   "revalidation": "reference/revalidation.md",
+  "operatingManual": "reference/operating-manual.md",
   "methodology": {
    "file": "reference/methodology.md",
-   "skipBefore": 8,
-   "byPhase": { "4": [10], "5": [9], "6": [4, 7], "9": [13, 14] }
+   "skipBefore": 10,
+   "byPhase": { "4": [10], "5": [9], "6": [4, 7], "7": [11, 12], "9": [13, 14] }
   }
  },
  "idFields": { "issue": "issue", "change": "change", "changeApplies": "changeApplies", "description": "changeDescription" },

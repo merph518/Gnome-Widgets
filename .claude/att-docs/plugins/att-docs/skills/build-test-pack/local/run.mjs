@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { fill, loadReference, MEMORY_STOP } from './config.mjs';
+import { fill, loadReference, MEMORY_STOP, rootRelative } from './config.mjs';
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { Cancelled, ModelError, modelClient } from './model.mjs';
 import { jobLogs, readStatusLog } from './status.mjs';
@@ -41,7 +41,7 @@ function countStatuses(stdout) {
 
 /** The phases in the order a job runs them; a checkpoint names the last one passed. */
 export const PHASES = ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5', 'phase6',
-  'phase7', 'phase8', 'phase9-checklist', 'phase9-confidence', 'phase9-senior',
+  'phase7', 'phase8', 'phase9-checklist', 'phase9-senior', 'phase9-confidence',
   'phase9-revalidate', 'phase10'];
 
 // What a run builds for itself from the config; everything else on ctx is the job's state.
@@ -49,11 +49,13 @@ const SETUP = new Set(['config', 'job', 'logs', 'builder', 'suiteMerge', 'model'
   'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets', 'fullCoverageObjective', 'breakItObjective', 'rulesFresh',
   'window', 'windowNoted']);
 
-const checkpointPath = (outDir) => path.join(outDir, 'work', 'checkpoint.json');
+export const checkpointPath = (outDir) => path.join(outDir, 'work', 'checkpoint.json');
 
-function readCheckpoint(outDir) {
+export function readCheckpoint(outDir) {
   try {
     const saved = JSON.parse(fs.readFileSync(checkpointPath(outDir), 'utf8'));
+    // The confidence step used to run before the senior review; a job saved after it reruns both.
+    if (saved.phase === 'phase9-confidence' && !saved.state?.confidenceSteps) saved.phase = 'phase9-checklist';
     return PHASES.includes(saved.phase) ? saved : null;
   } catch {
     return null;
@@ -106,7 +108,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     breakItObjective: setObjective(config.breakItObjective, builder, 'BREAK IT'),
     suiteSetOrder: suiteMerge?.SUITE_SET_ORDER ?? builder.OBJECTIVES.slice(1),
     suiteRunSets: config.suiteMerge?.runSets ?? ['Regression Testing', 'Full Coverage Required Run'],
-    calls: 0, repairs: 0, droppedObjectives: 0, derived: 0, reviewIssues: 0, reuse: [],
+    calls: 0, repairs: 0, droppedObjectives: [], derived: 0, reviewIssues: 0, reuse: [],
     tokens: { prompt: 0, output: 0 },
     private(name, value) {
       fs.writeFileSync(path.join(outDir, 'work', name), `${JSON.stringify(value, null, 1)}\n`);
@@ -123,6 +125,11 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   const done = saved ? PHASES.indexOf(saved.phase) : -1;
   if (saved) {
     Object.assign(ctx, saved.state);
+    // The documents are read from the root this run has, whatever root wrote the checkpoint.
+    for (const doc of ctx.documents ?? []) if (doc.file) doc.file = rootRelative(config, doc.file);
+    if (ctx.documentPaths) {
+      ctx.documentPaths = ctx.documentPaths.map((file) => rootRelative(config, file));
+    }
     pack = saved.pack ?? ctx.pack;
     logs.status({ job: id, phase: PHASES[done + 1] ?? 'done', event: 'resume', after: saved.phase });
   }
@@ -200,12 +207,17 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       const fixes = await P.phase9Fix(ctx, pack);
       return { ...counts, fixRounds: fixes.rounds };
     });
-    await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
     await step('phase9-senior', () => P.phase9SeniorReview(ctx, pack));
+    await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
     await step('phase9-revalidate', async () => {
       delete pack.revalidation;
       await P.phase8(ctx, pack, 'rebuild');
       const again = await P.revalidate(ctx, pack);
+      // Items still open lower what the pack can claim, so the rating is made again with them in view.
+      if (!again.passed) {
+        return { revalidated: false, remaining: again.remaining,
+          confidence: await P.reRateConfidence(ctx, pack) };
+      }
       return { revalidated: again.passed, remaining: again.remaining };
     });
     await step('phase10', () => P.phase10(ctx, pack));
@@ -253,6 +265,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       fs.writeFileSync(path.join(outDir, 'work', 'partial-pack.json'),
         `${JSON.stringify(ctx.pack, null, 1)}\n`);
     }
-    return { ok: false, id, outDir, phase, reason, ms: now() - started, packPath, workbook: written };
+    return { ok: false, id, outDir, phase, reason, ms: now() - started, packPath, workbook: written,
+      ...(error instanceof P.GateError ? { counts: error.counts } : {}) };
   }
 }

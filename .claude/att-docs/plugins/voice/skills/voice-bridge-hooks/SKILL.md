@@ -40,7 +40,7 @@ All of them ship in this folder.
 | `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle` and `managed <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
 | `sessions.py` | Lists the open Claude sessions the way Baton's `list_sessions` does; imported by `speechctl` | no |
 | `speak_pending.py` | Picks the text blocks a turn has not had read aloud yet | no |
-| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; it talks to the session's own inbox, never to Baton. Baton drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped`, `waiting on CI`, `needs you` and `working` as "marked ..." only on the idle line, and only while the session is not waiting | no |
+| `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; `hook prompt` and `hook stop` read a hook payload and set `working`, `needs you` or `idle` themselves, keep a stuck, stopped, waiting on CI or needs you already on the title, skip subagents, and always exit 0 quietly; it talks to the session's own inbox, never to Baton. Baton drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped`, `waiting on CI`, `needs you` and `working` as "marked ..." only on the idle line, and only while the session is not waiting. The plugin runs `hook prompt` on UserPromptSubmit and `hook stop` on Stop | yes, for `hook` |
 | `background_pending.py` | Names the background work still due to wake a session, so a stop stays quiet; `--describe` also says what each item is, for Baton's session list | no |
 | `hook_config.py` | Reads `<config>` | |
 | `defaults.json` | The config for a repository with no extension file; the plugin's `hooks/run.sh` passes it | |
@@ -151,7 +151,7 @@ Each hook calls `hooks/run.sh`, which picks the config for the session's reposit
   a session is never reported as waiting on a ledger.
 
 A repository whose own `.claude/settings.json` or `settings.local.json` still registers
-`voice_bridge_reply` or `speak-attention` keeps those hooks, and `run.sh` exits quietly
+`voice_bridge_reply`, `speak-attention` or `session_title` keeps those hooks, and `run.sh` exits quietly
 so no hook fires twice. A repository moves to the plugin by deleting its voice entries
 and keeping its extension file.
 

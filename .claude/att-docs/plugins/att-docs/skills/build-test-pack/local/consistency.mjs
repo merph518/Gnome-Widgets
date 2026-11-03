@@ -32,7 +32,10 @@ function dashboardValues(pack) {
 /**
  * Dashboard counts against the sheets they count: test cards, test sets, rule
  * rows and assumptions. Returns [{ label, stated, actual, row }] for each count
- * the Dashboard states that differs from the sheet.
+ * the Dashboard states that differs from the sheet. A rule count may read
+ * "15 impacted of 47": the first number is checked against the impacted rows and
+ * the second against all of them. A rule mismatch carries a `note` that gives both
+ * counts, so a reader sees what the sheet holds.
  */
 export function dashboardCountMismatches(pack) {
   const counted = [
@@ -43,12 +46,27 @@ export function dashboardCountMismatches(pack) {
   ];
   const found = [];
   for (const { n, label, value } of dashboardValues(pack)) {
-    const stated = /^\s*(\d+)\s*$/.exec(value)?.[1];
     const target = counted.find(([pattern]) => pattern.test(label));
+    // Only a rule count reads "N impacted of M"; any other "N of M" row is not a plain count.
+    const split = target?.[2] !== undefined
+      ? /^\s*(\d+)\s+impacted\s+of\s+(\d+)\s*$/i.exec(value) : null;
+    const stated = split ? split[1] : /^\s*(\d+)\s*$/.exec(value)?.[1];
     if (stated === undefined || !target || target[1] === undefined) continue;
+    const note = target[2] === undefined ? undefined
+      : `${target[1]} rule rows, ${target[2]} of them impacted`;
+    if (split && target[2] !== undefined) {
+      // "N impacted of M" states both counts, and each is checked against its own.
+      if (Number(split[1]) !== target[2]) {
+        found.push({ label, stated: Number(split[1]), actual: target[2], row: n, note });
+      }
+      if (Number(split[2]) !== target[1]) {
+        found.push({ label, stated: Number(split[2]), actual: target[1], row: n, note });
+      }
+      continue;
+    }
     // A count labeled impacted leaves the Not Impacted baseline rules out.
     const actual = target[2] !== undefined && /impacted/i.test(label) ? target[2] : target[1];
-    if (Number(stated) !== actual) found.push({ label, stated: Number(stated), actual, row: n });
+    if (Number(stated) !== actual) found.push({ label, stated: Number(stated), actual, row: n, note });
   }
   return found;
 }

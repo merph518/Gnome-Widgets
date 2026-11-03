@@ -59,6 +59,36 @@ printf '%s\n' '{"permissions":{"allow":["Bash(scripts/speak-attention_test.sh)"]
 check "a permission naming a script is not a hook" "py --config $defaults x payload" \
   "$(CLAUDE_PROJECT_DIR=$work/allowed "$run" probe.py x <<<payload)"
 
+mkdir -p "$work/titled/.claude"
+printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x/session_title.py hook stop"}]}]}}' \
+  >"$work/titled/.claude/settings.json"
+check "steps aside when the project registers the title hook" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/titled "$run" probe.py x <<<payload)"
+CLAUDE_PROJECT_DIR=$work/titled "$run" probe.py x </dev/null
+check "and exits 0" 0 $?
+
+mkdir -p "$work/titleperm/.claude"
+printf '%s\n' '{"permissions":{"allow":["Bash(python3 x/session_title.py show)"]}}' \
+  >"$work/titleperm/.claude/settings.json"
+check "a permission naming the title script is not a hook" "py --config $defaults x payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/titleperm "$run" probe.py x <<<payload)"
+
+# Every hook the plugin registers names a script that sits in the skill folder.
+for entry in "session_title.py hook prompt" "session_title.py hook stop"; do
+  found=$(jq -r --arg e "$entry" '[.hooks[][].hooks[].command | select(contains($e))] | length' \
+    "$here/hooks.json")
+  check "hooks.json registers $entry once" 1 "$found"
+done
+scanned=$(jq -r '.hooks[][].hooks[].command | scan("run\\.sh\\\\?\"? ([A-Za-z0-9_.-]+)") | .[0]' \
+  "$here/hooks.json")
+check "the scan names a script for every hook that runs one" \
+  "$(jq '[.hooks[][].hooks[].command | select(contains("run.sh"))] | length' "$here/hooks.json")" \
+  "$(printf '%s\n' "$scanned" | grep -c .)"
+for script in $(printf '%s\n' "$scanned" | sort -u); do
+  [[ -f $here/../skills/voice-bridge-hooks/$script ]] ||
+    { echo "FAIL hooks.json names $script, which is not in the skill folder" >&2; fail=1; }
+done
+
 mkdir -p "$work/home/.claude"
 printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x/speak-attention.sh"}]}]}}' \
   >"$work/home/.claude/settings.json"

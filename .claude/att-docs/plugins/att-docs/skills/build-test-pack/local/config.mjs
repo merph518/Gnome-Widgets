@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { localEndpoint } from './model.mjs';
 
 const REQUIRED_REFERENCES = ['procedure', 'workbookStandard', 'implementationGuide'];
@@ -28,8 +29,39 @@ export const RULE_SHAPE = {
 /** The `phase` names a reasoning call carries; `model.reasoningOutputByPhase` is keyed by them. */
 export const REASONING_PHASES = ['phase1', 'phase3', 'phase4', 'phase5', 'phase9'];
 
+/**
+ * The thinking limit of each reasoning step, in tokens, keyed `<phase>.<step>`. A step
+ * with an index or a repeat suffix is keyed without it, so `rules-3` is `phase1.rules`.
+ * `model.reasoningOutputByStep` overrides these, and `model.reasoningOutput` caps them.
+ * A step not listed here has no limit of its own.
+ */
+export const REASONING_STEPS = {
+  'phase1.rules': 20480,
+  'phase1.understanding': 12288,
+  'phase3.scope': 20480,
+  'phase4.impact': 8192,
+  'phase5.objectives': 12288,
+  'phase9.senior': 12288,
+  'phase9.confidence-steps': 12288,
+  'phase9.confidence-overall': 8192,
+  'phase9.revalidation': 12288,
+};
+
+/** A step's name without the index or repeat suffix its call adds. */
+export const stepKey = (step) => String(step ?? '').replace(/-(\d+|again)$/, '');
+
 /** How many times a job is tried before it is flagged and dropped from the queue. */
 export const MAX_TRIES = 2;
+
+/**
+ * The stops a second try cannot change: the document or its rules have to be fixed by a
+ * person first, so the job waits as stopped instead of using its tries on the same checkpoint.
+ */
+export const HOLD_REASONS = ['gate:rules-not-extracted', 'gate:rules-malformed', 'gate:document-file',
+  'gate:duplicate-rule-wording', 'gate:rule-conflict', 'gate:needs-user-review'];
+
+/** True for a stopped row that waits for a person rather than for a request to resume. */
+export const heldRow = (row) => row.status === 'stopped' && HOLD_REASONS.includes(row.reason);
 
 /** The reason a run stops when memory stays low; such a stop is not one of a job's tries. */
 export const MEMORY_STOP = 'memory:low';
@@ -50,6 +82,101 @@ export const memoryStops = (failures = []) => {
 const fill = (template, values) => String(template).replace(/\{(\w+)\}/g, (whole, key) =>
   (values[key] === undefined ? whole : String(values[key])));
 export { fill };
+
+// Git run for a path must not read the repository a hook or a parent git command pointed it at.
+const gitEnv = () => {
+  const env = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_COMMON_DIR']) delete env[key];
+  return env;
+};
+
+const realOr = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+
+/** { prefix, top } for `root`: its folder inside its repository, with a trailing slash, and the top folder. */
+function gitPlace(root) {
+  const run = spawnSync('git', ['rev-parse', '--show-prefix', '--show-toplevel'],
+    { cwd: root, encoding: 'utf8', env: gitEnv() });
+  if (run.status !== 0) return null;
+  const lines = run.stdout.replace(/\n$/, '').split('\n');
+  return lines.length === 2 ? { prefix: lines[0], top: realOr(lines[1]) } : null;
+}
+
+/**
+ * A document path as the job holds it: relative to the repository root, with
+ * forward slashes. The part of a path after a `.claude/worktrees/<name>/` folder is
+ * relative to that worktree's top folder. When the worktree belongs to the root's
+ * own repository, the root's folder in that repository is cut off it. Otherwise it
+ * is cut down to the longest tail of a folder and a file that exists under the
+ * root, then to the tail from `docs/` on, then left whole. Any other path inside
+ * the root is made relative; an absolute one outside it is read from its `docs/`
+ * folder on, or returned as given, and a relative one outside it is only normalized.
+ */
+export function rootRelative(config, file) {
+  const given = file;
+  const posix = (p) => p.split(path.sep).join('/');
+  const absolute = path.isAbsolute(given);
+  const worktree = /^(.*?)(?:^|\/)\.claude\/worktrees\/[^/]+\/(.+)$/;
+  const docs = /(?:^|\/)(docs\/.+)$/;
+  const rel = absolute ? path.relative(config.root, given) : path.normalize(given);
+  const inside = !rel.startsWith('..') && !path.isAbsolute(rel);
+  // Only the part below the root is matched, so where the root itself sits never counts.
+  const found = absolute && !inside ? worktree.exec(posix(given))
+    : /^((?:\.\.\/)*)\.claude\/worktrees\/[^/]+\/(.+)$/.exec(posix(rel));
+  if (!found) {
+    if (inside) return posix(rel) || '.';
+    return absolute ? docs.exec(posix(given))?.[1] ?? given : posix(rel);
+  }
+  const base = absolute && !inside ? found[1] : path.resolve(config.root, found[1]);
+  const rest = found[2];
+  const place = gitPlace(config.root);
+  if (place && realOr(base || '/') === place.top && rest.startsWith(place.prefix)
+    && rest.length > place.prefix.length) {
+    return rest.slice(place.prefix.length);
+  }
+  // A tail of at least a folder and a file, so a bare file name never matches an unrelated file.
+  const parts = rest.split('/');
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const tail = parts.slice(i).join('/');
+    const at = path.resolve(config.root, tail);
+    if (fs.existsSync(at) && fs.statSync(at).isFile()) return tail;
+  }
+  return docs.exec(rest)?.[1] ?? rest;
+}
+
+/**
+ * The main checkout when `root` is inside a linked worktree of it, as
+ * { main, top }: the main checkout's folder and the worktree's top folder. Null
+ * for the main checkout itself, a folder outside a repository, or no git.
+ */
+export function mainCheckout(root) {
+  const run = spawnSync('git', ['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'],
+    { cwd: root, encoding: 'utf8', env: gitEnv() });
+  if (run.status !== 0) return null;
+  const lines = run.stdout.trim().split('\n');
+  if (lines.length !== 3) return null;
+  const real = (p) => { try { return fs.realpathSync(path.resolve(root, p)); } catch { return path.resolve(root, p); } };
+  const [dir, common, top] = lines.map(real);
+  if (dir === common) return null;
+  return { main: path.basename(common) === '.git' ? path.dirname(common) : common, top };
+}
+
+/**
+ * The message that refuses a run from a worktree, or null. The job's documents
+ * live in the main checkout, because a worktree is removed when its branch
+ * merges. `BUILD_PACK_ALLOW_WORKTREE=1` skips the check for tests that run
+ * over fixtures inside a worktree.
+ */
+export function worktreeRefusal(config) {
+  if (process.env.BUILD_PACK_ALLOW_WORKTREE === '1') return null;
+  const found = mainCheckout(config.root);
+  if (!found) return null;
+  let file = config.file;
+  try { file = fs.realpathSync(file); } catch { /* the path as given */ }
+  const inside = path.relative(found.top, file);
+  const suggestion = inside.startsWith('..') ? '' : ` --config ${path.join(found.main, inside)}`;
+  return `${config.root} is in a worktree of ${found.main}; a job's documents live in the main checkout,`
+    + ` so run from there${suggestion ? ` with${suggestion}` : ''}.`;
+}
 
 export function loadConfig(configPath) {
   const file = path.resolve(configPath);
@@ -90,6 +217,22 @@ export function loadConfig(configPath) {
       }
       if (!Number.isInteger(cap) || cap < 1024 || cap > model.reasoningOutput) {
         throw new Error(`config model.reasoningOutputByPhase.${phase} must be a whole number`
+          + ' from 1024 to model.reasoningOutput');
+      }
+    }
+  }
+  if (raw.model?.reasoningOutputByStep !== undefined) {
+    const byStep = model.reasoningOutputByStep;
+    if (!byStep || typeof byStep !== 'object' || Array.isArray(byStep)) {
+      throw new Error('config model.reasoningOutputByStep must be an object of step caps');
+    }
+    for (const [step, cap] of Object.entries(byStep)) {
+      if (!(step in REASONING_STEPS)) {
+        throw new Error(`config model.reasoningOutputByStep.${step} is not a reasoning step`
+          + ` (${Object.keys(REASONING_STEPS).join(', ')})`);
+      }
+      if (!Number.isInteger(cap) || cap < 1024 || cap > model.reasoningOutput) {
+        throw new Error(`config model.reasoningOutputByStep.${step} must be a whole number`
           + ' from 1024 to model.reasoningOutput');
       }
     }
@@ -177,6 +320,37 @@ export function loadConfig(configPath) {
   if (raw.exclusiveSets !== undefined && typeof raw.exclusiveSets !== 'boolean') {
     throw new Error('config exclusiveSets must be true or false');
   }
+  const objectiveEvidence = raw.objectiveEvidence ?? [];
+  if (!Array.isArray(objectiveEvidence)) throw new Error('config objectiveEvidence must be a list');
+  const evidenceKeys = ['id', 'objective', 'claim', 'terms', 'reason'];
+  const validPattern = (source) => {
+    try { new RegExp(source, 'i'); return true; } catch { return false; }
+  };
+  const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  const evidenceIds = new Set();
+  objectiveEvidence.forEach((rule, i) => {
+    const where = `config objectiveEvidence[${i}]`;
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error(`${where} must be an object`);
+    const extra = Object.keys(rule).find((key) => !evidenceKeys.includes(key));
+    if (extra) throw new Error(`${where} has an unknown key: ${extra}`);
+    if (typeof rule.id !== 'string' || !/^[A-Za-z][\w-]*$/.test(rule.id)) {
+      throw new Error(`${where}.id must be a name of letters, digits, _ and -, starting with a letter`);
+    }
+    if (evidenceIds.has(rule.id)) throw new Error(`${where}.id repeats ${rule.id}`);
+    evidenceIds.add(rule.id);
+    if (!nonEmpty(rule.objective) || !validPattern(rule.objective)) {
+      throw new Error(`${where}.objective is not a valid pattern`);
+    }
+    for (const key of ['claim', 'reason']) {
+      if (!nonEmpty(rule[key])) throw new Error(`${where}.${key} must be a non-empty string`);
+    }
+    if (!Array.isArray(rule.terms) || !rule.terms.length) {
+      throw new Error(`${where}.terms must be a non-empty list`);
+    }
+    rule.terms.forEach((term, j) => {
+      if (!nonEmpty(term) || !validPattern(term)) throw new Error(`${where}.terms[${j}] is not a valid pattern`);
+    });
+  });
   const moduleAbbreviations = raw.moduleAbbreviations ?? {};
   for (const [name, abbreviation] of Object.entries(moduleAbbreviations)) {
     if (!/^[A-Z0-9]{2,6}$/.test(abbreviation)) {
@@ -240,6 +414,8 @@ export function loadConfig(configPath) {
     breakItObjective: raw.breakItObjective ?? null,
     // false: a card may sit in several sets. true: a BREAK IT card sits only in the BREAK IT set.
     exclusiveSets: raw.exclusiveSets === true,
+    // Evidence a change can hold that makes an objective applicable; see Phase 5.
+    objectiveEvidence,
     output: outputDir,
     pause,
     closeApps,
@@ -287,13 +463,16 @@ export function globFiles(root, pattern) {
 /**
  * The reference documents, read once. `chapters(phase)` gives the methodology
  * chapters config names for a phase, each cut from its heading to the next.
+ * `docs.operatingManual` holds the operating rules. It stays out of `core`, so only
+ * the design phases that name it carry it.
  */
 export function loadReference(config) {
   const read = (key) => (config.reference[key]
     ? fs.readFileSync(config.at(config.reference[key]), 'utf8') : '');
   const docs = {};
   for (const key of ['procedure', 'workbookStandard', 'implementationGuide', 'glossary',
-    'intake', 'understandingGate', 'ruleIntake', 'scope', 'validation', 'revalidation']) {
+    'intake', 'understandingGate', 'ruleIntake', 'scope', 'validation', 'revalidation',
+    'operatingManual']) {
     docs[key] = read(key);
   }
   const methodology = config.reference.methodology;

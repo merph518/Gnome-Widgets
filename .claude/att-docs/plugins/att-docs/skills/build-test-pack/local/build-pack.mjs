@@ -3,7 +3,7 @@
 //
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
-//   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+//   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 //   node build-pack.mjs check --config <pipeline.json>
 //   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
 //   node build-pack.mjs queue remove --config <pipeline.json> --job <id>
@@ -16,7 +16,7 @@
 //   node build-pack.mjs queue status --config <pipeline.json> [--job <id>]
 //   node build-pack.mjs queue summary --config <pipeline.json>
 //   node build-pack.mjs report --config <pipeline.json> [--period day|week|auto] [--seed <n>]
-//   node build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <pipeline.json>]
+//   node build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <pipeline.json> [--no-model]]
 //
 // Console output is the content-free status lines only: phase names, pass or
 // fail, reason codes, counts and timings. What the model wrote stays in each
@@ -29,21 +29,21 @@ import { fileURLToPath } from 'node:url';
 import { setupCheck } from './check.mjs';
 import { runCompare, UsageError } from './compare.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
-import { countedTries, fill, globFiles, loadConfig, MAX_MEMORY_STOPS, MAX_TRIES, MEMORY_STOP,
-  memoryStops } from './config.mjs';
+import { countedTries, fill, globFiles, heldRow, HOLD_REASONS, loadConfig, MAX_MEMORY_STOPS, MAX_TRIES, MEMORY_STOP,
+  memoryStops, rootRelative, worktreeRefusal } from './config.mjs';
 import { modelClient } from './model.mjs';
 import { createAppCloser } from './close-apps.mjs';
 import { createPauser, downUnits, markRestoreFile, onPauseList, pendingRestore } from './pause.mjs';
-import { documentRules, USABLE_RULE_CODES } from './phases.mjs';
+import { documentRules, phase2Verdict, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
 import { seededRandom, writeReports } from './report.mjs';
-import { jobId, PHASES, runJob } from './run.mjs';
+import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
   build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
-  build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules]
+  build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
   build-pack.mjs check --config <file>
   build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
   build-pack.mjs queue remove --config <file> --job <id>
@@ -56,7 +56,7 @@ const USAGE = `usage:
   build-pack.mjs queue status --config <file> [--job <id>]
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
-  build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--model --config <file>]
+  build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <file> [--no-model]]
 exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
 exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
 exit codes of check --config <file> alone, the setup check: 0 every check passed, 1 any failed, 2 bad config
@@ -72,9 +72,9 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume, --now, --allow-derived-rules, --restore-paused and --model take no value.
+    // --resume, --now, --allow-derived-rules, --restore-paused, --model and --no-model take no value.
     if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model'
-      || flag === '--restore-paused') {
+      || flag === '--no-model' || flag === '--restore-paused') {
       args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
     }
@@ -105,6 +105,47 @@ export function jobFrom(args) {
     ...(args.resume ? { resume: true } : {}) };
 }
 
+/** The counts a gate stop names: how many documents and which, by number. Codes and numbers only. */
+const STOP_FIELDS = ['documents', 'numbers', 'document'];
+const stopFields = (from = {}) => Object.fromEntries(
+  STOP_FIELDS.filter((key) => from[key] !== undefined).map((key) => [key, from[key]]));
+
+/** The stop fields of the last `fail` line a run wrote for `reason`, for a row that holds none. */
+const loggedStop = (entries, reason) => stopFields(
+  entries.findLast((e) => e.event === 'fail' && e.phase !== 'release' && e.reason === reason) ?? {});
+
+/** A stopped row's document count and numbers as summary text, or nothing. */
+const stopText = (row) => (row.documents !== undefined ? `, documents ${row.documents}${row.numbers !== undefined ? ` (${row.numbers})` : ''}`
+  : row.document !== undefined ? `, document ${row.document}` : '');
+
+/**
+ * The checkpoint's documents, as the lines a resumed run would earn: Phase 2 reads
+ * the rule export again for each Included document that has a file, so those are
+ * checked with the same verdict Phase 2 uses. A checkpoint past Phase 2 does not
+ * read the export again. Nothing but codes and numbers reaches the lines.
+ */
+function checkpointDocuments(ctx, saved, add) {
+  const { config } = ctx;
+  add('checkpoint', true, saved.phase);
+  const docs = saved.state?.documents;
+  if (!Array.isArray(docs)) {
+    add('documents', false, 'no-checkpoint-documents');
+    return;
+  }
+  if (PHASES.indexOf(saved.phase) >= PHASES.indexOf('phase2')) {
+    add('documents', true, 'past-phase2');
+    return;
+  }
+  docs.forEach((doc, i) => {
+    const input = `document-${doc.number ?? i + 1}`;
+    // Inclusion is decided in Phase 1; at intake every document counts as Included.
+    if (saved.phase !== 'intake' && doc.inclusion !== 'Included') return add(input, true, 'context-only');
+    if (!doc.file) return add(input, true, doc.ruleCode ?? 'rules-held');
+    const { code } = documentRules(ctx, config.at(rootRelative(config, doc.file)));
+    add(input, !phase2Verdict(doc, code).stop, code);
+  });
+}
+
 /**
  * The input gates for an issue job, with no model call: one line per input,
  * `<input>  present|missing  <code>`, whether every required input is
@@ -124,15 +165,14 @@ export function checkJob(config, job) {
   const description = descriptionFiles.filter((f) => fs.existsSync(f))
     .map((f) => fs.readFileSync(f, 'utf8')).join('').trim();
   add('description', Boolean(description), description ? 'found' : 'no-description');
-  if (job.docs?.length) {
-    const logs = jobLogs(path.join(config.output, `${jobId(job)}.check`), { echo: false });
-    const ctx = { config, job, logs };
+  const saved = job.resume ? readCheckpoint(path.join(config.output, jobId(job))) : null;
+  const ctx = saved || job.docs?.length
+    ? { config, job, logs: jobLogs(path.join(config.output, `${jobId(job)}.check`), { echo: false }) } : null;
+  if (saved) {
+    checkpointDocuments(ctx, saved, add);
+  } else if (job.docs?.length) {
     job.docs.forEach((doc, i) => {
-      const file = config.at(doc);
-      if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
-        add(`document-${i + 1}`, false, 'document-file');
-        return;
-      }
+      const file = config.at(rootRelative(config, doc));
       const { code } = documentRules(ctx, file);
       add(`document-${i + 1}`, USABLE_RULE_CODES.includes(code), code);
     });
@@ -170,7 +210,17 @@ function writeQueue(config, queue) {
   writeAtomic(queuePath(config), `${JSON.stringify(queue, null, 1)}\n`);
 }
 
-export function addJob(config, job, now = new Date()) {
+/** A job with its document and description paths relative to the root, so a queue row outlives any worktree. */
+export function atRoot(config, job) {
+  return {
+    ...job,
+    ...(job.docs ? { docs: job.docs.map((doc) => rootRelative(config, doc)) } : {}),
+    ...(job.descriptionFile ? { descriptionFile: rootRelative(config, job.descriptionFile) } : {}),
+  };
+}
+
+export function addJob(config, given, now = new Date()) {
+  const job = atRoot(config, given);
   const queue = readQueue(config);
   const id = jobId(job);
   const open = queue.jobs.find((row) => row.id === id && ['queued', 'running'].includes(row.status));
@@ -552,7 +602,7 @@ function settleRow(row, result, at, config) {
     // A stop on request says nothing about the job: no failure is counted, and the
     // row keeps its checkpoint, so `queue add --resume` starts at the phase it stopped in.
     for (const field of ['started', 'now', 'ms', 'phase', 'reason', 'workbook', 'outDir', 'notBefore',
-      'finished']) delete row[field];
+      'finished', ...STOP_FIELDS]) delete row[field];
     Object.assign(row, { status: 'stopped', resume: true, phase: result.phase ?? 'unknown',
       reason: 'cancelled', finished: at.toISOString(), ms: result.ms ?? 0,
       ...(failures.length ? { failures } : {}) });
@@ -560,10 +610,17 @@ function settleRow(row, result, at, config) {
   }
   if (!result.ok) {
     failures.push({ at: at.toISOString(), phase: result.phase ?? 'unknown',
-      reason: result.reason ?? 'error', ms: result.ms ?? 0 });
+      reason: result.reason ?? 'error', ms: result.ms ?? 0, ...stopFields(result.counts) });
   }
   for (const field of ['started', 'now', 'finished', 'ms', 'phase', 'reason', 'workbook', 'outDir',
-    'notBefore', 'restore']) delete row[field];
+    'notBefore', 'restore', ...STOP_FIELDS]) delete row[field];
+  // A stop no retry can change waits for a person; its checkpoint is kept for `queue add --resume`.
+  if (!result.ok && HOLD_REASONS.includes(result.reason)) {
+    Object.assign(row, { status: 'stopped', resume: true, phase: result.phase ?? 'unknown',
+      reason: result.reason, finished: at.toISOString(), ms: result.ms ?? 0, failures,
+      ...stopFields(result.counts) });
+    return;
+  }
   // A failed revalidation is the review's verdict on the finished pack; a resume would skip
   // every phase and build the same pack again, so the job is not retried.
   const retry = result.reason !== 'gate:revalidation-failed';
@@ -576,7 +633,7 @@ function settleRow(row, result, at, config) {
   Object.assign(row, {
     status: result.ok ? 'passed' : 'failed', finished: at.toISOString(),
     ms: result.ms, phase: result.ok ? 'done' : result.phase, reason: result.reason ?? null,
-    workbook: result.workbook ?? null, outDir: result.outDir ?? null,
+    workbook: result.workbook ?? null, outDir: result.outDir ?? null, ...stopFields(result.counts),
     ...(failures.length ? { failures } : {}),
   });
 }
@@ -703,7 +760,7 @@ export async function cancelJob(config, id, { clock = () => new Date(), kill = p
     await held.value;
     row = current();
   }
-  return row?.status === 'stopped' ? { id, cancelled: true, phase: row.phase }
+  return row?.status === 'stopped' && row.reason === 'cancelled' ? { id, cancelled: true, phase: row.phase }
     : { id, cancelled: false, status: row?.status ?? 'not queued' };
 }
 
@@ -712,7 +769,9 @@ export function summaryLines(queue) {
   return queue.jobs.filter((row) => row.status !== 'removed').map((row) => {
     const minutes = row.ms ? `${Math.round(row.ms / 60000)} min` : '';
     const last = row.failures?.at(-1);
-    const where = row.status === 'stopped' ? `stopped at ${row.phase} (${row.reason}), resumable`
+    const where = heldRow(row) ? `stopped at ${row.phase} (${row.reason}), waits for a person, resumable`
+      + stopText(row)
+      : row.status === 'stopped' ? `stopped at ${row.phase} (${row.reason}), resumable`
       : row.status === 'failed' ? `stopped at ${row.phase} (${row.reason})`
       + (countedTries(row.failures) >= MAX_TRIES ? `, dropped after failing ${MAX_TRIES} times` : '')
       + (memoryStops(row.failures) >= MAX_MEMORY_STOPS ? `, dropped after ${MAX_MEMORY_STOPS} low-memory stops in a row` : '')
@@ -793,7 +852,10 @@ export function jobStatus(config, id, { clock = () => new Date() } = {}) {
       { phase: attempt[lastStart].phase, elapsed: `${seconds}s` }));
   } else if (['failed', 'stopped', 'queued'].includes(row.status)) {
     const where = row.status === 'queued' ? failures.at(-1) : row;
-    if (where) lines.push(fieldText('stopped', { phase: where.phase ?? '-', reason: where.reason ?? '-' }));
+    if (where) {
+      lines.push(fieldText('stopped', { phase: where.phase ?? '-', reason: where.reason ?? '-',
+        ...(Object.keys(stopFields(where)).length ? stopFields(where) : loggedStop(all, where.reason)) }));
+    }
   }
   const finished = new Map();
   for (const entry of own) {
@@ -898,7 +960,8 @@ export async function precheckQueue(config, { clock = () => new Date(),
       }
       let checked;
       try {
-        checked = checkJob(config, job);
+        // The nightly settle resumes a stale running row from its checkpoint, so it is checked that way.
+        checked = checkJob(config, job.status === 'running' ? { ...job, resume: true } : job);
       } catch (error) {
         // The error's name only: a message could carry a path or a document's text.
         checked = { lines: [`check  failed  ${error.name}`], ok: false, unchecked: false };
@@ -925,6 +988,15 @@ export function localStamp(at) {
     + `${pad(at.getHours())}:${pad(at.getMinutes())}`;
 }
 
+/** The job the command line names, with its documents relative to the root that runs it. */
+function jobHere(args, config) {
+  return atRoot(config, jobFrom(args));
+}
+
+/** The commands that run a job or put one on the queue; a worktree cannot hold a job's documents. */
+const MAKES_JOBS = new Set(['run', 'check', 'queue add', 'queue fill', 'queue check', 'queue run',
+  'queue start']);
+
 async function main(argv) {
   const args = parseArgs(argv);
   const [command, sub] = args.words ?? [];
@@ -934,6 +1006,15 @@ async function main(argv) {
     return 2;
   }
   const config = loadConfig(args.config);
+  // The setup check, `check` with no job named, reads the machine and makes no job.
+  const setupOnly = command === 'check' && !args.issue && !args.suite && args.change === undefined
+    && !args.docs.length && !args.allowDerivedRules;
+  const refusal = !setupOnly && MAKES_JOBS.has(sub && command === 'queue' ? `queue ${sub}` : command)
+    ? worktreeRefusal(config) : null;
+  if (refusal) {
+    console.error(refusal);
+    return 2;
+  }
   // While units are stopped, a signal starts them again before the process exits.
   const pausers = [];
   const releasers = [];
@@ -1016,10 +1097,19 @@ function fillSummary({ added, known, invalid, errors }, verb = 'filled') {
     + (errors.length ? `, source problems: ${errors.join(' ')}` : '');
 }
 
-/** The compare command: needs no job config unless --model asks for the endpoint. */
+/** The compare command: a job config supplies the model endpoint and the workbook standard. */
 async function compareCommand(args) {
   try {
     const lines = await runCompare(args, {
+      standardFrom: (configPath) => {
+        try {
+          const config = loadConfig(configPath);
+          const file = config.reference?.workbookStandard;
+          return file ? fs.readFileSync(config.at(file), 'utf8') : '';
+        } catch {
+          throw new UsageError('--config could not be read');
+        }
+      },
       makeClient: (configPath) => {
         try {
           return modelClient(loadConfig(configPath).model);
@@ -1048,7 +1138,7 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
     const { signal } = control.abort;
     try {
       await pauser.pause({ signal });
-      const result = await runJob(config, jobFrom(args), { signal });
+      const result = await runJob(config, jobHere(args, config), { signal });
       return result.ok ? 0 : 1;
     } finally {
       await pauser.resume();
@@ -1061,7 +1151,7 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
     return ok ? 0 : 1;
   }
   if (command === 'check') {
-    const job = jobFrom(args);
+    const job = jobHere(args, config);
     if (job.suite) throw new Error('check takes an issue job');
     const { lines, ok, unchecked } = checkJob(config, job);
     for (const line of lines) console.log(line);
@@ -1070,7 +1160,7 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
   if (command === 'queue' && sub === 'add') {
     const units = restoreUnits(config, args);
     const { id, added, marked, merged, running } = addJob(config,
-      { ...jobFrom(args), ...(args.now ? { now: true } : {}) });
+      { ...jobHere(args, config), ...(args.now ? { now: true } : {}) });
     if (markRestore(config, id, units) && units.length) console.log(`${id} restores ${units.join(' ')} when it ends`);
     if (added) console.log(`queued ${id}`);
     else if (marked || merged?.length) {

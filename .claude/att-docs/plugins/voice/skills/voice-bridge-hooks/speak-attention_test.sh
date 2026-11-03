@@ -49,6 +49,11 @@ printf '%s\n' '#!/bin/sh' 'for a in "$@"; do last=$a; done' \
   '  jq -c . "$now" >> "$NOWLOG"' \
   'fi' \
   'printf "piper: %s" "$(cat "$last")" >> "$SPOKEN"' > "$SANDBOX/bin/pw-play"
+# A date that ignores the width in %3N and writes all nine digits, as some builds do. Nothing here
+# or in the hook uses %3N, so this shim only fails a case that starts to.
+printf '%s\n' '#!/bin/sh' 'for a in "$@"; do set -- "$@" "$(printf %s "$a" | sed "s/%3N/%N/g")"; shift; done' \
+  "exec $(command -v date) \"\$@\"" > "$SANDBOX/bin/date"
+chmod +x "$SANDBOX/bin/date"
 chmod +x "$SANDBOX/bin/spd-say" "$SANDBOX/bin/piper" "$SANDBOX/bin/pw-play" \
   "$HOME/.local/bin/piper"
 export PATH="$SANDBOX/bin:$PATH"
@@ -63,13 +68,23 @@ OWED="$XDG_RUNTIME_DIR/speak-attention/s1.owed"
 : > "$TRANSCRIPT"
 
 fails=0
+LAST_AT="$(date +%s.%N)"
 
 # usage: check <got> <wanted> <case>
 check() {
+  # Each line carries the seconds since the last one, so a case that waited out a timeout stands out.
+  local now gap
+  now="$(date +%s.%N)"
+  gap="$(awk -v a="$now" -v b="$LAST_AT" 'BEGIN { printf "%.1f", a - b }')"
+  LAST_AT="$now"
   if [ "$1" = "$2" ]; then
-    echo "ok   $3"
+    echo "ok   $3 (${gap}s)"
   else
-    echo "FAIL $3: got [$1], wanted [$2]"
+    echo "FAIL $3: got [$1], wanted [$2] (${gap}s)"
+    # The clock and the last rows of the transcript, on a FAIL line of their own so the runner
+    # lists them, to tell a timing failure from a logic one.
+    echo "FAIL   clock $(($(date +%s%N) / 1000000)) ms, last rows $(tail -n 4 "$TRANSCRIPT" |
+      jq -c '[.type, .origin.kind, .timestamp]' 2>/dev/null | tr '\n' ' ')"
     fails=$((fails + 1))
   fi
 }
@@ -81,7 +96,11 @@ row() { printf '%s\n' "$1" >> "$TRANSCRIPT"; }
 # when it is given one.
 prompt() {
   local at=
-  [[ -n "${3:-}" ]] && at=$(date -u -d "$3 seconds" +%Y-%m-%dT%H:%M:%S.%3NZ)
+  if [[ -n "${3:-}" ]]; then
+    # Milliseconds are the first three digits of %N, which every date writes in full.
+    at=$(date -u -d "$3 seconds" +%Y-%m-%dT%H:%M:%S.%N)
+    at="${at:0:23}Z"
+  fi
   row "$(jq -cn --arg k "$1" --arg t "$2" --arg at "$at" \
     '{type:"user", origin:{kind:$k}, message:{role:"user", content:$t}}
       + (if $at == "" then {} else {timestamp:$at} end)')"

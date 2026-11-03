@@ -85,6 +85,9 @@ export function buildPack(pack) {
   }
   if (!pack.testerNotes) add('Tester Notes', 'fields are blank');
   if (!CONFIDENCE_LEVELS.includes(pack.confidence?.overall)) add('Confidence Assessment', 'no overall');
+  if (pack.confidence?.overall === 'Low' && blank(pack.limitations?.['Confidence Assessment'])) {
+    add('Confidence Assessment', 'overall confidence is Low and no limitation says why');
+  }
   if (blank(pack.executiveSummary?.confidence)) add('Executive Summary', 'confidence is blank');
   if (!list(pack.assumptions).length && blank(pack.limitations?.Assumptions)) {
     add('Assumptions', 'fields are blank and no limitation says why');
@@ -108,7 +111,8 @@ export function buildPack(pack) {
   workbooks.set(validation, [
     sheet('Dashboard', ['Item', 'Value'], [['Number of Impacted Business Rules', impacted],
       ['Number of Reusable Test Cards', list(pack.testCards).length],
-      ['Number of Applicable Test Sets', list(pack.testSets).length]]),
+      ['Number of Applicable Test Sets', list(pack.testSets).length],
+      ['Overall Confidence', pack.confidence?.overall ?? '']]),
     sheet('Impact Analysis', ['Rule ID', 'Rule Name', 'Impact Classification', 'Status'],
       list(pack.rules).map((r) => [r.id, r.name, r.impact, r.status ?? ''])),
     sheet('Test Cards Markdown', ['Test Case ID', 'Test Case Title', 'Focus', 'Expected Result', 'Rules Covered'],
@@ -120,6 +124,11 @@ export function buildPack(pack) {
         [c.id, `Step ${i + 1}`, st.description, st.expected]))),
     sheet('Coverage Matrix', ['Rule ID', 'Status'],
       ruleCoverage(pack).map((r) => [r.rule.id, r.status])),
+    // The sheets Phase 9 fills, as Field / Value rows, so the revalidation has them to read.
+    ...[['Executive Summary', pack.executiveSummary], ['Senior Tester Review', pack.seniorReview],
+      ['Tester Notes', pack.testerNotes], ['Confidence Assessment', pack.confidence]].map(([name, fields]) =>
+      sheet(name, ['Field', 'Value'], Object.entries(fields ?? {}).map(([field, value]) =>
+        [field, Array.isArray(value) ? value.join('; ') : String(value)]))),
     sheet('Workbook Validation', ['Sheet', 'Status', 'Notes'],
       validation.map(([name, , , status, notes]) => [name, status, notes])),
   ]);

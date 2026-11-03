@@ -44,6 +44,8 @@ run_one() {
     passed=$((passed + 1))
   else
     echo "FAIL  $file (exit $status)"
+    # A long log puts its failures above the tail, so they are listed first.
+    grep -E '^(FAIL|not ok)' "$log" | sed 's/^/      /' | head -n 20 || true
     sed 's/^/      /' "$log" | tail -n 40
     failed=$((failed + 1))
     failed_names+=("$file")
