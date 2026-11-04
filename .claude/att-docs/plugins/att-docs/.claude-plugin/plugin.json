@@ -1,6 +1,6 @@
 {
   "name": "att-docs",
   "description": "General documentation skills with a per-repository extension layer",
-  "version": "0.31.2",
+  "version": "0.31.4",
   "license": "MIT"
 }

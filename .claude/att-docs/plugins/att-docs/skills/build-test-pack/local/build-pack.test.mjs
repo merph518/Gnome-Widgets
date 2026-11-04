@@ -4,6 +4,7 @@
 //   node --test plugins/att-docs/skills/build-test-pack/local/build-pack.test.mjs
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,7 @@ import { getEventListeners } from 'node:events';
 import http from 'node:http';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { addJob, cancelJob, checkJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld,
+import { addJob, cancelJob, checkJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld, rerunJob,
   markRestore, parseArgs, queueLines, readQueue, removeJob, restoreLines, restorePaused, restoreUnits,
   summaryLines }
   from './build-pack.mjs';
@@ -26,7 +27,8 @@ import * as S from './schemas.mjs';
 import { estimateTokens } from './model.mjs';
 import { almDescriptions, batches, candidateLine, documentInputs, documentRules, dropUnfoundedAssumptions, expectedProblems, impactsText, phase5,
   resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
-import { jobId, runJob } from './run.mjs';
+import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
+import { compareSnapshots } from './rerun.mjs';
 import { memoryLow, parseMeminfo, waitForMemory } from './meminfo.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { createReleaser } from './release.mjs';
@@ -6310,4 +6312,295 @@ test('a BREAK IT card stays out of the core set', () => {
   const card = { derivation: 'Requirement', objectives: ['Core', 'Flow'] };
   assert.deepEqual(setsOf(ctx, { ...card, breakIt: true }).sort(), ['Break', 'Flow', 'Full']);
   assert.deepEqual(setsOf(ctx, { ...card, breakIt: false }).sort(), ['Core', 'Flow', 'Full']);
+});
+
+// A job's slice runs: a snapshot per phase, and a rerun from any phase in a sandbox.
+
+const SOURCE_JOB = 'issue-501-change-7001';
+
+/** Every file under `dir` by relative path, with a hash of its bytes. */
+function digest(dir) {
+  const files = {};
+  const walk = (folder) => {
+    for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+      const file = path.join(folder, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else files[path.relative(dir, file)] = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    }
+  };
+  walk(dir);
+  return files;
+}
+
+/** A fixture job that ran end to end, with its queue row, ready to be run again in slices. */
+async function finishedJob(overrides = {}) {
+  const setup = lib({}, overrides);
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const result = await runLib(setup);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  return { ...setup, result };
+}
+
+test('every phase that passes leaves a snapshot, and checkpoint.json is the last one', async () => {
+  const { result } = await finishedJob();
+  const folder = path.join(result.outDir, 'work', 'checkpoints');
+  assert.deepEqual(fs.readdirSync(folder).sort(), PHASES.map((phase) => `${phase}.json`).sort());
+  for (const phase of PHASES) assert.equal(JSON.parse(read(path.join(folder, `${phase}.json`))).phase, phase);
+  // The resume file is what it was before snapshots: the state after the last phase.
+  assert.equal(read(path.join(result.outDir, 'work', 'checkpoint.json')), read(path.join(folder, 'phase10.json')));
+  assert.deepEqual(readCheckpoint(result.outDir).phase, 'phase10');
+});
+
+test('a slice from Phase 9 revalidation runs that phase alone and leaves the job as it was', async () => {
+  const marker = path.join(os.tmpdir(), `slice-released-${process.pid}-${Date.now()}`);
+  const { config, model, result } = await finishedJob({
+    release: { command: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] } });
+  // The phase's output is written by the slice, so it is absent from the job's folder before the slice runs.
+  fs.rmSync(path.join(result.outDir, 'work', 'phase9-revalidation.json'));
+  const before = digest(result.outDir);
+  const queueBefore = read(config.at(config.queue.file));
+  model.calls.length = 0;
+  const slice = await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'try' },
+    { model, echo: false });
+  assert.equal(slice.result.ok, true, JSON.stringify(slice.result));
+  assert.equal(slice.id, `${SOURCE_JOB}~try`);
+  // The job's folder, its queue row and its workbook are as they were.
+  assert.deepEqual(digest(result.outDir), before);
+  assert.equal(read(config.at(config.queue.file)), queueBefore);
+  assert.ok(fs.existsSync(result.workbook));
+  // Only the revalidation ran, on the model's side and in the log.
+  assert.ok(model.calls.length > 0);
+  assert.ok(model.calls.every((call) => /^phase(8|9_revalidation)/.test(call.schemaName)),
+    model.calls.map((call) => call.schemaName).join(' '));
+  const sandbox = path.join(config.output, slice.id);
+  const lines = statusLines(sandbox).filter((line) => line.job === slice.id);
+  assert.deepEqual(lines.filter((line) => line.event === 'start').map((line) => line.phase), ['phase9-revalidate']);
+  assert.deepEqual(lines.filter((line) => line.event === 'pass').map((line) => line.phase), ['phase9-revalidate']);
+  assert.equal(lines.find((line) => line.event === 'resume').after, 'phase9-confidence');
+  assert.equal(lines.at(-1).event, 'slice');
+  // The sandbox holds the phase's outputs and its snapshot, the earlier snapshots, and no pack or workbook.
+  assert.ok(fs.existsSync(path.join(sandbox, 'work', 'phase9-revalidation.json')));
+  assert.ok(fs.existsSync(path.join(sandbox, 'work', 'checkpoints', 'phase9-revalidate.json')));
+  assert.ok(fs.existsSync(path.join(sandbox, 'work', 'checkpoints', 'phase9-confidence.json')));
+  assert.ok(!fs.existsSync(path.join(sandbox, 'work', 'checkpoints', 'phase10.json')));
+  assert.deepEqual(fs.readdirSync(sandbox).filter((name) => !['work', 'review', 'status.log', 'detail.log'].includes(name)), []);
+  // The same model gives the same pack, so the summary shows no change.
+  assert.match(slice.lines[0], /^cards  source (\d+)  sandbox \1  added 0  removed 0$/);
+  assert.deepEqual(slice.lines.slice(1), ['coverage  unchanged', 'confidence  unchanged High', 'revalidation  open 0 -> 0']);
+  // The model was not unloaded, since the slice runs no release step.
+  assert.ok(!fs.existsSync(marker));
+  assertContentFree(slice.lines.join('\n'));
+  // The queue is free again and the sandbox reads like a job.
+  assert.equal(lockHeld(config), false);
+  assert.match(jobStatus(config, slice.id)[0], new RegExp(`^${slice.id}  passed  queue free$`));
+  assert.match(jobStatus(config, slice.id).join('\n'), /done phase=phase9-revalidate/);
+  assert.ok(!jobStatus(config, slice.id).join('\n').includes('phase9-checklist'));
+});
+
+test('a slice of several phases runs them in order and stops after the last', async () => {
+  const { config, model, result } = await finishedJob();
+  model.calls.length = 0;
+  const slice = await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-senior', until: 'phase9-confidence' },
+    { model, echo: false });
+  assert.equal(slice.result.ok, true, JSON.stringify(slice.result));
+  // With no label the sandbox is named by the time.
+  assert.match(slice.id, new RegExp(`^${SOURCE_JOB}~\\d{8}T\\d{6}$`));
+  const lines = statusLines(path.join(config.output, slice.id)).filter((line) => line.job === slice.id);
+  assert.deepEqual(lines.filter((line) => line.event === 'pass').map((line) => line.phase),
+    ['phase9-senior', 'phase9-confidence']);
+  assert.ok(!fs.existsSync(path.join(config.output, slice.id, 'work', 'checkpoints', 'phase9-revalidate.json')));
+  // Its checkpoint is where the slice ended, so a slice of the sandbox carries on from there.
+  assert.equal(readCheckpoint(path.join(config.output, slice.id)).phase, 'phase9-confidence');
+  assert.equal(readCheckpoint(result.outDir).phase, 'phase10');
+  const next = await rerunJob(config, { job: slice.id, from: 'phase9-revalidate', label: 'next' },
+    { model, echo: false });
+  assert.equal(next.result.ok, true, JSON.stringify(next.result));
+  assert.equal(next.id, `${slice.id}~next`);
+});
+
+test('a slice from a phase whose earlier snapshot is missing stops and names it, writing nothing', async () => {
+  const { config, result } = await finishedJob();
+  fs.rmSync(path.join(result.outDir, 'work', 'checkpoints', 'phase9-checklist.json'));
+  const before = digest(result.outDir);
+  await assert.rejects(() => rerunJob(config, { job: SOURCE_JOB, from: 'phase9-senior', label: 'gap' },
+    { echo: false }), /issue-501-change-7001 has no snapshot for phase9-checklist \(work\/checkpoints\/phase9-checklist\.json\)/);
+  assert.equal(fs.existsSync(path.join(config.output, `${SOURCE_JOB}~gap`)), false);
+  assert.deepEqual(digest(result.outDir), before);
+  assert.equal(lockHeld(config), false);
+});
+
+test('a slice refuses a job with no folder, a label already used, a phase that does not exist and a range backwards', async () => {
+  const { config } = await finishedJob();
+  const run = async () => { throw new Error('must not run'); };
+  const attempt = (job) => rerunJob(config, job, { run });
+  await assert.rejects(() => attempt({ job: 'issue-9-change-1', from: 'phase3' }), /has no output folder/);
+  await assert.rejects(() => attempt({ job: SOURCE_JOB, from: 'phase99' }), /--from takes one of: intake, phase1/);
+  await assert.rejects(() => attempt({ job: SOURCE_JOB, from: 'phase3', until: 'phase99' }), /--until takes one of/);
+  await assert.rejects(() => attempt({ job: SOURCE_JOB, from: 'phase5', until: 'phase3' }), /--from comes after --until/);
+  await assert.rejects(() => attempt({ job: SOURCE_JOB, from: 'phase3', label: 'a/b' }), /--as takes/);
+  await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'used' }, { run: async () => ({ ok: true }) });
+  await assert.rejects(() => attempt({ job: SOURCE_JOB, from: 'phase9-revalidate', label: 'used' }),
+    /already exists; give another --as label/);
+});
+
+test('a slice from intake needs no snapshot and starts the job over in the sandbox', async () => {
+  const { config, model, result } = await finishedJob();
+  fs.rmSync(path.join(result.outDir, 'work', 'checkpoints'), { recursive: true });
+  const slice = await rerunJob(config, { job: SOURCE_JOB, from: 'intake', until: 'phase1', label: 'fresh' },
+    { model, echo: false });
+  assert.equal(slice.result.ok, true, JSON.stringify(slice.result));
+  const lines = statusLines(path.join(config.output, slice.id));
+  assert.deepEqual(lines.filter((line) => line.event === 'pass').map((line) => line.phase), ['intake', 'phase1']);
+  assert.equal(lines.at(-1).event, 'slice');
+  // The sandbox's log is its own: nothing of the job's earlier run is in it.
+  assert.ok(!lines.some((line) => line.event === 'resume' || line.phase === 'phase2'));
+});
+
+test('a slice holds the queue while it runs, leaves a held queue alone, and starts units again only if it stopped them', async () => {
+  const { config } = await finishedJob();
+  const seen = [];
+  const run = async (_config, job, options) => {
+    seen.push({ held: lockHeld(config), job, until: options.until });
+    return { ok: true };
+  };
+  await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'one' }, { run });
+  // The job's options come from its queue row, and the sandbox is resumed from the snapshot.
+  assert.deepEqual(seen, [{ held: true, until: 'phase9-revalidate',
+    job: { issue: '501', change: '7001', id: `${SOURCE_JOB}~one`, resume: true } }]);
+  assert.equal(lockHeld(config), false);
+
+  const lock = `${config.at(config.queue.file)}.lock`;
+  fs.writeFileSync(lock, String(process.pid));
+  assert.deepEqual(await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'two' },
+    { run: async () => { throw new Error('must not run'); } }), { busy: true });
+  assert.equal(fs.existsSync(path.join(config.output, `${SOURCE_JOB}~two`)), false);
+  fs.rmSync(lock);
+
+  const calls = [];
+  const pauser = { pause: async () => calls.push('pause'), resume: async () => calls.push('resume') };
+  await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'three', pauser }, { run });
+  assert.deepEqual(calls, ['pause', 'resume']);
+  calls.length = 0;
+  await assert.rejects(() => rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'four', pauser },
+    { run: async () => { throw new Error('model down'); } }), /model down/);
+  assert.deepEqual(calls, ['pause', 'resume']);
+  assert.equal(lockHeld(config), false);
+  // A run that threw before it wrote a line leaves the job's copied lines behind; the sandbox still reads as failed
+  // and lists none of the phases the job passed.
+  assert.equal(jobStatus(config, `${SOURCE_JOB}~four`)[0], `${SOURCE_JOB}~four  failed  queue free`);
+  assert.ok(!jobStatus(config, `${SOURCE_JOB}~four`).some((line) => line.startsWith('done phase=')));
+});
+
+test('a slice takes its job options from the queue row, else from the job ID, and a sandbox of a sandbox finds the same row', async () => {
+  const { config } = await finishedJob();
+  const queue = readQueue(config);
+  Object.assign(queue.jobs[0], { docs: ['docs/LIB/UC01-Card-Renewal.md'], allowDerivedRules: true, status: 'passed',
+    workbook: 'x.xlsx', phase: 'done' });
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(queue));
+  const seen = [];
+  const run = async (_config, job) => { seen.push(job); return { ok: true }; };
+  const slice = (job, label) => rerunJob(config, { job, from: 'phase9-revalidate', label }, { run });
+  await slice(SOURCE_JOB, 'a');
+  assert.deepEqual(seen[0], { issue: '501', change: '7001', docs: ['docs/LIB/UC01-Card-Renewal.md'],
+    allowDerivedRules: true, id: `${SOURCE_JOB}~a`, resume: true });
+  // A slice of a sandbox reads the folder of the sandbox and the row of the job.
+  fs.cpSync(path.join(config.output, SOURCE_JOB), path.join(config.output, `${SOURCE_JOB}~a`), { recursive: true });
+  await slice(`${SOURCE_JOB}~a`, 'b');
+  assert.equal(seen[1].id, `${SOURCE_JOB}~a~b`);
+  assert.equal(seen[1].allowDerivedRules, true);
+  // A job with no row, as one run by hand has, is read from its ID.
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify({ jobs: [] }));
+  await slice(SOURCE_JOB, 'c');
+  assert.deepEqual(seen[2], { issue: '501', change: '7001', id: `${SOURCE_JOB}~c`, resume: true });
+  fs.cpSync(path.join(config.output, SOURCE_JOB), path.join(config.output, 'suite-LIB'), { recursive: true });
+  await slice('suite-LIB', 'd');
+  assert.deepEqual(seen[3], { suite: 'LIB', id: 'suite-LIB~d', resume: true });
+});
+
+test('queue status reads a sandbox that failed from its own log, not the job\'s lines before the slice', async () => {
+  const { config } = await finishedJob();
+  const failing = async (_config, job) => {
+    const logs = jobLogs(path.join(config.output, job.id), { echo: false });
+    logs.status({ job: job.id, phase: 'phase9-revalidate', event: 'resume', after: 'phase9-confidence' });
+    logs.status({ job: job.id, phase: 'phase9-revalidate', event: 'start' });
+    logs.status({ job: job.id, phase: 'phase9-revalidate', event: 'fail', reason: 'gate:revalidation-failed', ms: 5 });
+    return { ok: false, phase: 'phase9-revalidate' };
+  };
+  const slice = await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'bad' }, { run: failing });
+  assert.equal(slice.result.ok, false);
+  assert.deepEqual(slice.lines, []);
+  const status = jobStatus(config, slice.id);
+  assert.equal(status[0], `${slice.id}  failed  queue free`);
+  assert.ok(status.includes('stopped phase=phase9-revalidate reason=gate:revalidation-failed'), status.join('\n'));
+  // The source job's phases, copied into the sandbox's log, are not the slice's.
+  assert.ok(!status.some((line) => line.startsWith('done phase=phase1 ')), status.join('\n'));
+  assert.deepEqual(jobStatus(config, 'issue-9-change-1~nothing'), ['issue-9-change-1~nothing  not queued  queue free']);
+  // A stop on request reads stopped, as a queue row does.
+  const cancelled = async (_config, job) => {
+    jobLogs(path.join(config.output, job.id), { echo: false })
+      .status({ job: job.id, phase: 'phase9-revalidate', event: 'fail', reason: 'cancelled', ms: 5 });
+    return { ok: false, phase: 'phase9-revalidate', reason: 'cancelled' };
+  };
+  const stop = await rerunJob(config, { job: SOURCE_JOB, from: 'phase9-revalidate', label: 'stop' }, { run: cancelled });
+  assert.equal(jobStatus(config, stop.id)[0], `${stop.id}  stopped  queue free`);
+});
+
+test('a slice\'s summary lists what changed against the job\'s snapshot, with counts and codes only', () => {
+  const { config } = lib();
+  const snapshot = (job, pack) => {
+    const folder = path.join(config.output, job, 'work', 'checkpoints');
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'phase9-revalidate.json'),
+      JSON.stringify({ phase: 'phase9-revalidate', state: { pack } }));
+  };
+  snapshot('src', { testCards: [{ id: 'TC-A-001' }, { id: 'TC-A-002' }, { id: 'TC-A-003' }],
+    coverage: [{ status: 'Covered' }, { status: 'Covered' }, { status: 'Missing' }], confidence: { overall: 'High' } });
+  snapshot('sbx', { testCards: [{ id: 'TC-A-001' }, { id: 'TC-A-002' }, { id: 'TC-A-004' }, { id: 'TC-A-005' }],
+    coverage: [{ status: 'Covered' }, { status: 'Partially Covered' }, { status: 'Covered' }],
+    confidence: { overall: 'Low' }, revalidation: { passed: false, remaining: ['Item one', 'Item two'] } });
+  const { lines, detail } = compareSnapshots(path.join(config.output, 'src'), path.join(config.output, 'sbx'),
+    'phase9-revalidate');
+  assert.deepEqual(lines, [
+    'cards  source 3  sandbox 4  added 2  removed 1',
+    'coverage  Missing 1 -> 0  Partially Covered 0 -> 1',
+    'confidence  High -> Low',
+    'revalidation  open 0 -> 2',
+  ]);
+  // The card IDs and the open items stay out of the console lines.
+  assert.deepEqual(detail, { phase: 'phase9-revalidate', cardsAdded: ['TC-A-004', 'TC-A-005'],
+    cardsRemoved: ['TC-A-003'], openBefore: [], openAfter: ['Item one', 'Item two'] });
+  assert.ok(!lines.join('\n').includes('TC-A') && !lines.join('\n').includes('Item'));
+  assert.deepEqual(compareSnapshots(path.join(config.output, 'src'), path.join(config.output, 'sbx'), 'phase10').lines,
+    ['sandbox has no snapshot at phase10; nothing to compare']);
+  fs.rmSync(path.join(config.output, 'src', 'work'), { recursive: true });
+  assert.deepEqual(compareSnapshots(path.join(config.output, 'src'), path.join(config.output, 'sbx'),
+    'phase9-revalidate').lines, ['source has no snapshot at phase9-revalidate; nothing to compare']);
+});
+
+test('the command line runs a slice, and refuses slice options without --job and job options with it', async () => {
+  const { config, result } = await finishedJob();
+  const cli = (...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'run', ...args,
+    '--config', config.file], { encoding: 'utf8' });
+  assert.deepEqual(parseArgs(['run', '--job', 'x', '--from', 'p', '--until', 'q', '--as', 'l', '--pause']),
+    { docs: [], words: ['run'], job: 'x', from: 'p', until: 'q', as: 'l', pause: true });
+  const sliceOnly = cli('--issue', '501', '--from', 'phase3');
+  assert.equal(sliceOnly.status, 2);
+  assert.match(sliceOnly.stderr, /--from goes with --job/);
+  const both = cli('--job', SOURCE_JOB, '--issue', '501', '--from', 'phase3');
+  assert.equal(both.status, 2);
+  assert.match(both.stderr, /--job names the job/);
+  assert.match(cli('--job', SOURCE_JOB).stderr, /--from takes a phase/);
+  assert.match(cli('--job', '../x', '--from', 'phase3').stderr, /--job takes a job ID/);
+  const gone = cli('--job', 'issue-9-change-1', '--from', 'phase3');
+  assert.equal(gone.status, 2);
+  assert.match(gone.stderr, /issue-9-change-1 has no output folder/);
+  // A queue held by a live process makes the slice wait for another try, and writes nothing.
+  const lock = `${config.at(config.queue.file)}.lock`;
+  fs.writeFileSync(lock, String(process.pid));
+  const busy = cli('--job', SOURCE_JOB, '--from', 'phase9-senior', '--as', 'cli');
+  fs.rmSync(lock);
+  assert.equal(busy.status, 1);
+  assert.match(busy.stderr, /the queue is running/);
+  assert.equal(fs.existsSync(path.join(config.output, `${SOURCE_JOB}~cli`)), false);
+  assert.ok(fs.existsSync(result.workbook));
 });

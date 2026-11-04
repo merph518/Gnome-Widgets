@@ -357,6 +357,9 @@ say() {
         rm -f "$dir/skip" "$now"
         return 0
       fi
+      # a volume set while Piper rendered is read here, since the stream does not exist for
+      # speechctl to change until pw-play starts
+      volume=$(setting volume)
       pw-play --media-role=Speech --volume "${volume:-1.2}" "$wav" >/dev/null 2>&1 8>&- 9>&- &
       await_player $! "$1" piper "$speaker" "${3:-}"
       return $?

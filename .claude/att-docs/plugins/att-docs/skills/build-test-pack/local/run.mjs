@@ -1,7 +1,9 @@
 // Runs one job, intake through Phase 10, and writes its pack, its workbook and
 // its two logs to the job's own output folder. After each phase passes, the
 // job's state goes to work/checkpoint.json, so a job run again with `resume`
-// starts at the phase that stopped it.
+// starts at the phase that stopped it, and to work/checkpoints/<phase>.json,
+// so a later run can start from any phase that passed. With `until`, a run
+// stops after that phase and writes no pack and no workbook.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -62,8 +64,20 @@ export function readCheckpoint(outDir) {
   }
 }
 
+export const snapshotPath = (outDir, phase) => path.join(outDir, 'work', 'checkpoints', `${phase}.json`);
+
+/** The state as `phase` passed, or null when the job has no snapshot for it. */
+export function readSnapshot(outDir, phase) {
+  try {
+    const saved = JSON.parse(fs.readFileSync(snapshotPath(outDir, phase), 'utf8'));
+    return saved.phase === phase ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function runJob(config, job, { model, echo = true, now = Date.now, readMemory = readMeminfo,
-  sleep, signal = null } = {}) {
+  sleep, signal = null, until = null } = {}) {
   const id = job.id ?? jobId(job);
   const outDir = path.join(config.output, id);
   const saved = job.resume ? readCheckpoint(outDir) : null;
@@ -133,12 +147,16 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     pack = saved.pack ?? ctx.pack;
     logs.status({ job: id, phase: PHASES[done + 1] ?? 'done', event: 'resume', after: saved.phase });
   }
+  // The snapshot is written before checkpoint.json, so the latest checkpoint always has its snapshot.
   const checkpoint = (name) => {
     const state = Object.fromEntries(Object.entries(ctx).filter(([key]) => !SETUP.has(key)));
-    const temp = `${checkpointPath(outDir)}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ phase: name, state,
-      pack: pack === ctx.pack ? undefined : pack }));
-    fs.renameSync(temp, checkpointPath(outDir));
+    const text = JSON.stringify({ phase: name, state, pack: pack === ctx.pack ? undefined : pack });
+    const snapshot = snapshotPath(outDir, name);
+    fs.mkdirSync(path.dirname(snapshot), { recursive: true });
+    for (const file of [snapshot, checkpointPath(outDir)]) {
+      fs.writeFileSync(`${file}.tmp`, text);
+      fs.renameSync(`${file}.tmp`, file);
+    }
   };
 
   let phase = 'intake';
@@ -163,7 +181,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   };
   const step = async (name, fn) => {
     phase = name;
-    if (PHASES.indexOf(name) <= done) return {};
+    if (PHASES.indexOf(name) <= done || (until && PHASES.indexOf(name) > PHASES.indexOf(until))) return {};
     // A stop between phases loses nothing: the last phase that passed is checkpointed.
     if (signal?.aborted) throw new Cancelled();
     await checkMemory(name);
@@ -221,6 +239,12 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       return { revalidated: again.passed, remaining: again.remaining };
     });
     await step('phase10', () => P.phase10(ctx, pack));
+    if (until) {
+      const summary = { job: id, phase: 'done', event: 'slice', until, ms: now() - started,
+        calls: ctx.calls, promptTokens: ctx.tokens.prompt, outputTokens: ctx.tokens.output };
+      logs.status(summary);
+      return { ok: true, id, outDir, ...summary };
+    }
     pack = P.reconcile(ctx, pack);
     fs.writeFileSync(packPath, `${JSON.stringify(pack, null, 1)}\n`);
 

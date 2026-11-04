@@ -17,8 +17,9 @@ It works through the files the hook keeps in $XDG_RUNTIME_DIR/speak-attention: n
 while a clip plays, the <session>.queue files, the <session>.managed markers that put a
 session in the session management widget, a paused flag, and settings.json for the voice,
 volume, pace and Piper's speaker, noise, noise-w and silence, which the hook reads before each
-clip. An option that is not set is left out of the Piper command, so the model keeps its own
-default. Exit 2 is a bad argument, 1 a
+clip. A volume change also sets the stream of a Piper clip that is playing, through
+pw-dump and pw-cli. An option that is not set is left out of the Piper command, so the model
+keeps its own default. Exit 2 is a bad argument, 1 a
 failure.
 """
 import fcntl
@@ -40,6 +41,7 @@ PIPER_DIR = os.environ.get("SPEAK_PIPER_DIR", os.path.expanduser("~/.local/share
 DEFAULT_VOICE = "en_US-amy-medium"
 DEFAULT_VOLUME = 1.2
 PLAYERS = ("pw-play", "spd-say")
+STREAM_WAIT = 5  # seconds pw-dump and pw-cli may take when a volume change reaches a stream
 
 
 class Bad(Exception):
@@ -233,6 +235,41 @@ def cmd_toggle():
     cmd_resume() if is_paused() else cmd_pause()
 
 
+def stream_props(o):
+    return (o.get("info") or {}).get("props") or {}
+
+
+def set_live_volume(n, value):
+    """Sets the volume of the stream pw-play opened for the clip in now.json (n), so a clip
+    already playing follows a change. The stream is the node of the PipeWire client whose
+    process id is the clip's player_pid. It is set through the node's volume property, the
+    one pw-play's --volume sets, and never with wpctl, which writes the channel volumes that
+    WirePlumber saves for the Speech role and applies to every later stream. A Speech
+    Dispatcher clip, a clip still rendering, or a PipeWire that cannot be asked has no
+    stream to set."""
+    if not n or n.get("engine") == "spd-say" or n.get("player_pid") is None:
+        return
+    pid = int(n["player_pid"])
+    try:
+        dump = json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True,
+                                         timeout=STREAM_WAIT, check=True).stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+    objs = [o for o in dump if isinstance(o, dict)]
+    clients = {o.get("id") for o in objs if o.get("type") == "PipeWire:Interface:Client"
+               and stream_props(o).get("application.process.id") == pid}
+    for o in objs:
+        props = stream_props(o)
+        if (o.get("type") == "PipeWire:Interface:Node" and props.get("client.id") in clients
+                and props.get("media.class") == "Stream/Output/Audio"):
+            try:
+                subprocess.run(["pw-cli", "set-param", str(o["id"]), "Props",
+                                "{ volume: %s }" % value], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=STREAM_WAIT, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
 def cmd_volume(arg):
     cur = float(settings().get("volume", DEFAULT_VOLUME))
     if arg in ("up", "down"):
@@ -246,6 +283,7 @@ def cmd_volume(arg):
             raise Bad("volume takes up, down or a number from 0.0 to 2.0")
     value = round(min(2.0, max(0.0, value)), 1)
     save_setting("volume", value)
+    set_live_volume(now_playing(), value)
     print(value)
 
 

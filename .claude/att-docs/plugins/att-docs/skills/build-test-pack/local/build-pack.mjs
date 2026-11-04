@@ -3,6 +3,7 @@
 //
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
+//   node build-pack.mjs run --config <pipeline.json> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
 //   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 //   node build-pack.mjs check --config <pipeline.json>
 //   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -38,11 +39,13 @@ import { documentRules, phase2Verdict, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
 import { seededRandom, writeReports } from './report.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
+import { compareSnapshots, jobParameters, prepareSandbox, sandboxId, sandboxRun, sliceRange } from './rerun.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
   build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
+  build-pack.mjs run --config <file> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
   build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
   build-pack.mjs check --config <file>
   build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -58,6 +61,7 @@ const USAGE = `usage:
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <file> [--no-model]]
 exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
+exit codes of run --job: 0 the slice passed, 1 it stopped or the queue is running, 2 bad arguments, a job with no folder, or a missing snapshot
 exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
 exit codes of check --config <file> alone, the setup check: 0 every check passed, 1 any failed, 2 bad config
 exit codes of queue cancel: 0 the job stopped, 1 the job is not running, 4 the queue stayed held after the stop request
@@ -72,9 +76,9 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume, --now, --allow-derived-rules, --restore-paused, --model and --no-model take no value.
+    // --resume, --now, --allow-derived-rules, --restore-paused, --pause, --model and --no-model take no value.
     if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model'
-      || flag === '--no-model' || flag === '--restore-paused') {
+      || flag === '--no-model' || flag === '--restore-paused' || flag === '--pause') {
       args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
     }
@@ -764,6 +768,50 @@ export async function cancelJob(config, id, { clock = () => new Date(), kill = p
     : { id, cancelled: false, status: row?.status ?? 'not queued' };
 }
 
+/**
+ * Runs the phases `from` through `until` (`from` alone by default) of a job's
+ * work in a sandbox, `<job>~<label>` with a time stamp for a label by default,
+ * from the job's snapshot of the phase before `from`. The job's own folder,
+ * queue row and workbook are only read. The run holds the queue, so the
+ * nightly run waits for it; units are stopped only when `pauser` is given. It
+ * stops after `until` with no pack, no workbook and no model unload. Returns
+ * `{ busy: true }` when a live process holds the queue, else `{ id, result,
+ * lines }`, the lines being how the sandbox's pack at `until` differs from the
+ * job's. Throws when an argument is wrong, the job has no folder or no
+ * snapshot for the phase before `from`, or the sandbox exists; nothing is
+ * written then.
+ */
+export async function rerunJob(config, { job, from, until, label, pauser = null },
+  { run = runJob, now = () => new Date(), signal = null, ...options } = {}) {
+  const range = sliceRange({ from, until });
+  const id = sandboxId(job, label, now());
+  const held = withQueue(config, async () => {
+    const parameters = jobParameters(readQueue(config).jobs, job);
+    const resumes = prepareSandbox(config, job, id, range.from);
+    const logs = jobLogs(path.join(config.output, id), { echo: false });
+    // The sandbox's log starts with the job's lines; this one marks where the slice's own begin.
+    logs.status({ job: id, phase: range.from, event: 'begin', until: range.until });
+    let result;
+    try {
+      await pauser?.pause({ signal });
+      result = await run(config, { ...parameters, id, ...(resumes ? { resume: true } : {}) },
+        { ...options, signal, until: range.until });
+    } catch (error) {
+      // A run that threw before writing a line of its own leaves the slice's last word to this line.
+      logs.status({ job: id, phase: range.from, event: 'fail', reason: 'error' });
+      throw error;
+    } finally {
+      await pauser?.resume();
+    }
+    if (!result.ok) return { id, result, lines: [] };
+    const { lines, detail } = compareSnapshots(path.join(config.output, job), path.join(config.output, id),
+      range.until);
+    if (detail) jobLogs(path.join(config.output, id), { echo: false }).detail('slice summary', detail);
+    return { id, result, lines };
+  });
+  return held ? held.value : { busy: true };
+}
+
 /** The morning summary: one content-free line per job. */
 export function summaryLines(queue) {
   return queue.jobs.filter((row) => row.status !== 'removed').map((row) => {
@@ -805,12 +853,16 @@ function tally(entries, keys) {
  * `length` and `runaway` cut. `clock` supplies the current time.
  */
 export function jobStatus(config, id, { clock = () => new Date() } = {}) {
-  const row = readQueue(config).jobs.findLast((r) => r.id === id);
-  const lines = [`${id}  ${row ? row.status : 'not queued'}  queue ${lockHeld(config) ? 'held' : 'free'}`];
-  if (!row) return lines;
   const log = path.join(config.output, id, 'status.log');
   // A line cut off mid-write does not parse and is skipped.
-  const all = fs.existsSync(log) ? readStatusLog(log) : [];
+  const logged = fs.existsSync(log) ? readStatusLog(log) : [];
+  const queued = readQueue(config).jobs.findLast((r) => r.id === id);
+  // A sandbox job has no queue row; its log, from the slice's first line on, says how the slice went.
+  const sandbox = !queued && id.includes('~') ? sandboxRun(logged) : null;
+  const row = queued ?? sandbox?.row;
+  const lines = [`${id}  ${row ? row.status : 'not queued'}  queue ${lockHeld(config) ? 'held' : 'free'}`];
+  if (!row) return lines;
+  const all = sandbox ? sandbox.entries : logged;
   // The release line is written after the run ends, so it is shown on its own
   // and counts as none of the job's phases.
   const entries = all.filter((entry) => entry.phase !== 'release');
@@ -1131,6 +1183,23 @@ async function compareCommand(args) {
 async function dispatch(args, command, sub, config, track, trackRelease, control) {
   const pause = (cfg) => track(cfg);
   const release = (cfg) => trackRelease(cfg);
+  if (command === 'run' && args.job !== undefined) {
+    const stray = ['issue', 'suite', 'change', 'resume', 'allowDerivedRules', 'descriptionFile', 'now',
+      'restore', 'restorePaused'].find((key) => args[key] !== undefined);
+    if (stray || args.docs.length) throw new Error('--job names the job; it takes no other job option');
+    if (!/^[A-Za-z0-9_~-]+$/.test(args.job)) throw new Error('--job takes a job ID');
+    if (args.from === undefined) throw new Error('--from takes a phase');
+    const pauser = args.pause ? track(config, { leftover: false }) : null;
+    control.abort = new AbortController();
+    const done = await rerunJob(config, { job: args.job, from: args.from, until: args.until, label: args.as,
+      pauser }, { signal: control.abort.signal });
+    if (done.busy) return busyQueue();
+    console.log(`sandbox ${done.id}`);
+    for (const line of done.lines) console.log(line);
+    return done.result.ok ? 0 : 1;
+  }
+  const sliceFlag = ['from', 'until', 'as', 'pause'].find((key) => args[key] !== undefined);
+  if (command === 'run' && sliceFlag) throw new Error(`--${sliceFlag} goes with --job`);
   if (command === 'run') {
     // No queue lock is held here, so this run leaves another holder's stopped units alone.
     const pauser = track(config, { leftover: false });

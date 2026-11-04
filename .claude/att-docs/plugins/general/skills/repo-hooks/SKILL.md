@@ -1,15 +1,16 @@
 ---
 name: repo-hooks
-description: Four session hooks every repository can reuse, each driven by one section of the repository's extension.json. They refuse a pull request body whose Testing section a checker cannot parse, remind the session to put a new pull request in its catch-up ledger and keep a merge watch running, run the unit test that belongs to an edited file, and run Prettier on an edited file. Use when wiring these hooks into a repository, changing a repository's values for them, or working out why one fired or stayed quiet.
+description: Five session hooks every repository can reuse, four of them driven by one section of the repository's extension.json. They refuse a pull request body whose Testing section a checker cannot parse, refuse a commit that holds build artifacts or junk and `git add -A` or `git add .` in every repository, remind the session to put a new pull request in its catch-up ledger and keep a merge watch running, run the unit test that belongs to an edited file, and run Prettier on an edited file. Use when wiring these hooks into a repository, changing a repository's values for them, or working out why one fired or stayed quiet.
 ---
 
 # Repo hooks
 
 Hooks that carry no repository detail of their own. The `general` plugin registers them
-in `hooks/hooks.json`, and each one reads its values from one section of the
-repository's extension file, `.claude/skills/repo-hooks/extension.json`. A repository
-with no extension file, or a file with no section for a hook, gets no hook: the runner
-exits 0 and prints nothing.
+in `hooks/hooks.json`. Four read their values from one section of the repository's
+extension file, `.claude/skills/repo-hooks/extension.json`. A repository with no
+extension file, or a file with no section for such a hook, gets no hook: the runner exits
+0 and prints nothing. The stray-file gate is the exception. It runs in every repository
+and reads its section only to add patterns or turn itself off.
 
 The scripts are in `plugins/general/hooks/`, beside `hooks.json` and the runner
 `run.sh`. Each has a `_test.sh` or `_test.py` beside it.
@@ -39,7 +40,9 @@ script that `hooks/hooks.json` gives it:
 ```
 
 When a project's settings name `plugins/general/hooks/run.sh`, the plugin's own copy of
-the runner steps aside for that project, so a hook never fires twice. A vendoring
+the runner steps aside for that project, so a hook never fires twice. The stray-file gate
+is the exception: the plugin copy steps aside only when the settings register that gate,
+so a vendoring repository that registered the other hooks still gets it. A vendoring
 repository adds `plugins/general/hooks` to the paths its sync script copies.
 
 The runner runs each script from the repository root (`CLAUDE_PROJECT_DIR`, or the
@@ -97,6 +100,43 @@ Keys:
 - `failureMarker`: text the checker prints when it rejects a body. When set, an exit 1
   without it is reported as a checker that could not run (a missing dependency, for
   example) instead of a failed body.
+
+## Stray-file gate
+
+`stray_files_gate.py`, PreToolUse on Bash, section `strayFiles`. It refuses three calls:
+`git add -A`, `git add --all` and `git add .`; a `git add` that names a build artifact or
+junk file, with or without `-f`; and a `git commit` while the index holds one. The denial
+lists the files and says how to leave them out: `git restore --staged <path>`, a
+`.gitignore` entry when the pattern is not ignored yet, and a note to the user of which
+file was left out and why. A hook runs for a delegated agent's Bash calls too, so a
+subagent's commit gets the same check.
+
+Unlike the other hooks it runs in every repository: the runner takes `--default-on`, and a
+missing extension file or section means every default. Set `"strayFiles": false` to turn
+it off. A repository that vendors this one registers it as
+`run.sh --default-on strayFiles stray_files_gate.py`.
+
+Junk is a path with a folder, or the path itself, named `__pycache__`, `node_modules`,
+`coverage`, `htmlcov`, `test-results`, `playwright-report`, `.nyc_output`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache` or `.idea`, or a file name matching `*.pyc`,
+`*.pyo`, `.coverage`, `.coverage.*`, `.DS_Store`, `Thumbs.db`, `*.swp`, `*.swo`, `*~`,
+`*.log`, `*.tmp`, `*.temp`, `*.orig` or `*.rej`. A file the repository already tracks is
+left alone, and so is a staged deletion.
+
+Keys, all optional:
+
+- `patterns`: more junk, as globs. A word ending in `/` names a folder, a word with a `/`
+  in it is matched against the whole path from the repository root, and any other word is
+  matched against the file name.
+- `allow`: globs for paths to let through although they match, matched against the whole
+  path. A fixture that is a log on purpose goes here.
+- `allowBulkAdd`: `true` to let `git add -A` and `git add .` through. The junk checks
+  stay.
+
+The checks read the repository the call runs in, moved by a `cd` earlier in the same
+command and by `git -C <dir>`. A hook runs before the command, so a `git add <folder>` is
+checked through git's own dry run, and `git add src && git commit` in one call is covered.
+`git commit -a` also stages tracked files, which the gate does not look at.
 
 ## Merge-watch reminder
 
@@ -160,6 +200,7 @@ bash plugins/general/hooks/run_test.sh
 bash plugins/general/hooks/remind-pr-merge-watch_test.sh
 bash plugins/general/hooks/test-on-edit_test.sh
 bash plugins/general/hooks/prettier-on-save_test.sh
+python3 plugins/general/hooks/stray_files_gate_test.py
 python3 plugins/general/hooks/pr_testing_gate_test.py
 ```
 

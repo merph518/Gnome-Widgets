@@ -538,6 +538,25 @@ Reread the changed lines. Fix everything these report before committing,
 including anything already wrong on `<default-branch>`, per
 "Failures already on the default branch get fixed" in step 6.
 
+### Before every commit
+
+Run this before each commit, whether this session or a delegated agent makes it.
+
+- Stage the files the change meant to touch by name: `git add <path>...`. Never use
+  `git add -A`, `git add --all` or `git add .`.
+- Read `git diff --cached --name-status` and `git status --short`. Build artifacts and
+  junk stay out of the commit: `__pycache__/`, `*.pyc`, `node_modules/`, coverage and
+  test-result folders, editor and OS files (`.DS_Store`, `*.swp`), logs, and temp files.
+- When a stray file is staged, unstage it with `git restore --staged <path>`. Tell the
+  user which file was left out and why. Add a `.gitignore` entry when the pattern is not
+  ignored yet.
+- A prompt that hands code to another agent repeats these three rules, so a delegated
+  commit gets the same check.
+
+The `strayFiles` hook in the `repo-hooks` skill refuses the bulk adds, a named junk file,
+and a commit that holds one. It runs in every repository and for every agent. The check
+above still applies where the hook is turned off.
+
 ## 6. Run the affected tests yourself
 
 Opening a pull request triggers no test run. Its only check is `<pr-checks>`,

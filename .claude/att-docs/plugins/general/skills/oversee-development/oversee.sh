@@ -6,8 +6,10 @@
 # session that dies mid-issue is resumed by reading it, not by remembering.
 #
 # usage:
-#   oversee.sh init [label]                build the queue from the ready open issues
-#   oversee.sh refresh [label]             rebuild it for new issues, same label
+#   oversee.sh init [--milestone <title>] [label]
+#                                          build the queue from the ready open issues
+#   oversee.sh refresh [--milestone <title>] [label]
+#                                          rebuild it for new issues, same scope
 #   oversee.sh next                        what to work, or why nothing is workable
 #   oversee.sh start <issue> <branch>
 #   oversee.sh adopt <issue>               claim an orphaned in-flight issue
@@ -40,11 +42,73 @@ EXCLUDED+='"needs-triage","needs-info","ready-for-human"]'
 # The label an issue needs before an unattended session may take it up.
 READY="ready-for-agent"
 
+# jq definitions shared by the queue read: `labels`, which lists an issue's label
+# names, and the readers a milestone run uses on an issue body, then the
+# reachability walk that counts an issue's dependents. Fenced code is dropped
+# first. A dependency is the phrase `Depends on` or `Blocked by` anywhere in a
+# line, followed by the leading run of issue references (`#5`, `#5, #6`, `#5 and
+# #6`), or a line under a heading of that name that starts with an issue
+# reference. A priority is a `Priority:` line or the first line under a
+# `Priority` heading. References before a slash or a letter, such as
+# `owner/repo#5`, name another repository and are skipped. An open native
+# blocker counts as a dependency edge when ranking.
+BODY_JQ='
+def labels: [.labels[].name];
+def refs: [match("(^|[^A-Za-z0-9_/#])#([0-9]+)"; "g") | .captures[1].string | tonumber];
+def body_lines: (. // "") | gsub("\r"; "") | gsub("(?s)```.*?```"; "") | split("\n");
+def prank:
+  ascii_downcase
+  | if . == "critical" or . == "p0" then 0
+    elif . == "high" or . == "p1" then 1
+    elif . == "medium" or . == "p2" then 2
+    elif . == "low" or . == "p3" then 3
+    else null end;
+def dep_re:
+  "\\b(?:depends on|blocked by)\\b\\**\\s*:?\\s*\\**\\s*"
+  + "(?<run>#[0-9]+(?:\\s*(?:,\\s*(?:and\\s+)?|&|and)\\s*#[0-9]+)*)";
+def live($self; $open; $trk):
+  unique | map(. as $d
+    | select($d != $self and any($open[]; . == $d) and (any($trk[]; . == $d) | not)));
+def run_re:
+  "^\\s*(?:(?:[-*+]|[0-9]+[.)])\\s+)?(?:\\[[ xX]\\]\\s+)?"
+  + "(?<run>#[0-9]+(?:\\s*(?:,|&|and)\\s*#[0-9]+)*)";
+def pri_re:
+  "^\\s*(?:[-*]\\s+)?\\*{0,2}\\s*priority\\s*\\*{0,2}\\s*:\\s*\\*{0,2}\\s*(?<w>[A-Za-z0-9]+)";
+def first_re: "^\\s*(?:[-*]\\s+)?\\*{0,2}\\s*(?<w>[A-Za-z0-9]+)";
+def parse:
+  reduce body_lines[] as $l ({sec: "", deps: [], pri: []};
+    if ($l | test("^\\s{0,3}#{1,6}\\s")) then
+      .sec = ($l | sub("^\\s*#+\\s+"; "") | sub("\\s+$"; "") | sub(":$"; "") | ascii_downcase
+              | if . == "depends on" or . == "blocked by" then "dep"
+                elif . == "priority" then "pri" else "" end)
+    elif ($l | test("^\\s*$")) then .
+    else
+      .deps += [$l | match(dep_re; "gi") | .captures[0].string | refs[]]
+      | .pri += [$l | capture(pri_re; "i") | .w]
+      | if .sec == "dep" then .deps += [$l | capture(run_re; "i") | .run | refs[]]
+        elif .sec == "pri" then .pri += [$l | capture(first_re; "i") | .w] | .sec = ""
+        else . end
+    end);
+def tpos:
+  body_lines[]
+  | capture("^\\s*(?:[-+*]\\s+\\[[ xX]\\]\\s+|[0-9]+[.)]\\s+)#(?<n>[0-9]+)")
+  | .n | tonumber;
+def go($rev; $seen; $front):
+  if ($front | length) == 0 then $seen
+  else ([$front[] | ($rev[tostring] // [])[]] | unique) as $next
+    | ($next - $seen) as $new
+    | go($rev; $seen + $new; $new) end;
+def reach($rev): . as $x | go($rev; []; [$x]) | map(select(. != $x)) | length;
+'
+
 # The oldest gh whose --json output carries an issue's blockers.
 GH_MIN_MAJOR=2
 GH_MIN_MINOR=94
 
 die() { echo "$*" >&2; exit 1; }
+
+# A string as a JSON literal, for splicing into a jq program.
+jq_str() { jq -n --arg s "$1" '$s'; }
 
 # The queue reads each issue's blockers with `gh issue list --json blockedBy`,
 # which older gh versions reject. A rejected read looks like any failed backlog
@@ -106,43 +170,130 @@ row() {
     "${branch:--}" "${pr:--}" "${note:--}" >> "$LEDGER"
 }
 
+# Sets label and milestone, in the caller's scope, from the arguments of init
+# and refresh: one optional label and an optional --milestone <title>.
+parse_scope() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --milestone)
+        [ $# -ge 2 ] && [ -n "$2" ] || die "--milestone needs a title"
+        milestone=$2
+        shift 2 ;;
+      *)
+        [ -z "$label" ] || die "one label at most (got: $label $1)"
+        label=$1
+        shift ;;
+    esac
+  done
+}
+
 cmd_init() {
-  local label="${1:-}"
+  local label= milestone=
+  parse_scope "$@"
+  build_queue "$label" "$milestone"
+}
+
+build_queue() {
+  local label=$1 milestone=$2
   if [ -s "$QUEUE" ] && [ "${OVERSEE_FORCE:-}" != 1 ]; then
     die "queue already has $(wc -l < "$QUEUE") entries; OVERSEE_FORCE=1 to rebuild"
   fi
 
-  local want
-  want=$(jq -n --arg s "$label" '$s')
+  local want mile fields=number,title,labels,blockedBy
+  want=$(jq_str "$label")
+  mile=$(jq_str "$milestone")
+  [ -z "$milestone" ] || fields+=,milestone,body
 
   # A title that opens with `<area>:` names the plugin folder or part of the
   # repository the issue touches, so the area is readable from the title alone.
   # That is what keeps two sessions off the same files without opening any
   # issue body. The fourth column flags an issue carrying an excluded label,
   # the fifth an issue the queue may serve, meaning it carries the ready label
-  # and the label the queue was built for, and the sixth the open issues that
-  # block it, or `-`. The read covers every open issue, so next can tell
-  # whether the issue a skipped row waited on is still open. A failed read
-  # leaves the queue as it was rather than writing an empty one.
+  # and the label the queue was built for, and in a milestone run belongs to
+  # it, and the sixth the open issues that block it, or `-`. The read covers
+  # every open issue, so next can tell whether the issue a skipped row waited
+  # on is still open. A failed read leaves the queue as it was rather than
+  # writing an empty one.
+  #
+  # A milestone run adds three columns. The seventh is the open issues the
+  # body says it waits on, or `-`. The eighth is why the issue ranks where it
+  # does, or `-`. The ninth is 1 for an issue in the milestone, and init does
+  # not write it to the queue. The rows come out in serve order.
   local listed
-  listed=$(gh issue list --state open --limit 1000 --json number,title,labels,blockedBy --jq '
-    .[]
-    | . as $i
-    | [$i.labels[].name] as $have
-    | ($have | any(. as $n | '"$EXCLUDED"' | index($n))) as $out
-    | ('"$want"' as $w
-       | (($have | index("'"$READY"'")) != null)
+  listed=$(gh issue list --state open --limit 1000 --json "$fields" --jq "$BODY_JQ"'
+    def rowof($w; $m):
+      . as $i
+      | labels as $have
+      | ($have | any(. as $n | '"$EXCLUDED"' | index($n))) as $out
+      | ((($have | index("'"$READY"'")) != null)
          and ($w == "" or (($have | index($w)) != null))) as $in
-    | ($i.title | if test("^[A-Za-z][A-Za-z0-9_-]{0,19}\\s*:")
-                  then capture("^(?<area>[A-Za-z][A-Za-z0-9_-]{0,19})\\s*:").area | ascii_downcase
-                  else "-" end) as $area
-    | ($i.blockedBy // {nodes: [], totalCount: 0}) as $b
-    | ([$b.nodes[] | select(.state != "CLOSED") | "#\(.number)"]
-       + (if $b.totalCount > ($b.nodes | length) then ["more than 50 blockers"] else [] end)
-       | if length == 0 then "-" else join(" ") end) as $blockers
-    | [$i.number, $area, $i.title,
-       (if $out then 1 else 0 end), (if $in then 1 else 0 end), $blockers]
-    | @tsv') || return 1
+      | ($i.title | if test("^[A-Za-z][A-Za-z0-9_-]{0,19}\\s*:")
+                    then capture("^(?<area>[A-Za-z][A-Za-z0-9_-]{0,19})\\s*:").area
+                         | ascii_downcase
+                    else "-" end) as $area
+      | ($i.blockedBy // {nodes: [], totalCount: 0}) as $b
+      | ([$b.nodes[] | select(.state != "CLOSED") | "#\(.number)"]
+         + (if $b.totalCount > ($b.nodes | length) then ["more than 50 blockers"] else [] end)
+         | if length == 0 then "-" else join(" ") end) as $blockers
+      | {number: $i.number, title: $i.title, area: $area, ex: $out, ok: $in,
+         blockers: $blockers, trk: (($have | index("Tracker")) != null), body: $i.body,
+         bnums: [$b.nodes[] | select(.state != "CLOSED") | .number],
+         mem: ($m != "" and ($i.milestone.title // "") == $m)};
+    '"$want"' as $w
+    | '"$mile"' as $m
+    | map(rowof($w; $m)) as $rows
+    | if $m == "" then
+        $rows[]
+        | [.number, .area, .title, (if .ex then 1 else 0 end),
+           (if .ok then 1 else 0 end), .blockers]
+        | @tsv
+      else
+        ($rows | map(.number)) as $open
+        | ($rows | map(select(.trk) | .number)) as $trk
+        | ($rows | map(select(.mem and (.trk | not)))) as $cand
+        | ($cand | map(. as $c | (.body | parse) as $p
+            | {number: $c.number,
+               waits: ($p.deps | live($c.number; $open; $trk)),
+               edges: (($p.deps + $c.bnums) | live($c.number; $open; $trk)),
+               pri: ($p.pri | map(prank) | map(select(. != null)) | .[0])})) as $info
+        | (reduce $info[] as $c ({};
+            reduce $c.edges[] as $d (.; .[$d | tostring] += [$c.number]))) as $rev
+        | ($info | map({key: (.number | tostring), value: .}) | from_entries) as $byn
+        | ($rows | map(select(.mem and .trk)) | sort_by(.number)) as $trs
+        | ([$trs[] | .body | [tpos]] | add // []) as $pos
+        | $rows
+        | map(. as $r
+            | $byn[($r.number | tostring)] as $c
+            | (.ok and .mem) as $sv
+            | if $c == null then
+                {number, area, title, ex, sv: $sv, blockers, waits: "-", pick: "-",
+                 mem, key: [1, 0, 0, 0, $r.number]}
+              else
+                ($r.number | reach($rev)) as $dc
+                | ([range(0; ($pos | length))] | map(select($pos[.] == $r.number)) | .[0]) as $tp
+                | ("unblocks \($dc) open issue" + (if $dc == 1 then "" else "s" end)) as $u
+                | (["critical", "high", "medium", "low"][$c.pri // 0]) as $pn
+                | ([(if $dc > 0 then $u else empty end),
+                    (if $c.pri != null then "priority " + $pn else empty end),
+                    (if $tp != null then "tracker position \($tp + 1)" else empty end)]
+                   | if length == 0 then "lowest issue number" else join("; ") end) as $why
+                | {number, area, title, ex, sv: $sv, blockers, mem,
+                   waits: (if ($c.waits | length) == 0 then "-"
+                           else ($c.waits | map("#\(.)") | join(" ")) end),
+                   pick: ("pick: " + $why),
+                   key: [0, -$dc, ($c.pri // 2), ($tp // 1000000), $r.number]}
+              end)
+        | sort_by(.key)
+        | .[]
+        | [.number, .area, .title, (if .ex then 1 else 0 end), (if .sv then 1 else 0 end),
+           .blockers, .waits, .pick, (if .mem then 1 else 0 end)]
+        | @tsv
+      end') || return 1
+
+  if [ -n "$milestone" ] &&
+     ! awk -F'\t' '$9 == 1 { found = 1 } END { exit !found }' <<< "$listed"; then
+    echo "no open issue in milestone \"$milestone\"" >&2
+  fi
 
   printf '%s\n' "$listed" | awk -F'\t' 'NF { print $1 }' > "$OPEN.tmp.$$"
   mv "$OPEN.tmp.$$" "$OPEN"
@@ -154,22 +305,41 @@ cmd_init() {
   printf '%s\n' "$listed" |
   awk -F'\t' -v OFS='\t' -v ledger="$LEDGER" '
     FILENAME == ledger { known[$2]=1; next }
-    NF && (known[$1] || ($5 && !$4)) { print $1, $2, $3, $4, $5, $6 }' "$LEDGER" - |
-  # Oldest issue first, so an issue lands before the later ones that build on
-  # it. Two issues in one area never run together: next defers the second
-  # until the first one's pull request merges.
-  sort -t$'\t' -k1,1n > "$QUEUE.tmp.$$"
+    # A queue file from before milestone runs has no columns 7 and 8.
+    NF && (known[$1] || ($5 && !$4)) {
+      print $1, $2, $3, $4, $5, $6, ($7 == "" ? "-" : $7), ($8 == "" ? "-" : $8) }' \
+    "$LEDGER" - |
+  # A milestone run arrives in serve order. Otherwise the oldest issue goes
+  # first, so an issue lands before the later ones that build on it. Two
+  # issues in one area never run together: next defers the second until the
+  # first one's pull request merges.
+  { if [ -n "$milestone" ]; then cat; else sort -t$'\t' -k1,1n; fi; } > "$QUEUE.tmp.$$"
 
   mv "$QUEUE.tmp.$$" "$QUEUE"
-  printf '%s\n' "$label" > "$FILTER"
+  printf '%s\n%s\n' "$label" "$milestone" > "$FILTER"
   echo "queued $(wc -l < "$QUEUE") issues -> $QUEUE"
 }
 
-# A rebuild scoped to the label the queue was built with, unless one is given.
+# Sets saved_label and saved_milestone, in the caller's scope, to the label and
+# milestone the queue was built for: one per line of the filter file. Either
+# may be empty.
+load_scope() {
+  saved_label= saved_milestone=
+  [ ! -f "$FILTER" ] || {
+    IFS= read -r saved_label || true
+    IFS= read -r saved_milestone || true
+  } < "$FILTER"
+}
+
+# A rebuild scoped to the label and milestone the queue was built with. A
+# label or milestone given here replaces the saved one; the other is kept.
 cmd_refresh() {
-  local label="${1:-}"
-  [ -n "$label" ] || [ ! -f "$FILTER" ] || label=$(cat "$FILTER")
-  OVERSEE_FORCE=1 cmd_init "$label"
+  local label= milestone= saved_label saved_milestone
+  parse_scope "$@"
+  load_scope
+  [ -n "$label" ] || label=$saved_label
+  [ -n "$milestone" ] || milestone=$saved_milestone
+  OVERSEE_FORCE=1 build_queue "$label" "$milestone"
 }
 
 cmd_next() {
@@ -177,11 +347,13 @@ cmd_next() {
   # unblocked since the last call is served now. When a read fails, next
   # serves from the last queue, says so, and serves no skip again, since stale
   # lists cannot say a blocker has closed.
-  local open_prs stale=0
+  local open_prs stale=0 saved_label saved_milestone scoped=0
   if ! cmd_refresh > /dev/null; then
     stale=1
     echo "next: the backlog read failed; serving the last queue" >&2
   fi
+  load_scope
+  [ -z "$saved_milestone" ] || scoped=1
   open_prs=$(gh pr list --state open --limit 200 --json number --jq '.[].number') ||
     stale=1
   open_prs=$(printf '%s' "$open_prs" | tr '\n' ' ')
@@ -189,7 +361,7 @@ cmd_next() {
   # The ledger is matched by name rather than by FNR==NR: on the first run it is
   # empty, and an empty first file makes FNR==NR true for every queue row.
   awk -F'\t' -v open_prs=" $open_prs " -v ledger="$LEDGER" -v openf="$OPEN" \
-    -v me="$SESSION" -v stale="$stale" '
+    -v me="$SESSION" -v stale="$stale" -v scoped="$scoped" '
     # A skipped row is served again once what stopped it has cleared. A start
     # refused on a label or a closed state has cleared when the queue row is
     # open and carries no excluded label. Any other skip has cleared when every
@@ -216,6 +388,7 @@ cmd_next() {
     {
       line[FNR]=$1 "\t" $2 "\t" $3; num[FNR]=$1; area[FNR]=$2
       excluded[FNR]=($4 == 1); servable[FNR]=($5 == 1); blockers[FNR]=$6
+      waits[FNR]=($7 == "" ? "-" : $7); pick[FNR]=($8 == "" ? "-" : $8)
       total=FNR
     }
     END {
@@ -235,10 +408,13 @@ cmd_next() {
       }
 
       # My own unfinished start row outranks everything: resume it, never
-      # restart it. An orphaned one comes next, for any session to adopt.
+      # restart it. An orphaned one comes next, for any session to adopt. In a
+      # milestone run an orphan is adopted only while it belongs to the
+      # milestone, which servable records.
       for (pass = 1; pass <= 2; pass++)
         for (i=1; i<=total; i++) {
           n = num[i]
+          if (pass == 2 && scoped && !servable[i]) continue
           if (owner[n] == (pass == 1 ? "mine" : "orphan")) {
             print "INFLIGHT\t" line[i] "\tbranch " branch[n] "\t" owner[n]
             exit
@@ -251,10 +427,14 @@ cmd_next() {
         n = num[i]
         if (status[n] == "done" && pr[n] != "-" && index(open_prs, " " pr[n] " ") > 0)
           held[area[i]] = "PR #" pr[n]
-        if (owner[n] == "elsewhere") {
+        # An orphan a milestone run does not adopt is printed like an issue in
+        # flight elsewhere, and holds its area while its branch is open.
+        skipped_orphan = (owner[n] == "orphan" && scoped && !servable[i])
+        if (owner[n] == "elsewhere" || skipped_orphan) {
           print "ELSEWHERE\t" line[i] "\tbranch " branch[n]
           busy++
-          if (area[i] != "-") held[area[i]] = "issue " n " in another session"
+          why = skipped_orphan ? " orphaned outside the milestone" : " in another session"
+          if (area[i] != "-") held[area[i]] = "issue " n why
         }
       }
 
@@ -275,16 +455,34 @@ cmd_next() {
           deferred++
           continue
         }
+        # An issue whose body says it waits on open issues waits until they
+        # close. A dependency whose pull request is still open is named, since
+        # the dependency stays open until that pull request merges.
+        if (waits[i] != "-") {
+          w = "waits on " waits[i]
+          prs = ""; npr = 0
+          cnt = split(waits[i], parts, " ")
+          for (k = 1; k <= cnt; k++) {
+            d = substr(parts[k], 2)
+            if (status[d] == "done" && pr[d] != "-" && index(open_prs, " " pr[d] " ") > 0) {
+              prs = prs (npr++ ? ", " : "") pr[d]
+            }
+          }
+          if (npr > 0) w = w " (pull request" (npr > 1 ? "s " : " ") prs " open)"
+          print "DEFER\t" line[i] "\t" w
+          deferred++
+          continue
+        }
         if (area[i] != "-" && area[i] in held) {
           print "DEFER\t" line[i] "\tarea held by " held[area[i]]
           deferred++
           continue
         }
-        print "NEXT\t" line[i]
+        print "NEXT\t" line[i] (pick[i] != "-" ? "\t" pick[i] : "")
         exit
       }
       print ((deferred || busy) ? "BLOCKED" : "EMPTY")
-    }' "$OPEN" "$LEDGER" <(sort -t$'\t' -k1,1n "$QUEUE")
+    }' "$OPEN" "$LEDGER" "$QUEUE"
 }
 
 # The queue is a snapshot from init, and labels move after it: another session
@@ -292,14 +490,20 @@ cmd_next() {
 # again here. An issue no longer workable gets a skipped row, which next passes
 # over, and start fails so the caller asks next again.
 cmd_start() {
-  local issue=$1 branch=$2 why
-  why=$(gh issue view "$issue" --json state,labels,blockedBy --jq '
+  local issue=$1 branch=$2 why saved_label saved_milestone m pick note
+  local fields=state,labels,blockedBy
+  load_scope
+  [ -z "$saved_milestone" ] || fields+=,milestone
+  m=$(jq_str "$saved_milestone")
+  why=$(gh issue view "$issue" --json "$fields" --jq '
     [.labels[].name] as $have
     | ('"$EXCLUDED"' | map(select(. as $n | $have | index($n)))) as $hit
     | ([.blockedBy.nodes[]? | select(.state != "CLOSED") | "#\(.number)"]) as $open
+    | '"$m"' as $m
     | if .state != "OPEN" then "state \(.state)"
       elif ($hit | length) > 0 then "labeled \($hit | join(", "))"
       elif ($have | index("'"$READY"'")) == null then "not labeled '"$READY"'"
+      elif $m != "" and (.milestone.title // "") != $m then "not in milestone \($m)"
       elif ($open | length) > 0 then "blocked by \($open | join(" "))"
       elif .blockedBy.totalCount > (.blockedBy.nodes | length) then "more than 50 blockers"
       else "" end')
@@ -312,7 +516,12 @@ cmd_start() {
     row "$issue" skipped - - "not workable at start: $why"
     die "issue $issue is not workable ($why); recorded as skipped, run next again"
   fi
-  row "$issue" start "$branch" - "$(owner_tag)"
+  # The reason the issue ranked first sits in its queue row. It goes into the
+  # start row, so a resumed or adopted issue still carries it.
+  pick=$(awk -F'\t' -v i="$issue" '$1 == i { print $8 }' "$QUEUE")
+  note=$(owner_tag)
+  [ -z "$pick" ] || [ "$pick" = - ] || note+="${note:+; }$pick"
+  row "$issue" start "$branch" - "$note"
 }
 
 # Two sessions can both read NEXT for one issue and both call start. The second
@@ -337,11 +546,13 @@ refuse_if_held() {
 # again: the dead worker left `In Progress` on it, and that label is this
 # session's claim now.
 cmd_adopt() {
-  local issue=$1 branch
+  local issue=$1 branch last pick=
   lock_ledger
   branch=$(awk -F'\t' -v i="$issue" '$2==i {s=$3; b=$4} END {if (s == "start") print b}' "$LEDGER")
   [ -n "$branch" ] || die "issue $issue is not in flight; nothing to adopt"
-  row "$issue" start "$branch" - "$(owner_tag) adopted"
+  last=$(latest_row "$issue")
+  [[ $(cut -f6 <<< "$last") =~ (pick:\ .*) ]] && pick=${BASH_REMATCH[1]}
+  row "$issue" start "$branch" - "$(owner_tag) adopted${pick:+; $pick}"
 }
 
 # Takes back a start this session wrote, when the session cannot work the
@@ -385,12 +596,19 @@ cmd_swap() {
 }
 
 cmd_status() {
+  local saved_label saved_milestone
   awk -F'\t' '
     { status[$2]=$3 }
     END { for (i in status) n[status[i]]++
           printf "done %d  stalled %d  skipped %d  in-flight %d\n",
                  n["done"], n["stalled"], n["skipped"], n["start"] }' "$LEDGER"
   echo "queued $(wc -l < "$QUEUE") total"
+  load_scope
+  if [ -n "$saved_milestone" ]; then
+    echo "scope: milestone \"$saved_milestone\"${saved_label:+, label $saved_label}"
+  elif [ -n "$saved_label" ]; then
+    echo "scope: label $saved_label"
+  fi
   tail -n 8 "$LEDGER"
 }
 
