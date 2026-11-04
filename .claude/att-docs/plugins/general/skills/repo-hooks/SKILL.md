@@ -1,16 +1,14 @@
 ---
 name: repo-hooks
-description: Five session hooks every repository can reuse, four of them driven by one section of the repository's extension.json. They refuse a pull request body whose Testing section a checker cannot parse, refuse a commit that holds build artifacts or junk and `git add -A` or `git add .` in every repository, remind the session to put a new pull request in its catch-up ledger and keep a merge watch running, run the unit test that belongs to an edited file, and run Prettier on an edited file. Use when wiring these hooks into a repository, changing a repository's values for them, or working out why one fired or stayed quiet.
+description: Reusable repository session hooks for pull request checks, merge reminders, stray files, tests, formatting, and persistent implement loops. Use when wiring or configuring these hooks or diagnosing their behavior.
 ---
 
 # Repo hooks
 
-Hooks that carry no repository detail of their own. The `general` plugin registers them
-in `hooks/hooks.json`. Four read their values from one section of the repository's
-extension file, `.claude/skills/repo-hooks/extension.json`. A repository with no
-extension file, or a file with no section for such a hook, gets no hook: the runner exits
-0 and prints nothing. The stray-file gate is the exception. It runs in every repository
-and reads its section only to add patterns or turn itself off.
+The `general` plugin registers repository hooks in `hooks/hooks.json`. Their settings
+are sections of `.claude/skills/repo-hooks/extension.json`. The stray-file and
+implement-loop hooks run by default and accept `false` to turn them off; the other hooks
+run only when their section is present.
 
 The scripts are in `plugins/general/hooks/`, beside `hooks.json` and the runner
 `run.sh`. Each has a `_test.sh` or `_test.py` beside it.
@@ -39,11 +37,10 @@ script that `hooks/hooks.json` gives it:
 }
 ```
 
-When a project's settings name `plugins/general/hooks/run.sh`, the plugin's own copy of
-the runner steps aside for that project, so a hook never fires twice. The stray-file gate
-is the exception: the plugin copy steps aside only when the settings register that gate,
-so a vendoring repository that registered the other hooks still gets it. A vendoring
-repository adds `plugins/general/hooks` to the paths its sync script copies.
+When a project's settings name `plugins/general/hooks/run.sh`, the plugin copy steps
+aside for configured hooks. Default-on hooks step aside only when the settings register
+that hook. A vendoring repository adds `plugins/general/hooks` and
+`plugins/general/skills/oversee-development` to its copied paths for the loop hook.
 
 The runner runs each script from the repository root (`CLAUDE_PROJECT_DIR`, or the
 working directory) and hands it the extension file as `--config <file>`. A script run by
@@ -193,6 +190,17 @@ Keys, all optional:
   with a `prettier` key also counts, whatever this says. A repository with no config at
   all gets no formatting.
 
+## Persistent implement loop
+
+`implement_loop.py` runs on `SessionStart` and `Stop`. It supplies the session ID,
+restores an active loop's instructions, and continues that loop at a turn boundary.
+Set `"implementLoop": false` to disable it. The loop's state, recovery, and commands
+are described in `oversee-development`.
+
+Vendoring repositories register both events using `--default-on implementLoop
+implement_loop.py`, with the same matchers as `hooks/hooks.json`. Registering only one
+event leaves the plugin registration for the other in place.
+
 ## Tests
 
 ```
@@ -201,6 +209,7 @@ bash plugins/general/hooks/remind-pr-merge-watch_test.sh
 bash plugins/general/hooks/test-on-edit_test.sh
 bash plugins/general/hooks/prettier-on-save_test.sh
 python3 plugins/general/hooks/stray_files_gate_test.py
+python3 plugins/general/hooks/implement_loop_test.py
 python3 plugins/general/hooks/pr_testing_gate_test.py
 ```
 

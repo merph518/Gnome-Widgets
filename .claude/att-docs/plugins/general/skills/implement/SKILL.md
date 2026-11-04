@@ -4,15 +4,18 @@ description: >-
   Implement an issue end to end: read it in the current repository, claim it with a
   label, work it in an isolated worktree, run the affected tests until they are green,
   open a linked pull request, review that pull request itself, then hand it to the user.
-  Use when asked to implement, work on, pick up, or start an issue by number.
+  Use when asked to implement an issue or keep working the backlog on a loop.
 ---
 
 # Implement
 
-Takes one argument: the issue number. `/implement 214`, `/implement #214`, and
-`/implement https://github.com/<owner>/<repo>/issues/214` all mean issue 214.
+`/implement <issue>` works one issue: a number, `#<number>`, or an issue URL.
+`/implement --loop` runs the backlog through the `oversee-development` skill.
+Follow that skill's loop-mode instructions, including its persistent state and stop
+conditions. Repository extensions provide the issue filters. Do not run the single-issue
+steps below for `--loop`; the conductor invokes them for each selected issue.
 
-If no number was supplied, ask for one with `AskUserQuestion`. Do not guess
+If no argument was supplied, ask for one with `AskUserQuestion`. Do not guess
 from open issues. Every question this skill puts to the user goes through that
 tool, per `<asking-note>`.
 

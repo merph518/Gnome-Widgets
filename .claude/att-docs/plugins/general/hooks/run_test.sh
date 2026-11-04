@@ -109,6 +109,15 @@ printf '%s\n' '{"gate":{},"gate2":{}}' >"$work/vendored/.claude/skills/repo-hook
 check "a hook that is not default-on steps aside when the project registers any hook" "" \
   "$(CLAUDE_PROJECT_DIR=$work/vendored "$run" gate2 probe.py <<<payload)"
 
+printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"bash .claude/att-docs/plugins/general/hooks/run.sh --default-on implementLoop probe.py"}]}]}}' \
+  >"$work/always/.claude/settings.json"
+printf '%s\n' '{"other":{}}' >"$cfg"
+check "loop Stop steps aside for its vendored registration" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on implementLoop probe.py <<<'{"hook_event_name":"Stop"}')"
+check "loop SessionStart still runs when only Stop is vendored" \
+  "py --config $cfg $work/always {\"hook_event_name\":\"SessionStart\"}" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on implementLoop probe.py <<<'{"hook_event_name":"SessionStart"}')"
+
 check "hooks.json names a section and script that exist" "" "$(
   jq -r '.hooks[][].hooks[].command' "$here/hooks.json" |
     sed -nE 's#.*run\.sh" (--default-on )?([A-Za-z]+) ([^ "]+).*#\2 \3#p' |
