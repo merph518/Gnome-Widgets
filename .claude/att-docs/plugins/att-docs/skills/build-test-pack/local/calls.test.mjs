@@ -6,10 +6,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { callFileName, callRecorder, promptHash, schemaHash } from './calls.mjs';
 
-const folder = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'calls-')), 'work', 'calls');
+// One scratch root for the whole file, removed when the last test ends.
+const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'calls-test-'));
+after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
+const folder = () => path.join(fs.mkdtempSync(path.join(SCRATCH_ROOT, 'calls-')), 'work', 'calls');
 const at = (iso) => new Date(iso);
 const call = (extra = {}) => ({ step: 'phase1_rules', attempt: 1, thinking: false, maxTokens: 100,
   system: 'sys', user: 'usr', schema: { type: 'object' }, reply: { ok: true }, usage: { promptTokens: 9, outputTokens: 4, ms: 70 },

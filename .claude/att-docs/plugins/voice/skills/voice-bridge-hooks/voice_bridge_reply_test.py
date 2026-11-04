@@ -2,6 +2,7 @@
 """Tests for voice_bridge_reply.py. Run with: python3 voice_bridge_reply_test.py"""
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -17,6 +18,7 @@ import voice_bridge_reply as hook  # noqa: E402
 class VoiceBridgeReplyTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         os.makedirs(os.path.join(self.root, 'pending'))
         self.socket = '/run/user/1000/cc-socks/4242.sock'
 
@@ -165,6 +167,7 @@ class VoiceBridgeReplyTest(unittest.TestCase):
 
     def prepare_mark(self):
         self.runtime = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.runtime, ignore_errors=True)
         self.root = os.path.join(self.runtime, 'voice-bridge')
         os.makedirs(os.path.join(self.root, 'pending'))
         hook.attention(self.prompt(), self.socket, self.root)
@@ -567,6 +570,7 @@ class AnswerFormTest(unittest.TestCase):
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.socket = '/run/user/1000/cc-socks/4242.sock'
         self.clock = [1000.0]
 

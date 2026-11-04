@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.31.13](https://github.com/merph518/Overmind/compare/v0.31.12...v0.31.13) (2026-11-04)
+
+
+### Bug Fixes
+
+* cover a partial-clone Overmind checkout in the pin tests ([#508](https://github.com/merph518/Overmind/issues/508)) ([#526](https://github.com/merph518/Overmind/issues/526)) ([6c91a8b](https://github.com/merph518/Overmind/commit/6c91a8babf046b18fe7162247e4ca81cb2bfb1af))
+
+## [0.31.12](https://github.com/merph518/Overmind/compare/v0.31.11...v0.31.12) (2026-11-04)
+
+
+### Features
+
+* run one Phase 9 step or one builder pass on its own ([#491](https://github.com/merph518/Overmind/issues/491)) ([#525](https://github.com/merph518/Overmind/issues/525)) ([44e9754](https://github.com/merph518/Overmind/commit/44e975462796d1f0c9fae53d125bf41d5bc705d0))
+
+
+### Bug Fixes
+
+* remove the scratch folders test files leave in the temp folder ([#523](https://github.com/merph518/Overmind/issues/523)) ([c84c49b](https://github.com/merph518/Overmind/commit/c84c49b74cd257fccaff470a36c3cc2aa15a9ced))
+
+## [0.31.11](https://github.com/merph518/Overmind/compare/v0.31.10...v0.31.11) (2026-11-04)
+
+
+### Bug Fixes
+
+* fetch the objects a partial clone left in the pin workflow checkout ([#521](https://github.com/merph518/Overmind/issues/521)) ([297011f](https://github.com/merph518/Overmind/commit/297011f182c75ff70ba75a4915513cafb4fd19bb))
+
 ## [0.31.10](https://github.com/merph518/Overmind/compare/v0.31.9...v0.31.10) (2026-11-04)
 
 

@@ -115,6 +115,18 @@ jobs:
       - name: Clear a sparse checkout another workflow left behind
         run: git sparse-checkout disable
 
+      # A sparse checkout, which the plan job and other workflows make, clones without
+      # file contents and marks the workspace as a partial clone. The sync script fetches
+      # the tag from this directory, and a directory with that mark cannot serve contents
+      # it lacks, so a consumer whose history needs one fails. The script drops the mark
+      # and fetches every object, and leaves a full checkout as it is. It gets the
+      # workflow's token, which can read this repository; the App token of the pin step
+      # is narrowed to the consumer.
+      - name: Fetch the objects a partial clone left behind
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/pin/overmind-complete-clone.sh
+
       - name: Mint an App token for the consumer
         id: app-token
         uses: actions/create-github-app-token@v3

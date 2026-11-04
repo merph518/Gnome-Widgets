@@ -148,8 +148,9 @@ test('sheets with a title and a subtitle above their headers are checked like sh
   assert.match(warnings(goodPack(), wrong)['dashboard-count'], /Number of Reusable Test Cards reads 5/);
 });
 
-test('the stub builder writes the reference pack\'s layout: title, subtitle, headers in row 4, an ID-only Test Name', () => {
+test('the stub builder writes the reference pack\'s layout: title, subtitle, headers in row 4, an ID-only Test Name', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stub-layout-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const pack = goodPack();
   fs.writeFileSync(path.join(dir, 'pack.json'), JSON.stringify(pack));
   const run = spawnSync(process.execPath, [path.join(HERE, 'fixtures', 'builder-stub.mjs'), path.join(dir, 'pack.json'),

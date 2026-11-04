@@ -15,7 +15,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { addJob, cancelJob, checkJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld, rerunJob,
   markRestore, parseArgs, queueLines, readQueue, removeJob, restoreLines, restorePaused, restoreUnits,
-  summaryLines }
+  summaryLines, stepJob }
   from './build-pack.mjs';
 import { countedTries, HOLD_REASONS, loadConfig, MAX_MEMORY_STOPS, mainCheckout, memoryStops, RULE_SHAPE, rootRelative,
   worktreeRefusal } from './config.mjs';
@@ -28,7 +28,8 @@ import { estimateTokens } from './model.mjs';
 import { almDescriptions, batches, candidateLine, documentInputs, documentRules, dropUnfoundedAssumptions, expectedProblems, impactsText, phase5,
   resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
-import { compareSnapshots } from './rerun.mjs';
+import { compareSnapshots, readStep } from './rerun.mjs';
+import { checkStep, runStep } from './step-job.mjs';
 import { memoryLow, parseMeminfo, waitForMemory } from './meminfo.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { createReleaser } from './release.mjs';
@@ -6695,4 +6696,320 @@ test('the command line runs a slice, and refuses slice options without --job and
   assert.match(busy.stderr, /the queue is running/);
   assert.equal(fs.existsSync(path.join(config.output, `${SOURCE_JOB}~cli`)), false);
   assert.ok(fs.existsSync(result.workbook));
+});
+
+// A job's single steps: one part of Phase 9 on its own, in a sandbox, over a snapshot or an earlier step's state.
+
+const slurp = (file) => fs.readFileSync(file, 'utf8');
+/** The pack a step state or a snapshot holds. */
+const savedPack = (saved) => saved.pack ?? saved.state.pack;
+/** Rewrites the job's snapshot of `phase` through `change`, to set a state up. */
+const editSnapshot = (outDir, phase, change) => {
+  const file = path.join(outDir, 'work', 'checkpoints', `${phase}.json`);
+  const saved = JSON.parse(slurp(file));
+  change(saved);
+  fs.writeFileSync(file, JSON.stringify(saved));
+};
+const walkFailsOnCard = { phase9_revalidation: (value, calls) => failCheck(value, 'Traceability complete',
+  `${cardIdIn(calls.at(-1).user)} reads wrong`, `Change step 1 of ${cardIdIn(calls.at(-1).user)} to read Corrected step`) };
+const repairsStepOne = { phase8_repair: (value) => ({ ...correctingRepair(value),
+  cards: correctingRepair(value).cards.map((card) => ({ ...card,
+    steps: card.steps.map((one, i) => (i ? one : { ...one, description: 'Repaired by the step' })) })) }) };
+const step = (config, options, run) => stepJob(config, { job: SOURCE_JOB, ...options }, run);
+
+test('the draft step builds the review workbook with no model and prints the builder\'s sheet results', async () => {
+  const { config, result } = await finishedJob();
+  const before = digest(result.outDir);
+  const held = [];
+  const done = await step({ ...config, model: undefined }, { at: 'phase9-revalidate', step: 'draft', label: 'draft' },
+    { run: (...args) => { held.push(lockHeld(config)); return runStep(...args); } });
+  assert.equal(done.id, `${SOURCE_JOB}~draft`);
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.equal(done.result.failed, false);
+  assert.match(done.result.report.join('\n'), /^PASS +Dashboard$/m);
+  assert.ok(done.result.report.every((line) => /^(PASS|FAIL)/.test(line)));
+  const sandbox = path.join(config.output, done.id);
+  assert.ok(fs.readdirSync(path.join(sandbox, 'work', 'review')).some((name) => name.endsWith('.xlsx')));
+  // No model call was made, and a builder step never takes the queue.
+  assert.deepEqual(fs.readdirSync(path.join(sandbox, 'work', 'calls')), fs.readdirSync(path.join(result.outDir, 'work', 'calls')));
+  assert.deepEqual(held, [false]);
+  assert.deepEqual(done.result.lines.map((line) => JSON.parse(line).event), ['begin', 'step']);
+  assert.equal(JSON.parse(done.result.lines.at(-1)).calls, 0);
+  assertContentFree(done.result.lines.join('\n'));
+  assert.equal(jobStatus(config, done.id)[0], `${done.id}  passed  queue free`);
+  assert.deepEqual(digest(result.outDir), before);
+});
+
+test('the draft step prints the builder\'s lines when a sheet fails and the builder writes no workbook', async () => {
+  const { config, result } = await finishedJob();
+  editSnapshot(result.outDir, 'phase9-revalidate', (saved) => { savedPack(saved).testCards[0].title = 'REJECT'; });
+  const done = await step(config, { at: 'phase9-revalidate', step: 'draft', label: 'draft' });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.equal(done.result.failed, true);
+  assert.match(done.result.report.join('\n'), /^FAIL +Test Cards Markdown$/m);
+  assert.match(done.result.report.join('\n'), /^no workbook was written \(builder exit 1\)$/m);
+  assert.equal(JSON.parse(done.result.lines.at(-1)).sheetsFail, 1);
+});
+
+test('the build step prints every sheet\'s status without repairing, and a failing sheet makes the step fail', async () => {
+  const { config, result } = await finishedJob();
+  editSnapshot(result.outDir, 'phase9-revalidate', (saved) => { savedPack(saved).testCards[0].title = 'REJECT'; });
+  const before = digest(result.outDir);
+  const done = await step(config, { at: 'phase9-revalidate', step: 'build', label: 'build' });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.equal(done.result.failed, true);
+  assert.match(done.result.report.join('\n'), /^FAIL +Test Cards Markdown$/m);
+  assert.match(done.result.report.join('\n'), /^PASS +Dashboard$/m);
+  const sandbox = path.join(config.output, done.id);
+  assert.equal(JSON.parse(done.result.lines.at(-1)).sheetsFail, 1);
+  // The rejected title is still there: the step asks no model to repair it.
+  assert.equal(savedPack(readStep(sandbox)).testCards[0].title, 'REJECT');
+  assert.deepEqual(digest(result.outDir), before);
+});
+
+test('a build step before the review leaves the review sheets out of the failures, and after it counts them', async () => {
+  const { config, result } = await finishedJob();
+  const blank = (saved) => { savedPack(saved).testerNotes = ''; };
+  for (const phase of ['phase8', 'phase9-checklist', 'phase9-revalidate']) editSnapshot(result.outDir, phase, blank);
+  const early = await step(config, { at: 'phase8', step: 'build', label: 'early' });
+  assert.equal(early.result.failed, false);
+  assert.match(early.result.report.join('\n'), /^DEFERRED +Tester Notes$/m);
+  const checked = await step(config, { at: 'phase9-checklist', step: 'build', label: 'checked' });
+  assert.equal(checked.result.failed, false);
+  assert.match(checked.result.report.join('\n'), /^DEFERRED +Tester Notes$/m);
+  const late = await step(config, { at: 'phase9-revalidate', step: 'build', label: 'late' });
+  assert.equal(late.result.failed, true);
+  assert.match(late.result.report.join('\n'), /^FAIL +Tester Notes$/m);
+});
+
+test('a repair step repairs one finding of the snapshot\'s revalidation in the sandbox and leaves the job as it was', async () => {
+  const setup = lib({ ...walkFailsOnCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  assert.equal(failed.reason, 'gate:revalidation-failed');
+  const { config } = setup;
+  const before = digest(failed.outDir);
+  const model = fakeModel(repairsStepOne);
+  const done = await step(config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'fix' }, { model });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.match(done.result.report[0], /^repaired finding 0 {2}Traceability complete$/);
+  const sandbox = path.join(config.output, done.id);
+  const repaired = savedPack(readStep(sandbox));
+  assert.ok(repaired.testCards.some((card) => card.steps[0].description === 'Repaired by the step'));
+  // The repair round's own rebuild passed, so the pack no longer claims a failed revalidation.
+  assert.equal(repaired.revalidation, undefined);
+  assert.equal(model.calls.filter((c) => c.schemaName.startsWith('phase8_repair')).length, 1);
+  assert.ok(!JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json')))
+    .state.pack.testCards.some((card) => card.steps[0].description === 'Repaired by the step'));
+  assert.deepEqual(digest(failed.outDir), before);
+  assertContentFree(done.result.lines.join('\n'));
+});
+
+test('a build step at a failed revalidation reads the builder without the verdict, and a state with no verdicts takes them from the revalidation file', async () => {
+  const setup = lib({ ...walkFailsOnCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  assert.equal(failed.reason, 'gate:revalidation-failed');
+  const { config } = setup;
+  const built = await step(config, { at: 'phase9-revalidate', step: 'build', label: 'build' });
+  assert.equal(built.result.failed, false, built.result.report.join('\n'));
+  assert.match(built.result.report.join('\n'), /^PASS +Workbook Validation$/m);
+  // The verdict stays in the saved state for the steps after.
+  assert.equal(savedPack(readStep(path.join(config.output, built.id))).revalidation.passed, false);
+  // A snapshot whose state holds no verdicts takes them from the revalidation's file.
+  editSnapshot(failed.outDir, 'phase9-revalidate', (saved) => { delete saved.state.revalidationChecks; });
+  const older = await step(config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'older' },
+    { model: fakeModel(repairsStepOne) });
+  assert.equal(older.result.ok, true, JSON.stringify(older.result));
+  assert.ok(savedPack(readStep(path.join(config.output, older.id))).testCards
+    .some((card) => card.steps[0].description === 'Repaired by the step'));
+  const seeded = await step(config, { at: 'phase9-revalidate', step: 'walk', check: 'traceability', label: 'seeded' },
+    { model: fakeModel(walkFailsOnCard) });
+  assert.equal(seeded.result.ok, true, JSON.stringify(seeded.result));
+  assert.equal(readStep(path.join(config.output, seeded.id)).state.revalidationChecks.length, 7);
+  // With no file either, a partial walk cannot say what the other checks read.
+  fs.rmSync(path.join(failed.outDir, 'work', 'phase9-revalidation.json'));
+  const model = fakeModel();
+  const one = await step(config, { at: 'phase9-revalidate', step: 'walk', check: 'traceability', label: 'one' }, { model });
+  assert.equal(one.result.ok, false);
+  assert.match(one.result.report[0], /walk all seven first/);
+  assert.equal(model.calls.length, 0);
+});
+
+test('a step that cannot set up its context logs a fail line, so the sandbox does not read as running', async () => {
+  const { config } = await finishedJob();
+  const broken = { ...config, builder: { ...config.builder, module: 'fixtures/missing-builder.mjs' } };
+  const done = await step(broken, { at: 'phase9-revalidate', step: 'draft', label: 'broken' });
+  assert.equal(done.result.ok, false);
+  assert.equal(statusLines(path.join(config.output, done.id)).at(-1).event, 'fail');
+  assert.equal(jobStatus(config, done.id)[0], `${done.id}  failed  queue free`);
+});
+
+test('a walk of some checks before any full walk records those verdicts and leaves the pack\'s revalidation alone', async () => {
+  const { config, result } = await finishedJob();
+  const one = await step(config, { at: 'phase9-confidence', step: 'walk', check: 'traceability', label: 'one' },
+    { model: fakeModel(walkFailsOnCard) });
+  assert.equal(one.result.ok, true, JSON.stringify(one.result));
+  assert.match(one.result.report.join('\n'), /^fail +Traceability complete$/m);
+  const saved = readStep(path.join(config.output, one.id));
+  assert.deepEqual(saved.state.revalidationChecks.map((row) => row.check), ['Traceability complete']);
+  assert.equal(savedPack(saved).revalidation, undefined);
+  const file = (dir) => slurp(path.join(dir, 'work', 'phase9-revalidation.json'));
+  assert.equal(file(path.join(config.output, one.id)), file(result.outDir));
+});
+
+test('a walk step names the findings, and a repair step starts from the sandbox the walk left', async () => {
+  const { config, result } = await finishedJob();
+  const before = digest(result.outDir);
+  const model = fakeModel({ ...walkFailsOnCard, ...repairsStepOne });
+  const walked = await step(config, { at: 'phase9-confidence', step: 'walk', label: 'walk' }, { model });
+  assert.equal(walked.result.ok, true, JSON.stringify(walked.result));
+  const report = walked.result.report.join('\n');
+  assert.match(report, /^fail +Traceability complete$/m);
+  assert.match(report, /^finding 0 {2}Traceability complete$/m);
+  assert.equal(walked.result.report.filter((line) => line.startsWith('pass')).length, 6);
+  const repaired = await step(config, { at: walked.id, step: 'repair', finding: '0', label: 'fix' }, { model });
+  assert.equal(repaired.id, `${walked.id}~fix`);
+  assert.equal(repaired.result.ok, true, JSON.stringify(repaired.result));
+  assert.ok(savedPack(readStep(path.join(config.output, repaired.id))).testCards
+    .some((card) => card.steps[0].description === 'Repaired by the step'));
+  assert.ok(!savedPack(readStep(path.join(config.output, walked.id))).testCards
+    .some((card) => card.steps[0].description === 'Repaired by the step'));
+  assert.deepEqual(digest(result.outDir), before);
+});
+
+test('a walk of named checks asks for those only and keeps the earlier verdicts of the others', async () => {
+  const { config } = await finishedJob();
+  const full = await step(config, { at: 'phase9-confidence', step: 'walk', label: 'full' },
+    { model: fakeModel(walkFailsOnCard) });
+  const model = fakeModel();
+  const one = await step(config, { at: full.id, step: 'walk', check: 'traceability', label: 'one' }, { model });
+  assert.equal(one.result.ok, true, JSON.stringify(one.result));
+  assert.deepEqual(Object.keys(model.calls[0].schema.properties.checks.properties), ['Traceability complete']);
+  assert.match(one.result.report[0], /^pass +Traceability complete$/);
+  // The other six verdicts stand from the full walk, so nothing is open and the pack carries no failed revalidation.
+  const saved = readStep(path.join(config.output, one.id));
+  assert.deepEqual(saved.state.revalidationChecks.map((row) => row.verdict), Array(7).fill('pass'));
+  assert.equal(savedPack(saved).revalidation?.passed ?? true, true);
+  const last = JSON.parse(one.result.lines.at(-1));
+  assert.deepEqual([last.failedChecks, last.open], [0, 0]);
+});
+
+test('the confidence step writes one field or rates the overall level, and counts the Coverage field in code', async () => {
+  const { config, result } = await finishedJob();
+  const before = digest(result.outDir);
+  const model = fakeModel();
+  const coverage = await step(config, { at: 'phase9-revalidate', step: 'confidence', field: 'coverage', label: 'cov' }, { model });
+  assert.equal(coverage.result.ok, true, JSON.stringify(coverage.result));
+  assert.equal(model.calls.length, 0);
+  const field = await step(config, { at: 'phase9-revalidate', step: 'confidence', field: 'remainingRisks', label: 'field' },
+    { model });
+  assert.equal(field.result.ok, true, JSON.stringify(field.result));
+  assert.equal(model.calls.length, 1);
+  const overall = await step(config, { at: 'phase9-revalidate', step: 'confidence', label: 'overall' }, { model });
+  assert.equal(overall.result.ok, true, JSON.stringify(overall.result));
+  assert.equal(model.calls.length, 2);
+  const level = savedPack(readStep(path.join(config.output, overall.id))).confidence.overall;
+  assert.equal(overall.result.report[0], `overall ${level}`);
+  assert.deepEqual(digest(result.outDir), before);
+});
+
+test('a checklist step reads the built workbook and counts what it found', async () => {
+  const { config, result } = await finishedJob();
+  const before = digest(result.outDir);
+  const model = fakeModel({ phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair });
+  const done = await step(config, { at: 'phase8', step: 'checklist', label: 'check' }, { model });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.match(done.result.report[0], /^issues \d+ {2}coverageRows \d+ {2}fixRounds \d+$/);
+  assert.ok(model.calls.some((c) => c.schemaName.startsWith('phase9_checklist')));
+  assert.deepEqual(digest(result.outDir), before);
+});
+
+test('a step the state cannot serve stops with a fail line and the message, and leaves the state as it was', async () => {
+  const { config, result } = await finishedJob();
+  const model = fakeModel(walkFailsOnCard);
+  const walked = await step(config, { at: 'phase9-confidence', step: 'walk', label: 'walk' }, { model });
+  const sandbox = path.join(config.output, walked.id);
+  const state = slurp(path.join(sandbox, 'work', 'step.json'));
+  const out = await step(config, { at: walked.id, step: 'repair', finding: '5', label: 'range' }, { model });
+  assert.equal(out.result.ok, false);
+  assert.equal(out.result.report.length, 1);
+  assert.match(out.result.report[0], /^--finding 5 /);
+  assert.equal(statusLines(path.join(config.output, out.id)).at(-1).reason, 'step-input');
+  assert.equal(slurp(path.join(config.output, out.id, 'work', 'step.json')), state);
+  assert.equal(jobStatus(config, out.id)[0], `${out.id}  failed  queue free`);
+  // A snapshot from before any walk, with no revalidation file beside it, holds no verdicts to repair from.
+  editSnapshot(result.outDir, 'phase9-revalidate', (saved) => { delete saved.state.revalidationChecks; });
+  fs.rmSync(path.join(result.outDir, 'work', 'phase9-revalidation.json'));
+  const none = await step(config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'none' }, { model });
+  assert.match(none.result.report[0], /run the walk step first/);
+});
+
+test('a step refuses a wrong option, a missing snapshot and a sandbox it cannot start from, writing nothing', async () => {
+  const { config, result } = await finishedJob();
+  assert.deepEqual(checkStep({ step: 'walk', check: 'all issues, Traceability Complete' }),
+    { step: 'walk', checks: ['All issues resolved', 'Traceability complete'] });
+  assert.deepEqual(checkStep({ step: 'repair', finding: '0' }), { step: 'repair', finding: 0 });
+  assert.throws(() => checkStep({ step: 'nap' }), /a step is one of: draft, build, checklist, walk, repair, confidence/);
+  assert.throws(() => checkStep({ step: 'repair' }), /repair takes --finding/);
+  assert.throws(() => checkStep({ step: 'repair', finding: 'x' }), /repair takes --finding/);
+  assert.throws(() => checkStep({ step: 'draft', finding: '1' }), /--finding does not go with draft/);
+  assert.throws(() => checkStep({ step: 'walk', field: 'coverage' }), /--field does not go with walk/);
+  assert.throws(() => checkStep({ step: 'walk', check: 'nothing' }), /--check takes the names/);
+  assert.throws(() => checkStep({ step: 'confidence', field: 'overall' }), /--field takes one of: coverage, remainingRisks/);
+  const attempt = (options) => step(config, { step: 'draft', label: 'x', ...options });
+  await assert.rejects(() => attempt({ at: 'phase99' }), /--at takes one of: intake, phase1.*or a sandbox of issue-501-change-7001/);
+  await assert.rejects(() => attempt({ at: 'other~x' }), /--at takes one of/);
+  await assert.rejects(() => attempt({ at: `${SOURCE_JOB}~none` }), /holds no step state/);
+  await assert.rejects(() => stepJob(config, { job: 'issue-9-change-1', at: 'phase8', step: 'draft' }), /has no output folder/);
+  fs.rmSync(path.join(result.outDir, 'work', 'checkpoints', 'phase8.json'));
+  await assert.rejects(() => attempt({ at: 'phase8' }),
+    /issue-501-change-7001 has no snapshot for phase8 \(work\/checkpoints\/phase8\.json\)/);
+  await attempt({ at: 'phase9-revalidate', label: 'used' });
+  await assert.rejects(() => attempt({ at: 'phase9-revalidate', label: 'used' }), /already exists; give another --as label/);
+  assert.equal(fs.readdirSync(config.output).filter((name) => name.includes('~')).length, 1);
+});
+
+test('a step that asks the model holds the queue and leaves a held queue alone, as a builder step does neither', async () => {
+  const { config } = await finishedJob();
+  const seen = [];
+  const run = async (_config, job) => { seen.push({ held: lockHeld(config), job }); return { ok: true }; };
+  await step(config, { at: 'phase9-revalidate', step: 'checklist', label: 'one' }, { run });
+  assert.deepEqual(seen, [{ held: true, job: { id: `${SOURCE_JOB}~one`, job: { issue: '501', change: '7001' }, step: 'checklist' } }]);
+  const lock = `${config.at(config.queue.file)}.lock`;
+  fs.writeFileSync(lock, String(process.pid));
+  assert.deepEqual(await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'two' },
+    { run: async () => { throw new Error('must not run'); } }), { busy: true });
+  assert.equal(fs.existsSync(path.join(config.output, `${SOURCE_JOB}~two`)), false);
+  // A builder step ignores the held queue.
+  const built = await step(config, { at: 'phase9-revalidate', step: 'draft', label: 'three' });
+  assert.equal(built.result.ok, true, JSON.stringify(built.result));
+  fs.rmSync(lock);
+  const calls = [];
+  const pauser = { pause: async () => calls.push('pause'), resume: async () => calls.push('resume') };
+  await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'four', pauser }, { run });
+  await assert.rejects(() => step(config, { at: 'phase9-revalidate', step: 'walk', label: 'five', pauser },
+    { run: async () => { throw new Error('model down'); } }), /model down/);
+  assert.deepEqual(calls, ['pause', 'resume', 'pause', 'resume']);
+  assert.equal(lockHeld(config), false);
+});
+
+test('the command line runs a step, and refuses job options, a missing --at and an option the step does not take', async () => {
+  const { config, result } = await finishedJob();
+  const cli = (...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'step', ...args,
+    '--config', config.file], { encoding: 'utf8' });
+  const ran = cli('draft', '--job', SOURCE_JOB, '--at', 'phase9-revalidate', '--as', 'cli');
+  assert.equal(ran.status, 0, ran.stderr);
+  const lines = ran.stdout.trim().split('\n');
+  assert.equal(lines[0], `sandbox ${SOURCE_JOB}~cli`);
+  assert.match(ran.stdout, /^PASS +Dashboard$/m);
+  assert.equal(JSON.parse(lines.at(-1)).event, 'step');
+  const bad = cli('build', '--job', SOURCE_JOB, '--at', 'phase9-revalidate', '--issue', '501');
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /step takes --job and --at/);
+  assert.match(cli('draft', '--job', SOURCE_JOB).stderr, /--at takes a phase or a sandbox/);
+  assert.match(cli('draft', '--at', 'phase8').stderr, /--job takes a job ID/);
+  assert.match(cli('draft', '--job', SOURCE_JOB, '--at', 'phase8', '--finding', '1').stderr, /--finding does not go with draft/);
+  assert.ok(fs.existsSync(result.workbook));
+  assert.deepEqual(fs.readdirSync(config.output).filter((name) => name.includes('~')), [`${SOURCE_JOB}~cli`]);
 });
