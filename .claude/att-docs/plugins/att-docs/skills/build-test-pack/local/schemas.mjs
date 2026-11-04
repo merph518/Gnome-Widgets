@@ -236,8 +236,8 @@ export const REVALIDATION_CHECKS = ['All issues resolved', 'No regressions intro
 // The verdict for a check the part of the workbook in view does not show.
 export const NOT_SHOWN = 'not shown in this part';
 
-export const revalidationSchema = ({ verdicts = ['pass', 'fail'] } = {}) => obj({
-  checks: keyed('check', REVALIDATION_CHECKS, { why: str, verdict: oneOf(verdicts), fix: str }),
+export const revalidationSchema = ({ verdicts = ['pass', 'fail'], checks = REVALIDATION_CHECKS } = {}) => obj({
+  checks: keyed('check', checks, { why: str, verdict: oneOf(verdicts), fix: str }),
 });
 
 export const repairSchema = ({ cardIds, ids, objectives, derivations, statuses, sheets,

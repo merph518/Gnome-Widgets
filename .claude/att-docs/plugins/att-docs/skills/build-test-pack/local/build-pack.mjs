@@ -4,6 +4,7 @@
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
+//   node build-pack.mjs step --config <pipeline.json> --job <id> --at <phase|sandbox> <step> [--finding <n>] [--check <names>] [--field <name>] [--as <label>] [--pause]
 //   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 //   node build-pack.mjs check --config <pipeline.json>
 //   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -39,13 +40,16 @@ import { documentRules, phase2Verdict, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
 import { seededRandom, writeReports } from './report.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
-import { compareSnapshots, jobParameters, prepareSandbox, sandboxId, sandboxRun, sliceRange } from './rerun.mjs';
+import { compareSnapshots, jobParameters, prepareSandbox, prepareStepSandbox, sandboxId, sandboxRun, sliceRange,
+  stepStart } from './rerun.mjs';
+import { checkStep, runStep, stepUsesModel } from './step-job.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
   build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
   build-pack.mjs run --config <file> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
+  build-pack.mjs step --config <file> --job <id> --at <phase|sandbox> (draft | build | checklist | walk [--check <names>] | repair --finding <n> | confidence [--field <name>]) [--as <label>] [--pause]
   build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
   build-pack.mjs check --config <file>
   build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -62,6 +66,7 @@ const USAGE = `usage:
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <file> [--no-model]]
 exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
 exit codes of run --job: 0 the slice passed, 1 it stopped or the queue is running, 2 bad arguments, a job with no folder, or a missing snapshot
+exit codes of step: 0 the step ran and its build passed, 1 it stopped, its build failed a sheet, or the queue is running, 2 bad arguments, a job with no folder, or a missing snapshot or step state
 exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
 exit codes of check --config <file> alone, the setup check: 0 every check passed, 1 any failed, 2 bad config
 exit codes of queue cancel: 0 the job stopped, 1 the job is not running, 4 the queue stayed held after the stop request
@@ -812,6 +817,39 @@ export async function rerunJob(config, { job, from, until, label, pauser = null 
   return held ? held.value : { busy: true };
 }
 
+/**
+ * Runs one step of a job's work on its own in a sandbox, `<source>~<label>` with a
+ * time stamp for a label by default, over the job's snapshot of the phase `at` or the
+ * state a step left in one of the job's sandboxes (see `runStep`). The job's own
+ * folder, queue row and workbook are only read. A step that asks the model holds
+ * the queue while it runs, so the nightly run waits for it, and stops units only when
+ * `pauser` is given; a builder step holds nothing. Returns `{ busy: true }` when a
+ * live process holds the queue, else `{ id, result }`. Throws when an argument is
+ * wrong, the job has no folder or no state at `at`, or the sandbox exists; nothing is
+ * written then.
+ */
+export async function stepJob(config, { job, at, label, pauser = null, ...options },
+  { run = runStep, now = () => new Date(), signal = null, ...runOptions } = {}) {
+  const request = checkStep(options);
+  const start = stepStart(config, job, at);
+  const id = sandboxId(start.source, label, now());
+  const go = async () => {
+    const parameters = jobParameters(readQueue(config).jobs, job);
+    prepareStepSandbox(config, start, id);
+    return { id, result: await run(config, { id, job: parameters, ...request }, { ...runOptions, signal }) };
+  };
+  if (!stepUsesModel(request)) return go();
+  const held = withQueue(config, async () => {
+    try {
+      await pauser?.pause({ signal });
+      return await go();
+    } finally {
+      await pauser?.resume();
+    }
+  });
+  return held ? held.value : { busy: true };
+}
+
 /** The morning summary: one content-free line per job. */
 export function summaryLines(queue) {
   return queue.jobs.filter((row) => row.status !== 'removed').map((row) => {
@@ -1183,6 +1221,21 @@ async function compareCommand(args) {
 async function dispatch(args, command, sub, config, track, trackRelease, control) {
   const pause = (cfg) => track(cfg);
   const release = (cfg) => trackRelease(cfg);
+  if (command === 'step') {
+    const stray = ['issue', 'suite', 'change', 'resume', 'allowDerivedRules', 'descriptionFile', 'now',
+      'restore', 'restorePaused', 'from', 'until'].find((key) => args[key] !== undefined);
+    if (stray || args.docs.length) throw new Error('step takes --job and --at; it takes no other job option');
+    if (!/^[A-Za-z0-9_~-]+$/.test(args.job ?? '')) throw new Error('--job takes a job ID');
+    if (args.at === undefined) throw new Error('--at takes a phase or a sandbox');
+    const pauser = args.pause ? track(config, { leftover: false }) : null;
+    control.abort = new AbortController();
+    const done = await stepJob(config, { job: args.job, at: args.at, step: sub, finding: args.finding,
+      check: args.check, field: args.field, label: args.as, pauser }, { signal: control.abort.signal });
+    if (done.busy) return busyQueue();
+    console.log(`sandbox ${done.id}`);
+    for (const line of [...done.result.report, ...done.result.lines]) console.log(line);
+    return done.result.ok && !done.result.failed ? 0 : 1;
+  }
   if (command === 'run' && args.job !== undefined) {
     const stray = ['issue', 'suite', 'change', 'resume', 'allowDerivedRules', 'descriptionFile', 'now',
       'restore', 'restorePaused'].find((key) => args[key] !== undefined);

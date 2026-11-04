@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { fill, loadReference, MEMORY_STOP, rootRelative } from './config.mjs';
+import { fill, globFiles, loadReference, MEMORY_STOP, rootRelative } from './config.mjs';
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { Cancelled, ModelError, modelClient } from './model.mjs';
 import { jobLogs, readStatusLog } from './status.mjs';
@@ -31,7 +31,7 @@ export const jobId = (job) => (job.suite ? `suite-${job.suite}` : `issue-${job.i
   + (job.change ? `-change-${job.change}` : ''));
 
 /** The builder's validation lines, counted by status. Its notes stay in detail.log. */
-function countStatuses(stdout) {
+export function countStatuses(stdout) {
   const counts = { pass: 0, limited: 0, fail: 0 };
   for (const line of stdout.split('\n')) {
     if (line.startsWith('PASS WITH LIMITATIONS')) counts.limited += 1;
@@ -76,6 +76,66 @@ export function readSnapshot(outDir, phase) {
   }
 }
 
+/**
+ * What a run builds for itself from the config, with no phase passed yet: the
+ * builder and suite merge modules, the reference documents, and the context the
+ * phases share. `job` carries its ID; `outDir` is the folder the job writes to.
+ * Throws when the builder module lacks what the pipeline reads.
+ */
+export async function jobContext(config, job, { outDir, logs, model, signal = null }) {
+  const builderModule = await import(pathToFileURL(config.at(config.builder.module)).href);
+  if (typeof builderModule.buildPack !== 'function' || !Array.isArray(builderModule.OBJECTIVES)) {
+    throw new Error('config builder.module exports no buildPack and OBJECTIVES');
+  }
+  const suiteMerge = job.suite && config.suiteMerge?.module
+    ? await import(pathToFileURL(config.at(config.suiteMerge.module)).href) : null;
+  if (job.suite && typeof suiteMerge?.mergeSuitePack !== 'function') {
+    throw new Error('a suite job needs suiteMerge.module exporting mergeSuitePack');
+  }
+  const builder = { ...DEFAULTS, ...builderModule };
+  const ctx = {
+    config, job, logs, builder, suiteMerge,
+    model: model ?? modelClient({ ...config.model, signal }),
+    ref: loadReference(config),
+    pack: {},
+    riskLevels: config.riskLevels ?? ['High', 'Medium', 'Low'],
+    coreObjective: config.coreObjective ?? builder.OBJECTIVES[0],
+    fullCoverageObjective: setObjective(config.fullCoverageObjective, builder, 'Full Coverage Required Run'),
+    breakItObjective: setObjective(config.breakItObjective, builder, 'BREAK IT'),
+    suiteSetOrder: suiteMerge?.SUITE_SET_ORDER ?? builder.OBJECTIVES.slice(1),
+    suiteRunSets: config.suiteMerge?.runSets ?? ['Regression Testing', 'Full Coverage Required Run'],
+    calls: 0, repairs: 0, droppedObjectives: [], derived: 0, reviewIssues: 0, reuse: [],
+    tokens: { prompt: 0, output: 0 },
+    private(name, value) {
+      fs.writeFileSync(path.join(outDir, 'work', name), `${JSON.stringify(value, null, 1)}\n`);
+    },
+  };
+  if (config.inputs.existingTests) {
+    ctx.existingTests = globFiles(config.root, fill(config.inputs.existingTests, job))
+      .map((file) => fs.readFileSync(file, 'utf8')).join('\n\n');
+  }
+  return ctx;
+}
+
+/**
+ * Puts a saved state on the context and returns the saved pack. The documents are
+ * read from the root this run has, whatever root wrote the state.
+ */
+export function restoreState(config, ctx, saved) {
+  Object.assign(ctx, saved.state);
+  for (const doc of ctx.documents ?? []) if (doc.file) doc.file = rootRelative(config, doc.file);
+  if (ctx.documentPaths) {
+    ctx.documentPaths = ctx.documentPaths.map((file) => rootRelative(config, file));
+  }
+  return saved.pack ?? ctx.pack;
+}
+
+/** A job's state as `phase` leaves it, as the text a snapshot holds: the context without what the run builds for itself. */
+export function stateText(ctx, pack, phase) {
+  const state = Object.fromEntries(Object.entries(ctx).filter(([key]) => !SETUP.has(key)));
+  return JSON.stringify({ phase, state, pack: pack === ctx.pack ? undefined : pack });
+}
+
 export async function runJob(config, job, { model, echo = true, now = Date.now, readMemory = readMeminfo,
   sleep, signal = null, until = null } = {}) {
   const id = job.id ?? jobId(job);
@@ -101,56 +161,18 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   fs.mkdirSync(path.join(outDir, 'work'), { recursive: true });
   const logs = jobLogs(outDir, { echo });
   const started = now();
-  const builderModule = await import(pathToFileURL(config.at(config.builder.module)).href);
-  if (typeof builderModule.buildPack !== 'function' || !Array.isArray(builderModule.OBJECTIVES)) {
-    throw new Error('config builder.module exports no buildPack and OBJECTIVES');
-  }
-  const suiteMerge = job.suite && config.suiteMerge?.module
-    ? await import(pathToFileURL(config.at(config.suiteMerge.module)).href) : null;
-  if (job.suite && typeof suiteMerge?.mergeSuitePack !== 'function') {
-    throw new Error('a suite job needs suiteMerge.module exporting mergeSuitePack');
-  }
-  const builder = { ...DEFAULTS, ...builderModule };
-  const ctx = {
-    config, job: { ...job, id }, logs, builder, suiteMerge,
-    model: model ?? modelClient({ ...config.model, signal }),
-    ref: loadReference(config),
-    pack: {},
-    riskLevels: config.riskLevels ?? ['High', 'Medium', 'Low'],
-    coreObjective: config.coreObjective ?? builder.OBJECTIVES[0],
-    fullCoverageObjective: setObjective(config.fullCoverageObjective, builder, 'Full Coverage Required Run'),
-    breakItObjective: setObjective(config.breakItObjective, builder, 'BREAK IT'),
-    suiteSetOrder: suiteMerge?.SUITE_SET_ORDER ?? builder.OBJECTIVES.slice(1),
-    suiteRunSets: config.suiteMerge?.runSets ?? ['Regression Testing', 'Full Coverage Required Run'],
-    calls: 0, repairs: 0, droppedObjectives: [], derived: 0, reviewIssues: 0, reuse: [],
-    tokens: { prompt: 0, output: 0 },
-    private(name, value) {
-      fs.writeFileSync(path.join(outDir, 'work', name), `${JSON.stringify(value, null, 1)}\n`);
-    },
-  };
-  if (config.inputs.existingTests) {
-    const { globFiles } = await import('./config.mjs');
-    ctx.existingTests = globFiles(config.root, fill(config.inputs.existingTests, job))
-      .map((file) => fs.readFileSync(file, 'utf8')).join('\n\n');
-  }
+  const ctx = await jobContext(config, { ...job, id }, { outDir, logs, model, signal });
 
   // The merged suite pack is a separate object from ctx.pack once Phase 7 passes.
   let pack = ctx.pack;
   const done = saved ? PHASES.indexOf(saved.phase) : -1;
   if (saved) {
-    Object.assign(ctx, saved.state);
-    // The documents are read from the root this run has, whatever root wrote the checkpoint.
-    for (const doc of ctx.documents ?? []) if (doc.file) doc.file = rootRelative(config, doc.file);
-    if (ctx.documentPaths) {
-      ctx.documentPaths = ctx.documentPaths.map((file) => rootRelative(config, file));
-    }
-    pack = saved.pack ?? ctx.pack;
+    pack = restoreState(config, ctx, saved);
     logs.status({ job: id, phase: PHASES[done + 1] ?? 'done', event: 'resume', after: saved.phase });
   }
   // The snapshot is written before checkpoint.json, so the latest checkpoint always has its snapshot.
   const checkpoint = (name) => {
-    const state = Object.fromEntries(Object.entries(ctx).filter(([key]) => !SETUP.has(key)));
-    const text = JSON.stringify({ phase: name, state, pack: pack === ctx.pack ? undefined : pack });
+    const text = stateText(ctx, pack, name);
     const snapshot = snapshotPath(outDir, name);
     fs.mkdirSync(path.dirname(snapshot), { recursive: true });
     for (const file of [snapshot, checkpointPath(outDir)]) {
@@ -219,12 +241,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       await P.phase8(ctx, pack, 'build', P.REVIEW_SHEETS);
       return { repairs: ctx.repairs };
     });
-    await step('phase9-checklist', async () => {
-      const counts = await P.phase9Checklist(ctx, pack);
-      ctx.reviewIssues = counts.issues;
-      const fixes = await P.phase9Fix(ctx, pack);
-      return { ...counts, fixRounds: fixes.rounds };
-    });
+    await step('phase9-checklist', () => P.checklistRounds(ctx, pack));
     await step('phase9-senior', () => P.phase9SeniorReview(ctx, pack));
     await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
     await step('phase9-revalidate', async () => {

@@ -47,6 +47,21 @@ export function jobParameters(rows, sourceId) {
 }
 
 /**
+ * Copies a job's folder to a sandbox, leaving out the files in `skipped`. Only the
+ * job's logs are kept from the folder itself: any other file there is a pack or a workbook.
+ */
+function copyJob(source, sandbox, skipped) {
+  const keptLogs = new Set(['status.log', 'detail.log']);
+  fs.cpSync(source, sandbox, {
+    recursive: true,
+    filter: (file) => {
+      if (skipped.has(file)) return false;
+      return path.dirname(file) !== source || fs.statSync(file).isDirectory() || keptLogs.has(path.basename(file));
+    },
+  });
+}
+
+/**
  * Copies the source job's folder to the sandbox and points the sandbox's
  * checkpoint at the snapshot of the phase before `from`, so a run with
  * `resume` starts at `from`. The pack and workbook the source built are not
@@ -66,18 +81,9 @@ export function prepareSandbox(config, sourceId, sandboxName, from) {
     throw new Error(`${sourceId} has no snapshot for ${before} (work/checkpoints/${before}.json); `
       + `run the job through ${before} first`);
   }
-  const later = new Set(PHASES.slice(PHASES.indexOf(from)).map((name) => snapshotPath(source, name)));
-  const skipped = new Set([path.join(source, 'work', 'checkpoint.json'),
-    path.join(source, 'work', 'partial-pack.json')]);
-  const keptLogs = new Set(['status.log', 'detail.log']);
-  fs.cpSync(source, sandbox, {
-    recursive: true,
-    filter: (file) => {
-      if (later.has(file) || skipped.has(file)) return false;
-      // A file in the job's folder itself, other than its logs, is a pack or a workbook.
-      return path.dirname(file) !== source || fs.statSync(file).isDirectory() || keptLogs.has(path.basename(file));
-    },
-  });
+  const skipped = new Set([...PHASES.slice(PHASES.indexOf(from)).map((name) => snapshotPath(source, name)),
+    path.join(source, 'work', 'checkpoint.json'), path.join(source, 'work', 'partial-pack.json')]);
+  copyJob(source, sandbox, skipped);
   const checkpoint = path.join(sandbox, 'work', 'checkpoint.json');
   fs.copyFileSync(snapshotPath(source, before), `${checkpoint}.tmp`);
   fs.renameSync(`${checkpoint}.tmp`, checkpoint);
@@ -137,8 +143,63 @@ export function sandboxRun(entries) {
   const last = mine.at(-1);
   if (!last) return null;
   const stopped = last.event === 'fail';
-  const status = last.event === 'slice' ? 'passed' : !stopped ? 'running' : last.reason === 'cancelled' ? 'stopped' : 'failed';
+  const status = ['slice', 'step'].includes(last.event) ? 'passed' : !stopped ? 'running' : last.reason === 'cancelled' ? 'stopped' : 'failed';
   return { entries: own, row: { status, started: mine[0].at,
     ...(status === 'running' ? {} : { finished: last.at }),
     ...(stopped ? { phase: last.phase, reason: last.reason } : {}) } };
+}
+
+/** The state a step starts from and leaves, in the sandbox's work folder: a snapshot's shape. */
+export const stepPath = (outDir) => path.join(outDir, 'work', 'step.json');
+
+/** The state a sandbox's last step left, or null when it holds none. */
+export function readStep(outDir) {
+  try {
+    return JSON.parse(fs.readFileSync(stepPath(outDir), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where a step starts. `at` is a phase, read from the job's snapshot of it, or the
+ * ID of a sandbox of the job, read from the state its last step left. Returns the
+ * folder to copy (`source`), the `phase` the state is at, and the `file` holding it.
+ * Throws when the folder is missing or `at` names neither.
+ */
+export function stepStart(config, job, at) {
+  if (PHASES.includes(at)) {
+    const dir = path.join(config.output, job);
+    if (!fs.existsSync(dir)) throw new Error(`${job} has no output folder`);
+    if (!readSnapshot(dir, at)) {
+      throw new Error(`${job} has no snapshot for ${at} (work/checkpoints/${at}.json); run the job through ${at} first`);
+    }
+    return { source: job, phase: at, file: snapshotPath(dir, at) };
+  }
+  const base = job.split('~')[0];
+  if (typeof at !== 'string' || !at.startsWith(`${base}~`) || !/^[A-Za-z0-9_~-]+$/.test(at)) {
+    throw new Error(`--at takes one of: ${PHASES.join(', ')}, or a sandbox of ${base}`);
+  }
+  const dir = path.join(config.output, at);
+  const saved = fs.existsSync(dir) ? readStep(dir) : null;
+  if (!saved) throw new Error(`${at} holds no step state (work/step.json); give a sandbox a step has run in`);
+  return { source: at, phase: saved.phase, file: stepPath(dir) };
+}
+
+/**
+ * Copies the folder `start` names to the sandbox and puts its state in
+ * work/step.json. Snapshots after the state's phase are left behind, so none stands
+ * in for a phase the sandbox has not run. Throws, with nothing written, when the
+ * sandbox exists.
+ */
+export function prepareStepSandbox(config, start, sandboxName) {
+  const source = path.join(config.output, start.source);
+  const sandbox = path.join(config.output, sandboxName);
+  if (fs.existsSync(sandbox)) throw new Error(`${sandboxName} already exists; give another --as label`);
+  const skipped = new Set([...PHASES.slice(PHASES.indexOf(start.phase) + 1).map((name) => snapshotPath(source, name)),
+    ...['checkpoint.json', 'partial-pack.json', 'step.json'].map((name) => path.join(source, 'work', name))]);
+  copyJob(source, sandbox, skipped);
+  fs.mkdirSync(path.dirname(stepPath(sandbox)), { recursive: true });
+  fs.copyFileSync(start.file, `${stepPath(sandbox)}.tmp`);
+  fs.renameSync(`${stepPath(sandbox)}.tmp`, stepPath(sandbox));
 }

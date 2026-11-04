@@ -115,6 +115,25 @@ jobs:
       - name: Clear a sparse checkout another workflow left behind
         run: git sparse-checkout disable
 
+      # A sparse checkout, which the plan job and other workflows make, clones without
+      # file contents and marks the workspace as a partial clone. The sync script fetches
+      # the tag from this directory, and a directory with that mark cannot serve contents
+      # it lacks, so a consumer whose history needs one fails. Dropping the mark and
+      # fetching again brings every object down. A full checkout is left as it is.
+      - name: Fetch the objects a partial clone left behind
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$(git config --get remote.origin.promisor || true)" != true ]; then
+            exit 0
+          fi
+          git config --unset remote.origin.partialclonefilter || true
+          git config --unset remote.origin.promisor
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --quiet --refetch --no-tags origin
+
       - name: Mint an App token for the consumer
         id: app-token
         uses: actions/create-github-app-token@v3

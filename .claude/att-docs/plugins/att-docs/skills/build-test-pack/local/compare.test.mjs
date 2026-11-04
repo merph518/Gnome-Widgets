@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { parseArgs } from './build-pack.mjs';
@@ -25,7 +25,10 @@ import { columnNumber, decodeXml, readXlsx, readZip } from './xlsx.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BUILD_PACK = path.join(HERE, 'build-pack.mjs');
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'compare-'));
+// One scratch root for the whole file, removed when the last test ends.
+const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'compare-test-'));
+after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
+const tmp = () => fs.mkdtempSync(path.join(SCRATCH_ROOT, 'compare-'));
 
 // ---- a small zip and xlsx writer ----------------------------------------
 

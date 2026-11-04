@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,7 +9,10 @@ import { DEFAULT_FOLDER, SCRIPT, cleanup, folderProblem, isAllowed, outFolder, r
   from './pack-compare.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pack-compare-test-'));
+// One scratch root for the whole file, removed when the last test ends.
+const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-compare-test-'));
+after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
+const tmp = () => fs.mkdtempSync(path.join(SCRATCH_ROOT, 'case-'));
 const touch = (dir, ...names) => names.forEach((name) => fs.writeFileSync(path.join(dir, name), 'x'));
 const staged = (dir, rules = 'rules.json') => touch(dir, 'reference.xlsx', 'pack.xlsx', 'doc.md', rules);
 
