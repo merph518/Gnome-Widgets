@@ -282,6 +282,15 @@ file, the workbook, or the job's `detail.log` and `work` folder. It runs or
 queues the job and reports the content-free status lines: phase names, pass or
 fail, reason codes, counts and timings.
 
+Each model call leaves a file in the job's `work/calls` folder, named
+`<seq>-<step>-<attempt>.json`: the step, the attempt, whether thinking was on, a hash of
+the whole prompt, a hash of the reply schema, the prompt itself, the reply, the token counts
+and the timings. A call
+that failed is recorded with its error code and no reply, and a retry is a second file.
+A job run again with `--resume` adds to the folder and never replaces a file. The files
+hold document and rule text, as `detail.log` does, so they stay on the machine and the
+session does not read them.
+
 ```bash
 <pipeline> check --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 <pipeline> run --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]

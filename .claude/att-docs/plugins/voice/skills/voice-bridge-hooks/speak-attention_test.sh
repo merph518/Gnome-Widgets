@@ -619,12 +619,14 @@ check "$(now '.markdown')" '["  Indented first line."]' \
 # a source past the cap is cut at a line boundary and ends in an ellipsis
 long=$(for i in $(seq 1 400); do echo "line $i of a long reply"; done)
 : > "$NOWLOG"
+: > "$QUEUES/s1.fulltext"
 text "$long"
 call > /dev/null
 check "$(now '.markdown | [length <= 2001, endswith("…"), (split("\n") | length > 3),
   (split("\n") | .[-1] | test("^line [0-9]+ of a long reply…$"))] | all')" "[true]" \
   "a long source is cut at a line boundary and marked"
 check "$(now '.text | length > 4000')" "[true]" "the cap leaves the spoken text whole"
+rm -f "$QUEUES/s1.fulltext"
 
 # the cut falls after a complete line, not before it, and a long run of space is quick
 exact="$(head -c 1990 /dev/zero | tr '\0' x)
@@ -654,6 +656,59 @@ text "$cjk"
 call > /dev/null
 check "$(now '.markdown | [length, (explode | any(. == 65533)), endswith("…")]')" \
   "[[2001,false,true]]" "a multibyte source over 4 KB is cut whole, with no replacement characters"
+
+# Long text is read in short. The queue keeps the block as written; the voice feed gets it whole.
+filler=$(for i in $(seq 1 60); do printf 'Detail %s of the run. ' "$i"; done)
+ready_reply="PULL REQUEST 214 IS READY FOR YOUR REVIEW
+
+Checks passed. $filler"
+full_text() { [[ $1 == *"Detail 60 of the run."* ]] && echo whole || echo short; }
+prompt human "finish up"
+check "$(stop "$ready_reply")" "demo session says: Pull request 214 is ready for review." \
+  "a ready reply is read as one short line"
+prompt human "finish up again"
+: > "$NOWLOG"
+text "**PULL REQUEST #215** IS READY FOR YOUR REVIEW. $filler"
+check "$(call)" "demo session says: Pull request 215 is ready for review." \
+  "a ready line with emphasis around its number is read as one short line"
+check "$(now '.markdown | startswith("**PULL REQUEST #215** IS READY")')" "[true]" \
+  "the ready line's queue source is the reply as written"
+prompt human "explain"
+: > "$NOWLOG"
+text "The suite passed after one fix. $filler"
+check "$(call)" "demo session says: The suite passed after one fix. The rest is on screen." \
+  "a long reply is read as its opening sentence"
+check "$(now '.markdown | startswith("The suite passed after one fix. Detail 1 of")')" "[true]" \
+  "the long reply's queue source is the reply as written"
+prompt human "list"
+text "$(printf '## Summary\n\n1. Fixed the parser.\n2. Added tests.\n\n%s' "$filler")"
+check "$(call)" "demo session says: Summary 1. Fixed the parser. The rest is on screen." \
+  "a long reply that opens with a heading and a list is cut after the first item, not at its marker"
+prompt human "short one"
+text "Two files changed. Tests pass."
+check "$(call)" "demo session says: Two files changed. Tests pass." "a short reply is read whole"
+prompt human "followed"
+text "$ready_reply"
+CLAUDE_CODE_MESSAGING_SOCKET=/x/79.sock call > /dev/null
+check "$(full_text "$(jq -r '.[-1].text' "$XDG_RUNTIME_DIR/voice-bridge/feed/79.json")")" whole \
+  "the voice feed still gets the ready reply whole"
+: > "$QUEUES/s1.fulltext"
+prompt human "full ready"
+text "$ready_reply"
+check "$(full_text "$(call)")" whole "the full-text marker reads a ready reply whole"
+prompt human "full long"
+text "The suite passed after one fix. $filler"
+check "$(full_text "$(call)")" whole "the full-text marker reads a long reply whole"
+rm -f "$QUEUES/s1.fulltext"
+jq '.fullSpeech = true' "$CONFIG" > "$SANDBOX/full.json"
+prompt human "config full"
+text "$ready_reply"
+check "$(full_text "$(CONFIG="$SANDBOX/full.json" call)")" whole \
+  "fullSpeech in the extension file reads a ready reply whole"
+prompt human "default again"
+text "$ready_reply"
+check "$(call)" "demo session says: Pull request 214 is ready for review." \
+  "with neither opt-out set, a ready reply is read as one short line again"
 
 # another session's queue: its line plays with its own source, after this session's own
 printf 'Other session.' > "$QUEUES/s2.name"

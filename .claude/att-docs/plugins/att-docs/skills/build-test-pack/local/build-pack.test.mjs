@@ -33,6 +33,7 @@ import { memoryLow, parseMeminfo, waitForMemory } from './meminfo.mjs';
 import { renderReport, reportData, seededRandom, spotChecks, writeReports } from './report.mjs';
 import { createReleaser } from './release.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
+import { callFileName, promptHash, schemaHash } from './calls.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 import { readPack } from './pack.mjs';
 
@@ -990,7 +991,7 @@ async function askOver(finish, { model = {}, phase = 'phase1', step = 's', reaso
   const { ask } = await import('./phases.mjs');
   const lines = [];
   const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
-    logs: { status: (fields) => lines.push(fields), detail() {} },
+    logs: { status: (fields) => lines.push(fields), detail() {}, call() {} },
     model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
       countTokens: async () => tokens, contextWindow: async () => null } };
   const run = () => ask(ctx, { phase, step, reasoning, inputs: [],
@@ -1768,7 +1769,7 @@ test('a document path outside the root gets the path code and no export runs', (
   const config = fixtureConfig();
   config.inputs = { ...config.inputs, ruleExport: ['node', '-e',
     `require("fs").appendFileSync(${JSON.stringify(log)}, process.argv[1]);`, '{doc}'] };
-  const ctx = { config, job: { id: 'j' }, logs: { status() {}, detail() {} } };
+  const ctx = { config, job: { id: 'j' }, logs: { status() {}, detail() {}, call() {} } };
   assert.deepEqual(documentRules(ctx, path.join(FIXTURES, '..', 'phases.mjs')),
     { code: 'document-file', rules: [] });
   assert.deepEqual(documentRules(ctx, path.join(FIXTURES, 'docs')), { code: 'document-file', rules: [] });
@@ -2492,7 +2493,7 @@ test('a reasoning call that fails for any reason is retried once with thinking o
   };
   const config = fixtureConfig();
   const { ask } = await import('./phases.mjs');
-  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, logs: { status() {}, detail() {} },
+  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, logs: { status() {}, detail() {}, call() {} },
     job: { id: 'j' }, model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
       countTokens: async () => 10 } };
   const value = await ask(ctx, { phase: 'phase9', step: 's', reasoning: true, inputs: [],
@@ -4632,7 +4633,7 @@ async function runPhase5(description, rules, closure, objectives = ['Core Change
     job: options.suite ? { suite: 'SUITE' } : {}, builder: { OBJECTIVES: objectives }, coreObjective: 'Core Change Validation',
     description, model, calls: 0, tokens: { prompt: 0, output: 0 },
     config: { model: { context, reasoningOutput: 100, maxOutput: 100 }, objectiveEvidence: evidence },
-    logs: { detail: (label, text) => logged.push(`${label}: ${text}`), status() {} }, private() {} };
+    logs: { detail: (label, text) => logged.push(`${label}: ${text}`), status() {}, call() {} }, private() {} };
   await phase5(ctx);
   return { row: ctx.pack.objectives.find((row) => row.objective === 'Integration Testing'), logged, model };
 }
@@ -4778,7 +4779,7 @@ test('evidence never turns an applicable objective off, and keeps its reason', a
     coreObjective: 'Core Change Validation', description: `Short Description: ${SENTENCE}`, model, calls: 0,
     tokens: { prompt: 0, output: 0 },
     config: { model: { context: 100000, reasoningOutput: 100, maxOutput: 100 }, objectiveEvidence: [EVIDENCE_RULE] },
-    logs: { detail() {}, status() {} }, private() {} };
+    logs: { detail() {}, status() {}, call() {} }, private() {} };
   await phase5(ctx);
   assert.ok(ctx.pack.objectives.every((row) => row.applicable && row.reason === 'The model\'s reason.'));
 });
@@ -4967,7 +4968,7 @@ test('a guess lowers the window but never raises a smaller one', async () => {
   const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
     context: 128000, maxOutput: 500, reasoningOutput: 500 } });
   const run = async (health, saved, window) => {
-    const ctx = { config, job: { id: 'j' }, logs: { status() {}, detail() {} }, window,
+    const ctx = { config, job: { id: 'j' }, logs: { status() {}, detail() {}, call() {} }, window,
       model: windowClient({ '/health': health, '/models/m%20a%2Fb': SAVED_SIZE(saved) }) };
     await readWindow(ctx, 'p');
     return ctx.window;
@@ -5110,7 +5111,7 @@ test('a server window just above the reply and reserve but with no input room fa
     context: 20000, maxOutput: 500, reasoningOutput: 500 } });
   const model = { ...fakeModel(), contextWindow: async () => ({ size: 2800, guess: false }) };
   const { readWindow } = await import('./phases.mjs');
-  const ctx = { config, job: { id: 'j' }, model, logs: { status() {}, detail() {} } };
+  const ctx = { config, job: { id: 'j' }, model, logs: { status() {}, detail() {}, call() {} } };
   await assert.rejects(readWindow(ctx, 'intake'),
     (error) => error instanceof ModelError && error.code === 'window-too-small');
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
@@ -5170,7 +5171,7 @@ test('the floor uses the larger reply, so a window only that floor rejects fails
   const accepts = async (cfg, size) => {
     try {
       await readWindow({ config: cfg, job: { id: 'j' }, model: { contextWindow: async () => ({ size, guess: false }) },
-        logs: { status() {}, detail() {} } }, 'p');
+        logs: { status() {}, detail() {}, call() {} } }, 'p');
       return true;
     } catch (error) {
       if (error instanceof ModelError && error.code === 'window-too-small') return false;
@@ -5192,7 +5193,7 @@ test('room reserves the widest reply a thinking call may ask for, so a prompt si
   const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
     context: 60000, maxOutput: 16384, reasoningOutput: 8192 } });
   const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
-    logs: { status() {}, detail() {} },
+    logs: { status() {}, detail() {}, call() {} },
     model: { json: async () => ({ value: {}, usage: { promptTokens: 1, outputTokens: 1, ms: 1 } }),
       // A prompt that uses all the room, plus the reference text already counted in it.
       countTokens: async () => room(ctx, true, []) + 100 } };
@@ -6312,6 +6313,91 @@ test('a BREAK IT card stays out of the core set', () => {
   const card = { derivation: 'Requirement', objectives: ['Core', 'Flow'] };
   assert.deepEqual(setsOf(ctx, { ...card, breakIt: true }).sort(), ['Break', 'Flow', 'Full']);
   assert.deepEqual(setsOf(ctx, { ...card, breakIt: false }).sort(), ['Core', 'Flow', 'Full']);
+});
+
+/** The call records of a job, in sequence order. */
+const callRecords = (outDir) => {
+  const dir = path.join(outDir, 'work', 'calls');
+  return fs.readdirSync(dir).sort().map((name) => ({ name, ...JSON.parse(read(path.join(dir, name))) }));
+};
+
+test('a run records every model call with its prompt, reply and counts, in the order they were made', async () => {
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const answered = [];
+  const answer = model.json;
+  model.json = async (request) => {
+    const reply = await answer(request);
+    answered.push(structuredClone(reply.value));
+    return reply;
+  };
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const records = callRecords(result.outDir);
+  assert.equal(records.length, model.calls.length);
+  assert.deepEqual(records.map((r) => r.seq), records.map((_, i) => i + 1));
+  records.forEach((record, i) => {
+    const sent = model.calls[i];
+    assert.equal(record.name, callFileName(i + 1, sent.schemaName, 1));
+    assert.equal(record.attempt, 1);
+    assert.equal(record.step, sent.schemaName);
+    assert.equal(record.thinking, Boolean(sent.reasoning));
+    assert.equal(record.maxTokens, sent.maxTokens);
+    assert.deepEqual(record.prompt, { system: sent.system, user: sent.user });
+    assert.equal(record.promptHash, promptHash(sent.system, sent.user));
+    assert.equal(record.schemaHash, schemaHash(sent.schema));
+    assert.deepEqual(record.usage, { promptTokens: 10, outputTokens: 5 });
+    assert.equal(record.error, null);
+    assert.deepEqual(record.reply, answered[i]);
+    assert.ok(Date.parse(record.endedAt) >= Date.parse(record.startedAt));
+  });
+  // Prompt text stays out of the log a session may read.
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a thinking call that is cut and retried records both attempts, and a second cut records as runaway', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'calls-ask-'));
+  const reply = (cut) => ({ ok: true, json: async () => ({ choices: [{ finish_reason: cut ? 'length' : 'stop',
+    message: { content: cut ? '{"a":' : '{"ok":true}' } }], usage: { prompt_tokens: 30, completion_tokens: 7 } }) });
+  const { ask } = await import('./phases.mjs');
+  const over = (cutOn) => ({ config: fixtureConfig(), calls: 0, tokens: { prompt: 0, output: 0 },
+    logs: jobLogs(dir, { echo: false }), job: { id: 'j' },
+    model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm',
+      fetchImpl: async (url, options) => reply(cutOn(JSON.parse(options.body).chat_template_kwargs.enable_thinking)) }),
+    countTokens: async () => 10 } });
+  const call = (ctx, step) => ask(ctx, { phase: 'phase9', step, reasoning: true, inputs: [['Doc', 'text']],
+    schema: { type: 'object' }, task: 'do it' });
+  // Cut while thinking only: the retry answers.
+  assert.deepEqual(await call(over((thinking) => thinking), 'walk'), { ok: true });
+  // Cut on both attempts: the second cut is a runaway.
+  await assert.rejects(call(over(() => true), 'repair'), { code: 'runaway' });
+  const records = callRecords(dir);
+  assert.deepEqual(records.map((r) => [r.step, r.attempt, r.thinking, r.error?.code ?? null]), [
+    ['phase9_walk', 1, true, 'length'],
+    ['phase9_walk', 2, false, null],
+    ['phase9_repair', 1, true, 'length'],
+    ['phase9_repair', 2, false, 'runaway'],
+  ]);
+  assert.deepEqual(records[1].reply, { ok: true });
+  assert.equal(records[0].reply, null);
+  assert.equal(records[0].usage.outputTokens, 7);
+  assert.equal(records[0].promptHash, records[1].promptHash);
+});
+
+test('a resumed job keeps the calls it recorded before the stop and numbers the new ones after them', async () => {
+  const config = fixtureConfig();
+  const down = { phase9_checklist: () => { throw new ModelError('no-reply', 'x'); } };
+  const first = await runJob(config, { issue: '501' },
+    { model: fakeModel({ ...INTAKE, ...NOT_REMOVAL, ...down }), echo: false });
+  assert.equal(first.ok, false);
+  const before = callRecords(first.outDir);
+  assert.ok(before.some((r) => r.error?.code === 'no-reply'));
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const again = await runJob(config, { issue: '501', resume: true }, { model, echo: false });
+  assert.equal(again.ok, true, JSON.stringify(again));
+  const after = callRecords(again.outDir);
+  assert.deepEqual(after.slice(0, before.length), before);
+  assert.equal(after.length, before.length + model.calls.length);
+  assert.deepEqual(after.map((r) => r.seq), after.map((_, i) => i + 1));
 });
 
 // A job's slice runs: a snapshot per phase, and a rerun from any phase in a sandbox.

@@ -8,6 +8,8 @@ are installed. The fields:
   reviewAnnouncement  the words spoken after "has pull request <N>" once the label lands
   readyLine           the ready line, with <N> where the pull request number goes
   spokenTerms         words the voice would misread, and how to say them
+  fullSpeech          true reads long replies and ready lines aloud in full; absent or false
+                      reads them in short
   scriptsDir          the folder that holds the ledger module
   ledgerModule        the module that reads a ledger: read_ledger(path) gives its rows,
                       and STATIC_CHECKS_NAME starts the title of a checks row

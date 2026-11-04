@@ -141,7 +141,9 @@ export async function readWindow(ctx, phase) {
  * The pipeline's one way to call the model. Checks the token count first and
  * throws `too-big` rather than truncating, retries a failed call once with
  * thinking off (a thinking call cut off at its cap gets the smaller `retryOutput`,
- * and a second cut is `runaway`), and logs only counts and timings.
+ * and a second cut is `runaway`), and logs only counts and timings. Each call that
+ * reaches the model, failed ones too, also gets its prompt, reply and timings written
+ * to work/calls.
  */
 export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task }) {
   const system = [SYSTEM, ...refs.filter(Boolean).map((text, i) => section(`Reference ${i + 1}`, text))]
@@ -162,13 +164,17 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
   let think = reasoning;
   let maxTokens = firstCap;
   let cutThinking = false;
+  const schemaName = `${phase}_${step}`.replace(/\W+/g, '_');
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     ctx.calls += 1;
+    const startedAt = new Date();
+    const recorded = { step: schemaName, attempt, thinking: think, maxTokens, system, user, schema,
+      startedAt };
     try {
       const { value, usage } = await ctx.model.json({
-        system, user, schema, schemaName: `${phase}_${step}`.replace(/\W+/g, '_'),
-        reasoning: think, maxTokens,
+        system, user, schema, schemaName, reasoning: think, maxTokens,
       });
+      ctx.logs.call({ ...recorded, reply: value, usage, endedAt: new Date() });
       ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call', attempt, reasoning: think,
         promptTokens: usage.promptTokens, outputTokens: usage.outputTokens, ms: usage.ms });
       ctx.logs.detail(`${phase} ${step} reply`, value);
@@ -184,6 +190,7 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
         error = Object.assign(new ModelError('runaway', 'model kept going after thinking was turned off'),
           { usage: caught.usage });
       }
+      ctx.logs.call({ ...recorded, errorCode: error.code, usage: error.usage, endedAt: new Date() });
       if (attempt === 2 || (cut && !think)) {
         ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call-fail', attempt, reasoning: think,
           maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,

@@ -291,7 +291,7 @@ function context(pack, { reply, builder = stub, retries = 2 } = {}) {
   const calls = [];
   return { calls, ctx: {
     pack, builder, job: { id: 'job' }, repairs: 0, calls: 0, tokens: { prompt: 0, output: 0 },
-    logs: { status() {}, detail() {} },
+    logs: { status() {}, detail() {}, call() {} },
     config: { builder: { retries }, model: { context: 1e6, maxOutput: 100, reasoningOutput: 100 } },
     ref: { docs: { workbookStandard: '' }, core: [], chapters: () => [] },
     model: {

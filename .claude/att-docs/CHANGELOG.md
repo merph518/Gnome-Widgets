@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.31.6](https://github.com/merph518/Overmind/compare/v0.31.5...v0.31.6) (2026-11-04)
+
+
+### Features
+
+* open consumer pin pull requests after releases ([#194](https://github.com/merph518/Overmind/issues/194)) ([#503](https://github.com/merph518/Overmind/issues/503)) ([ca3b7d5](https://github.com/merph518/Overmind/commit/ca3b7d550bc0c04bd737c06ae559b54e6756cc12))
+* read long replies in short and a ready reply as one line ([#189](https://github.com/merph518/Overmind/issues/189)) ([#504](https://github.com/merph518/Overmind/issues/504)) ([90ffda7](https://github.com/merph518/Overmind/commit/90ffda78d1c76aca6a12193e00e811f969361961))
+
+## [0.31.5](https://github.com/merph518/Overmind/compare/v0.31.4...v0.31.5) (2026-11-04)
+
+
+### Features
+
+* record each model call's prompt and reply in work/calls ([#492](https://github.com/merph518/Overmind/issues/492)) ([#496](https://github.com/merph518/Overmind/issues/496)) ([0ac9451](https://github.com/merph518/Overmind/commit/0ac9451e7f5d5f8a88337565f95c89a8cc45e69c))
+
+
+### Bug Fixes
+
+* document git worktree fallback ([#500](https://github.com/merph518/Overmind/issues/500)) ([603d9fc](https://github.com/merph518/Overmind/commit/603d9fcb04ac0861a6ae0a980cbea51389c2b7f0))
+
 ## [0.31.4](https://github.com/merph518/Overmind/compare/v0.31.3...v0.31.4) (2026-11-04)
 
 

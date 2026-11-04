@@ -12,10 +12,12 @@ usage: speechctl status [--json]
        speechctl sessions [--json]
        speechctl speech <session> on|alerts|off|cycle
        speechctl managed <session> on|off
+       speechctl full-text <session> on|off
 
 It works through the files the hook keeps in $XDG_RUNTIME_DIR/speak-attention: now.json
 while a clip plays, the <session>.queue files, the <session>.managed markers that put a
-session in the session management widget, a paused flag, and settings.json for the voice,
+session in the session management widget, the <session>.fulltext markers that make a session
+read long replies in full, a paused flag, and settings.json for the voice,
 volume, pace and Piper's speaker, noise, noise-w and silence, which the hook reads before each
 clip. A volume change also sets the stream of a Piper clip that is playing, through
 pw-dump and pw-cli. An option that is not set is left out of the Piper command, so the model
@@ -413,22 +415,31 @@ def is_managed(sid):
     return os.path.exists(path(sid + ".managed"))
 
 
-def cmd_managed(ref, mode):
+def set_marker(ref, mode, suffix, name):
+    """Turns a session's <suffix> marker on or off, for the command called name."""
     if mode not in ("on", "off"):
-        raise Bad("managed takes on or off")
+        raise Bad("%s takes on or off" % name)
     try:
         s = sessions_mod.find_session(sessions_mod.list_sessions(), ref)
     except LookupError as e:
         raise Bad(str(e))
     if mode == "on":
         os.makedirs(DIR, exist_ok=True)
-        open(path(s["id"] + ".managed"), "w").close()
+        open(path(s["id"] + suffix), "w").close()
     else:
         try:
-            os.remove(path(s["id"] + ".managed"))
+            os.remove(path(s["id"] + suffix))
         except OSError:
             pass
-    print("%s: managed %s" % (s["name"], mode))
+    print("%s: %s %s" % (s["name"], name, mode))
+
+
+def cmd_managed(ref, mode):
+    set_marker(ref, mode, ".managed", "managed")
+
+
+def cmd_full_text(ref, mode):
+    set_marker(ref, mode, ".fulltext", "full-text")
 
 
 def cmd_sessions(as_json):
@@ -561,8 +572,10 @@ def main(argv):
         cmd_speech(*rest)
     elif cmd == "managed" and len(rest) == 2:
         cmd_managed(*rest)
+    elif cmd == "full-text" and len(rest) == 2:
+        cmd_full_text(*rest)
     else:
-        raise Bad("usage: speechctl status|skip|next|clear|pause|resume|toggle|volume|pace|voice(s)|speaker|noise|noise-w|silence|sessions|speech|managed")
+        raise Bad("usage: speechctl status|skip|next|clear|pause|resume|toggle|volume|pace|voice(s)|speaker|noise|noise-w|silence|sessions|speech|managed|full-text")
 
 
 if __name__ == "__main__":

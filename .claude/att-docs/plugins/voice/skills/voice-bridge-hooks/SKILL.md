@@ -37,9 +37,10 @@ All of them ship in this folder.
 | `voice_bridge_reply.py` | Writes a stopped session's reply, its attention marks, its feed entries and its ready records for `<bridge>`, and answers a permission prompt with the answer Baton relays | yes |
 | `transcript.py` | Reads a session transcript; `blocked` prints the ledgers, issues and pull requests a session waits on | yes, for `blocked` |
 | `ready_line.py` | Reads `<ready-line>` and a `<review-label>` add out of a reply and a command, imported by the three above | through its importer |
-| `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle` and `managed <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
+| `speechctl` | Drives the speech `speak-attention.sh` reads aloud: `status`, `skip`, `next`, `clear`, `pause`/`resume`/`toggle`, `volume`, `voice`/`voices`, `sessions`, `speech <session> on\|alerts\|off\|cycle`, `managed <session> on\|off` and `full-text <session> on\|off`. Put it on `PATH` for the conky widget and keyboard shortcuts | no |
 | `sessions.py` | Lists the open Claude sessions the way Baton's `list_sessions` does; imported by `speechctl` | no |
 | `speak_pending.py` | Picks the text blocks a turn has not had read aloud yet | no |
+| `short_speech.py` | Cuts the text `speak-attention.sh` reads aloud: `ready` prints the one line that stands for a block holding `<ready-line>`, and `brief` cuts a long block down to its opening sentence | yes |
 | `session_title.py` | Sets the title of the session it runs in: `work` names its work after the base title, `status` appends a stop or wait status in parentheses; `hook prompt` and `hook stop` read a hook payload and set `working`, `needs you` or `idle` themselves, keep a stuck, stopped, waiting on CI or needs you already on the title, skip subagents, and always exit 0 quietly; it talks to the session's own inbox, never to Baton. Baton drops `(idle)` and `(waiting on you)` from the titles it reports and says the live state instead; it reports `stuck`, `stopped`, `waiting on CI`, `needs you` and `working` as "marked ..." only on the idle line, and only while the session is not waiting. The plugin runs `hook prompt` on UserPromptSubmit and `hook stop` on Stop | yes, for `hook` |
 | `background_pending.py` | Names the background work still due to wake a session, so a stop stays quiet; `--describe` also says what each item is, for Baton's session list | no |
 | `hook_config.py` | Reads `<config>` | |
@@ -62,6 +63,7 @@ through `speechctl`.
 | `<session>.muted` | Speech **Off**: the session says nothing, announcements included. Its voice-bridge feed is unaffected |
 | neither | **Alerts only** (the default): just the short announcements |
 | `<session>.managed` | A **managed session**: one the session management widget shows. `speechctl sessions` reports it as `managed`. It says nothing about speech, which the two markers above set on their own |
+| `<session>.fulltext` | Full text: the session's long replies and ready lines are read in full, not cut down. `speechctl full-text <session> on\|off` sets it. See Long text below |
 | `<session>.queue`, `.cursor`, `.name` | The lines waiting to be read, how far the turn was read, the name the voice gives the session. Edits to the first two take `<session>.cursor.lock`. A queue line is the spoken text, then a tab and the block as the assistant wrote it, as a JSON string; a line with no tab (queued before `markdown` existed) has no source |
 | `<session>.feed` | A managed session's replies (while its `<session>.managed` marker exists), for the session management widget: one JSON object per line per block, `session`, `name`, `text` (the spoken form, no name ahead of it), `markdown` (the block as written, trimmed and capped as `now.json`'s; a block that is only space is not fed) and `at` (epoch seconds). Written ahead of each tool call and at Stop whatever the speech setting, On, Alerts only or Off, under `<session>.cursor.lock`, and never played. It reads the turn through `<session>.feed-cursor`, its own, so speech turning on (which marks `.cursor` read) never drops a block from it. Keeps the last 200 blocks (`FEED_KEEP` in `speak-attention.sh`) |
 | `now.json` | The clip playing: `session` and `name` of the session whose line it is (not always the hook's own, since a hook reads other sessions' queues after its own), `text`, `markdown`, `started`, `clip`, `hook_pid`, `player_pid` (null while Piper renders), `engine` (`piper` or `spd-say`). Written atomically, removed when the clip ends or its hook is killed |
@@ -93,6 +95,26 @@ as it shows up. Neither touches the speech setting: speech is On, Alerts only or
 `speechctl speech` or the widget sets it. `speechctl managed <session> on|off` sets the
 marker by hand.
 
+### Long text
+
+Speech mode does not read a long block out. A block whose spoken text is over 600 characters
+(`SPOKEN_LIMIT` in `short_speech.py`) is read as its opening sentence, cut at a word within
+300 characters when that sentence runs on, followed by "The rest is on screen." A block that
+holds `<ready-line>` is read as one line, "Pull request 214 is ready for review." (one line
+naming each pull request, in ascending order, when it holds several). A question the hook
+composes from a tool call, which starts "Question:", is always read whole, since its choices
+are what the user has to hear. A block of up to 600 characters is read whole.
+
+Only the spoken `text` changes. The queue line's `markdown` is the block as written
+(with the cap above), and the block goes to Baton's feed and to a managed session's feed
+whole, as does the transcript.
+
+Short reading is the default. `speechctl full-text <session> on` makes one session read in
+full by writing `<session>.fulltext`, and `off` takes the marker away; the marker lasts until
+the runtime folder is cleared. `"fullSpeech": true` in `<config>` makes every session read
+in full. Either way each block is read whole, ready lines included. A block already read by
+an earlier tool call's hook is not taken back when a later block holds the ready line.
+
 ## The config
 
 `hook_config.py` lists every field. A path in the file is relative to the git
@@ -106,6 +128,8 @@ toplevel of the folder the file sits in.
   them. A word whose sound depends on its sense, such as "lives", cannot be
   fixed this way, so the `voice-request` skill's wording rules have replies
   avoid it.
+- `fullSpeech`: `true` reads long replies and ready lines in full, for every session. Absent
+  or `false`, they are read in short; see Long text.
 - `scriptsDir`, `ledgerModule`: where `<ledger-module>` lives. It provides
   `read_ledger(path)`, whose rows carry `run`, `state`, `branch` and `title`, and
   `STATIC_CHECKS_NAME`, which starts the title of a pull request's checks row.
@@ -224,7 +248,9 @@ you` are read fresh each time, so one of them left on a session is replaced. A s
 given the exact title another session holds. A title that already reads so, the Session
 Launcher and a session the user stopped following are left alone, and the answer lists what
 changed and what was left. `session_title.py` and Baton share the status words, so a title
-written by either is taken apart the same way by both.
+written by either is taken apart the same way by both. A work name a session sets is
+words for the work, with a number at most as a suffix, so the title Baton keeps and reads
+out says what the session does.
 
 ## Tests
 

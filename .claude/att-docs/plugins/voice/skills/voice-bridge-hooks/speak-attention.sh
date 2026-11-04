@@ -467,6 +467,26 @@ feed_block() {
   return 0
 }
 
+# Long text is read in short: short_speech.py cuts a block's spoken text to one line for a
+# ready line, and to its opening sentence for any other block past its limit. The queue's
+# source and the voice bridge get the block as written, whole. The
+# <session>.fulltext marker (speechctl full-text) or "fullSpeech": true in the extension
+# file reads every block in full instead.
+fulltext=${replies%.replies}.fulltext
+
+# usage: spoken <block>; prints the text read aloud for a block written in Markdown.
+spoken() {
+  local said
+  said=$(speakable <<<"$1")
+  if [[ -z $said || -e $fulltext ]] || jq -e '.fullSpeech == true' "$config" >/dev/null 2>&1; then
+    printf '%s' "$said"
+    return 0
+  fi
+  python3 "$here/short_speech.py" --config "$config" ready <<<"$1" 2>/dev/null && return 0
+  python3 "$here/short_speech.py" --config "$config" brief <<<"$said" 2>/dev/null ||
+    printf '%s' "$said"
+}
+
 # usage: read_aloud; queues the turn's unread text and reads the queue. Outside speech mode
 # nothing is queued or spoken: a managed session's feed gets the text, and so does the voice
 # feed ahead of a tool call while a phone follows the session.
@@ -499,7 +519,7 @@ read_aloud() {
     for chunk in "${fields[@]:1}"; do
       pushed+=$chunk$'\n\n'
       [[ -e "$replies" ]] || continue
-      text=$(speakable <<<"$chunk")
+      text=$(spoken "$chunk")
       [[ -n "$text" ]] || continue
       printf '%s\t%s\n' "$name$text" "$(markdown_source <<<"$chunk")" >> "$queue"
       name=
