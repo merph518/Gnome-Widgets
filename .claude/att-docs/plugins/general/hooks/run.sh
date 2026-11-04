@@ -31,12 +31,21 @@ script=${2:?usage: run.sh [--default-on] <section> <script> [args...]}
 shift 2
 project=${CLAUDE_PROJECT_DIR:-$PWD}
 
+# The loop uses the same section for two events. A vendored registration for one
+# must not suppress the plugin's registration for the other.
+event=
+payload=
+if [[ $section == implementLoop ]]; then
+  payload=$(cat)
+  event=$(jq -r '.hook_event_name // empty' <<<"$payload" 2>/dev/null)
+fi
+
 vendored=$project/.claude/att-docs/plugins/general/hooks
 if [[ $here != "$(readlink -f "$vendored" 2>/dev/null)" ]]; then
   only=
   ((default_on)) && only=$section
   for settings in "$project/.claude/settings.json" "$project/.claude/settings.local.json"; do
-    jq -e --arg s "$only" '[.hooks[]?[]?.hooks[]?.command // empty]
+    jq -e --arg s "$only" --arg event "$event" '[(if $event == "" then .hooks[]? else .hooks[$event]? end)[]?.hooks[]?.command // empty]
       | any(test("plugins/general/hooks/run\\.sh" + (if $s == "" then ""
           else "[\"'\'']? (--default-on )?" + $s + "([ \"'\'']|$)" end)))' \
       "$settings" >/dev/null 2>&1 && exit 0
@@ -55,6 +64,9 @@ fi
 cd "$project" || exit 0
 flags=()
 [[ -n $config ]] && flags=(--config "$config")
+if [[ $section == implementLoop ]]; then
+  exec python3 "$here/$script" "${flags[@]}" "$@" <<<"$payload"
+fi
 case $script in
   *.sh) exec bash "$here/$script" "${flags[@]}" "$@" ;;
   *) exec python3 "$here/$script" "${flags[@]}" "$@" ;;

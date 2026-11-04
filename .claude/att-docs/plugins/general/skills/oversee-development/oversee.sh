@@ -17,6 +17,7 @@
 #   oversee.sh finish <issue> <done|stalled|skipped> <pr|-> <note...>
 #   oversee.sh swap <issue> <from> <to>    move a label, read back
 #   oversee.sh status                      counts and the tail of the ledger
+#   oversee.sh blocked                     report blocked issues and deferrals
 set -euo pipefail
 
 COMMON=$(git rev-parse --git-common-dir)
@@ -28,9 +29,9 @@ FILTER="$DIR/filter"
 OPEN="$DIR/open"
 
 mkdir -p "$DIR"
-[ -f "$LEDGER" ] || : > "$LEDGER"
-[ -f "$QUEUE" ] || : > "$QUEUE"
-[ -f "$OPEN" ] || : > "$OPEN"
+: >> "$LEDGER"
+: >> "$QUEUE"
+: >> "$OPEN"
 
 # Labels that mean the issue is not available for unattended work: already
 # claimed, waiting on something outside the branch, already delivered, a
@@ -40,7 +41,44 @@ EXCLUDED+='"question","wontfix","duplicate","invalid",'
 EXCLUDED+='"needs-triage","needs-info","ready-for-human"]'
 
 # The label an issue needs before an unattended session may take it up.
-READY="ready-for-agent"
+READY='"ready-for-agent"'
+REQUIRED='[]'
+BLOCKED_LABELS='["Blocked"]'
+CONFIG="$MAIN/.claude/skills/oversee-development/extension.json"
+
+load_filters() {
+  local config
+  [ -f "$CONFIG" ] || return 0
+  config=$(jq -ce '
+    if type != "object" or ((.queue // {}) | type != "object") then error("queue must be an object")
+    else .queue // {} end
+    | if (has("readyLabel") and .readyLabel != null and
+          ((.readyLabel | type) != "string" or .readyLabel == "")) then error("invalid readyLabel") else . end
+    | if all([.requireLabels, .excludeLabels, .blockedLabels][];
+          if . == null then true elif type == "array" then all(.[]; type == "string" and . != "")
+          else false end)
+      then . else error("invalid label list") end
+    | {ready: (if has("readyLabel") then .readyLabel else "ready-for-agent" end),
+       required: (.requireLabels // []), excluded: (.excludeLabels // []), blocked: (.blockedLabels // [])}
+  ' "$CONFIG") || die "invalid queue configuration: $CONFIG"
+  READY=$(jq -c '.ready' <<< "$config")
+  REQUIRED=$(jq -c '.required' <<< "$config")
+  BLOCKED_LABELS=$(jq -c --argjson defaults "$BLOCKED_LABELS" '$defaults + .blocked | unique' <<< "$config")
+  EXCLUDED=$(jq -c --argjson defaults "$EXCLUDED" '$defaults + .excluded + .blocked | unique' <<< "$config")
+}
+
+# A failed GitHub read must never be mistaken for an empty list.
+read_prs() {
+  gh pr list --state open --limit 1000 --json number,headRefName,body |
+    jq -ce 'if type == "array" then . else error("invalid pull request list") end'
+}
+
+pr_links() {
+  jq -r '.[] | .number as $pr |
+    ((.headRefName // "" | scan("issue-([0-9]+)(?:-|$)") | .[0]),
+     (.body // "" | scan("(?i)\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#([0-9]+)\\b") | .[0]))
+    | [., ($pr | tostring)] | @tsv'
+}
 
 # jq definitions shared by the queue read: `labels`, which lists an issue's label
 # names, and the readers a milestone run uses on an issue body, then the
@@ -111,9 +149,8 @@ die() { echo "$*" >&2; exit 1; }
 jq_str() { jq -n --arg s "$1" '$s'; }
 
 # The queue reads each issue's blockers with `gh issue list --json blockedBy`,
-# which older gh versions reject. A rejected read looks like any failed backlog
-# read, and next survives one by serving its last queue, so the version is
-# checked up front and a gh that is too old stops the command instead.
+# which older gh versions reject. Check the version up front so an older gh
+# stops the command instead.
 require_gh() {
   local have
   have=$(gh --version 2>/dev/null | head -n 1) || true
@@ -148,6 +185,18 @@ tag_owner() {
   [[ $1 =~ session\ ([^ ]+) ]] && sid=${BASH_REMATCH[1]}
   [[ $1 =~ pid\ ([0-9]+) ]] && pid=${BASH_REMATCH[1]}
   printf '%s %s' "$sid" "$pid"
+}
+
+# An unreadable or malformed marker holds conservatively. Only a stopped
+# marker for this session releases it to the usual process-liveness check.
+marker_holds() {
+  local sid=$1 path
+  [[ $sid =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$ ]] || return 1
+  path="$DIR/loops/$sid.json"
+  [ -e "$path" ] || return 1
+  ! jq -e --arg session "$sid" \
+    'type == "object" and .session == $session and .state == "stopped"' \
+    "$path" > /dev/null 2>&1
 }
 
 # The session that owns an in-flight issue. The id survives a worktree switch,
@@ -188,16 +237,27 @@ parse_scope() {
 }
 
 cmd_init() {
-  local label= milestone=
+  local label= milestone= saved_label saved_milestone
   parse_scope "$@"
+  if [ "$loop_scope" = 1 ]; then
+    load_scope
+    [ "$label" = "$saved_label" ] && [ "$milestone" = "$saved_milestone" ] ||
+      die "init scope differs from this session's loop marker"
+  fi
   build_queue "$label" "$milestone"
 }
 
 build_queue() {
-  local label=$1 milestone=$2
+  local label=$1 milestone=$2 expected_label=${3-} expected_milestone=${4-} check_scope=${5-0}
+  # Serialize reads for this snapshot without blocking ledger writers.
+  flock -u 9
+  exec 7>"$QUEUE.lock"
+  flock -w 30 7 || die "the queue is being rebuilt by another session; try again"
+  lock_ledger
   if [ -s "$QUEUE" ] && [ "${OVERSEE_FORCE:-}" != 1 ]; then
     die "queue already has $(wc -l < "$QUEUE") entries; OVERSEE_FORCE=1 to rebuild"
   fi
+  flock -u 9
 
   local want mile fields=number,title,labels,blockedBy
   want=$(jq_str "$label")
@@ -225,7 +285,8 @@ build_queue() {
       . as $i
       | labels as $have
       | ($have | any(. as $n | '"$EXCLUDED"' | index($n))) as $out
-      | ((($have | index("'"$READY"'")) != null)
+      | (('"$READY"' == null or ($have | index('"$READY"')) != null)
+         and all('"$REQUIRED"'[]; . as $n | ($have | index($n)) != null)
          and ($w == "" or (($have | index($w)) != null))) as $in
       | ($i.title | if test("^[A-Za-z][A-Za-z0-9_-]{0,19}\\s*:")
                     then capture("^(?<area>[A-Za-z][A-Za-z0-9_-]{0,19})\\s*:").area
@@ -290,6 +351,26 @@ build_queue() {
         | @tsv
       end') || return 1
 
+  lock_ledger
+  exec 8>"$DIR/loops.lock"
+  flock -w 30 8 || die "the loop markers are locked by another session; try again"
+  if [ "$loop_scope" = 1 ]; then
+    jq -e --arg session "$SESSION" --arg label "$loop_label" --arg milestone "$loop_milestone" \
+      '.session == $session and (.state == "active" or .state == "paused") and
+       (.label // "") == $label and (.milestone // "") == $milestone' \
+      "$marker" > /dev/null || die "loop marker changed; run again"
+  elif [ -n "$SESSION" ] && [ -e "$DIR/loops/$SESSION.json" ]; then
+    jq -e --arg session "$SESSION" \
+      '.session == $session and .state == "stopped"' \
+      "$DIR/loops/$SESSION.json" > /dev/null || die "loop marker changed; run again"
+  fi
+  if [ "$check_scope" = 1 ]; then
+    local saved_label saved_milestone
+    load_scope
+    [ "$saved_label" = "$expected_label" ] && [ "$saved_milestone" = "$expected_milestone" ] ||
+      die "queue scope changed during backlog read; run again"
+  fi
+
   if [ -n "$milestone" ] &&
      ! awk -F'\t' '$9 == 1 { found = 1 } END { exit !found }' <<< "$listed"; then
     echo "no open issue in milestone \"$milestone\"" >&2
@@ -316,7 +397,11 @@ build_queue() {
   { if [ -n "$milestone" ]; then cat; else sort -t$'\t' -k1,1n; fi; } > "$QUEUE.tmp.$$"
 
   mv "$QUEUE.tmp.$$" "$QUEUE"
-  printf '%s\n%s\n' "$label" "$milestone" > "$FILTER"
+  if [ "$loop_scope" != 1 ]; then
+    printf '%s\n%s\n' "$label" "$milestone" > "$FILTER"
+  fi
+  flock -u 8
+  flock -u 7
   echo "queued $(wc -l < "$QUEUE") issues -> $QUEUE"
 }
 
@@ -325,10 +410,15 @@ build_queue() {
 # may be empty.
 load_scope() {
   saved_label= saved_milestone=
-  [ ! -f "$FILTER" ] || {
-    IFS= read -r saved_label || true
-    IFS= read -r saved_milestone || true
-  } < "$FILTER"
+  if [ "$loop_scope" = 1 ]; then
+    saved_label=$loop_label
+    saved_milestone=$loop_milestone
+  elif [ -f "$FILTER" ]; then
+    {
+      IFS= read -r saved_label || true
+      IFS= read -r saved_milestone || true
+    } < "$FILTER"
+  fi
 }
 
 # A rebuild scoped to the label and milestone the queue was built with. A
@@ -337,40 +427,55 @@ cmd_refresh() {
   local label= milestone= saved_label saved_milestone
   parse_scope "$@"
   load_scope
+  if [ "$loop_scope" = 1 ]; then
+    [ -z "$label" ] || [ "$label" = "$saved_label" ] ||
+      die "refresh scope differs from this session's loop marker"
+    [ -z "$milestone" ] || [ "$milestone" = "$saved_milestone" ] ||
+      die "refresh scope differs from this session's loop marker"
+  fi
   [ -n "$label" ] || label=$saved_label
   [ -n "$milestone" ] || milestone=$saved_milestone
-  OVERSEE_FORCE=1 build_queue "$label" "$milestone"
+  OVERSEE_FORCE=1 build_queue "$label" "$milestone" "$saved_label" "$saved_milestone" 1
 }
 
 cmd_next() {
-  # Every call reads the live backlog first, so an issue filed, relabeled or
-  # unblocked since the last call is served now. When a read fails, next
-  # serves from the last queue, says so, and serves no skip again, since stale
-  # lists cannot say a blocker has closed.
-  local open_prs stale=0 saved_label saved_milestone scoped=0
-  if ! cmd_refresh > /dev/null; then
-    stale=1
-    echo "next: the backlog read failed; serving the last queue" >&2
-  fi
+  # Selection needs current issues and pull requests; neither failed read can
+  # establish that an issue is safe to start.
+  local open_prs prs links saved_label saved_milestone scoped=0 scope_name=milestone
+  local sid held_sessions=" "
+  flock -u 9
+  prs=$(read_prs) || die "next: the pull request read failed"
+  open_prs=$(jq -r '.[].number' <<< "$prs" | tr '\n' ' ')
+  links=$(pr_links <<< "$prs") || die "next: invalid pull request data"
+  lock_ledger
+  cmd_refresh > /dev/null || die "next: the backlog read failed"
   load_scope
-  [ -z "$saved_milestone" ] || scoped=1
-  open_prs=$(gh pr list --state open --limit 200 --json number --jq '.[].number') ||
-    stale=1
-  open_prs=$(printf '%s' "$open_prs" | tr '\n' ' ')
+  if [ -n "$saved_milestone" ]; then
+    scoped=1
+  elif [ -n "$saved_label" ]; then
+    scoped=1
+    scope_name=label
+  fi
+
+  exec 8>"$DIR/loops.lock"
+  flock -w 30 8 || die "the loop markers are locked by another session; try again"
+  while IFS= read -r sid; do
+    if marker_holds "$sid"; then held_sessions+="$sid "; fi
+  done < <(awk -F'\t' 'match($6, /session [^ ]+/) {
+    print substr($6, RSTART + 8, RLENGTH - 8)
+  }' "$LEDGER" | sort -u)
 
   # The ledger is matched by name rather than by FNR==NR: on the first run it is
   # empty, and an empty first file makes FNR==NR true for every queue row.
-  awk -F'\t' -v open_prs=" $open_prs " -v ledger="$LEDGER" -v openf="$OPEN" \
-    -v me="$SESSION" -v stale="$stale" -v scoped="$scoped" '
+  awk -F'\t' -v open_prs=" $open_prs " -v links="$links" -v ledger="$LEDGER" -v openf="$OPEN" \
+    -v me="$SESSION" -v scoped="$scoped" -v scope_name="$scope_name" -v held_sessions="$held_sessions" '
     # A skipped row is served again once what stopped it has cleared. A start
     # refused on a label or a closed state has cleared when the queue row is
     # open and carries no excluded label. Any other skip has cleared when every
     # issue or pull request its note names is closed. A name is a number of
     # two to four digits other than the issue itself, so run and process ids
-    # are not read as blockers. A skip whose note names nothing stays skipped,
-    # and so does every skip when a read failed.
+    # are not read as blockers. A skip whose note names nothing stays skipped.
     function cleared(n,   t, m, refs) {
-      if (stale) return 0
       if (note[n] ~ /^not workable at start:/) return 1
       t = note[n]
       refs = 0
@@ -392,6 +497,11 @@ cmd_next() {
       total=FNR
     }
     END {
+      count = split(links, pairs, "\n")
+      for (j = 1; j <= count; j++) {
+        split(pairs[j], pair, "\t")
+        if (pair[1] != "" && !(pair[1] in linked)) linked[pair[1]] = pair[2]
+      }
       # Each session works one issue at a time; other sessions hold their own.
       # An in-flight row is mine when it carries my session id, orphaned when
       # its owner process has exited, and live elsewhere otherwise. A row with
@@ -403,6 +513,7 @@ cmd_next() {
         if (match(note[n], /session [^ ]+/)) sid = substr(note[n], RSTART + 8, RLENGTH - 8)
         if (match(note[n], /pid [0-9]+/)) pid = substr(note[n], RSTART + 4, RLENGTH - 4)
         if (sid != "" && sid == me) owner[n] = "mine"
+        else if (index(held_sessions, " " sid " ") > 0) owner[n] = "elsewhere"
         else if (pid != "" && system("ps -p " pid " >/dev/null") != 0) owner[n] = "orphan"
         else owner[n] = "elsewhere"
       }
@@ -433,7 +544,7 @@ cmd_next() {
         if (owner[n] == "elsewhere" || skipped_orphan) {
           print "ELSEWHERE\t" line[i] "\tbranch " branch[n]
           busy++
-          why = skipped_orphan ? " orphaned outside the milestone" : " in another session"
+          why = skipped_orphan ? " orphaned outside the " scope_name : " in another session"
           if (area[i] != "-") held[area[i]] = "issue " n why
         }
       }
@@ -449,7 +560,12 @@ cmd_next() {
         # of a backlog can be in that state, and a line for each would bury
         # the ones that matter. An open blocker is the exception, since it
         # clears by itself and the reader wants to know what is waited on.
-        if (!servable[i]) continue
+        if (!servable[i] || excluded[i]) continue
+        if (n in linked) {
+          print "DEFER\t" line[i] "\topen pull request #" linked[n]
+          deferred++
+          continue
+        }
         if (blockers[i] != "-") {
           print "DEFER\t" line[i] "\tblocked by " blockers[i]
           deferred++
@@ -483,6 +599,41 @@ cmd_next() {
       }
       print ((deferred || busy) ? "BLOCKED" : "EMPTY")
     }' "$OPEN" "$LEDGER" "$QUEUE"
+  flock -u 8
+}
+
+cmd_blocked() {
+  local saved_label saved_milestone fields=number,title,labels listed next issue title last status note comment label mile
+  load_scope
+  [ -z "$saved_milestone" ] || fields+=,milestone
+  label=$(jq_str "$saved_label")
+  mile=$(jq_str "$saved_milestone")
+  next=$(cmd_next) || return 1
+  flock -u 9
+  listed=$(gh issue list --state open --limit 1000 --json "$fields" --jq '
+    map([.labels[].name] as $have
+      | select(($have | index("Tracker")) == null)
+      | select(any('"$BLOCKED_LABELS"'[]; . as $n | ($have | index($n)) != null))
+      | select(all('"$EXCLUDED"'[]; . as $n |
+          (('"$BLOCKED_LABELS"' | index($n)) != null) or (($have | index($n)) == null)))
+      | select('"$READY"' == null or ($have | index('"$READY"')) != null)
+      | select(all('"$REQUIRED"'[]; . as $n | ($have | index($n)) != null))
+      | select('"$label"' == "" or ($have | index('"$label"')) != null)
+      | select('"$mile"' == "" or (.milestone.title // "") == '"$mile"'))
+    | .[] | [.number, .title] | @tsv') || die "blocked: the backlog read failed"
+  while IFS=$'\t' read -r issue title; do
+    [ -n "$issue" ] || continue
+    last=$(latest_row "$issue")
+    status=$(cut -f3 <<< "$last")
+    note=$(cut -f6 <<< "$last")
+    if [ "$status" != stalled ] || [ -z "$note" ] || [ "$note" = - ]; then
+      comment=$(gh issue view "$issue" --json comments --jq '(.comments[-1].body // "") | split("\n")[0]') ||
+        die "blocked: could not read comments for issue $issue"
+      note=${comment:-no reason recorded}
+    fi
+    printf 'BLOCKED\t%s\t%s\t%s\n' "$issue" "$title" "$note"
+  done <<< "$listed"
+  printf '%s\n' "$next" | awk '/^DEFER\t/'
 }
 
 # The queue is a snapshot from init, and labels move after it: another session
@@ -490,11 +641,17 @@ cmd_next() {
 # again here. An issue no longer workable gets a skipped row, which next passes
 # over, and start fails so the caller asks next again.
 cmd_start() {
-  local issue=$1 branch=$2 why saved_label saved_milestone m pick note
+  local issue=$1 branch=$2 why saved_label saved_milestone m label pick note prs linked
   local fields=state,labels,blockedBy
+  if [ "$loop_scope" = 1 ]; then
+    cmd_refresh > /dev/null || die "start: the backlog read failed"
+  fi
   load_scope
   [ -z "$saved_milestone" ] || fields+=,milestone
   m=$(jq_str "$saved_milestone")
+  label=$(jq_str "$saved_label")
+  pick=$(awk -F'\t' -v i="$issue" '$1 == i { print $8 }' "$QUEUE")
+  flock -u 9
   why=$(gh issue view "$issue" --json "$fields" --jq '
     [.labels[].name] as $have
     | ('"$EXCLUDED"' | map(select(. as $n | $have | index($n)))) as $hit
@@ -502,15 +659,29 @@ cmd_start() {
     | '"$m"' as $m
     | if .state != "OPEN" then "state \(.state)"
       elif ($hit | length) > 0 then "labeled \($hit | join(", "))"
-      elif ($have | index("'"$READY"'")) == null then "not labeled '"$READY"'"
+      elif '"$READY"' != null and ($have | index('"$READY"')) == null then "not labeled " + '"$READY"'
+      elif (['"$REQUIRED"'[] | select(. as $n | ($have | index($n)) == null)] | length) > 0
+        then "missing required label"
+      elif '"$label"' != "" and ($have | index('"$label"')) == null then "not labeled " + '"$label"'
       elif $m != "" and (.milestone.title // "") != $m then "not in milestone \($m)"
       elif ($open | length) > 0 then "blocked by \($open | join(" "))"
       elif .blockedBy.totalCount > (.blockedBy.nodes | length) then "more than 50 blockers"
       else "" end')
+  prs=$(read_prs) || die "start: the pull request read failed"
+  linked=$(pr_links <<< "$prs" | awk -F'\t' -v n="$issue" '$1 == n { print $2; exit }')
+  [ -z "$linked" ] || die "issue $issue has open pull request #$linked; run next again"
+  lock_ledger
+  exec 8>"$DIR/loops.lock"
+  flock -w 30 8 || die "the loop markers are locked by another session; try again"
+  if [ "$loop_scope" = 1 ]; then
+    jq -e --arg session "$SESSION" --arg label "$loop_label" --arg milestone "$loop_milestone" \
+      '.session == $session and (.state == "active" or .state == "paused") and
+       (.label // "") == $label and (.milestone // "") == $milestone' \
+      "$marker" > /dev/null || die "loop marker changed; run next again"
+  fi
 
   # The holder check comes first: a holder's own In Progress label must not
   # turn its start row into a skipped one.
-  lock_ledger
   refuse_if_held "$issue"
   if [ -n "$why" ]; then
     row "$issue" skipped - - "not workable at start: $why"
@@ -518,10 +689,10 @@ cmd_start() {
   fi
   # The reason the issue ranked first sits in its queue row. It goes into the
   # start row, so a resumed or adopted issue still carries it.
-  pick=$(awk -F'\t' -v i="$issue" '$1 == i { print $8 }' "$QUEUE")
   note=$(owner_tag)
   [ -z "$pick" ] || [ "$pick" = - ] || note+="${note:+; }$pick"
   row "$issue" start "$branch" - "$note"
+  flock -u 8
 }
 
 # Two sessions can both read NEXT for one issue and both call start. The second
@@ -538,6 +709,7 @@ refuse_if_held() {
   [ "$status" = start ] || return 0
   read -r sid pid <<< "$(tag_owner "$note")"
   [ "$sid" != - ] && [ "$sid" != "$SESSION" ] || return 0
+  ! marker_holds "$sid" || die "issue $issue is held by loop session $sid; run next again"
   [ "$pid" = - ] || ps -p "$pid" > /dev/null || return 0
   die "issue $issue is held by session $sid (pid $pid); run next again"
 }
@@ -546,13 +718,22 @@ refuse_if_held() {
 # again: the dead worker left `In Progress` on it, and that label is this
 # session's claim now.
 cmd_adopt() {
-  local issue=$1 branch last pick=
+  local issue=$1 branch last pick= sid pid
   lock_ledger
+  exec 8>"$DIR/loops.lock"
+  flock -w 30 8 || die "the loop markers are locked by another session; try again"
   branch=$(awk -F'\t' -v i="$issue" '$2==i {s=$3; b=$4} END {if (s == "start") print b}' "$LEDGER")
   [ -n "$branch" ] || die "issue $issue is not in flight; nothing to adopt"
   last=$(latest_row "$issue")
+  read -r sid pid <<< "$(tag_owner "$(cut -f6 <<< "$last")")"
+  if [ "$sid" != - ] && [ "$sid" != "$SESSION" ]; then
+    if marker_holds "$sid" || [ "$pid" = - ] || ps -p "$pid" > /dev/null; then
+      die "issue $issue is held by session $sid; cannot adopt"
+    fi
+  fi
   [[ $(cut -f6 <<< "$last") =~ (pick:\ .*) ]] && pick=${BASH_REMATCH[1]}
   row "$issue" start "$branch" - "$(owner_tag) adopted${pick:+; $pick}"
+  flock -u 8
 }
 
 # Takes back a start this session wrote, when the session cannot work the
@@ -612,14 +793,51 @@ cmd_status() {
   tail -n 8 "$LEDGER"
 }
 
+# Queue snapshots and the ledger use a separate lock from loop markers.
+# Each loop keeps its own snapshot; the marker supplies its scope.
+loop_scope=0 loop_label= loop_milestone=
 case "${1:-}" in
-  init|refresh|next|start) require_gh ;;
+  init|refresh|next|blocked|start|status)
+    lock_ledger
+    if [ -n "$SESSION" ]; then
+      [[ $SESSION =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$ ]] ||
+        die "invalid session ID"
+      exec 8>"$DIR/loops.lock"
+      flock -w 30 8 || die "the loop markers are locked by another session; try again"
+      marker="$DIR/loops/$SESSION.json"
+      if [ -f "$marker" ]; then
+        scope=$(jq -ce --arg session "$SESSION" '
+          if type != "object" or .session != $session or
+             ((.state | IN("active", "paused", "stopped")) | not) or
+             ((.label != null and (.label | type != "string")) or
+              (.milestone != null and (.milestone | type != "string")))
+          then error("invalid loop marker")
+          else {state, label: (.label // ""), milestone: (.milestone // "")} end
+        ' "$marker") || die "invalid loop marker: $marker"
+        if [ "$(jq -r '.state' <<< "$scope")" != stopped ]; then
+          loop_scope=1
+          loop_label=$(jq -r '.label' <<< "$scope")
+          loop_milestone=$(jq -r '.milestone' <<< "$scope")
+          QUEUE="$DIR/loops/$SESSION.queue.tsv"
+          OPEN="$DIR/loops/$SESSION.open"
+          : >> "$QUEUE"
+          : >> "$OPEN"
+        fi
+      fi
+      flock -u 8
+    fi
+    ;;
+esac
+
+case "${1:-}" in
+  init|refresh|next|start|blocked) require_gh; load_filters ;;
 esac
 
 case "${1:-}" in
   init)   shift; cmd_init "$@" ;;
   refresh) shift; cmd_refresh "$@" ;;
   next)   cmd_next ;;
+  blocked) cmd_blocked ;;
   start)  [ $# -ge 3 ] || die "usage: oversee.sh start <issue> <branch>"
           cmd_start "$2" "$3" ;;
   adopt)  [ $# -ge 2 ] || die "usage: oversee.sh adopt <issue>"
@@ -638,5 +856,5 @@ case "${1:-}" in
           row "$issue" "$st" "$branch" "$pr" "$@" ;;
   status) cmd_status ;;
   *)      die "usage: oversee.sh" \
-              "init|refresh|next|start|adopt|withdraw|swap|finish|status" ;;
+              "init|refresh|next|blocked|start|adopt|withdraw|swap|finish|status" ;;
 esac

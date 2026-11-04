@@ -39,7 +39,7 @@ This repository is private and for my own use.
 | `att-docs` | `read-sir` | Read one SIR back out of ALM by number: status, owner, description, comments |
 | `att-docs` | `update-sir` | Change a SIR already in ALM: status, fields, comments, or a Draft's text |
 | `att-docs` | `retest-sir` | Retest a raised SIR against the application and report Retested or Failed Test |
-| `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
+| `general` | `implement` | Take an issue to a reviewed pull request, or run the backlog with `--loop` |
 | `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
 | `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, or the best next issue of one milestone ranked by dependents, priority and tracker order, skipping any with an open blocker or dependency, one `implement` run at a time, and never merge |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
@@ -369,16 +369,19 @@ installed and kept current with `claude plugin update voice@att-docs` after a ve
 packaged Baton is updated with apt), but the skill loads from the plugin install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
 `.claude/att-docs/` is not loaded as a skill.
 
-The `general` plugin also registers five repo hooks: a gate that refuses a pull request
-body whose Testing section a repository's checker cannot parse, a reminder to record a
-new pull request in the catch-up ledger and keep a merge watch running, a gate that
-refuses a commit holding build artifacts or junk and `git add -A` or `git add .`, the
-unit test that belongs to an edited file, and Prettier on an edited file. Four of them
-read their values from `.claude/skills/repo-hooks/extension.json`, one section per hook,
-and a repository without that file gets none of the four. The stray-file gate runs in every
-repository and reads that file only to add patterns or turn itself off. A repository that
-vendors this one registers `plugins/general/hooks/run.sh` in its own settings. See the
-`repo-hooks` skill.
+The `general` plugin registers repo hooks for pull request testing, merge-watch
+reminders, stray-file checks, tests and formatting on edit, and persistent implement
+loops. Hook settings live in `.claude/skills/repo-hooks/extension.json`. The loop and
+stray-file hooks are enabled by default; the others require a section in that file.
+A repository that vendors this one registers `plugins/general/hooks/run.sh` in its own
+settings. See the `repo-hooks` skill.
+
+`/implement --loop` uses the `oversee-development` queue. Its optional
+`.claude/skills/oversee-development/extension.json` sets `queue.readyLabel`,
+`queue.requireLabels`, `queue.excludeLabels`, and `queue.blockedLabels`; see the skill
+for their defaults and the loop's stop and resume commands. Loop state is shared by
+worktrees in the main checkout. An interactive restart requires a prompt before the
+session can resume work.
 
 Baton, the voice bridge server, is in `merph518/Code-Conductor` under `baton/`. The extension
 file at `.claude/skills/voice-bridge-hooks/extension.json` also names Baton's repository

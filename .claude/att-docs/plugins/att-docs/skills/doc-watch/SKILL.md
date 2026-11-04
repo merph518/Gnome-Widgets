@@ -199,15 +199,45 @@ location.host === '<library-host>'
 More than one browser can be connected, one per machine the user has signed in
 to the automation from, and the default one is not always the machine the user
 signed in to SharePoint on. So when the tab lands on a sign-in page, list the
-connected browsers before reporting anything. Close the tab, then for each
+connected browsers before reporting anything. Keep that tab open. For each
 other browser, most recently connected first: select it, open the library in a
 new tab, and run the same check. Scan in the first browser where it returns
-`true`, and name that browser in the report. When none does, close every tab
-opened this way, report that the session has expired, and stop.
+`true` and name that browser in the report. Then close the original tab and
+every other tab opened this way, except the one that is scanning.
 
-The session does not last overnight, and the user signs in by hand. An expired
-session on a scheduled run means that sign-in did not happen that day; the
-notification says so, and names the site to sign in to.
+When no other browser returns `true`, close the tabs opened in the other
+browsers and select the default browser and the original tab again. A
+scheduled run does not wait for anyone: close the tab, report that the session
+has expired, and stop. The session does not last overnight, and the user signs
+in by hand, so an expired session on a scheduled run means that sign-in did
+not happen that day. Step 5 sends the notification, which names the site to
+sign in to.
+
+An attended run, `--dry-run` included, waits for the user instead. Tell the
+user that sign-in is needed, which browser holds the tab, that the tab stays
+open, and that the run waits about 30 seconds for them to sign in to
+`<library-host>` by hand in that same tab. Then check that tab every few
+seconds for about 30 seconds in total. Make each check its own browser call,
+so each wait stays well under the browser call's time limit, and a sign-in
+that navigates the page ends only that one short check:
+
+```js
+await new Promise((r) => setTimeout(r, 3000));
+location.host === '<library-host>'
+```
+
+A check that fails because the page was navigating is repeated on the same tab
+within the 30 seconds. A `true` can come from a page on `<library-host>` that
+the sign-in passes through on its way to the library, so when a check returns
+`true`, open `<library-url>` in that same tab again and run the first check in
+this step, the one with the 4-second wait, once on that tab. The 30 seconds
+keep counting, and nothing else in this step starts over. When that check
+returns `true`, carry on to step 2 in that tab without asking the user
+anything. When it returns `false`, go on checking until the 30 seconds are up.
+When the 30 seconds pass without a library page, or the tab or browser is
+gone, close the tab if it is still open, report that the session has expired,
+name the site to sign in to, tell the user to start the run again after
+signing in, and stop.
 
 ## 2. Scan
 
@@ -315,8 +345,8 @@ Nothing else is written: the tracking issue, the `doc-impact` issues, and the
 run changes, with anything more the extension names.
 
 A scheduled run that stopped on an expired session in step 1 also sends one
-notification: the scan did not run, sign in to the site, then start the task
-again.
+notification: the scan did not run, sign in to `<library-host>`, then start the
+task again.
 
 ## 6. Attended run: ask, then download
 

@@ -19,6 +19,7 @@ mkdir -p "$FIXTURES"
 # prints GH_VERSION, so a case can run oversee.sh against an older gh.
 cat > "$SANDBOX/bin/gh" <<'STUB'
 #!/usr/bin/env bash
+set -o pipefail
 jqx=.
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -30,9 +31,18 @@ if [ "$1" = --version ]; then
   exit 0
 fi
 case "$1 $2" in
-  "issue list") jq -r "$jqx" "$FIXTURES/issues.json" ;;
-  "pr list") jq -r "$jqx" "$FIXTURES/prs.json" ;;
-  "issue view") jq -c ".[] | select(.number == $3)" "$FIXTURES/issues.json" | jq -r "$jqx" ;;
+  "issue list")
+    if [ -n "${DELAY_ISSUES:-}" ]; then
+      : > "$DELAY_ISSUES/entered"
+      for ((n = 0; n < 500; n++)); do
+        [ -e "$DELAY_ISSUES/release" ] && break
+        sleep 0.02
+      done
+      [ -e "$DELAY_ISSUES/release" ] || exit 1
+    fi
+    [ "${FAIL_ISSUES:-}" != 1 ] && jq -r "$jqx" "$FIXTURES/issues.json" ;;
+  "pr list") [ "${FAIL_PRS:-}" != 1 ] && jq -r "$jqx" "$FIXTURES/prs.json" ;;
+  "issue view") [ "${FAIL_VIEW:-}" != 1 ] && jq -c ".[] | select(.number == $3)" "$FIXTURES/issues.json" | jq -r "$jqx" ;;
   "api "*)
     method=GET; for a in "$@"; do [ "$a" = DELETE ] && method=DELETE; [ "$a" = POST ] && method=POST; done
     url=; for a in "$@"; do [[ $a == repos/* ]] && url=$a; done
@@ -190,6 +200,14 @@ GH_VERSION=3.0.0 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" next > /de
 check "$?" 0 "a newer major is accepted"
 GH_VERSION=2.93.9 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" status > /dev/null 2>&1
 check "$?" 0 "an old gh does not stop commands that only read the ledger"
+
+# A status read must not make the ledger look newly modified.
+touch -m -t 200001010000 "$LEDGER"
+ledger_metadata=$(stat -c '%y|%z|%s|%i' "$LEDGER")
+as A "$LIVE" status > /dev/null
+check "$?" 0 "status reads the ledger"
+check "$(stat -c '%y|%z|%s|%i' "$LEDGER")" "$ledger_metadata" \
+  "status leaves ledger metadata unchanged"
 
 # --- a milestone: its own repository, so the state is separate
 R2="$SANDBOX/repo2"
@@ -494,6 +512,299 @@ as A "$LIVE" init --milestone "$M" > /dev/null
 check "$(order)" "33 31 32 " "a native blocker ranks ahead of unrelated issues"
 check "$(as A "$LIVE" next | head -n 1 | cut -f5)" "pick: unblocks 1 open issue" \
   "and the reason counts the issue it blocks"
+fresh
+mkdir -p "$R2/.claude/skills/oversee-development"
+CONFIG="$R2/.claude/skills/oversee-development/extension.json"
+echo '{"queue":{"readyLabel":null,"requireLabels":["allowed"],"excludeLabels":["new feature"],"blockedLabels":["Blocked on API"]}}' > "$CONFIG"
+{ mk 7 "Candidate" "allowed" -; mk 14 "Other" "allowed" -
+  mk 15 "Excluded" "allowed,new feature" -; mk 16 "Missing" "" -
+  mk 17 "API wait" "allowed,Blocked on API" -; } | fixture
+as A "$LIVE" init > /dev/null
+out=$(as A "$LIVE" blocked)
+check "$(grep -c '^BLOCKED	17	API wait	' <<< "$out")" 1 "configured blocked labels appear in the report"
+check "$(order)" "7 14 " "repository filters apply together and null removes the ready gate"
+echo '[{"number":80,"headRefName":"feat/issue-71-x","body":"Closes #14"}]' > "$FIXTURES/prs.json"
+out=$(as A "$LIVE" next)
+check "$(grep -c '^NEXT	7' <<< "$out")" 1 "a longer issue number in a branch does not match"
+as A "$LIVE" start 14 feat/issue-14-test 2> /dev/null
+check "$?" 1 "start refuses an issue already linked to an open pull request"
+echo '[{"number":80,"headRefName":"feat/issue-7-x","body":"Closes #14"}]' > "$FIXTURES/prs.json"
+out=$(as A "$LIVE" next)
+check "$(grep -c '^DEFER	7.*open pull request #80' <<< "$out")" 1 "branch-linked pull requests defer their issue"
+check "$(tail -n 1 <<< "$out")" "BLOCKED" "open pull requests leave the queue blocked"
+echo '[]' > "$FIXTURES/prs.json"
+mk 7 "Candidate" "allowed,new feature" - | fixture
+as A "$LIVE" start 7 feat/issue-7-test 2> /dev/null
+check "$?" 1 "start rechecks configured exclusions"
+rm "$CONFIG"
+FAIL_PRS=1 as A "$LIVE" next > /dev/null 2>&1
+check "$?" 1 "next fails closed when the pull request read fails"
+FAIL_PRS=1 as A "$LIVE" start 7 feat/issue-7-test > /dev/null 2>&1
+check "$?" 1 "start fails closed when the pull request read fails"
+FAIL_ISSUES=1 as A "$LIVE" next > /dev/null 2>&1
+check "$?" 1 "next does not select from a stale backlog"
+
+fresh
+echo '[{"number":1,"title":"Waiting","state":"OPEN","labels":[{"name":"Blocked"},{"name":"ready-for-agent"}],"comments":[{"body":"Old"},{"body":"Latest reason\nMore"}]},
+ {"number":2,"title":"Stalled","state":"OPEN","labels":[{"name":"Blocked"},{"name":"ready-for-agent"}],"comments":[{"body":"Comment"}]},
+ {"number":3,"title":"Track","state":"OPEN","labels":[{"name":"Blocked"},{"name":"Tracker"},{"name":"ready-for-agent"}]}]' > "$FIXTURES/issues.json"
+as A "$LIVE" init > /dev/null
+as A "$LIVE" finish 2 stalled - "ledger reason"
+out=$(as A "$LIVE" blocked)
+check "$(grep -c '^BLOCKED	1	Waiting	Latest reason$' <<< "$out")" 1 "blocked reports the latest comment first line"
+check "$(grep -c '^BLOCKED	2	Stalled	ledger reason$' <<< "$out")" 1 "a stalled ledger reason takes precedence"
+check "$(grep -c '^BLOCKED	3	' <<< "$out")" 0 "blocked excludes trackers"
+
+fresh
+echo '{"queue":{"readyLabel":"ready","requireLabels":["allowed","reviewed"],"excludeLabels":["custom exclusion","Blocked on API"],"blockedLabels":["Blocked on API"]}}' > "$CONFIG"
+{ mk 10 "Default blocked" "ready,allowed,reviewed,scope,Blocked" "$M"
+  mk 11 "Custom blocked" "ready,allowed,reviewed,scope,Blocked on API" "$M"
+  mk 12 "Missing ready" "allowed,reviewed,scope,Blocked" "$M"
+  mk 13 "Missing required" "ready,allowed,scope,Blocked" "$M"
+  mk 14 "Default exclusion" "ready,allowed,reviewed,scope,Blocked,needs-info" "$M"
+  mk 15 "Custom exclusion" "ready,allowed,reviewed,scope,Blocked,custom exclusion" "$M"
+  mk 16 "Wrong label" "ready,allowed,reviewed,Blocked" "$M"
+  mk 17 "Wrong milestone" "ready,allowed,reviewed,scope,Blocked" "Wave Two"
+  mk 18 "Tracker" "ready,allowed,reviewed,scope,Blocked,Tracker" "$M"
+  mk 19 "Multiple blocked labels" "ready,allowed,reviewed,scope,Blocked,Blocked on API" "$M"; } | fixture
+as A "$LIVE" init --milestone "$M" scope > /dev/null
+out=$(as A "$LIVE" blocked)
+check "$(printf '%s\n' "$out" | cut -f2 | sort -n | tr '\n' ' ')" "10 11 19 " \
+  "blocked reports only blocked issues satisfying all other queue and run filters"
+rm "$CONFIG"
+
+fresh
+{ mk 1 "First scope" "$RA,alpha" "$M"
+  mk 2 "Second scope" "$RA,beta" "Wave Two"; } | fixture
+LOOP="$HERE/loop.py"
+python3 "$LOOP" --session A start --milestone "$M" alpha > /dev/null
+python3 "$LOOP" --session B start --milestone "Wave Two" beta > /dev/null
+OVERSEE_FORCE=1 as A "$LIVE" init --milestone "$M" alpha > /dev/null
+OVERSEE_FORCE=1 as B "$LIVE" init --milestone "Wave Two" beta > /dev/null
+check "$(as A "$LIVE" next | first)" "NEXT	1" "a loop selects from its marker after another session changes the shared queue"
+check "$(as B "$LIVE" next | first)" "NEXT	2" "each loop restores its own scope on selection"
+check "$(as A "$LIVE" status | grep -c '^scope: milestone "Wave One", label alpha$')" 1 \
+  "status reports the loop scope rather than the last shared filter"
+as A "$LIVE" start 2 feat/issue-2 > /dev/null 2>&1
+check "$?" 1 "start checks the marker scope after another session changed the queue"
+OVERSEE_FORCE=1 as A "$LIVE" init beta > /dev/null 2>&1
+check "$?" 1 "init cannot replace a live loop's marker scope"
+as A "$LIVE" refresh beta > /dev/null 2>&1
+check "$?" 1 "refresh cannot replace a live loop's marker scope"
+python3 "$LOOP" --session A stop done > /dev/null
+python3 "$LOOP" --session B stop done > /dev/null
+
+fresh
+{ mk 2 "voice: outside orphan" "$RA,beta" -
+  mk 3 "voice: inside" "$RA,alpha" -; } | fixture
+as A "$LIVE" init > /dev/null
+as C "$DEAD2" start 2 feat/issue-2
+python3 "$LOOP" --session A start alpha > /dev/null
+out=$(as A "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	2' <<< "$out")" 1 "a label-scoped loop does not adopt an orphan outside its label"
+check "$(grep -c '^DEFER	3.*area held by issue 2 orphaned outside the label' <<< "$out")" 1 \
+  "an out-of-scope orphan still holds its area"
+python3 "$LOOP" --session A stop done > /dev/null
+
+fresh
+{ mk 1 "Milestone candidate" "$RA,alpha" "$M"
+  mk 2 "Loop candidate" "$RA,beta" "Wave Two"
+  mk 3 "Loop candidate two" "$RA,beta" "Wave Two"; } | fixture
+as C "$LIVE" init --milestone "$M" alpha > /dev/null
+python3 "$LOOP" --session A start --milestone "Wave Two" beta > /dev/null
+as A "$LIVE" next > /dev/null
+check "$(as A "$LIVE" status | grep '^queued ')" "queued 2 total" \
+  "loop status counts its own snapshot"
+check "$(as C "$LIVE" status | grep '^queued ')" "queued 1 total" \
+  "non-loop status keeps its own snapshot"
+check "$(as C "$LIVE" next | first)" "NEXT	1" \
+  "a loop refresh does not overwrite a non-loop milestone and label"
+check "$(sed -n 1,2p "$FILTER2" | tr '\n' '|')" "alpha|Wave One|" \
+  "the saved non-loop scope is unchanged"
+
+fresh
+{ mk 7 "Owned work" "$RA,alpha" -; } | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+as A "$DEAD2" start 7 feat/issue-7-owned
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	7' <<< "$out")" 1 \
+  "an active marker protects an issue even after its owner process exits"
+as B "$LIVE" start 7 feat/issue-7-other > /dev/null 2>&1
+check "$?" 1 "start refuses an issue protected by an active marker"
+as B "$LIVE" adopt 7 > /dev/null 2>&1
+check "$?" 1 "adoption refuses an issue protected by an active marker"
+MARKER="$R2/.claude/oversee/loops/A.json"
+jq '.state = "paused"' "$MARKER" > "$MARKER.tmp" && mv "$MARKER.tmp" "$MARKER"
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	7' <<< "$out")" 1 "a paused marker protects its issue"
+as B "$LIVE" start 7 feat/issue-7-other > /dev/null 2>&1
+check "$?" 1 "start refuses an issue protected by a paused marker"
+as B "$LIVE" adopt 7 > /dev/null 2>&1
+check "$?" 1 "adoption refuses an issue protected by a paused marker"
+python3 "$LOOP" --session A stop done > /dev/null
+check "$(as B "$LIVE" next | first)" "INFLIGHT	7" \
+  "a stopped marker allows a dead owner's issue to be selected"
+check "$(as B "$LIVE" next | cut -f6)" "orphan" "the stopped owner's issue is an orphan"
+as B "$LIVE" adopt 7
+check "$(as B "$LIVE" next | cut -f6)" "mine" "ordinary adoption claims the orphan"
+check "$(tail -n 1 "$LEDGER2" | cut -f4)" "feat/issue-7-owned" \
+  "ordinary adoption preserves the in-flight branch"
+
+fresh
+{ mk 7 "Live owned work" "$RA,alpha" -; } | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+as A "$LIVE" start 7 feat/issue-7-owned
+python3 "$LOOP" --session A stop done > /dev/null
+python3 "$LOOP" --session B start alpha > /dev/null
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	7' <<< "$out")" 1 \
+  "a stopped marker falls back to the live owner's PID"
+as B "$LIVE" adopt 7 > /dev/null 2>&1
+check "$?" 1 "ordinary adoption refuses a stopped marker's live owner"
+as B "$LIVE" start 7 feat/issue-7-other > /dev/null 2>&1
+check "$?" 1 "start refuses a stopped marker's live owner"
+
+fresh
+{ mk 7 "Unknown PID work" "$RA,alpha" -; } | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+as A "" start 7 feat/issue-7-owned
+python3 "$LOOP" --session A stop done > /dev/null
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	7' <<< "$out")" 1 "a stopped marker with no owner PID remains held"
+as B "$LIVE" adopt 7 > /dev/null 2>&1
+check "$?" 1 "ordinary adoption refuses an unknown owner PID"
+
+fresh
+{ mk 7 "Stopped owner" "$RA,alpha" -; } | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+as A "$DEAD2" start 7 feat/issue-7-owned
+python3 "$LOOP" --session A stop done > /dev/null
+as B "$LIVE" start 7 feat/issue-7-new > /dev/null 2>&1
+check "$?" 0 "start applies normal dead-PID liveness after a marker stops"
+
+fresh
+{ mk 7 "Unreadable marker owner" "$RA,alpha" -; } | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+as A "$DEAD2" start 7 feat/issue-7-owned
+printf '{' > "$R2/.claude/oversee/loops/A.json"
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	7' <<< "$out")" 1 "a malformed marker holds conservatively"
+as B "$LIVE" adopt 7 > /dev/null 2>&1
+check "$?" 1 "adoption refuses an owner with a malformed marker"
+
+fresh
+{ mk 8 "Live non-loop owner" "$RA" -; } | fixture
+as A "$LIVE" init > /dev/null
+as A "$LIVE" start 8 feat/issue-8-owned
+as B "$LIVE" adopt 8 > /dev/null 2>&1
+check "$?" 1 "ordinary adoption refuses a live non-loop owner"
+
+wait_for_file() {
+  local path=$1 n
+  for ((n = 0; n < 250; n++)); do
+    [ -e "$path" ] && return
+    sleep 0.02
+  done
+  return 1
+}
+
+# Ledger writers must finish while a backlog read is still waiting.
+for operation in init refresh next loop-start; do
+  fresh
+  { mk 7 "Owned work" "$RA,alpha" -; mk 8 "Other work" "$RA,alpha" -; } | fixture
+  if [ "$operation" != init ]; then
+    as A "$LIVE" init > /dev/null
+  fi
+  if [ "$operation" = loop-start ]; then
+    python3 "$LOOP" --session A start alpha > /dev/null
+  fi
+  delay="$SANDBOX/delay-$operation"
+  mkdir -p "$delay"
+  case $operation in
+    init) set -- init ;;
+    refresh) set -- refresh ;;
+    next) set -- next ;;
+    loop-start) set -- start 7 feat/issue-7-a ;;
+  esac
+  DELAY_ISSUES="$delay" as A "$LIVE" "$@" > "$delay/out" 2>&1 &
+  reader=$!
+  wait_for_file "$delay/entered" || true
+  check "$([ -e "$delay/entered" ] && echo yes || echo no)" yes "$operation reaches the backlog read"
+  (as B "$LIVE" start 7 feat/issue-7-b > "$delay/writer-out" 2>&1
+   echo "$?" > "$delay/writer-status") &
+  writer=$!
+  wait_for_file "$delay/writer-status" || true
+  check "$([ -e "$delay/writer-status" ] && echo yes || echo no)" yes \
+    "$operation leaves the ledger available during the backlog read"
+  : > "$delay/release"
+  wait "$writer"
+  check "$(cat "$delay/writer-status")" 0 "$operation permits the other session to claim work"
+  wait "$reader"
+  result=$?
+  if [ "$operation" = loop-start ]; then
+    check "$result" 1 "loop start refuses an issue claimed during its backlog read"
+    check "$(tail -n 1 "$LEDGER2" | cut -f4)" "feat/issue-7-b" \
+      "loop start preserves the other session's ownership"
+  else
+    check "$result" 0 "$operation completes after the backlog read"
+    if [ "$operation" = next ]; then
+      check "$(grep -c '^ELSEWHERE	7' "$delay/out")" 1 \
+        "next observes the claim made during the backlog read"
+    fi
+  fi
+done
+
+fresh
+{ mk 7 "Claimed work" "$RA,In Progress" -; mk 8 "Ready work" "$RA" -; } | fixture
+delay="$SANDBOX/delay-known"
+mkdir -p "$delay"
+DELAY_ISSUES="$delay" as A "$LIVE" init > "$delay/out" 2>&1 &
+reader=$!
+wait_for_file "$delay/entered" || true
+as B "$LIVE" finish 7 stalled - "waiting" > /dev/null &
+writer=$!
+for ((n = 0; n < 250; n++)); do
+  [ -s "$LEDGER2" ] && break
+  sleep 0.02
+done
+check "$([ -s "$LEDGER2" ] && echo yes || echo no)" yes "finish writes during a backlog read"
+: > "$delay/release"
+wait "$writer"
+wait "$reader"
+check "$(awk -F'\t' '$1 == 7 {print $1}' "$QUEUE2")" 7 \
+  "the published snapshot includes an issue recorded during the backlog read"
+
+fresh
+mk 7 "Ready work" "$RA,alpha" - | fixture
+delay="$SANDBOX/delay-inits"
+mkdir -p "$delay"
+DELAY_ISSUES="$delay" as A "$LIVE" init alpha > "$delay/out" 2>&1 &
+reader=$!
+wait_for_file "$delay/entered" || true
+as B "$LIVE" init > "$delay/second" 2>&1 &
+writer=$!
+: > "$delay/release"
+wait "$reader"
+check "$?" 0 "the first concurrent init publishes its snapshot"
+wait "$writer"
+check "$?" 1 "a concurrent init cannot replace a populated snapshot without force"
+check "$(cat "$FILTER2")" alpha "the first init retains its scope"
+
+fresh
+mk 7 "Ready work" "$RA,alpha" - | fixture
+python3 "$LOOP" --session A start alpha > /dev/null
+delay="$SANDBOX/delay-stopped"
+mkdir -p "$delay"
+DELAY_ISSUES="$delay" as A "$LIVE" next > "$delay/out" 2>&1 &
+reader=$!
+wait_for_file "$delay/entered" || true
+python3 "$LOOP" --session A stop done > /dev/null
+: > "$delay/release"
+wait "$reader"
+check "$?" 1 "next refuses to publish after its loop stops during the backlog read"
+check "$([ -s "$R2/.claude/oversee/loops/A.queue.tsv" ] && echo yes || echo no)" no \
+  "a stopped loop does not publish the pending snapshot"
+
 cd "$SANDBOX/repo" || exit 1
 
 if ((fails)); then echo "$fails failed"; exit 1; fi

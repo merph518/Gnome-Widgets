@@ -32,8 +32,41 @@ Arguments, all optional:
 `oversee.sh` below is the script in this skill's folder, the base directory the Skill tool
 prints when the skill loads. Run it by that absolute path.
 
+## Persistent implement loop
+
+`/implement --loop` runs this procedure with a persistent marker. The general plugin's
+session hooks supply the session identifier and restore the loop instruction on resume
+and compaction. Before step 1, run the helper by its absolute path in this skill's
+folder, with the project as the working directory and the session ID from the hook:
+
+```bash
+python3 <skill-folder>/loop.py --session <session-id> start
+```
+
+Pass `CLAUDE_CODE_SESSION_ID=<session-id>` in the environment of each `oversee.sh`
+command so the ledger recognizes this session across separate shell invocations.
+
+Pass `--milestone "<title>"` and a label after `start` when the run has a scope. An
+active loop's marker fixes its scope; `init` and `refresh` cannot change it. The marker
+and queue survive a session restart. On resume, inspect `python3 <skill-folder>/loop.py
+--session <session-id> status` and continue the saved queue; do not initialize a new scope.
+
+The Stop hook continues an active loop after a turn. On a user pause request, run
+`python3 <skill-folder>/loop.py --session <session-id> pause "<reason>"`; use `resume` to continue.
+The hook also pauses on the eighth stop attempt without this session's ledger progress.
+When the user ends the loop or step 5 ends the run, run `python3 <skill-folder>/loop.py
+--session <session-id> stop "<reason>"` before the final reply.
+An interactive restart needs a user prompt to start a turn; the hook restores context on
+that turn but cannot start one itself.
+
+An active or paused marker holds its session's in-flight issue even if the process has
+exited. Resume that session to continue it. If the session will not return, first verify
+that it has stopped, then run `python3 <skill-folder>/loop.py --session <old-session-id>
+stop "<reason>"`. Once the recorded process has exited, `oversee.sh next` can offer its
+issue as an orphan. A missing process ID cannot establish that the owner exited.
+
 `oversee.sh` needs gh 2.94 or newer, because the queue reads each issue's blockers with
-`gh issue list --json blockedBy`. `init`, `refresh`, `next`, and `start` stop with the install
+`gh issue list --json blockedBy`. `init`, `refresh`, `next`, `blocked`, and `start` stop with the install
 fix when gh is older. `finish`, `swap`, `status`, `adopt`, and `withdraw` do not read
 blockers and run on any gh, so finished work is still recorded.
 
@@ -56,6 +89,7 @@ files with nothing else.
 oversee.sh init [--milestone <title>] [label]     # build the queue, once
 oversee.sh refresh [--milestone <title>] [label]  # rebuild it from the live backlog
 oversee.sh next                    # refresh, then what to work or why nothing is
+oversee.sh blocked                 # list blocked issues and their reasons
 oversee.sh start <issue> <branch>
 oversee.sh adopt <issue>           # claim an orphaned in-flight issue
 oversee.sh withdraw <issue>        # take back this session's own start
@@ -69,6 +103,23 @@ the queue with a bare `refresh`, which keeps both, and a `refresh` given only on
 keeps the other. A forced `init` sets the whole scope: a label or milestone it is not
 given comes out empty, so a run that names a scope starts with it. It rewrites the queue,
 the filter, and the open list, and leaves the ledger alone.
+
+Repository filters live in `.claude/skills/oversee-development/extension.json`:
+
+```json
+{
+  "queue": {
+    "readyLabel": "ready-for-agent",
+    "requireLabels": [],
+    "excludeLabels": [],
+    "blockedLabels": []
+  }
+}
+```
+
+`readyLabel: null` removes the ready-label requirement. Required labels all have to
+match. Excluded and blocked labels add to the built-in exclusions; blocked labels also
+appear in the blocker report. The queue reads this file from the main checkout.
 
 `start` tags its ledger row with the session's id and process id, from
 `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`. That tag is how several conductor sessions share
@@ -86,11 +137,11 @@ A title with no such prefix has no area and is never deferred.
 - `INFLIGHT <issue> ... branch <name> mine` this session's unfinished issue, resume it
   before anything else
 - `INFLIGHT <issue> ... branch <name> orphan` an unfinished issue whose session has exited,
-  adopt and resume it; a milestone run adopts an orphan only while the run would serve it,
+  adopt and resume it; a scoped run adopts an orphan only while the run would serve it,
   and a session still resumes its own `mine` issue wherever it sits
-- `ELSEWHERE <issue> ... branch <name>` in flight in another live session, printed for the
-  record; its area is held until it finishes. A milestone run prints an orphan it does not
-  adopt the same way, and its area stays held while the branch is open
+- `ELSEWHERE <issue> ... branch <name>` held by another session or its active or paused
+  loop marker; its area stays held. A scoped run prints an orphan it does not adopt the
+  same way, and its area stays held while the branch is open
 - `DEFER <issue> ... area held by <PR or issue>` skipped this pass, printed for the record
 - `DEFER <issue> ... blocked by #<n>` skipped this pass because an open issue blocks it,
   printed for the record; it is served once the blockers close
@@ -154,10 +205,10 @@ oversee.sh init
 A run given a label or milestone has built its queue with `init` in step 1 already.
 
 `next` rebuilds the queue from the live backlog on every call, through `refresh`, so an
-issue filed since the last call is in the queue it serves from. When the backlog read fails,
-`next` says so on stderr and serves the last queue. The rebuild keeps every open issue the
-ledger already names, whatever its labels: an issue in flight or waiting on an open pull
-request still holds its area though `In Progress` would drop it.
+issue filed since the last call is in the queue it serves from. A failed backlog or pull
+request read stops selection. The rebuild keeps every open issue the ledger already
+names, whatever its labels: an issue in flight or waiting on an open pull request still
+holds its area though `In Progress` would drop it.
 
 A `skipped` issue is served again once the reason it was skipped is gone:
 
@@ -168,7 +219,6 @@ A `skipped` issue is served again once the reason it was skipped is gone:
 - any other note comes back once every issue or pull request number it names is closed
 - a note that names no other issue or pull request stays skipped, since nothing `next` can
   read says the reason is gone
-- no skip comes back on a call whose backlog read failed
 
 `done` and `stalled` rows and in-flight rows are never served again. When `next` prints
 `BLOCKED` or `EMPTY`, that is the stop in step 5.
@@ -177,13 +227,12 @@ Outside a milestone run this reads issue numbers, titles, labels, and blockers. 
 else. An issue's body is read by `/implement` when that issue comes up, never all of them
 at once.
 
-The queue holds only cleared issues, the ones labeled `ready-for-agent`.
-`/oversee-development <label>` also requires that label, so an issue needs both. It drops
-issues labeled `In Progress`, `Blocked`, `Tracker`, `Already Done`, `DO NOT MERGE`,
-`question`, `wontfix`, `duplicate`, `needs-triage`, `needs-info`, `ready-for-human`, and
-`invalid`, even when they also carry `ready-for-agent`, and outside a milestone run orders
-what is left oldest issue first, by issue number. An issue that is not cleared is never
-served, so a backlog nobody has labeled ends the run at `EMPTY`.
+By default the queue holds issues labeled `ready-for-agent`. A repository may change
+that label or add filters in its extension file. `/oversee-development <label>` also
+requires the named label. The queue drops issues labeled `In Progress`, `Blocked`,
+`Tracker`, `Already Done`, `DO NOT MERGE`, `question`, `wontfix`, `duplicate`,
+`needs-triage`, `needs-info`, `ready-for-human`, or `invalid`, and outside a milestone
+run orders what is left oldest issue first. An issue with an open pull request is deferred.
 
 An issue with an open blocker is not served. A blocker is another issue that GitHub's issue
 dependencies list as blocking it, and it counts until that issue is closed. Outside a
@@ -367,7 +416,7 @@ row either way.
 
 ## 5. Stop conditions
 
-Stop the loop, write the final report, and stop starting issues when any of these is true:
+Stop starting issues and write the final report when any of these is true:
 
 - `next` prints `EMPTY` or `BLOCKED`, which it does only after reading the live backlog
 - the `/oversee-development <n>` limit is reached
@@ -385,6 +434,10 @@ then run `/oversee-development resume`.
 that are ready for unattended work, then run `/oversee-development` again.
 
 ## 6. Report
+
+Run `oversee.sh blocked` and include each blocked issue and its reason, including
+deferred issues. Recheck a blocker that may have cleared before ending the loop.
+For a persistent implement loop, turn off its marker before the final reply.
 
 One block at the end, short enough to read on a phone:
 
