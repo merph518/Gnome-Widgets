@@ -24,6 +24,9 @@ export class GateError extends Error {
   }
 }
 
+/** A step run on its own was given something its state cannot serve; the message says what. */
+export class StepInputError extends Error {}
+
 const SYSTEM = `You are one step of a fixed pipeline that builds a software test pack.
 The reference material below is the procedure, the workbook standard and the
 rules the pack follows; keep every rule it gives for the step you are asked to do.
@@ -233,10 +236,16 @@ export const room = (ctx, reasoning, refs) => budgetWindow(ctx)
     : ctx.config.model.maxOutput)
   - estimateTokens(SYSTEM + refs.join('\n')) - 2048;
 
-function runCommand(ctx, template, values, { failure } = {}) {
+/**
+ * Runs a repository command. Returns its output, or null when it fails; `failure`
+ * receives the error text and `output` the exit status and the output, for a caller
+ * that reads what a failing command printed.
+ */
+function runCommand(ctx, template, values, { failure, output } = {}) {
   const argv = template.map((part) => fill(part, values));
   const result = spawnSync(argv[0], argv.slice(1), { cwd: ctx.config.root, encoding: 'utf8',
     maxBuffer: 512 * 1024 * 1024 });
+  if (output) Object.assign(output, { status: result.status, stdout: result.stdout ?? '' });
   if (result.status !== 0) {
     ctx.logs.detail(`command ${argv[0]} failed`, `${result.stderr}`);
     if (failure) failure.stderr = `${result.stderr ?? ''}${result.error?.message ?? ''}`;
@@ -2664,30 +2673,41 @@ const problemText = (built) => built.failed.map(([sheet, , , , notes]) => `${she
 export const REVIEW_SHEETS = ['Senior Tester Review', 'Tester Notes', 'Confidence Assessment',
   'Executive Summary'];
 
-export async function phase8(ctx, pack, label = 'build', deferred = []) {
+/**
+ * One build of the pack: the reconcile, the builder, and the pipeline's own checks of
+ * the pack, with the sheets in `deferred` left out of the failures. Writes the builder
+ * status line and, when a sheet fails, its problems to detail.log. Throws
+ * `builder-stop` when the builder will not read the pack. Returns the builder's result
+ * with `failed` as the sheets that count.
+ */
+export function buildRound(ctx, pack, label = 'build', attempt = 0, deferred = []) {
   const { builder } = ctx;
+  reconcile(ctx, pack);
+  const whole = builder.buildPack(pack);
+  if (whole.stop) throw new GateError('phase8', 'builder-stop');
+  // The pipeline's own check of each card's Expected Result against its final step,
+  // reported beside the builder's sheets so the repair call reads it the same way.
+  const mismatched = expectedProblems(pack);
+  // The pipeline's own checks of the pack against itself, run for any builder.
+  const { failed: checked, warnings } = checkPack(pack, whole);
+  for (const { code, text } of warnings) ctx.logs.detail(`builder warning ${code} ${label} ${attempt}`, text);
+  const built = { ...whole, failed: [...whole.failed.filter(([sheet]) => !deferred.includes(sheet)),
+    ...checked.filter(([sheet]) => !deferred.includes(sheet)),
+    ...(mismatched.length ? [[EXPECTED_SHEET, 'Yes', 'Yes', 'FAIL', mismatched.join('\n')]] : [])] };
+  const statuses = built.validation.map((row) => row[3]);
+  ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'builder', attempt,
+    failed: built.failed.length, limited: statuses.filter((s) => s === 'PASS WITH LIMITATIONS').length,
+    passed: statuses.filter((s) => s === 'PASS').length });
+  if (built.failed.length) ctx.logs.detail(`builder ${label} ${attempt}`, problemText(built));
+  return built;
+}
+
+export async function phase8(ctx, pack, label = 'build', deferred = []) {
   for (let attempt = 0; ; attempt += 1) {
-    reconcile(ctx, pack);
-    const whole = builder.buildPack(pack);
-    if (whole.stop) throw new GateError('phase8', 'builder-stop');
-    // The pipeline's own check of each card's Expected Result against its final step,
-    // reported beside the builder's sheets so the repair call reads it the same way.
-    const mismatched = expectedProblems(pack);
-    // The pipeline's own checks of the pack against itself, run for any builder.
-    const { failed: checked, warnings } = checkPack(pack, whole);
-    for (const { code, text } of warnings) ctx.logs.detail(`builder warning ${code} ${label} ${attempt}`, text);
-    const built = { ...whole, failed: [...whole.failed.filter(([sheet]) => !deferred.includes(sheet)),
-      ...checked.filter(([sheet]) => !deferred.includes(sheet)),
-      ...(mismatched.length ? [[EXPECTED_SHEET, 'Yes', 'Yes', 'FAIL', mismatched.join('\n')]] : [])] };
-    const failed = built.failed.length;
-    const statuses = built.validation.map((row) => row[3]);
-    ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'builder', attempt,
-      failed, limited: statuses.filter((s) => s === 'PASS WITH LIMITATIONS').length,
-      passed: statuses.filter((s) => s === 'PASS').length });
-    if (!failed) return pack;
-    ctx.logs.detail(`builder ${label} ${attempt}`, problemText(built));
+    const built = buildRound(ctx, pack, label, attempt, deferred);
+    if (!built.failed.length) return pack;
     if (attempt >= ctx.config.builder.retries) {
-      throw new GateError('phase8', 'builder-fail', { sheets: failed });
+      throw new GateError('phase8', 'builder-fail', { sheets: built.failed.length });
     }
     await repair(ctx, pack, built, `${label}-${attempt + 1}`);
   }
@@ -2845,17 +2865,29 @@ function draftPack(ctx, pack) {
   return draft;
 }
 
-/** The workbook the builder writes for the pack as it stands, read back as sheets. */
-function builtSheets(ctx, pack) {
+/**
+ * Writes the draft workbook the review reads to work/review, with the builder
+ * command the repository gives, and says what the builder did: its exit `status`, the
+ * PASS and FAIL `lines` it printed, and the `workbook` it wrote, null when it wrote none.
+ */
+export function draftReview(ctx, pack) {
   const dir = path.join(ctx.config.output, ctx.job.id, 'work', 'review');
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'draft-pack.json');
   fs.writeFileSync(file, JSON.stringify(draftPack(ctx, pack)));
-  runCommand(ctx, ctx.config.builder.command, { pack: file, out: dir });
+  const output = {};
+  runCommand(ctx, ctx.config.builder.command, { pack: file, out: dir }, { output });
   const book = fs.readdirSync(dir).find((name) => name.endsWith('.xlsx'));
-  if (!book) throw new GateError('phase9', 'review-workbook-missing');
-  return readXlsx(path.join(dir, book)).map(readSheet);
+  return { dir, status: output.status, workbook: book ? path.join(dir, book) : null,
+    lines: (output.stdout ?? '').split('\n').filter((line) => /^(PASS|FAIL)/.test(line)) };
+}
+
+/** The workbook the builder writes for the pack as it stands, read back as sheets. */
+function builtSheets(ctx, pack) {
+  const { workbook } = draftReview(ctx, pack);
+  if (!workbook) throw new GateError('phase9', 'review-workbook-missing');
+  return readXlsx(workbook).map(readSheet);
 }
 
 /**
@@ -3039,6 +3071,14 @@ export async function phase9Fix(ctx, pack) {
     await phase9Checklist(ctx, pack, { again: true });
   }
   return { rounds };
+}
+
+/** The checklist and the fix rounds after it, as Phase 9's first step runs them. */
+export async function checklistRounds(ctx, pack) {
+  const counts = await phase9Checklist(ctx, pack);
+  ctx.reviewIssues = counts.issues;
+  const fixes = await phase9Fix(ctx, pack);
+  return { ...counts, fixRounds: fixes.rounds };
 }
 
 const PLACEHOLDER_FIX = /^\W*(n\/?a|none|nothing|no change|not applicable|no fix)\b/i;
@@ -3458,8 +3498,8 @@ export async function phase9SeniorReview(ctx, pack) {
  * check one part fails fails the pack; one a part passes and the others do not show
  * passes; one no part shows fails, as not evidenced.
  */
-export function mergeChecks(answers) {
-  const checks = S.REVALIDATION_CHECKS.map((check) => {
+export function mergeChecks(answers, names = S.REVALIDATION_CHECKS) {
+  const checks = names.map((check) => {
     const rows = answers.flatMap((answer) => list(answer.checks).filter((row) => row.check === check));
     const failed = rows.filter((row) => row.verdict === 'fail');
     if (failed.length) {
@@ -3473,8 +3513,11 @@ export function mergeChecks(answers) {
   return { passed: !remaining.length, checks, remaining };
 }
 
-/** One walk of the seven Revalidation checks over the finished workbook, in parts when it is long. */
-async function walkChecks(ctx, pack, step) {
+/**
+ * One walk of the Revalidation checks named in `names` (all seven by default) over the
+ * finished workbook, in parts when it is long.
+ */
+async function walkChecks(ctx, pack, step, names = S.REVALIDATION_CHECKS) {
   const refs = [...ctx.ref.core, ctx.ref.docs.revalidation];
   const extra = [['Fixes the review attempted (judge the workbook, not the attempt)',
     list(ctx.appliedFixes).join('\n')],
@@ -3484,19 +3527,21 @@ async function walkChecks(ctx, pack, step) {
   for (const view of views) {
     answers.push(await ask(ctx, {
       phase: 'phase9', step, reasoning: true, refs,
-      task: 'Revalidate the pack after the review\'s fixes. Give a verdict for each of the seven'
-        + ' Revalidation checks, with the reason first. For a check that fails, give the fix: the'
+      task: 'Revalidate the pack after the review\'s fixes. Give a verdict for '
+        + (names.length === S.REVALIDATION_CHECKS.length ? 'each of the seven Revalidation checks'
+          : `only the Revalidation check${names.length === 1 ? '' : 's'} in the schema`)
+        + ', with the reason first. For a check that fails, give the fix: the'
         + ' card, rule or sheet to change and what to change it to; leave it blank when no change'
         + ' to the pack can settle it.'
         + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
           + ` shows, answer "${S.NOT_SHOWN}" for a check it does not show, and judge a rule's`
           + ' coverage from the cards the rules index lists for it.' : ''),
       inputs: [['Change description', ctx.description], ...extra, ...view],
-      schema: S.revalidationSchema({ verdicts: views.length > 1 ? ['pass', 'fail', S.NOT_SHOWN]
+      schema: S.revalidationSchema({ checks: names, verdicts: views.length > 1 ? ['pass', 'fail', S.NOT_SHOWN]
         : ['pass', 'fail'] }),
     }));
   }
-  return mergeChecks(answers);
+  return mergeChecks(answers, names);
 }
 
 /**
@@ -3509,10 +3554,10 @@ async function walkChecks(ctx, pack, step) {
  */
 export async function revalidate(ctx, pack) {
   let result = await walkChecks(ctx, pack, 'revalidation');
+  ctx.revalidationChecks = result.checks;
   let repaired = false;
   if (!result.passed) {
-    const findings = fixableFindings(ctx, pack, result.checks.filter((row) => row.verdict === 'fail')
-      .map((row) => ({ section: row.check, issue: row.why, fix: row.fix })));
+    const findings = revalidationFindings(ctx, pack);
     if (findings.length) {
       const before = structuredClone(pack);
       const appliedFixes = [...list(ctx.appliedFixes)];
@@ -3520,6 +3565,7 @@ export async function revalidate(ctx, pack) {
         await fixRound(ctx, pack, findings, 'revalidation', []);
         repaired = true;
         result = await walkChecks(ctx, pack, 'revalidation-again');
+        ctx.revalidationChecks = result.checks;
       } catch (error) {
         if (!(error instanceof GateError)) throw error;
         ctx.appliedFixes = appliedFixes;
@@ -3534,6 +3580,86 @@ export async function revalidate(ctx, pack) {
   if (passed) delete pack.revalidation;
   else pack.revalidation = { passed: false, remaining };
   return { passed, remaining: remaining.length };
+}
+
+// ---------------------------------------------------------------------------
+// Single steps: one part of Phase 9 on its own, over a saved state.
+
+/**
+ * The failed checks of the last revalidation walk that a repair can act on, in the
+ * order the repair reads them: each names a card, a rule or a sheet to change.
+ */
+export function revalidationFindings(ctx, pack) {
+  return fixableFindings(ctx, pack, list(ctx.revalidationChecks).filter((row) => row.verdict === 'fail')
+    .map((row) => ({ section: row.check, issue: row.why, fix: row.fix })));
+}
+
+/**
+ * One walk of the named Revalidation checks (all seven when none are named). The
+ * verdicts replace those of the same checks in the last walk, so a state keeps
+ * one verdict for each check walked, and `pack.revalidation` follows them once
+ * all seven have a verdict.
+ */
+export async function walkSelected(ctx, pack, names = S.REVALIDATION_CHECKS) {
+  const known = S.REVALIDATION_CHECKS;
+  if (names.length < known.length && !ctx.revalidationChecks && pack.revalidation) {
+    throw new StepInputError('this state holds no verdicts for the other checks; walk all seven first');
+  }
+  const result = await walkChecks(ctx, pack, 'revalidation', names);
+  const checks = known.flatMap((check) => result.checks.find((row) => row.check === check)
+    ?? list(ctx.revalidationChecks).filter((row) => row.check === check));
+  ctx.revalidationChecks = checks;
+  const remaining = checks.filter((row) => row.verdict === 'fail').map((row) => `${row.check}: ${row.why}`);
+  if (checks.length === known.length) {
+    ctx.private('phase9-revalidation.json', { passed: !remaining.length, checks, remaining, repaired: false });
+    if (remaining.length) pack.revalidation = { passed: false, remaining };
+    else delete pack.revalidation;
+  }
+  return { checks: result.checks, findings: revalidationFindings(ctx, pack).length, open: remaining.length };
+}
+
+/**
+ * One repair round for finding `n` of `revalidationFindings`, then the rebuild. The
+ * pack's revalidation result is cleared first, as the revalidation phase clears it
+ * before its rebuild, so the builder does not read it as a failing sheet.
+ */
+export async function repairFinding(ctx, pack, n) {
+  if (!ctx.revalidationChecks) {
+    throw new StepInputError('this state holds no revalidation walk; run the walk step first');
+  }
+  const findings = revalidationFindings(ctx, pack);
+  if (!findings[n]) {
+    throw new StepInputError(`--finding ${n} is not one of the ${findings.length} findings a repair can act on`);
+  }
+  delete pack.revalidation;
+  await fixRound(ctx, pack, [findings[n]], 'revalidation', []);
+  return { check: findings[n].row.section };
+}
+
+/** The Confidence Assessment fields a step can write on its own, Coverage included. */
+export const CONFIDENCE_STEP_FIELDS = ['coverage', ...CONFIDENCE_FIELDS.map(([field]) => field)];
+
+/**
+ * One Confidence Assessment field written again over the pack as it stands. The old
+ * text is blanked first, so the call does not read it as a field already written.
+ */
+export async function confidenceField(ctx, pack, field) {
+  if (field === 'coverage') {
+    pack.confidence = { ...pack.confidence, coverage: coverageText(ctx, pack) };
+    return;
+  }
+  const entry = CONFIDENCE_FIELDS.find(([name]) => name === field);
+  if (!entry) throw new StepInputError(`--field takes one of: ${CONFIDENCE_STEP_FIELDS.join(', ')}`);
+  pack.confidence = { ...pack.confidence, [field]: '' };
+  pack.confidence[field] = await writeConfidenceField(ctx, pack, field, entry[1], confidenceExtra(ctx, pack));
+}
+
+/** The overall confidence level rated again from the assessment steps the state holds. */
+export async function confidenceLevel(ctx, pack) {
+  if (!list(ctx.confidenceSteps).length) {
+    throw new StepInputError('this state holds no confidence assessment steps; start at phase9-confidence or later');
+  }
+  return reRateConfidence(ctx, pack);
 }
 
 // ---------------------------------------------------------------------------

@@ -99,7 +99,8 @@ their registration under `docs/runners/`, and the tester hand-off plan under
 `docs/hand-off/`. A consuming repository reads them from its vendored copy, at
 `.claude/att-docs/docs/<subject>/`. `docs/agents/` holds this repository's issue tracker,
 triage label and domain docs settings, which the engineering skills read from the
-repository root.
+repository root, and the permission rules that let sessions file and comment on GitHub
+issues without a prompt.
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, `general` holds the workflow skills that serve any repository (implementing
@@ -584,7 +585,17 @@ starts the consumer's checks (see [Automation GitHub App](#automation-github-app
 To add a consumer, list it in `.github/consumers.json` once its lock file is in the
 standard `key=value` format. `AI-Health-Coach` is not listed until its lock is migrated.
 
-The cases are in `scripts/pin/overmind-pin_test.sh` and `scripts/pin/pin_notes_test.py`.
+The runners reuse their workspace, so the checkout the jobs read Overmind from can be a
+partial clone, which a sparse checkout by this workflow's plan job or by another
+workflow leaves behind. A partial clone cannot serve the file contents it lacks, so a
+consumer whose history needs one fails in the sync with `bad pack header`. Before the
+pin step, the job runs `scripts/pin/overmind-complete-clone.sh`, which drops the partial
+clone mark and fetches every object with the workflow's token. A full checkout is left
+as it is, and a fetch that fails or is interrupted keeps the mark so the next run tries
+again.
+
+The cases are in `scripts/pin/overmind-pin_test.sh`,
+`scripts/pin/overmind-complete-clone_test.sh` and `scripts/pin/pin_notes_test.py`.
 
 ## Automation GitHub App
 

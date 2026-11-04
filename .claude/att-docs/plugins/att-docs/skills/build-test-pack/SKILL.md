@@ -694,6 +694,51 @@ Exit codes: 0 the slice passed, 1 it stopped or the queue is running, 2 bad
 arguments, a job with no folder, no snapshot for the phase before `--from` (the
 message names the snapshot), or a setup error such as an unreadable config.
 
+### Trying one step
+
+A slice runs whole phases. To try one part of Phase 9, or the builder alone, run
+a step on a snapshot of the job:
+
+```bash
+<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> [--as <label>] [--pause]
+```
+
+`--at` is a phase, read from the job's snapshot of it, or a sandbox of the job
+that an earlier step ran in. The sandbox is made as for a slice, and its state
+goes in `work/step.json`, which the next step starts from. The job's own folder,
+queue row and workbook are only read.
+
+| Step | What it runs | Model |
+| --- | --- | --- |
+| `draft` | The draft the review reads: the builder on the pack, writing the review workbook | no |
+| `build` | The Phase 8 build on the pack, with no repair, with the review sheets left out of the failures until the confidence assessment | no |
+| `checklist` | The checklist reads and the fix rounds | yes |
+| `walk [--check <names>]` | One revalidation walk, or the named checks only, comma-separated, each an exact name or the start of one | yes |
+| `repair --finding <n>` | One repair round for finding `<n>` of the last walk, counted from 0 as the walk prints them | yes |
+| `confidence [--field <name>]` | One confidence field (`coverage`, `remainingRisks`, `assumptions`, `regressionScope`, `breakItScope`, `manualReview`), or the overall level when no field is named | yes |
+
+- A step that asks the model holds the queue and stops no unit unless `--pause`
+  is given, as a slice does. `draft` and `build` take neither.
+- `draft` and `build` print the builder's sheet results, one `PASS` or `FAIL`
+  line for each sheet. `build` also prints `DEFERRED` for a review sheet that
+  fails before the confidence assessment has run.
+- Every step then prints the status lines it wrote. The step's own line holds its
+  duration, model calls and tokens, and counts such as the sheets that failed.
+- `checklist` adds to the pack's assumptions, so start it from a snapshot before
+  Phase 9 has run. `repair` needs the verdicts of a walk: a sandbox a `walk`
+  step ran in has them, and so does a snapshot of the revalidation or after it.
+  A snapshot whose state holds none reads them from the job's
+  `work/phase9-revalidation.json`. A `walk` of some checks before all seven have
+  a verdict leaves the pack's revalidation result as it was.
+- A step that stops leaves `work/step.json` as it was, writes the pack as far
+  as it got to `work/partial-pack.json`, and logs a `fail` line.
+- Give `--as` when scripting steps: the default label is a time stamp with one
+  second of resolution.
+
+Exit codes: 0 the step ran and its build passed, 1 it stopped, its build failed
+a sheet, or the queue is running, 2 bad arguments, a job with no folder, or no
+snapshot or step state at `--at`.
+
 ### Closing desktop apps before a run
 
 `pause` takes one scope, and desktop apps run as transient `app-*.scope` user

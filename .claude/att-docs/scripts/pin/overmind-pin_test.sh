@@ -246,6 +246,34 @@ case "$(cat "$GITHUB_STEP_SUMMARY")" in *"iota: failed: overmind-check.sh failed
 check "$r" yes "the summary line carries the whole diagnostic"
 check "$(remote iota branch --list | wc -l)" 1 "a failed check pushes nothing"
 
+# A checkout that is a partial clone cannot serve the history it lacks, so the consumer
+# fails with the git error in its summary line and nothing is pushed. Completing the
+# checkout lets the same pin succeed, and a rerun adds no second pull request. The
+# server must allow filtered clones, or the clone comes out complete and proves nothing.
+git -C "$UP" config uploadpack.allowFilter true
+git -C "$UP" config uploadpack.allowAnySHA1InWant true
+UPP="$SANDBOX/upstream-partial"
+git clone -q --filter=blob:none "file://$UP" "$UPP" 2> /dev/null
+check "$([ "$(git -C "$UPP" rev-list --objects --all --missing=print | grep -c '^?' || true)" -gt 0 ] && echo yes)" yes "the partial checkout lacks objects"
+make_consumer lambda v0.1.0
+: > "$GITHUB_STEP_SUMMARY"
+: > "$GH_LOG"
+OVERMIND_DIR="$UPP" pin v0.2.0 lambda > "$SANDBOX/out" 2>&1
+check "$?" 1 "a pin from a partial checkout fails"
+case "$(cat "$GITHUB_STEP_SUMMARY")" in *"lambda: failed: overmind-sync.sh failed:"*"promisor remote"*) r=yes ;; *) r=no ;; esac
+check "$r" yes "the summary line carries the git error"
+check "$(remote lambda branch --list | wc -l)" 1 "a pin from a partial checkout pushes nothing"
+bash "$HERE/overmind-complete-clone.sh" "$UPP" > /dev/null 2>&1
+check "$?" 0 "the partial checkout is completed"
+OVERMIND_DIR="$UPP" pin v0.2.0 lambda > "$SANDBOX/out" 2>&1
+check "$?" 0 "the same pin succeeds from the completed checkout"
+check "$(remote lambda show "$BRANCH:.claude/att-docs.lock" | sed -n 's/^tag=//p')" v0.2.0 "the branch holds the new tag"
+check "$(remote lambda show "$BRANCH:.claude/att-docs/plugins/general/a.md")" three "the branch holds the new snapshot"
+check "$(pr_creates)" 1 "one pull request is opened"
+OVERMIND_DIR="$UPP" pin v0.2.0 lambda > "$SANDBOX/out" 2>&1
+check "$?" 0 "a rerun from the completed checkout succeeds"
+check "$(pr_creates)" 1 "a rerun opens no second pull request"
+
 # A tag whose changelog cannot be read fails the consumer before anything is pushed.
 git -C "$UP" rm -q CHANGELOG.md
 git -C "$UP" commit -q -m "drop the changelog"

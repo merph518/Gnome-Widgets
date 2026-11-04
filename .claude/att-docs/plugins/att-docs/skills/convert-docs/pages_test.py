@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -115,7 +116,9 @@ class Openings(unittest.TestCase):
         self.assertEqual(lines[1], ["Body text of page 2"])
 
     def test_a_missing_tool_costs_the_pages_only(self):
-        missing = pathlib.Path(tempfile.mkdtemp()) / "none.pdf"
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        missing = pathlib.Path(scratch) / "none.pdf"
         with unittest.mock.patch.object(pages.subprocess, "run", side_effect=OSError):
             self.assertEqual(pages.pdf_pages(missing), [])
             self.assertIsNone(pages.render(missing, missing.parent))
@@ -123,7 +126,9 @@ class Openings(unittest.TestCase):
 
 class Word(unittest.TestCase):
     def docx(self, body: str) -> pathlib.Path:
-        path = pathlib.Path(tempfile.mkdtemp()) / "doc.docx"
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        path = pathlib.Path(scratch) / "doc.docx"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr(
                 "word/document.xml", f"<w:document><w:body>{body}</w:body></w:document>"
