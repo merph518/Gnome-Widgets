@@ -15,7 +15,8 @@ export FIXTURES="$SANDBOX/fixtures"
 mkdir -p "$FIXTURES"
 
 # gh stub: `issue list` and `pr list` read the fixture files, `issue view <n>` one issue, and
-# `api` moves labels in a per-issue file. --jq is applied with jq, as gh does.
+# `api` moves labels in a per-issue file. --jq is applied with jq, as gh does. `--version`
+# prints GH_VERSION, so a case can run oversee.sh against an older gh.
 cat > "$SANDBOX/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 jqx=.
@@ -23,6 +24,11 @@ args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   [ "${args[i]}" = --jq ] && jqx=${args[i + 1]}
 done
+if [ "$1" = --version ]; then
+  printf 'gh version %s (2026-01-01)\nhttps://github.com/cli/cli/releases/tag/v%s\n' \
+    "${GH_VERSION:-2.94.0}" "${GH_VERSION:-2.94.0}"
+  exit 0
+fi
 case "$1 $2" in
   "issue list") jq -r "$jqx" "$FIXTURES/issues.json" ;;
   "pr list") jq -r "$jqx" "$FIXTURES/prs.json" ;;
@@ -58,23 +64,46 @@ as() { local s=$1 p=$2; shift 2; CLAUDE_CODE_SESSION_ID=$s CLAUDE_PID=$p bash "$
 first() { head -n 1 | cut -f1-2; }
 
 echo '[
- {"number":5,"title":"voice: first","state":"OPEN","labels":[{"name":"enhancement"}]},
- {"number":6,"title":"voice: second","state":"OPEN","labels":[]},
- {"number":7,"title":"Install a thing","state":"OPEN","labels":[]},
- {"number":8,"title":"voice: waits","state":"OPEN","labels":[{"name":"Blocked"}]},
- {"number":9,"title":"att-docs: other area","state":"OPEN","labels":[{"name":"In Progress"}]},
- {"number":10,"title":"Tracking","state":"OPEN","labels":[{"name":"Tracker"}]}
+ {"number":5,"title":"voice: first","state":"OPEN","labels":[{"name":"enhancement"},{"name":"ready-for-agent"}]},
+ {"number":6,"title":"voice: second","state":"OPEN","labels":[{"name":"ready-for-agent"}]},
+ {"number":7,"title":"Install a thing","state":"OPEN","labels":[{"name":"ready-for-agent"}]},
+ {"number":8,"title":"voice: waits","state":"OPEN","labels":[{"name":"Blocked"},{"name":"ready-for-agent"}]},
+ {"number":9,"title":"att-docs: other area","state":"OPEN","labels":[{"name":"In Progress"},{"name":"ready-for-agent"}]},
+ {"number":10,"title":"Tracking","state":"OPEN","labels":[{"name":"Tracker"},{"name":"ready-for-agent"}]},
+ {"number":11,"title":"Not yet looked at","state":"OPEN","labels":[{"name":"needs-triage"}]},
+ {"number":12,"title":"Waits on the reporter","state":"OPEN","labels":[{"name":"needs-info"}]},
+ {"number":13,"title":"Needs a person","state":"OPEN","labels":[{"name":"ready-for-human"}]},
+ {"number":14,"title":"Ready for an agent","state":"OPEN","labels":[{"name":"ready-for-agent"}]},
+ {"number":15,"title":"Never triaged","state":"OPEN","labels":[{"name":"enhancement"}]},
+ {"number":16,"title":"Waits on a blocker","state":"OPEN","labels":[{"name":"ready-for-agent"}],
+  "blockedBy":{"nodes":[{"number":99,"state":"OPEN"},{"number":97}],"totalCount":2}},
+ {"number":17,"title":"Blocker is closed","state":"OPEN","labels":[{"name":"ready-for-agent"}],
+  "blockedBy":{"nodes":[{"number":98,"state":"CLOSED"}],"totalCount":1}}
 ]' > "$FIXTURES/issues.json"
 echo '[]' > "$FIXTURES/prs.json"
 LIVE=$$
 
 # --- the queue
 as A "$LIVE" init > /dev/null
-check "$(cut -f1 "$SANDBOX/repo/.claude/oversee/queue.tsv" | tr '\n' ' ')" "5 6 7 " \
-  "the queue holds the workable issues, oldest first, and drops excluded labels"
+check "$(cut -f1 "$SANDBOX/repo/.claude/oversee/queue.tsv" | tr '\n' ' ')" "5 6 7 14 16 17 " \
+  "the queue holds the issues labeled ready-for-agent, oldest first, and drops excluded labels"
 check "$(as A "$LIVE" next | first)" "NEXT	5" "next serves the oldest issue"
-check "$(cut -f2 "$SANDBOX/repo/.claude/oversee/queue.tsv" | tr '\n' ' ')" "voice voice - " \
+check "$(cut -f2 "$SANDBOX/repo/.claude/oversee/queue.tsv" | tr '\n' ' ')" "voice voice - - - - " \
   "an area is the word before the colon in the title"
+
+# --- the gate and blockers
+QUEUE="$SANDBOX/repo/.claude/oversee/queue.tsv"
+check "$(awk -F'\t' '$1 == 15' "$QUEUE" | wc -l)" 0 "an issue without ready-for-agent is not queued"
+check "$(awk -F'\t' '$1 == 16 {print $6}' "$QUEUE")" "#99 #97" \
+  "the queue records an open blocker, and a blocker with no state counts as open"
+check "$(awk -F'\t' '$1 == 17 {print $6}' "$QUEUE")" "-" "a closed blocker blocks nothing"
+as A "$LIVE" init enhancement > /dev/null 2>&1
+check "$?" 1 "init refuses to rebuild a queue that already has entries"
+OVERSEE_FORCE=1 as A "$LIVE" init enhancement > /dev/null
+check "$(cut -f1 "$QUEUE" | tr '\n' ' ')" "5 " \
+  "a label argument needs both that label and ready-for-agent"
+OVERSEE_FORCE=1 as A "$LIVE" init > /dev/null
+check "$(cut -f1 "$QUEUE" | tr '\n' ' ')" "5 6 7 14 16 17 " "an init with no label widens it again"
 
 # --- two sessions
 as A "$LIVE" start 5 feat/issue-5-first
@@ -97,8 +126,8 @@ echo '[]' > "$FIXTURES/prs.json"
 check "$(as B "$LIVE" next | first)" "NEXT	6" "the area is free once the pull request closes"
 
 # --- a start that is no longer workable
-echo '[{"number":6,"title":"voice: second","state":"OPEN","labels":[{"name":"Blocked"}]},
- {"number":7,"title":"Install a thing","state":"OPEN","labels":[]}]' > "$FIXTURES/issues.json"
+echo '[{"number":6,"title":"voice: second","state":"OPEN","labels":[{"name":"Blocked"},{"name":"ready-for-agent"}]},
+ {"number":7,"title":"Install a thing","state":"OPEN","labels":[{"name":"ready-for-agent"}]}]' > "$FIXTURES/issues.json"
 as B "$LIVE" start 6 feat/issue-6-second 2> /dev/null
 check "$?" 1 "start refuses an issue that picked up an excluded label"
 check "$(tail -n 1 "$LEDGER" | cut -f2-3)" "6	skipped" "and records it as skipped"
@@ -125,6 +154,42 @@ check "$(as A "$LIVE" swap 7 "In Progress" Blocked)" "enhancement,Blocked" \
   "swap moves a label and reads the labels back"
 as A "$LIVE" finish 7 done - "ok"
 check "$(as A "$LIVE" next | first)" "EMPTY" "next reports EMPTY when nothing is left"
+
+# --- an issue that waits on a blocker, or loses its label
+echo '[
+ {"number":30,"title":"Waits","state":"OPEN","labels":[{"name":"ready-for-agent"}],
+  "blockedBy":{"nodes":[{"number":99,"state":"OPEN"}],"totalCount":1}},
+ {"number":31,"title":"Untriaged","state":"OPEN","labels":[]}
+]' > "$FIXTURES/issues.json"
+out=$(as A "$LIVE" next)
+check "$(grep -c '^DEFER	30	-	Waits	blocked by #99' <<< "$out")" 1 \
+  "an issue with an open blocker is deferred and the blocker is named"
+check "$(grep -c '31' <<< "$out")" 0 "an issue that is not ready-for-agent prints no line"
+check "$(tail -n 1 <<< "$out")" "BLOCKED" "next reports BLOCKED when what is left waits on a blocker"
+as A "$LIVE" start 30 feat/issue-30-waits 2> /dev/null
+check "$?" 1 "start refuses an issue that still has an open blocker"
+check "$(tail -n 1 "$LEDGER" | cut -f6)" "not workable at start: blocked by #99" "and records the blocker"
+echo '[{"number":30,"title":"Waits","state":"OPEN","labels":[],
+  "blockedBy":{"nodes":[{"number":99,"state":"CLOSED"}],"totalCount":1}}]' > "$FIXTURES/issues.json"
+as A "$LIVE" start 30 feat/issue-30-waits 2> /dev/null
+check "$?" 1 "start refuses an issue that lost ready-for-agent"
+check "$(tail -n 1 "$LEDGER" | cut -f6)" "not workable at start: not labeled ready-for-agent" \
+  "and records the missing label"
+check "$(as A "$LIVE" next)" "EMPTY" "a skipped issue stays out while the label is missing"
+echo '[{"number":30,"title":"Waits","state":"OPEN","labels":[{"name":"ready-for-agent"}],
+  "blockedBy":{"nodes":[{"number":99,"state":"CLOSED"}],"totalCount":1}}]' > "$FIXTURES/issues.json"
+check "$(as A "$LIVE" next | first)" "NEXT	30" "the issue is served again once the label is back and the blocker closed"
+
+# --- the gh version
+GH_VERSION=2.93.9 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" next > /dev/null 2> "$SANDBOX/err"
+check "$?" 1 "next stops on a gh older than 2.94"
+check "$(grep -c 'needs gh 2.94 or newer' "$SANDBOX/err")" 1 "and says which gh it needs"
+GH_VERSION=2.100.1 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" next > /dev/null 2>&1
+check "$?" 0 "a two-digit minor above 94 is accepted"
+GH_VERSION=3.0.0 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" next > /dev/null 2>&1
+check "$?" 0 "a newer major is accepted"
+GH_VERSION=2.93.9 CLAUDE_CODE_SESSION_ID=A CLAUDE_PID=$LIVE bash "$OS" status > /dev/null 2>&1
+check "$?" 0 "an old gh does not stop commands that only read the ledger"
 
 if ((fails)); then echo "$fails failed"; exit 1; fi
 echo "all passed"

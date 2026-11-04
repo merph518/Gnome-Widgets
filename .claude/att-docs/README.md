@@ -34,9 +34,14 @@ This repository is private and for my own use.
 | `att-docs` | `business-rule-update` | Update a document's rules and stage the result for review |
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
+| `att-docs` | `validate-sir` | Reproduce a suspected defect and write the SIR text for the dev team or the design team |
+| `att-docs` | `raise-sir` | File one verified SIR record into ALM without opening the desktop client |
+| `att-docs` | `read-sir` | Read one SIR back out of ALM by number: status, owner, description, comments |
+| `att-docs` | `update-sir` | Change a SIR already in ALM: status, fields, comments, or a Draft's text |
+| `att-docs` | `retest-sir` | Retest a raised SIR against the application and report Retested or Failed Test |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
 | `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
-| `general` | `oversee-development` | Work the open issues oldest first, one `implement` run at a time, and never merge |
+| `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, skipping any with an open blocker, one `implement` run at a time, and never merge |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
@@ -45,6 +50,7 @@ This repository is private and for my own use.
 
 ```
 CLAUDE.md                         standing rules for sessions working in this repository
+CODING_STANDARDS.md               pointers to the rules a code review checks changes against
 .claude-plugin/marketplace.json   marketplace entry, for a machine that installs a plugin
 plugins/<group>/
   .claude-plugin/plugin.json
@@ -64,7 +70,9 @@ the EnterWorktree tool. Other commands, such as commit, are not blocked. A
 `docs/` holds the documents about the harness on the repository side: the runners and
 their registration under `docs/runners/`, and the tester hand-off plan under
 `docs/hand-off/`. A consuming repository reads them from its vendored copy, at
-`.claude/att-docs/docs/<subject>/`.
+`.claude/att-docs/docs/<subject>/`. `docs/agents/` holds this repository's issue tracker,
+triage label and domain docs settings, which the engineering skills read from the
+repository root.
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, `general` holds the workflow skills that serve any repository (implementing
@@ -299,7 +307,7 @@ caller.
    placeholder in a table at the top.
 2. Move any script it runs here and make it read its inputs from `--config`.
 3. Add it to the table under [Skills](#skills).
-4. Tag a release and move one repository's pin to it.
+4. Merge the release pull request, then move one repository's pin to the tag it creates.
 5. In that repository, replace the local skill with an extension that follows the
    contract above, and confirm a dry run behaves as it did before.
 
@@ -312,6 +320,10 @@ release-please on every push to `main`. release-please keeps one release pull re
 open that collects the commits merged since the last tag, with the changelog and the
 next version. Merging that pull request is the release: the workflow tags the merge
 and publishes the GitHub release with its changelog.
+
+A tag cut by hand, which only happens while the workflow is off, leaves the manifest
+behind it. A `chore:` pull request then sets `.release-please-manifest.json` and the
+three `plugin.json` versions to that tag, and release-please counts commits from there.
 
 The version comes from the commit subjects on `main`, written as conventional commits.
 While the version is below 1.0:
@@ -330,9 +342,50 @@ conventional commit is left out.
 `.release-please-manifest.json` holds the current version. Each release also writes it
 into the three `plugin.json` files, so every plugin carries the repository's version.
 
-The workflow takes its token from the automation GitHub App, because a pull request
-opened with the workflow's own token starts no checks. It skips until the repository
-variable `AUTOMATION_APP_CLIENT_ID` and the secret `AUTOMATION_APP_PRIVATE_KEY` are set.
+The workflow's token comes from the automation GitHub App, described under
+[Automation GitHub App](#automation-github-app).
+
+## Automation GitHub App
+
+A pull request opened with a workflow's own token starts no checks, and that token
+cannot reach any other repository. Workflows that open pull requests here, or in a
+repository that pins Overmind, use a token from a GitHub App instead.
+
+The App is `overmind-automation`, a private App owned by merph518. It has no webhook.
+Its permissions are:
+
+| Permission | Level | Why |
+| --- | --- | --- |
+| Contents | Read and write | Create branches and commit files |
+| Pull requests | Read and write | Open and update pull requests |
+| Metadata | Read | Required of every App |
+
+It has no Workflows permission, because a vendored tree holds no workflow files.
+
+It is installed with All repositories access, so a repository that starts pinning
+Overmind is covered without an installation change. Add it to `.github/consumers.json`,
+which lists the repositories that pin Overmind.
+
+The repository variable `AUTOMATION_APP_CLIENT_ID` and the secret
+`AUTOMATION_APP_PRIVATE_KEY` hold its client ID and private key. A workflow mints a
+short-lived token with `actions/create-github-app-token`, narrowed to the repositories
+and permissions that job needs, and never uses the key for anything else.
+
+Node actions check certificates against a list bundled with Node, which lacks the root
+of a TLS-inspecting proxy. `release.yml` and `consumer-pr-check.yml` set
+`NODE_OPTIONS=--use-system-ca` so their actions read the operating system's store
+instead.
+
+To prove the App can open a pull request in a consumer, run the consumer pull request
+check:
+
+```bash
+gh workflow run consumer-pr-check.yml -f repository=Gnome-Widgets -f keep=true
+```
+
+It opens a draft pull request with a one-line file, and `keep=true` leaves it open so
+you can watch the consumer's checks start. Without `keep` it closes the pull request
+and deletes the branch. The repository must be listed in `.github/consumers.json`.
 
 ## License
 

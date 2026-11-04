@@ -19,7 +19,7 @@ since a lease is taken by the test, not by the runner.
 
 | Runners | Labels | Used by |
 | --- | --- | --- |
-| `pw-linux-runner-1` to `-6` | `self-hosted`, `Linux`, `X64`, `playwright` | `Playwright-Testing` |
+| `pw-linux-runner-1` to `-6` | `self-hosted`, `Linux`, `X64`, `playwright`, `overmind` | `Playwright-Testing`, `Overmind` |
 | `pw-windows-runner-1` | `self-hosted`, `Windows`, `X64`, `playwright` | `Playwright-Testing` |
 | `pw-ci-runner-desktop-1` to `-5` | `self-hosted`, `Windows`, `X64`, `ci`, `overmind` | `Playwright-Testing`, `Overmind` |
 | `tablet-runner-1` to `-4` | `self-hosted`, `Linux`, `X64`, `ci`, `static-checks`, `overmind` | `Playwright-Testing`, `Overmind` |
@@ -27,11 +27,15 @@ since a lease is taken by the test, not by the runner.
 The rules that keep this working:
 
 - `Overmind` workflows target `runs-on: [self-hosted, overmind]` and
-  never name `playwright`.
+  never name `playwright`. A job that needs a POSIX shell, such as `test-all` in
+  `ci.yml`, adds `Linux`; a job that needs the desktops, such as `pack-compare`,
+  adds `Windows`; the rest run on any `overmind` runner, Windows included.
+- The Linux Playwright runners carry `overmind` so the Linux jobs still have a
+  runner while the tablet runners are stopped for a test pack build.
 - `Playwright-Testing` workflows keep their labels as they are. Every `runs-on` under
   `.github/workflows` resolves against the table above with no edit.
-- A new runner for Overmind work gets `overmind`; a new Playwright runner never
-  does.
+- A new runner for Overmind work gets `overmind`. A new Linux Playwright runner
+  gets it too, and a new Windows Playwright runner does not.
 
 ## Moving a runner from the repository to the organization
 
