@@ -37,6 +37,14 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      # The runners reuse their workspace, and another workflow's sparse checkout turns on
+      # extensions.worktreeConfig. actions/checkout disables sparse checkout, then unsets
+      # that extension, hiding the core.sparseCheckout=false it wrote to config.worktree,
+      # so the old setting in .git/config applies again. Disabling here writes it to
+      # .git/config and restores the full tree; on a full checkout it does nothing.
+      - name: Clear a sparse checkout another workflow left behind
+        run: git sparse-checkout disable
+
       - name: Install dependencies
         run: npm ci
 

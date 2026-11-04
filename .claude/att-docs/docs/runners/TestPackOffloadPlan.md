@@ -11,17 +11,21 @@ script, no runner job, and no follow-up issue exists yet. Every row below
 describes the code as it stands in `plugins/att-docs/skills/build-test-pack/`.
 
 Runners allowed for any job that comes out of this plan: `tablet-runner-1` to
-`-4` (labels `self-hosted`, `Linux`, `X64`, `ci`, `static-checks`, `overmind`)
-and `pw-ci-runner-desktop-1` to `-5` (labels `self-hosted`, `Windows`, `X64`,
-`ci`, `overmind`), as `RunnerRegistration.md` lists them. Never a GitHub-hosted
-runner, never `pw-windows-runner-1`, never a runner labeled `playwright`.
+`-4` (labels `self-hosted`, `Linux`, `X64`, `ci`, `static-checks`, `overmind`),
+`pw-linux-runner-1` to `-6` (labels `self-hosted`, `Linux`, `X64`, `playwright`,
+`overmind`) and `pw-ci-runner-desktop-1` to `-5` (labels `self-hosted`,
+`Windows`, `X64`, `ci`, `overmind`), as `RunnerRegistration.md` lists them. Never
+a GitHub-hosted runner, never `pw-windows-runner-1`, never a runner without the
+`overmind` label, and never a `runs-on` that names `playwright`.
 
-Two kinds of runner appear in that list, and they are not alike. The four
+Three kinds of runner appear in that list, and they are not alike. The four
 `tablet-runner-*` units are Linux system services
 (`actions.runner.MRF-ORG.tablet-runner-1` to `-4`) on MTabletPC, the machine
 that serves the model. They run as `michael`, with `MemoryHigh` and `MemoryMax`
 both infinity, and their `_work` folders are under `~/Github/actions-runner-N/`.
-The `pw-ci-runner-desktop-*` runners are Windows runners on other machines. "The
+The `pw-linux-runner-*` runners are Linux runners on other machines, shared with
+the Playwright jobs, so they cannot reach the queue or env file a tablet can. The
+`pw-ci-runner-desktop-*` runners are Windows runners on other machines. "The
 desktop" is avoided below for MTabletPC, because the name also fits those
 runners.
 
@@ -187,7 +191,7 @@ which only matters if a runner could receive the pack file. See open question 3.
 | # | Step | Where | Mechanical or AI | Inputs, outputs, dependencies | Runner fit | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- |
 | 39 | Mirror ALM requirements into the store | `alm-mirror` `SKILL.md` ("Running it"), `<mirror-script>`, `<run-command>` | Mechanical; inserts, updates and deletes rows, no content leaves the store | In: ALM account and store connection from environment variables. Out: log lines ending with a root and a row count. | `alm-mirror` itself says it "runs on `<run-host>`, the machines that reach `<store>`". Only a runner on such a machine can do it. Log lines carry counts, not content. | Offload after a check: a runner is a fit only if one of the allowed runners is a `<run-host>` (open question 4). It does not run during a pack build, so it is a freshness job, not a pack step. |
-| 40 | Tests of the pipeline's own code | `local/*.test.mjs`; `scripts/test-all.sh`; `.github/workflows/ci.yml` job `test-all` on `[self-hosted, overmind, Linux]` | Mechanical, uses fixtures only (`local/fixtures/`) | | Already running on the tablet runners on every pull request and on pushes to main (the only Linux runners with the `overmind` label). `release.yml` (release-please, which runs only when `AUTOMATION_APP_CLIENT_ID` is set) lands there too. No work content involved, but each run takes memory from the model if it lands during a job. | Already off the session, and already on a runner. |
+| 40 | Tests of the pipeline's own code | `local/*.test.mjs`; `scripts/test-all.sh`; `.github/workflows/ci.yml` job `test-all` on `[self-hosted, overmind, Linux]` | Mechanical, uses fixtures only (`local/fixtures/`) | | Runs on every pull request and on pushes to main, on the tablet runners or the Linux Playwright runners, the Linux runners with the `overmind` label. `release.yml` (release-please, which runs only when `AUTOMATION_APP_CLIENT_ID` is set) runs on any `overmind` runner, the CI desktops included. No work content involved. A run on a tablet takes memory from the model if it lands during a job, so the tablets stay offline while a test pack build runs. | Already off the session, and already on a runner. |
 
 ## Mixed steps and the splits they need
 

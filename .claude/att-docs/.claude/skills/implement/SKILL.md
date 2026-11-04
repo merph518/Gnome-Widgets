@@ -23,6 +23,13 @@ ownership unit when reading the board. The worktree (Section 3), the non-draft p
 request, the self review loop, and the `Manual Review Needed` label (Section 7) hold for
 every pull request.
 
+Exception to the non-draft rule above and the general skill's non-draft rule: a pull
+request opened by the `implement-spec` skill (a user-scope skill that builds a whole
+spec's issues on one integration branch) may stay a draft while its issues land. Its own
+step 8 does not mark it ready: once its `code-review` pass ends, it goes through the
+Section 7 self review loop, checks and the `Manual Review Needed` label, and Section 7
+marks it ready. Its body has one `Closes #<N>` line per issue it closes.
+
 ## Base
 
 Read [the general skill](../../../plugins/general/skills/implement/SKILL.md), which lives in this repository rather than in a vendored copy, first and follow it, except where this file overrides it.
@@ -100,6 +107,13 @@ ask it for the plan and design advice: the approach, the files to change, and th
 Sonnet implements from that advice and records in the pull request body, under Judgment
 calls, any place it departed from it. A fix for a review finding is written by Sonnet, then
 reviewed by Opus.
+
+### Test seams
+
+The Opus plan names the test seams. This overrides the `tdd` skill's step of confirming
+seams with the user: when the code is built with `tdd`, the seams the plan names count as
+confirmed, so an unattended run does not stop to ask. A seam the plan did not name is
+asked through `AskUserQuestion` (or, in a subagent, returned in its report).
 
 ### Section 2, labels
 
@@ -194,10 +208,14 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   from `main`. The title follows the same form, and is the one commit release-please
   reads if the pull request is squash merged. Mark a breaking change to the extension
   contract with `!`.
-- The body has, in order: `Closes #<N>`, Why, What changes, Verification (the static
-  checks and each test file run with its result), Judgment calls, Pre-existing failures
-  fixed, Overlap, Self review, Settled decisions, then the attribution lines the session
-  gives.
+- The body has, in order: `Closes #<N>` (one line per issue closed), Why, What changes,
+  Verification (the static checks and each test file run with its result), Judgment
+  calls, Pre-existing failures fixed, Overlap, Self review, Settled decisions, then the
+  attribution lines the session gives.
+  The `pr` skill may be loaded when a body is written; this section's order wins. The
+  `pr` skill's Summary section goes under What changes and its before/after Evidence
+  under Verification; its Merge Danger section (Door and Blast Radius) goes under
+  Judgment calls.
 - Never merge the pull request, never push to `main`, and never force-push. The user
   merges. The one exception is a pin-only bump pull request, under Added gates, Post-merge
   pin.
@@ -294,12 +312,14 @@ not run here. Commit messages and the pull request body are exempt.
 ### CI runners
 
 All CI in this repository, now and in the future, runs only on the owner's self-hosted
-runners: `tablet-runner-1` to `tablet-runner-4` (Linux) and `pw-ci-runner-desktop-1` to
-`pw-ci-runner-desktop-5` (Windows). All nine carry the label `overmind`, so a job's
-`runs-on` includes `self-hosted` and `overmind`; add `Linux` for a job that needs the
-tablets alone. Never use a GitHub-hosted runner (`ubuntu-latest`, `windows-latest`,
-`macos-latest` or any other), and never target `pw-windows-runner-1` or the
-`pw-linux-runner-*` machines (label `playwright`). Before adding or editing a workflow,
+runners that carry the label `overmind`: `tablet-runner-1` to `tablet-runner-4` and
+`pw-linux-runner-1` to `pw-linux-runner-6` (Linux), and `pw-ci-runner-desktop-1` to
+`pw-ci-runner-desktop-5` (Windows). A job's `runs-on` includes `self-hosted` and
+`overmind` and never names `playwright`. Add `Linux` for a job that needs a POSIX shell
+(it lands on a tablet or a Linux Playwright runner) and `Windows` for one that needs the
+desktops. Never use a GitHub-hosted runner (`ubuntu-latest`, `windows-latest`,
+`macos-latest` or any other), and never target `pw-windows-runner-1`, which carries
+`playwright` but not `overmind`. Before adding or editing a workflow,
 confirm the names and labels with
 `gh api orgs/merph518/actions/runners --jq '.runners[] | "\(.name) \(.status) \([.labels[].name] | join(","))"'`,
 and before opening the pull request run `grep -rn runs-on .github/workflows` and check
@@ -336,7 +356,8 @@ done until it finishes or is skipped.
     way, with the run's link.
   - The workflow is skipped. The tag is cut by hand, an exception to the README's rule
     that holds only while the workflow is off, and any release pull request left open is
-    ignored: ask the user through `AskUserQuestion` to cut it.
+    ignored: ask the user through `AskUserQuestion` to cut it. When the workflow runs
+    again, resync the manifest to that tag, under Releases below.
 
   After the user was asked to merge the release pull request or to cut the tag, open no
   bump pull request until the newest tag is above the one from before the merge.
@@ -345,7 +366,10 @@ done until it finishes or is skipped.
   limit when it returns 100 names) and keep each one whose lock names Overmind:
   `gh api repos/merph518/<name>/contents/.claude/att-docs.lock -H "Accept: application/vnd.github.raw"`
   has a `repo=` line naming `merph518/Overmind` or an earlier location of it. A 404 means
-  the repository does not pin Overmind. Read the list fresh each time.
+  the repository does not pin Overmind. Read the list fresh each time. Compare the
+  result with `.github/consumers.json` and report drift both ways to the user: a repository
+  that pins Overmind but is missing from the file, so it can be added, and a listed
+  repository that no longer pins Overmind, so it can be removed.
 - **Open one pin-bump pull request per repository.** This session cannot write outside
   its own worktree, so each bump is handed to a session started in that repository, or to
   the user. That session runs `scripts/overmind-sync.sh <new tag>`, then
@@ -414,6 +438,9 @@ done until it finishes or is skipped.
 
 release-please reads conventional commits on `main`. Never bump a version, and never
 edit `.release-please-manifest.json`, `CHANGELOG.md`, or a `plugin.json` version by hand.
+The one exception is a resync: when a tag was cut by hand and the manifest is behind it,
+a `chore:` pull request sets the manifest and the three `plugin.json` versions to that
+tag. It changes no other version.
 
 ## Repository notes
 

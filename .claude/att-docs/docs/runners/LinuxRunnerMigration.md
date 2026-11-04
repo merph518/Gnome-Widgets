@@ -71,6 +71,13 @@ other:
 | `~/.pki/nssdb` | Chromium, and so the browser a run drives |
 | A confined application's own profile | that application alone |
 
+`NODE_EXTRA_CA_CERTS` in `/etc/environment`, which Phase 3 writes, is read by login
+sessions. The runner is a `systemd` service rather than a login session, so the Node
+actions it runs never see that variable. Node reads the system store for an action only
+when `NODE_OPTIONS=--use-system-ca` is set, so `release.yml` and `consumer-pr-check.yml`
+set it. An action that reaches GitHub through the inspecting proxy then verifies the
+corporate root the way `git` and `gh` do.
+
 Firefox keeps a fifth, inside its profile, and on Linux it reads nothing from the
 system store whatever `security.enterprise_roots.enabled` says. The profile lives
 under the confined application's own tree, and Firefox holds the database open, so

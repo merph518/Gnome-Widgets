@@ -6,7 +6,7 @@
 # session that dies mid-issue is resumed by reading it, not by remembering.
 #
 # usage:
-#   oversee.sh init [label]                build the queue from open issues
+#   oversee.sh init [label]                build the queue from the ready open issues
 #   oversee.sh refresh [label]             rebuild it for new issues, same label
 #   oversee.sh next                        what to work, or why nothing is workable
 #   oversee.sh start <issue> <branch>
@@ -34,9 +34,35 @@ mkdir -p "$DIR"
 # claimed, waiting on something outside the branch, already delivered, a
 # tracker rather than work, a reference copy, or declined.
 EXCLUDED='["In Progress","Blocked","Tracker","Already Done","DO NOT MERGE",'
-EXCLUDED+='"question","wontfix","duplicate","invalid"]'
+EXCLUDED+='"question","wontfix","duplicate","invalid",'
+EXCLUDED+='"needs-triage","needs-info","ready-for-human"]'
+
+# The label an issue needs before an unattended session may take it up.
+READY="ready-for-agent"
+
+# The oldest gh whose --json output carries an issue's blockers.
+GH_MIN_MAJOR=2
+GH_MIN_MINOR=94
 
 die() { echo "$*" >&2; exit 1; }
+
+# The queue reads each issue's blockers with `gh issue list --json blockedBy`,
+# which older gh versions reject. A rejected read looks like any failed backlog
+# read, and next survives one by serving its last queue, so the version is
+# checked up front and a gh that is too old stops the command instead.
+require_gh() {
+  local have
+  have=$(gh --version 2>/dev/null | head -n 1) || true
+  if [[ $have =~ ^gh\ version\ ([0-9]+)\.([0-9]+) ]] &&
+     (( BASH_REMATCH[1] > GH_MIN_MAJOR ||
+        (BASH_REMATCH[1] == GH_MIN_MAJOR && BASH_REMATCH[2] >= GH_MIN_MINOR) )); then
+    return 0
+  fi
+  die "oversee.sh needs gh $GH_MIN_MAJOR.$GH_MIN_MINOR or newer to read issue blockers" \
+      "(found: ${have:-no gh on PATH}). Install the current gh from GitHub's apt" \
+      "repository, https://github.com/cli/cli/blob/trunk/docs/install_linux.md," \
+      "then run this again."
+}
 
 # Holds the ledger for the rest of this process, so a command that reads the
 # ledger and then appends to it cannot interleave with another session doing
@@ -92,34 +118,43 @@ cmd_init() {
   # A title that opens with `<area>:` names the plugin folder or part of the
   # repository the issue touches, so the area is readable from the title alone.
   # That is what keeps two sessions off the same files without opening any
-  # issue body. The fourth column flags an issue carrying an excluded label, and
-  # the fifth an issue carrying the label the queue was built for. The read
-  # covers every open issue, so next can tell whether the issue a skipped row
-  # waited on is still open. A failed read leaves the queue as it was rather
-  # than writing an empty one.
+  # issue body. The fourth column flags an issue carrying an excluded label,
+  # the fifth an issue the queue may serve, meaning it carries the ready label
+  # and the label the queue was built for, and the sixth the open issues that
+  # block it, or `-`. The read covers every open issue, so next can tell
+  # whether the issue a skipped row waited on is still open. A failed read
+  # leaves the queue as it was rather than writing an empty one.
   local listed
-  listed=$(gh issue list --state open --limit 1000 --json number,title,labels --jq '
+  listed=$(gh issue list --state open --limit 1000 --json number,title,labels,blockedBy --jq '
     .[]
     | . as $i
-    | ([$i.labels[].name] | any(. as $n | '"$EXCLUDED"' | index($n))) as $out
-    | ('"$want"' as $w | $w == "" or ([$i.labels[].name] | index($w)) != null) as $in
+    | [$i.labels[].name] as $have
+    | ($have | any(. as $n | '"$EXCLUDED"' | index($n))) as $out
+    | ('"$want"' as $w
+       | (($have | index("'"$READY"'")) != null)
+         and ($w == "" or (($have | index($w)) != null))) as $in
     | ($i.title | if test("^[A-Za-z][A-Za-z0-9_-]{0,19}\\s*:")
                   then capture("^(?<area>[A-Za-z][A-Za-z0-9_-]{0,19})\\s*:").area | ascii_downcase
                   else "-" end) as $area
+    | ($i.blockedBy // {nodes: [], totalCount: 0}) as $b
+    | ([$b.nodes[] | select(.state != "CLOSED") | "#\(.number)"]
+       + (if $b.totalCount > ($b.nodes | length) then ["more than 50 blockers"] else [] end)
+       | if length == 0 then "-" else join(" ") end) as $blockers
     | [$i.number, $area, $i.title,
-       (if $out then 1 else 0 end), (if $in then 1 else 0 end)]
+       (if $out then 1 else 0 end), (if $in then 1 else 0 end), $blockers]
     | @tsv') || return 1
 
   printf '%s\n' "$listed" | awk -F'\t' 'NF { print $1 }' > "$OPEN.tmp.$$"
   mv "$OPEN.tmp.$$" "$OPEN"
 
-  # An excluded issue the ledger already names stays in the queue, flag and
-  # all. In Progress drops every issue a session holds, and next finds held
-  # areas and in-flight rows only through queue rows.
+  # An issue the ledger already names stays in the queue whatever its labels,
+  # flags and all. In Progress drops every issue a session holds, and next
+  # finds held areas and in-flight rows only through queue rows. Any other
+  # issue is queued only when the queue may serve it.
   printf '%s\n' "$listed" |
   awk -F'\t' -v OFS='\t' -v ledger="$LEDGER" '
     FILENAME == ledger { known[$2]=1; next }
-    NF && $5 && (!$4 || known[$1]) { print $1, $2, $3, $4 }' "$LEDGER" - |
+    NF && (known[$1] || ($5 && !$4)) { print $1, $2, $3, $4, $5, $6 }' "$LEDGER" - |
   # Oldest issue first, so an issue lands before the later ones that build on
   # it. Two issues in one area never run together: next defers the second
   # until the first one's pull request merges.
@@ -180,7 +215,8 @@ cmd_next() {
     FILENAME == ledger { status[$2]=$3; branch[$2]=$4; pr[$2]=$5; note[$2]=$6; next }
     {
       line[FNR]=$1 "\t" $2 "\t" $3; num[FNR]=$1; area[FNR]=$2
-      excluded[FNR]=($4 == 1); total=FNR
+      excluded[FNR]=($4 == 1); servable[FNR]=($5 == 1); blockers[FNR]=$6
+      total=FNR
     }
     END {
       # Each session works one issue at a time; other sessions hold their own.
@@ -229,6 +265,16 @@ cmd_next() {
         s = status[n]
         if (s == "skipped" && !excluded[i] && cleared(n)) s = ""
         if (s != "" && s != "withdrawn") continue
+        # An issue the queue may not serve is passed over without a line: most
+        # of a backlog can be in that state, and a line for each would bury
+        # the ones that matter. An open blocker is the exception, since it
+        # clears by itself and the reader wants to know what is waited on.
+        if (!servable[i]) continue
+        if (blockers[i] != "-") {
+          print "DEFER\t" line[i] "\tblocked by " blockers[i]
+          deferred++
+          continue
+        }
         if (area[i] != "-" && area[i] in held) {
           print "DEFER\t" line[i] "\tarea held by " held[area[i]]
           deferred++
@@ -247,11 +293,15 @@ cmd_next() {
 # over, and start fails so the caller asks next again.
 cmd_start() {
   local issue=$1 branch=$2 why
-  why=$(gh issue view "$issue" --json state,labels --jq '
+  why=$(gh issue view "$issue" --json state,labels,blockedBy --jq '
     [.labels[].name] as $have
     | ('"$EXCLUDED"' | map(select(. as $n | $have | index($n)))) as $hit
+    | ([.blockedBy.nodes[]? | select(.state != "CLOSED") | "#\(.number)"]) as $open
     | if .state != "OPEN" then "state \(.state)"
       elif ($hit | length) > 0 then "labeled \($hit | join(", "))"
+      elif ($have | index("'"$READY"'")) == null then "not labeled '"$READY"'"
+      elif ($open | length) > 0 then "blocked by \($open | join(" "))"
+      elif .blockedBy.totalCount > (.blockedBy.nodes | length) then "more than 50 blockers"
       else "" end')
 
   # The holder check comes first: a holder's own In Progress label must not
@@ -343,6 +393,10 @@ cmd_status() {
   echo "queued $(wc -l < "$QUEUE") total"
   tail -n 8 "$LEDGER"
 }
+
+case "${1:-}" in
+  init|refresh|next|start) require_gh ;;
+esac
 
 case "${1:-}" in
   init)   shift; cmd_init "$@" ;;
