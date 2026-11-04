@@ -67,9 +67,20 @@ package.json                      dependencies the shared scripts import
 
 The guard in `scripts/guard-main-checkout.sh`, wired up in `.claude/settings.json`,
 refuses file edits and the git verbs checkout, switch, restore, stash, reset, merge,
-rebase and pull in the shared main checkout, so a session works in a worktree made with
-the EnterWorktree tool. Other commands, such as commit, are not blocked. A
-`git pull --ff-only` of main is allowed.
+rebase and pull in the shared main checkout, so a session works in a worktree. A
+harness with a worktree tool can make it; `git worktree add -b <branch>
+.claude/worktrees/<name> origin/main` always can. Other commands, such as commit, are
+not blocked. A `git pull --ff-only` of main is allowed.
+
+A session that loads project extensions from `.omp/settings.json` gets the same guard
+through `scripts/omp-guard-hook.mjs`. It judges the `write`, `edit`, `ast_edit`, `lsp` and
+`bash` tools by the path each call names, resolved the way the harness resolves it, and
+hands the call to `guard-main-checkout.sh`. The harness reads `.omp/settings.json` only
+from the directory the session starts in, so a session started in a subdirectory is not
+guarded. An `edit` call that names no file is refused. The `eval` tool runs unguarded
+there, and so do files a `bash` command writes by redirection or other means. The guard
+allows an edit under any directory in `.claude/worktrees/`, so another session's
+worktree is not protected.
 
 Worktrees pile up under `.claude/worktrees/`. `scripts/worktree-cleanup.sh` lists each
 one with its branch, the state of its pull request, the count of uncommitted paths, and

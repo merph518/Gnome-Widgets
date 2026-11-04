@@ -180,6 +180,14 @@ refuses `git -C`, `cd` into the main checkout, and complex shell constructs. Kee
 commands simple, use absolute worktree paths, and put scripts and long text (commit
 messages, pull request bodies) in files in the session's scratchpad directory.
 
+A session that loads extensions from `.omp/settings.json` runs `guard-main-checkout.sh`
+through `scripts/omp-guard-hook.mjs`, and nothing else: the outright refusal of `git -C`,
+of a `cd` into the main checkout and of complex shell constructs above belongs to the
+other harness. The guard follows `cd` and `git -C` only to find where a branch-changing
+git verb acts. Such a session has no tool that moves it into the worktree: pass the
+worktree as the `cwd` of every shell call and name its files by absolute path. The
+operator's `/move <path>` or a launch with `--cwd <path>` rebinds the session itself.
+
 ### Section 5, static checks
 
 These run locally before every commit, so a push does not wait on CI to find what a local

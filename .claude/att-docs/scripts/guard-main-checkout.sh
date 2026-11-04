@@ -2,10 +2,11 @@
 # PreToolUse guard for one repository rule that a session cannot be trusted to
 # hold in its head for the length of a long task: the main checkout is shared
 # by concurrent sessions, so it stays read-only. Edits and branch-changing git
-# belong in a worktree made with the EnterWorktree tool (worktrees live in
-# .claude/worktrees/<name>, and that folder is exempt). `git pull --ff-only`
-# of main is allowed.
-# Wire up via .claude/settings.json.
+# belong in a worktree under .claude/worktrees/<name>, which is exempt; a harness
+# with a worktree tool may create it, and `git worktree add` always can.
+# `git pull --ff-only` of main is allowed.
+# Wire up via .claude/settings.json, or, for a session that loads project
+# extensions from .omp/settings.json, through scripts/omp-guard-hook.mjs.
 # Exit 2 blocks the tool call and returns stderr to the model.
 
 HERE="$(dirname "$0")"
@@ -57,8 +58,11 @@ WORKTREES="$real_main/.claude/worktrees"
 deny() {
   echo "Blocked: $1" >&2
   echo "The main checkout is read-only; other sessions share it." >&2
-  echo "Work in a worktree instead: make one with the EnterWorktree tool" >&2
-  echo "(it creates .claude/worktrees/<name>) and work there." >&2
+  echo "Work in a worktree instead: git worktree add -b <branch> \\" >&2
+  echo "  $MAIN/.claude/worktrees/<name> origin/main" >&2
+  echo "Then address its files by absolute path and give each shell call" >&2
+  echo "that worktree as its working directory. Where the harness supports it, an" >&2
+  echo "operator can rebind the session: /move <path>, or a launch with --cwd <path>." >&2
   exit 2
 }
 
