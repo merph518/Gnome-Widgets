@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.14](https://github.com/merph518/Overmind/compare/v0.31.13...v0.31.14) (2026-11-04)
+
+
+### Features
+
+* Check that skills name only Baton tools and arguments that exist ([#134](https://github.com/merph518/Overmind/issues/134)) ([#531](https://github.com/merph518/Overmind/issues/531)) ([c9edb20](https://github.com/merph518/Overmind/commit/c9edb2035953391bf53f0645c63109a54d08af99))
+
 ## [0.31.13](https://github.com/merph518/Overmind/compare/v0.31.12...v0.31.13) (2026-11-04)
 
 

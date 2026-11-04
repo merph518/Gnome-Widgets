@@ -11,6 +11,8 @@ Checked by `scripts/validate.py` in CI:
 - Python, Node and shell syntax, `SKILL.md` frontmatter, `plugin.json` and
   `marketplace.json` parsing, relative Markdown links:
   [scripts/validate.py](scripts/validate.py).
+- Baton tool and argument names in the voice skills and `README.md` exist in the bridge's
+  tool list: [scripts/bridge-tools/skill_tools.py](scripts/bridge-tools/skill_tools.py).
 
 Review checks (a reviewer decides):
 
