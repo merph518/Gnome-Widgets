@@ -36,6 +36,7 @@ import { createReleaser } from './release.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
 import { callFileName, promptHash, schemaHash } from './calls.mjs';
 import { jobLogs, readStatusLog, statusFields } from './status.mjs';
+import { replayModel, replaySource } from './replay.mjs';
 import { readPack } from './pack.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -6730,8 +6731,8 @@ test('the draft step builds the review workbook with no model and prints the bui
   assert.ok(done.result.report.every((line) => /^(PASS|FAIL)/.test(line)));
   const sandbox = path.join(config.output, done.id);
   assert.ok(fs.readdirSync(path.join(sandbox, 'work', 'review')).some((name) => name.endsWith('.xlsx')));
-  // No model call was made, and a builder step never takes the queue.
-  assert.deepEqual(fs.readdirSync(path.join(sandbox, 'work', 'calls')), fs.readdirSync(path.join(result.outDir, 'work', 'calls')));
+  // No model call was made, so the sandbox holds no call records, and a builder step never takes the queue.
+  assert.equal(fs.existsSync(path.join(sandbox, 'work', 'calls')), false);
   assert.deepEqual(held, [false]);
   assert.deepEqual(done.result.lines.map((line) => JSON.parse(line).event), ['begin', 'step']);
   assert.equal(JSON.parse(done.result.lines.at(-1)).calls, 0);
@@ -7012,4 +7013,187 @@ test('the command line runs a step, and refuses job options, a missing --at and 
   assert.match(cli('draft', '--job', SOURCE_JOB, '--at', 'phase8', '--finding', '1').stderr, /--finding does not go with draft/);
   assert.ok(fs.existsSync(result.workbook));
   assert.deepEqual(fs.readdirSync(config.output).filter((name) => name.includes('~')), [`${SOURCE_JOB}~cli`]);
+});
+
+// Replaying a job's recorded calls: a run answered from work/calls with no model server.
+
+/** The job's recorded calls copied to a scratch folder, so a test can change a record and leave the job alone. */
+function copiedCalls(config, job) {
+  const dir = scratch('replay-calls-');
+  fs.cpSync(path.join(config.output, job, 'work', 'calls'), dir, { recursive: true });
+  return dir;
+}
+
+/** Rewrites the first record of `step` in a calls folder to a prompt with one more line, as another version of the prompt would have recorded. */
+function recordWithChangedPrompt(dir, step) {
+  const names = fs.readdirSync(dir).filter((name) => name.includes(`-${step}-`)).sort();
+  assert.ok(names.length > 0, `${step} was not recorded`);
+  const file = path.join(dir, names[0]);
+  const saved = JSON.parse(read(file));
+  saved.prompt.user += '\nExtra line the old prompt had';
+  saved.promptHash = promptHash(saved.prompt.system, saved.prompt.user);
+  fs.writeFileSync(file, JSON.stringify(saved));
+}
+
+const replayRun = (config, model, label) => runJob(config,
+  { issue: '501', change: '7001', id: `${SOURCE_JOB}~${label}` }, { model, echo: false });
+
+test('a job replayed from its own recording with no model builds the identical pack', async () => {
+  const { config, model, result } = await finishedJob();
+  const live = { json: async () => { throw new Error('the live model was asked'); } };
+  const replay = replayModel({ dir: replaySource(config, SOURCE_JOB), live });
+  const again = await replayRun(config, replay, 'same');
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(read(again.packPath), read(result.packPath));
+  assert.deepEqual(replay.report(), { served: model.calls.length, live: 0, misses: [] });
+  // The replay records its own calls, the same ones, so it can be replayed in turn.
+  const asked = (outDir) => callRecords(outDir).map((r) => [r.step, r.attempt, r.promptHash, r.schemaHash, r.reply, r.usage]);
+  assert.deepEqual(asked(again.outDir), asked(result.outDir));
+  assert.equal(statusLines(again.outDir).some((line) => line.event === 'replay-miss'), false);
+});
+
+test('a changed prompt stops the replay at that step alone, naming it, with the lines that differ in detail.log', async () => {
+  const { config } = await finishedJob();
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const replay = replayModel({ dir });
+  const again = await replayRun(config, replay, 'changed');
+  assert.equal(again.ok, false);
+  assert.equal(again.reason, 'replay:prompt-changed');
+  assert.equal(again.phase, 'phase9-confidence');
+  assert.deepEqual(replay.report().misses, [{ step: 'phase9_confidence_overall', code: 'prompt-changed', changed: 1 }]);
+  // Every call before it came from the recording; the phases before it passed.
+  assert.equal(replay.report().live, 0);
+  const lines = statusLines(again.outDir);
+  assert.ok(lines.some((line) => line.phase === 'phase9-senior' && line.event === 'pass'));
+  assert.deepEqual(lines.filter((line) => line.event === 'replay-miss').map(({ at, ...fields }) => fields),
+    [{ job: `${SOURCE_JOB}~changed`, phase: 'phase9', event: 'replay-miss', step: 'phase9_confidence_overall',
+      reason: 'prompt-changed', changedLines: 1 }]);
+  assert.equal(lines.at(-1).reason, 'replay:prompt-changed');
+  assertContentFree(read(path.join(again.outDir, 'status.log')));
+  assert.match(read(path.join(again.outDir, 'detail.log')),
+    /replay diff phase9_confidence_overall\nuser, from line \d+:\n- Extra line the old prompt had\n/);
+  assert.equal(fs.existsSync(again.packPath), false);
+});
+
+test('with miss live the changed step alone goes to the live model and the pack is as it was', async () => {
+  const { config, result } = await finishedJob();
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const replay = replayModel({ dir, miss: 'live', live });
+  const again = await replayRun(config, replay, 'live');
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(live.calls.map((call) => call.schemaName), ['phase9_confidence_overall']);
+  assert.deepEqual(replay.report().misses, [{ step: 'phase9_confidence_overall', code: 'prompt-changed', changed: 1 }]);
+  assert.equal(replay.report().live, 1);
+  assert.equal(read(again.packPath), read(result.packPath));
+});
+
+test('a slice replayed with no model takes no queue, and a sandbox records only the calls its own run made', async () => {
+  const { config, model } = await finishedJob();
+  const held = [];
+  const replay = replayModel({ dir: replaySource(config, SOURCE_JOB) });
+  const slice = (label, from) => rerunJob(config, { job: SOURCE_JOB, from: 'phase9-senior', until: 'phase9-confidence', label },
+    { model: from, replayOnly: true, echo: false,
+      run: (...args) => { held.push(lockHeld(config)); return runJob(...args); } });
+  const one = await slice('one', replay);
+  assert.equal(one.result.ok, true, JSON.stringify(one.result));
+  assert.deepEqual(held, [false]);
+  const records = callRecords(path.join(config.output, one.id));
+  assert.ok(records.length > 0 && records.length < model.calls.length);
+  assert.equal(records.length, replay.report().served);
+  assert.deepEqual(records.map((r) => r.seq), records.map((_, i) => i + 1));
+  // The sandbox is a recording of its own: replaying it answers the same slice again.
+  const again = await slice('two', replayModel({ dir: replaySource(config, one.id) }));
+  assert.equal(again.result.ok, true, JSON.stringify(again.result));
+  const snapshot = (id) => read(path.join(config.output, id, 'work', 'checkpoints', 'phase9-confidence.json'));
+  assert.equal(snapshot(again.id), snapshot(one.id));
+  assert.deepEqual(held, [false, false]);
+});
+
+test('a step replayed from a sandbox recording asks no model, takes no queue and leaves the same state', async () => {
+  const { config } = await finishedJob();
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const recorded = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'asked' }, { model: live });
+  assert.equal(recorded.result.ok, true, JSON.stringify(recorded.result));
+  assert.ok(live.calls.length > 0);
+  const held = [];
+  const replay = replayModel({ dir: replaySource(config, recorded.id) });
+  const done = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'again' },
+    { model: replay, replayOnly: true, run: (...args) => { held.push(lockHeld(config)); return runStep(...args); } });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.deepEqual(held, [false]);
+  assert.deepEqual(replay.report(), { served: live.calls.length, live: 0, misses: [] });
+  assert.deepEqual(done.result.report, recorded.result.report);
+  assert.equal(slurp(path.join(config.output, done.id, 'work', 'step.json')),
+    slurp(path.join(config.output, recorded.id, 'work', 'step.json')));
+});
+
+test('a step stopped by a changed prompt fails as replay:prompt-changed and leaves the state it started from', async () => {
+  const { config, result } = await finishedJob();
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const recorded = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'asked' }, { model: live });
+  const dir = copiedCalls(config, recorded.id);
+  recordWithChangedPrompt(dir, live.calls[0].schemaName);
+  const done = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'miss' },
+    { model: replayModel({ dir }), replayOnly: true });
+  assert.equal(done.result.ok, false);
+  assert.equal(JSON.parse(done.result.lines.at(-1)).reason, 'replay:prompt-changed');
+  const sandbox = path.join(config.output, done.id);
+  assert.equal(slurp(path.join(sandbox, 'work', 'step.json')),
+    slurp(path.join(result.outDir, 'work', 'checkpoints', 'phase9-revalidate.json')));
+});
+
+test('--model takes a value only outside compare, and the replay flags go with run --job and step', async () => {
+  assert.deepEqual(parseArgs(['run', '--job', 'x', '--from', 'p', '--model', 'replay:x', '--replay-miss', 'live']),
+    { docs: [], words: ['run'], job: 'x', from: 'p', model: 'replay:x', replayMiss: 'live' });
+  assert.deepEqual(parseArgs(['compare', '--model', '--config', 'c']), { docs: [], words: ['compare'], model: true, config: 'c' });
+  const { config } = await finishedJob();
+  const cli = (command, ...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), command,
+    '--config', config.file, ...args], { encoding: 'utf8' });
+  const slice = (...more) => cli('run', '--job', SOURCE_JOB, '--from', 'phase9-senior', '--as', 'refused', ...more);
+  const refused = (result, pattern) => {
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stderr, pattern);
+  };
+  refused(cli('queue', 'status', '--model', `replay:${SOURCE_JOB}`), /--model goes with step, or with run --job/);
+  refused(cli('run', '--issue', '501', '--replay-miss', 'live'), /--replay-miss goes with step, or with run --job/);
+  refused(slice('--replay-miss', 'live'), /--replay-miss goes with --model replay:<source>/);
+  refused(slice('--model', 'live'), /--model takes replay:/);
+  refused(slice('--model'), /--model takes replay:/);
+  refused(slice('--model', `replay:${SOURCE_JOB}`, '--replay-miss', 'maybe'), /--replay-miss takes fail or live/);
+  refused(slice('--model', `replay:${SOURCE_JOB}`, '--pause'), /--pause is for a run that can ask the live model/);
+  refused(slice('--model', 'replay:issue-9-change-1'), /issue-9-change-1 has no recorded calls/);
+  refused(cli('step', 'walk', '--job', SOURCE_JOB, '--at', 'phase9-revalidate', '--model', 'replay:../nowhere'),
+    /holds no call records/);
+  // Nothing was written for any of them.
+  assert.deepEqual(fs.readdirSync(config.output).filter((name) => name.includes('~')), []);
+});
+
+test('the command line replays a slice with no model and no queue, prints what was replayed, and stops on a changed prompt', async () => {
+  const { config } = await finishedJob();
+  const cli = (command, ...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), command,
+    '--config', config.file, ...args], { encoding: 'utf8' });
+  const slice = (label, source, ...more) => cli('run', '--job', SOURCE_JOB, '--from', 'phase9-senior', '--until', 'phase9-confidence',
+    '--as', label, '--model', source, ...more);
+  // A queue held by a live process does not stop a replay that can never ask the model.
+  const lock = `${config.at(config.queue.file)}.lock`;
+  fs.writeFileSync(lock, String(process.pid));
+  const ran = slice('replayed', `replay:${SOURCE_JOB}`);
+  const stoppedByQueue = slice('live', `replay:${SOURCE_JOB}`, '--replay-miss', 'live');
+  fs.rmSync(lock);
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  assert.match(ran.stdout, new RegExp(`^sandbox ${SOURCE_JOB}~replayed$`, 'm'));
+  assert.match(ran.stdout, /^replay {2}served [1-9]\d* {2}live 0 {2}missed 0$/m);
+  // Where a miss may go to the live model, the queue is needed again.
+  assert.equal(stoppedByQueue.status, 1);
+  assert.match(stoppedByQueue.stderr, /the queue is running/);
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const changed = slice('changed', `replay:${dir}`);
+  assert.equal(changed.status, 1, changed.stdout + changed.stderr);
+  assert.match(changed.stdout, /^replay: prompt changed for phase9_confidence_overall \(1 line differs; the diff is in detail\.log\)$/m);
+  assert.match(changed.stdout, /"event":"fail".*"reason":"replay:prompt-changed"/);
+  assertContentFree(changed.stdout);
 });

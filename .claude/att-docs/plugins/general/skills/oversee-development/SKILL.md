@@ -322,6 +322,18 @@ takes the start back with `oversee.sh withdraw <issue>`. That puts the issue bac
 was before the start, so the queue serves it again, where `finish ... skipped` would record
 a verdict on the issue.
 
+`next` reads titles, so it cannot see two issues in different areas that edit one file.
+`/implement` checks that with its claim script in its first step, before it labels the
+issue. When the check defers the issue because an open pull request or another session's
+claim holds files of the issue's own unit, record the deferral:
+`oversee.sh finish <issue> skipped - "waits on PR #<n>"`. The queue serves the issue again
+once that pull request closes. A claim line ending `issue=<N>` names the holder's issue:
+write `waits on #<N>` in the note, and the queue serves the issue again once that issue
+closes. A claim that names no issue gives the queue nothing to read, so that deferral stays
+skipped: say so in the final report. A subagent that defers an issue has labeled nothing;
+it reports the outcome `deferred` with the file and the holder, and runs none of these
+commands.
+
 Then run `/implement <issue>` on the branch `start` recorded, in this session with the Skill
 tool or in a subagent. Run it in this session when the user is watching and may want to step
 in, since a subagent's work does not show in the session; use a subagent to keep the
@@ -337,7 +349,7 @@ no transcript and reads the issue body itself. It runs none of the `oversee.sh` 
 label swaps or issue comments that steps 3 and 4 give the conductor; the labels `/implement`
 sets itself stay with the subagent. Where `/implement` would ask the user a question, the
 subagent stops and puts the question in its report instead. Its report gives the pull
-request number, the outcome (`done`, `stalled`, or `already-done`), and any such question.
+request number, the outcome (`done`, `stalled`, `deferred`, or `already-done`), and any such question.
 It sends the report once `/implement` reaches its ready signal and does not wait for the
 merge. The conductor waits for that report before it runs `finish` or `next`, and never has two
 subagents working issues at once. To answer a question, the conductor asks it with
@@ -349,11 +361,13 @@ When `/implement` hands the pull request off, the issue ends in one of these:
 
 - `done`: an open pull request, self reviewed
 - `stalled`: the work cannot be finished, see step 4
+- `deferred`: another pull request or session holds the issue's files, recorded as `skipped`
+  above
 - `already-done`: the work is on main already, see below
 
 A point where `/implement` asks the user a question is a pause rather than an end, and is
 never recorded with `finish`. Ask with `AskUserQuestion`, carry on with `/implement` on the
-answer, and record the issue only once it ends `done`, `stalled`, or `already-done`.
+answer, and record the issue only once it ends `done`, `stalled`, `deferred`, or `already-done`.
 
 Record it in one ledger line, a note under 120 characters, and move on:
 

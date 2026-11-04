@@ -175,7 +175,7 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
       startedAt };
     try {
       const { value, usage } = await ctx.model.json({
-        system, user, schema, schemaName, reasoning: think, maxTokens,
+        system, user, schema, schemaName, attempt, reasoning: think, maxTokens,
       });
       ctx.logs.call({ ...recorded, reply: value, usage, endedAt: new Date() });
       ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call', attempt, reasoning: think,

@@ -77,6 +77,15 @@ if [ "$run_checks" -eq 1 ]; then
     failed=$((failed + 1))
     failed_names+=("static checks")
   fi
+  echo
+  echo "== Skill tool names"
+  if python3 -I scripts/bridge-tools/skill_tools.py; then
+    echo "Skill tool names: passed"
+  else
+    echo "Skill tool names: failed"
+    failed=$((failed + 1))
+    failed_names+=("skill tool names")
+  fi
 fi
 
 echo

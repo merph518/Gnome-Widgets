@@ -3,8 +3,8 @@
 //
 //   node build-pack.mjs run --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--resume]
 //   node build-pack.mjs run --config <pipeline.json> --suite <code> [--resume]
-//   node build-pack.mjs run --config <pipeline.json> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
-//   node build-pack.mjs step --config <pipeline.json> --job <id> --at <phase|sandbox> <step> [--finding <n>] [--check <names>] [--field <name>] [--as <label>] [--pause]
+//   node build-pack.mjs run --config <pipeline.json> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
+//   node build-pack.mjs step --config <pipeline.json> --job <id> --at <phase|sandbox> <step> [--finding <n>] [--check <names>] [--field <name>] [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
 //   node build-pack.mjs check --config <pipeline.json> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 //   node build-pack.mjs check --config <pipeline.json>
 //   node build-pack.mjs queue add --config <pipeline.json> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -38,6 +38,7 @@ import { createAppCloser } from './close-apps.mjs';
 import { createPauser, downUnits, markRestoreFile, onPauseList, pendingRestore } from './pause.mjs';
 import { documentRules, phase2Verdict, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
+import { replayModel, replaySource } from './replay.mjs';
 import { seededRandom, writeReports } from './report.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
 import { compareSnapshots, jobParameters, prepareSandbox, prepareStepSandbox, sandboxId, sandboxRun, sliceRange,
@@ -48,8 +49,8 @@ import { jobLogs, readStatusLog, statusFields } from './status.mjs';
 
 const USAGE = `usage:
   build-pack.mjs run --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume]
-  build-pack.mjs run --config <file> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause]
-  build-pack.mjs step --config <file> --job <id> --at <phase|sandbox> (draft | build | checklist | walk [--check <names>] | repair --finding <n> | confidence [--field <name>]) [--as <label>] [--pause]
+  build-pack.mjs run --config <file> --job <id> --from <phase> [--until <phase>] [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
+  build-pack.mjs step --config <file> --job <id> --at <phase|sandbox> (draft | build | checklist | walk [--check <names>] | repair --finding <n> | confidence [--field <name>]) [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
   build-pack.mjs check --config <file> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
   build-pack.mjs check --config <file>
   build-pack.mjs queue add --config <file> (--issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] | --suite <code>) [--resume] [--now] [--restore <unit>]... [--restore-paused]
@@ -65,8 +66,8 @@ const USAGE = `usage:
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <file> [--no-model]]
 exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
-exit codes of run --job: 0 the slice passed, 1 it stopped or the queue is running, 2 bad arguments, a job with no folder, or a missing snapshot
-exit codes of step: 0 the step ran and its build passed, 1 it stopped, its build failed a sheet, or the queue is running, 2 bad arguments, a job with no folder, or a missing snapshot or step state
+exit codes of run --job: 0 the slice passed, 1 it stopped (a replayed call the recording could not answer stops it unless --replay-miss live) or the queue is running, 2 bad arguments, a job with no folder, a missing snapshot, or a replay source with no recorded calls
+exit codes of step: 0 the step ran and its build passed, 1 it stopped, its build failed a sheet, or the queue is running, 2 bad arguments, a job with no folder, a missing snapshot or step state, or a replay source with no recorded calls
 exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
 exit codes of check --config <file> alone, the setup check: 0 every check passed, 1 any failed, 2 bad config
 exit codes of queue cancel: 0 the job stopped, 1 the job is not running, 4 the queue stayed held after the stop request
@@ -74,6 +75,8 @@ exit codes of compare: 0 the comparison was written, 1 it failed while running, 
 
 export function parseArgs(argv) {
   const args = { docs: [] };
+  // `compare` takes --model as a switch; `run` and `step` give it a value, `replay:<job>`.
+  const modelSwitch = argv[0] === 'compare';
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = argv[i + 1];
@@ -81,8 +84,8 @@ export function parseArgs(argv) {
       (args.words ??= []).push(flag);
       continue;
     }
-    // --resume, --now, --allow-derived-rules, --restore-paused, --pause, --model and --no-model take no value.
-    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || flag === '--model'
+    // --resume, --now, --allow-derived-rules, --restore-paused, --pause, --no-model and compare's --model take no value.
+    if (flag === '--resume' || flag === '--now' || flag === '--allow-derived-rules' || (flag === '--model' && modelSwitch)
       || flag === '--no-model' || flag === '--restore-paused' || flag === '--pause') {
       args[flag.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = true;
       continue;
@@ -778,19 +781,20 @@ export async function cancelJob(config, id, { clock = () => new Date(), kill = p
  * work in a sandbox, `<job>~<label>` with a time stamp for a label by default,
  * from the job's snapshot of the phase before `from`. The job's own folder,
  * queue row and workbook are only read. The run holds the queue, so the
- * nightly run waits for it; units are stopped only when `pauser` is given. It
- * stops after `until` with no pack, no workbook and no model unload. Returns
- * `{ busy: true }` when a live process holds the queue, else `{ id, result,
- * lines }`, the lines being how the sandbox's pack at `until` differs from the
- * job's. Throws when an argument is wrong, the job has no folder or no
+ * nightly run waits for it; units are stopped only when `pauser` is given. A run
+ * that `replayOnly` answers from recorded calls, with no live model, needs neither,
+ * and holds nothing. It stops after `until` with no pack, no workbook and no model
+ * unload. Returns `{ busy: true }` when a live process holds the queue, else `{ id,
+ * result, lines }`, the lines being how the sandbox's pack at `until` differs from
+ * the job's. Throws when an argument is wrong, the job has no folder or no
  * snapshot for the phase before `from`, or the sandbox exists; nothing is
  * written then.
  */
 export async function rerunJob(config, { job, from, until, label, pauser = null },
-  { run = runJob, now = () => new Date(), signal = null, ...options } = {}) {
+  { run = runJob, now = () => new Date(), signal = null, replayOnly = false, ...options } = {}) {
   const range = sliceRange({ from, until });
   const id = sandboxId(job, label, now());
-  const held = withQueue(config, async () => {
+  const go = async () => {
     const parameters = jobParameters(readQueue(config).jobs, job);
     const resumes = prepareSandbox(config, job, id, range.from);
     const logs = jobLogs(path.join(config.output, id), { echo: false });
@@ -813,7 +817,9 @@ export async function rerunJob(config, { job, from, until, label, pauser = null 
       range.until);
     if (detail) jobLogs(path.join(config.output, id), { echo: false }).detail('slice summary', detail);
     return { id, result, lines };
-  });
+  };
+  if (replayOnly) return go();
+  const held = withQueue(config, go);
   return held ? held.value : { busy: true };
 }
 
@@ -823,13 +829,13 @@ export async function rerunJob(config, { job, from, until, label, pauser = null 
  * state a step left in one of the job's sandboxes (see `runStep`). The job's own
  * folder, queue row and workbook are only read. A step that asks the model holds
  * the queue while it runs, so the nightly run waits for it, and stops units only when
- * `pauser` is given; a builder step holds nothing. Returns `{ busy: true }` when a
- * live process holds the queue, else `{ id, result }`. Throws when an argument is
- * wrong, the job has no folder or no state at `at`, or the sandbox exists; nothing is
- * written then.
+ * `pauser` is given; a builder step, or a step that `replayOnly` answers from recorded
+ * calls, holds nothing. Returns `{ busy: true }` when a live process holds the queue,
+ * else `{ id, result }`. Throws when an argument is wrong, the job has no folder or no
+ * state at `at`, or the sandbox exists; nothing is written then.
  */
 export async function stepJob(config, { job, at, label, pauser = null, ...options },
-  { run = runStep, now = () => new Date(), signal = null, ...runOptions } = {}) {
+  { run = runStep, now = () => new Date(), signal = null, replayOnly = false, ...runOptions } = {}) {
   const request = checkStep(options);
   const start = stepStart(config, job, at);
   const id = sandboxId(start.source, label, now());
@@ -838,7 +844,7 @@ export async function stepJob(config, { job, at, label, pauser = null, ...option
     prepareStepSandbox(config, start, id);
     return { id, result: await run(config, { id, job: parameters, ...request }, { ...runOptions, signal }) };
   };
-  if (!stepUsesModel(request)) return go();
+  if (!stepUsesModel(request) || replayOnly) return go();
   const held = withQueue(config, async () => {
     try {
       await pauser?.pause({ signal });
@@ -1218,22 +1224,52 @@ async function compareCommand(args) {
   }
 }
 
+/**
+ * The replaying model a command line names with `--model replay:<source>`, and whether the
+ * run needs no live model at all, or null when it names none. `<source>` is a job or sandbox
+ * ID, or a folder of call records. Throws, with nothing written, when the flags do not go
+ * together or the source holds no calls.
+ */
+function replayHere(args, config) {
+  if (!Object.hasOwn(args, 'model')) {
+    if (Object.hasOwn(args, 'replayMiss')) throw new Error('--replay-miss goes with --model replay:<source>');
+    return null;
+  }
+  const source = /^replay:(.+)$/s.exec(args.model ?? '')?.[1];
+  if (!source) throw new Error('--model takes replay:<job or sandbox ID, or folder of call records>');
+  const miss = args.replayMiss ?? 'fail';
+  if (!['fail', 'live'].includes(miss)) throw new Error('--replay-miss takes fail or live');
+  if (miss === 'fail' && args.pause) {
+    throw new Error('--pause is for a run that can ask the live model; add --replay-miss live');
+  }
+  return { model: replayModel({ dir: replaySource(config, source), miss }), replayOnly: miss === 'fail' };
+}
+
+/** The options that hand a replaying model to a run, none when the command line names no replay. */
+const replayOptions = (replay) => (replay ? { model: replay.model, replayOnly: replay.replayOnly } : {});
+
 async function dispatch(args, command, sub, config, track, trackRelease, control) {
   const pause = (cfg) => track(cfg);
   const release = (cfg) => trackRelease(cfg);
+  const replayFlag = [['model', '--model'], ['replayMiss', '--replay-miss']].find(([key]) => Object.hasOwn(args, key));
+  if (replayFlag && command !== 'step' && !(command === 'run' && args.job !== undefined)) {
+    throw new Error(`${replayFlag[1]} goes with step, or with run --job`);
+  }
   if (command === 'step') {
     const stray = ['issue', 'suite', 'change', 'resume', 'allowDerivedRules', 'descriptionFile', 'now',
       'restore', 'restorePaused', 'from', 'until'].find((key) => args[key] !== undefined);
     if (stray || args.docs.length) throw new Error('step takes --job and --at; it takes no other job option');
     if (!/^[A-Za-z0-9_~-]+$/.test(args.job ?? '')) throw new Error('--job takes a job ID');
     if (args.at === undefined) throw new Error('--at takes a phase or a sandbox');
+    const replay = replayHere(args, config);
     const pauser = args.pause ? track(config, { leftover: false }) : null;
     control.abort = new AbortController();
     const done = await stepJob(config, { job: args.job, at: args.at, step: sub, finding: args.finding,
-      check: args.check, field: args.field, label: args.as, pauser }, { signal: control.abort.signal });
+      check: args.check, field: args.field, label: args.as, pauser },
+    { signal: control.abort.signal, ...replayOptions(replay) });
     if (done.busy) return busyQueue();
     console.log(`sandbox ${done.id}`);
-    for (const line of [...done.result.report, ...done.result.lines]) console.log(line);
+    for (const line of [...done.result.report, ...done.result.lines, ...(replay?.model.lines() ?? [])]) console.log(line);
     return done.result.ok && !done.result.failed ? 0 : 1;
   }
   if (command === 'run' && args.job !== undefined) {
@@ -1242,13 +1278,14 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
     if (stray || args.docs.length) throw new Error('--job names the job; it takes no other job option');
     if (!/^[A-Za-z0-9_~-]+$/.test(args.job)) throw new Error('--job takes a job ID');
     if (args.from === undefined) throw new Error('--from takes a phase');
+    const replay = replayHere(args, config);
     const pauser = args.pause ? track(config, { leftover: false }) : null;
     control.abort = new AbortController();
     const done = await rerunJob(config, { job: args.job, from: args.from, until: args.until, label: args.as,
-      pauser }, { signal: control.abort.signal });
+      pauser }, { signal: control.abort.signal, ...replayOptions(replay) });
     if (done.busy) return busyQueue();
     console.log(`sandbox ${done.id}`);
-    for (const line of done.lines) console.log(line);
+    for (const line of [...done.lines, ...(replay?.model.lines() ?? [])]) console.log(line);
     return done.result.ok ? 0 : 1;
   }
   const sliceFlag = ['from', 'until', 'as', 'pause'].find((key) => args[key] !== undefined);

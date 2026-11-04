@@ -49,13 +49,16 @@ export function jobParameters(rows, sourceId) {
 /**
  * Copies a job's folder to a sandbox, leaving out the files in `skipped`. Only the
  * job's logs are kept from the folder itself: any other file there is a pack or a workbook.
+ * The call records stay behind too: a sandbox's work/calls holds the calls its own run
+ * made, so replaying the sandbox serves those and never the source's older ones.
  */
 function copyJob(source, sandbox, skipped) {
   const keptLogs = new Set(['status.log', 'detail.log']);
+  const calls = path.join(source, 'work', 'calls');
   fs.cpSync(source, sandbox, {
     recursive: true,
     filter: (file) => {
-      if (skipped.has(file)) return false;
+      if (skipped.has(file) || file === calls) return false;
       return path.dirname(file) !== source || fs.statSync(file).isDirectory() || keptLogs.has(path.basename(file));
     },
   });

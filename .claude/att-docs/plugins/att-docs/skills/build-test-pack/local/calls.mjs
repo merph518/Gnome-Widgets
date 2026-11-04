@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CALLS_VERSION = 1;
+export const CALLS_VERSION = 1;
 
 /**
  * A hash of the whole prompt, so two calls with the same text hash alike on any

@@ -31,6 +31,7 @@ tool, per `<asking-note>`.
 | `<reference-docs>` | The wider specification set to search when the feature's own document is silent |
 | `<ownership-unit>` | What one session owns while its branch is open, such as a test folder |
 | `<ownership-rules>` | The repository's rules for reading the board, deferring, shared code, and working while blocked |
+| `<claim-script>` | The command that checks and records claims on files, releases them, and reports files a merged sibling changed; a repository without one skips the claim checks |
 | `<main-checkout>` | The shared checkout that sessions never write to |
 | `<worktree-script>` | The command that cuts a branch and its worktree from a freshly fetched default branch |
 | `<edit-guard>` | The hook that blocks a write landing outside the session's worktree |
@@ -100,7 +101,7 @@ the pull request body says what was chosen, what the alternatives were, and
 what evidence decided it. "I picked one" is not that. Neither is a decision
 buried in a diff the user has to reverse-engineer.
 
-Four things still stop the session, because no amount of judgment makes them
+Five things still stop the session, because no amount of judgment makes them
 workable:
 
 - The issue is closed. Say so and what you would do, then ask whether to
@@ -117,6 +118,10 @@ workable:
 - A check fails because of something already on `<default-branch>`, the
   cause sits in a unit another session holds, and nothing is fixing it. Ask
   per "Failures already on the default branch get fixed" in step 6.
+- The edge-case list has an open question that the issue, its comments, and
+  `<reference-docs>` leave unanswered, and whose answer changes what gets
+  built. Ask once, before the first edit, per "Edge cases and acceptance
+  checks" in step 4.
 
 Everything else is decided, built, and explained in the pull request.
 
@@ -155,6 +160,11 @@ it, and the issue's own evidence. When the feature's own document is silent,
 search `<reference-docs>` before treating the question as open. State the
 reading and the one it beat in the restated scope and again in the pull
 request body, so the review has something specific to overturn.
+
+Before claiming the issue in step 2, run the check from "Claim shared files" in
+step 3 on the files this scope names. An issue whose own unit's files an open pull
+request or another session's claim already holds is not picked: it defers, and the
+session works the next qualifying issue.
 
 ## 2. Preflight, then claim the issue with `<in-progress-label>`
 
@@ -202,6 +212,56 @@ edited; and a deferred issue does not idle the session, which works the next
 qualifying issue while it waits. The board is read again before the pull
 request opens in step 7. The commands, the deferral steps, the watch on the
 holder, and the order blocked issues restart in are in `<ownership-rules>`.
+
+### Claim shared files
+
+Sessions on different issues still meet in the same files: the instructions file,
+the README, a skill that several changes touch. The board above sees a pull request
+only once it is open, so a session that has edited a shared file but not yet pushed
+is invisible to it. A claim closes that gap, and the check runs before the first
+edit, not at the end. Check the files the work will likely touch:
+
+```bash
+<claim-script> check <path>...
+```
+
+Exit 0 means nothing is in the way. Exit 3 prints one line per conflict:
+`CLAIM <session> <branch> <path>` for a file another live session has claimed, with
+` issue=<N>` after the path when that session named its issue, and
+`PR #<n> <branch> <path>` for a file another open pull request changes. Exit 1
+means a read failed, which is not a pass: run it again, or read the board by hand.
+
+- A conflict on files of this issue's own unit defers the issue, as above, before it
+  is claimed. Do not pick an issue whose own files an open pull request already
+  changes.
+- A conflict on a shared file outside the unit does not stop the issue. Do the
+  unit's own work first, and keep the shared edit for last.
+- Right before the first edit to a shared file, claim it with
+  `<claim-script> claim <path>... --issue <N>`, and make that edit in one short
+  pass. A claim names files, not folders, and it is refused when another session
+  holds the file or an open pull request changes it. When it is refused, work on,
+  and try again before the pull request opens. When it is still refused, leave that
+  edit out of this branch, file it per `<follow-up-note>`, and name the file and the
+  other session or pull request in the pull request body.
+
+A claim holds while the claiming session's process runs, or for twelve hours when it
+has no process to watch, so a session that died does not block a file for long;
+`<claim-script> prune` drops the stale ones. When the pull request opens, its file
+list takes over as the claim: run `<claim-script> release`. Release the claims too
+when the work stops with no pull request.
+
+Keep up with other branches' merges while the work goes on, not only at the end.
+Before each commit, before each self review pass, and at each wait on checks or on a
+merge, run:
+
+```bash
+<claim-script> sync
+```
+
+It fetches the default branch and prints `SYNC <path>` for each file both that branch
+and this one changed. Any such line means a merge there may conflict: bring the
+default branch in per `<branch-age-note>` now, resolve the conflict as the session's
+own work, and rerun the checks the merge touches.
 
 ### Cut the branch
 
@@ -404,6 +464,37 @@ The rename never gates the turn: if the script is missing or fails, go on.
 Follow the issue's acceptance criteria literally. Deliver the whole scope, not
 the easy half. If one part turns out blocked, finish everything else and say
 explicitly what was left out and why.
+
+Edge cases and acceptance checks: before the first edit, write a short
+checklist for this issue, one line per item, and record it as a comment on the
+issue (`gh issue comment <N> --body-file <file>`, per `<shell-text-note>`). The
+comment's first line reads `Edge cases and acceptance checks`, and a resumed
+run amends the comment with that line instead of adding a second. When the
+write is refused, or there is no issue, the list is kept in the scratchpad and
+goes in the pull request body under `Self review`. It has three parts:
+
+- Edge cases: collisions, such as a name or key another record already uses;
+  ordering and timing; empty or missing state; an action that lands on
+  something the user has not seen or heard, such as an answer given to a
+  question the user never heard; and how the change touches features that
+  already exist.
+- Acceptance checks: each concrete check or test to add, tied to an
+  acceptance item in the issue or to an edge case above. An item with no check
+  says why none fits.
+- Open questions: what the issue, its comments, and `<reference-docs>` do not
+  answer, the evidence at hand cannot settle, and whose answer changes what
+  gets built.
+
+A part with nothing to say reads "none". This is a checklist, not a design
+document. Put the open questions to the user together, in one
+`AskUserQuestion` (or, in a subagent, returned in its report), before the
+first edit, and add the answers to the list.
+A gap the evidence settles, or whose answer changes nothing that gets built, is
+not an open question: decide it and list it under `Judgment calls`. The list
+goes in full into the prompt of every delegated agent that builds from it or
+reviews the work. An edge case found during the build is added to the list
+with its check. A run that stops before the first edit, at a gate in step 1, 2,
+or 3, writes no list.
 
 Stay inside the issue's `<ownership-unit>`. An issue names one unit, and the
 diff covers that unit's specs, the page objects only that unit uses, and
@@ -951,6 +1042,9 @@ session in the meantime does not become a race: their claim stands, so open
 the pull request, name their branch in the body as the one this overlaps, and
 say in the report which parts they may have to resolve.
 
+Once the pull request is open, release this session's claims with
+`<claim-script> release`: the file list above is the claim from here on.
+
 Fourth gate: `git diff` the branch and confirm no comment, skip reason, or log
 string picked up anything `<writing-rules>` bans. Commit messages and the pull
 request body are exempt; they stay in this repository.
@@ -1001,13 +1095,17 @@ beside the review rather than ahead of it: a review of the pull request by its
 number, then a read against this repository's own rules, then a fix for every
 real bug. A red `<pr-checks>` job is one more. Nitpicks and edge cases no
 caller reaches are noted in the body and left unfixed, per that note's minor
-findings rule. Fixes go on the branch and owe what any later commit owes: the
-per-fix checks, the `<pr-checks>` rerun, and a step 6 dispatch scoped with a
-title filter when they touch spec-loaded code. Once the dispatches are green,
-review the commits since the previous pass, and keep going only while a pass
-finds a real bug, for at most three passes; the third pass's fixes get no
-fourth review, per that note's loop. Then run the final checks once, per
-`<static-checks>`'s final pass. The body gets its `Self review` section beside
+findings rule, but an item on the step 4 list is checked, not noted away: the
+review gets the list in full and checks each item against the diff. The item's
+check exists and passes, or the item is marked not applicable with a reason; an
+item with neither is a real bug. The result goes in the `Self review` section.
+Fixes go on the branch and owe what any later commit owes: the per-fix checks,
+the `<pr-checks>` rerun, and a step 6 dispatch scoped with a title filter when
+they touch spec-loaded code. Once the dispatches are green, review the commits
+since the previous pass, and keep going only while a pass finds a real bug, for
+at most three passes; the third pass's fixes get no fourth review, per that
+note's loop. Then run the final checks once, per `<static-checks>`'s final
+pass. The body gets its `Self review` section beside
 `Judgment calls`, and a `Settled decisions` section that records every finding
 a pass sorted, with its evidence and the commit it was checked against, per
 that note's settled decisions. Every pass but the pull request's very first,

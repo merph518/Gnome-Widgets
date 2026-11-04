@@ -289,7 +289,8 @@ and the timings. A call
 that failed is recorded with its error code and no reply, and a retry is a second file.
 A job run again with `--resume` adds to the folder and never replaces a file. The files
 hold document and rule text, as `detail.log` does, so they stay on the machine and the
-session does not read them.
+session does not read them. A slice or a step can answer its calls from these files
+instead of the model; see "Replaying recorded calls".
 
 ```bash
 <pipeline> check --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
@@ -662,13 +663,14 @@ intake. To try a change to one phase against a real job's state, run a slice of
 that job in a sandbox:
 
 ```bash
-<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> [--until <phase>] [--as <label>] [--pause]
+<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> [--until <phase>] [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
 ```
 
 - The sandbox is a copy of the job's folder named `<job-id>~<label>`; the label
   defaults to the time, `YYYYMMDDTHHMMSS`. The job's folder, its queue row and
   its workbook are only read. The copy holds the job's logs and `work` folder,
-  without the pack file, the workbook or the snapshots from `--from` on.
+  without the pack file, the workbook, the call records or the snapshots from
+  `--from` on. The sandbox's `work/calls` holds the calls its own run made.
 - The slice loads the snapshot of the phase before `--from`, runs `--from`
   through `--until` (`--from` alone by default) with the current code and
   config, and stops. It writes no pack and no workbook, and it does not unload
@@ -680,7 +682,8 @@ that job in a sandbox:
   do not.
 - It holds the queue while it runs, so the nightly run waits for it and a run
   already holding the queue makes the command exit 1. It stops no unit unless
-  `--pause` is given.
+  `--pause` is given. A run answered from a recording holds neither, as
+  "Replaying recorded calls" says.
 - The sandbox's snapshots are its own, so a slice of the sandbox, `--job
   <job-id>~<label>`, carries on from where the first slice ended.
 - When the slice passes, the command prints `sandbox <id>` and how the sandbox's
@@ -692,7 +695,8 @@ that job in a sandbox:
 
 Exit codes: 0 the slice passed, 1 it stopped or the queue is running, 2 bad
 arguments, a job with no folder, no snapshot for the phase before `--from` (the
-message names the snapshot), or a setup error such as an unreadable config.
+message names the snapshot), a replay source with no recorded calls, or a setup
+error such as an unreadable config.
 
 ### Trying one step
 
@@ -700,7 +704,7 @@ A slice runs whole phases. To try one part of Phase 9, or the builder alone, run
 a step on a snapshot of the job:
 
 ```bash
-<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> [--as <label>] [--pause]
+<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
 ```
 
 `--at` is a phase, read from the job's snapshot of it, or a sandbox of the job
@@ -718,7 +722,8 @@ queue row and workbook are only read.
 | `confidence [--field <name>]` | One confidence field (`coverage`, `remainingRisks`, `assumptions`, `regressionScope`, `breakItScope`, `manualReview`), or the overall level when no field is named | yes |
 
 - A step that asks the model holds the queue and stops no unit unless `--pause`
-  is given, as a slice does. `draft` and `build` take neither.
+  is given, as a slice does. `draft` and `build` take neither, and neither does a
+  step answered from a recording.
 - `draft` and `build` print the builder's sheet results, one `PASS` or `FAIL`
   line for each sheet. `build` also prints `DEFERRED` for a review sheet that
   fails before the confidence assessment has run.
@@ -736,8 +741,61 @@ queue row and workbook are only read.
   second of resolution.
 
 Exit codes: 0 the step ran and its build passed, 1 it stopped, its build failed
-a sheet, or the queue is running, 2 bad arguments, a job with no folder, or no
-snapshot or step state at `--at`.
+a sheet, or the queue is running, 2 bad arguments, a job with no folder, no
+snapshot or step state at `--at`, or a replay source with no recorded calls.
+
+### Replaying recorded calls
+
+A slice or a step can answer every model call from the calls a job recorded in
+`work/calls`, so a change to the code around the model is tried against a real
+job with no model server:
+
+```bash
+<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> --model replay:<source> [--replay-miss fail|live]
+<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> --model replay:<source> [--replay-miss fail|live]
+```
+
+- `<source>` is the ID of a job or sandbox in the output folder, or the path of a
+  folder of call records: a job folder, its `work/calls`, or a folder of the
+  files themselves, such as a recording kept as a regression fixture. The
+  flags belong to `run --job` and `step`; no other command takes them.
+- Each call is answered from the recorded call for the same step and attempt, in
+  the order the calls were made. The reply, the token counts and the timings are
+  the recorded ones, so while the code around the model is unchanged the replay
+  builds the same pack as the run it came from. A recorded failure is raised
+  again as the same error, so the retry that followed it replays too. The replay
+  records its own calls in the sandbox, so a sandbox can be replayed in turn.
+  When the next recorded call holds another prompt but a later one for the
+  same step and attempt holds this one, the calls ahead of it are skipped, so a
+  slice or a step replayed from a whole job passes over the calls of the phases
+  it does not run.
+- A call is a miss when its prompt hash is not the recorded one
+  (`prompt-changed`), when its reply schema is not (`schema-changed`), or when
+  the recording has no call left for it (`no-record`). A miss writes a
+  content-free `replay-miss` line to `status.log` with the step, the reason and
+  how many prompt lines differ, and the differing lines to `detail.log`: the
+  system and the user text apart, at most 20 lines on each side of the change.
+  When the run ends the command prints `replay  served <n>  live <n>  missed
+  <n>` and a line for each miss, such as `replay: prompt changed for <step>`.
+- By default a miss stops the run. The job fails with the reason
+  `replay:prompt-changed`, `replay:schema-changed` or `replay:no-record`, and no
+  phase retries it. With `--replay-miss live` the call goes to the model server
+  the config names, and every other call still comes from the recording, so the
+  steps whose prompts did not change cost nothing. A miss always uses up its
+  recorded call, and the recorded retry of a call that failed, so one changed
+  prompt does not shift the answers of the calls after it. A miss under
+  `--replay-miss live` does not change the exit code.
+- A run that cannot ask the live model, the default, holds no queue and stops no
+  unit, so it runs while the queue does, and `--pause` is refused. With
+  `--replay-miss live` it holds the queue as a slice does.
+- Replay an uninterrupted run or a sandbox. A job resumed after a stop holds the
+  interrupted run's calls first, error records included, and a replay repeats the
+  interruption.
+- Prompts are split to fit the model window, which a replay cannot read from a
+  server: it uses `model.context`. A recording made on a server whose window was
+  smaller than `model.context` misses where the batches split differently. Set
+  `model.context` in the replay's config to the window the `server-window` line
+  in the source's `status.log` names.
 
 ### Closing desktop apps before a run
 

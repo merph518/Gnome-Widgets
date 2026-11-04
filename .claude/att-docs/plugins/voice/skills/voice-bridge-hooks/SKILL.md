@@ -222,14 +222,14 @@ each in the session's own repository. It does not use the cache. When all of tho
 are done (a pull request merged or closed, or an issue closed), nothing is sent. The answer
 says what finished it and what the session has open, when GitHub says, so
 the voice chat can tell the user and suggest open work. A request that names done work beside
-open work, or a number GitHub could not check, goes out, with a note naming the done work. Passing `anyway` true sends the request
-as it is, which the voice chat does only after the user says so. `rename_session` does the
+open work, or a number GitHub could not check, goes out, with a note naming the done work. `send(anyway)` set true sends the request
+as it is, which the voice chat does only after the user says so. `rename_session(anyway)` does the
 same for a work name.
 
 The check never holds a request back when it cannot finish: a GitHub error, an unknown number,
 a session folder that is not a checkout, or no answer within four seconds sends the request,
 and the answer names the numbers that went unchecked. Each number has its own four seconds, so
-one slow answer leaves the others standing. A correction sent with `amend` is not checked.
+one slow answer leaves the others standing. A correction sent with `send(amend)` is not checked.
 
 The voice chat says a pull request's or issue's state only from `read_pull_request` or
 `read_issue` called at that moment. Baton's instructions say so, and the

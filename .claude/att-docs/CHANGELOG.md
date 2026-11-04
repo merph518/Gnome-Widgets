@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.31.15](https://github.com/merph518/Overmind/compare/v0.31.14...v0.31.15) (2026-11-04)
+
+
+### Features
+
+* claim shared files so concurrent sessions in one repo do not collide ([#257](https://github.com/merph518/Overmind/issues/257)) ([#528](https://github.com/merph518/Overmind/issues/528)) ([44b8456](https://github.com/merph518/Overmind/commit/44b84562ee31e604c2b37be86035e26c65662f79))
+* replay recorded model calls with --model replay: ([#492](https://github.com/merph518/Overmind/issues/492)) ([#536](https://github.com/merph518/Overmind/issues/536)) ([3439d38](https://github.com/merph518/Overmind/commit/3439d38d35be0ae579dbce8069c389f05b16da3f))
+
+## [0.31.14](https://github.com/merph518/Overmind/compare/v0.31.13...v0.31.14) (2026-11-04)
+
+
+### Features
+
+* Check that skills name only Baton tools and arguments that exist ([#134](https://github.com/merph518/Overmind/issues/134)) ([#531](https://github.com/merph518/Overmind/issues/531)) ([c9edb20](https://github.com/merph518/Overmind/commit/c9edb2035953391bf53f0645c63109a54d08af99))
+
 ## [0.31.13](https://github.com/merph518/Overmind/compare/v0.31.12...v0.31.13) (2026-11-04)
 
 

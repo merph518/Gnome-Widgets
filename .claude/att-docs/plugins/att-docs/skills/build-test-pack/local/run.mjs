@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { fill, globFiles, loadReference, MEMORY_STOP, rootRelative } from './config.mjs';
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { Cancelled, ModelError, modelClient } from './model.mjs';
+import { ReplayMiss } from './replay.mjs';
 import { jobLogs, readStatusLog } from './status.mjs';
 import * as P from './phases.mjs';
 
@@ -110,6 +111,9 @@ export async function jobContext(config, job, { outDir, logs, model, signal = nu
       fs.writeFileSync(path.join(outDir, 'work', name), `${JSON.stringify(value, null, 1)}\n`);
     },
   };
+  // A replaying model answers from recorded calls and asks the live model only for a call
+  // it was told to send there, so the live client is made when that first happens.
+  model?.bind?.({ logs, job: job.id, live: () => modelClient({ ...config.model, signal }) });
   if (config.inputs.existingTests) {
     ctx.existingTests = globFiles(config.root, fill(config.inputs.existingTests, job))
       .map((file) => fs.readFileSync(file, 'utf8')).join('\n\n');
@@ -297,7 +301,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   } catch (error) {
     const reason = error instanceof Cancelled ? 'cancelled' : error instanceof P.GateError ? `gate:${error.code}`
       : error instanceof ModelError ? `model:${error.code}`
-        : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
+        : error instanceof ReplayMiss ? `replay:${error.code}`
+          : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
     logs.detail('stopped', error.stack ?? String(error));
     const counts = error instanceof P.GateError || error instanceof MemoryLow ? error.counts : {};
     logs.status({ job: id, phase, event: 'fail', reason, ms: now() - started, calls: ctx.calls,

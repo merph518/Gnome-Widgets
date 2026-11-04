@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Cancelled, ModelError } from './model.mjs';
+import { ReplayMiss } from './replay.mjs';
 import { jobLogs } from './status.mjs';
 import * as P from './phases.mjs';
 import * as S from './schemas.mjs';
@@ -189,7 +190,8 @@ export async function runStep(config, { id, job, ...request }, { model, now = Da
     return { ok: true, failed: out.failed === true, id, outDir, report: out.report, lines: written() };
   } catch (error) {
     const reason = error instanceof Cancelled ? 'cancelled' : error instanceof P.GateError ? `gate:${error.code}`
-      : error instanceof ModelError ? `model:${error.code}` : error instanceof P.StepInputError ? 'step-input' : 'error';
+      : error instanceof ModelError ? `model:${error.code}` : error instanceof ReplayMiss ? `replay:${error.code}`
+        : error instanceof P.StepInputError ? 'step-input' : 'error';
     logs.detail('stopped', error.stack ?? String(error));
     logs.status({ job: id, phase: saved.phase, event: 'fail', reason, step, ms: now() - started, calls: (ctx?.calls ?? 0) - base.calls,
       ...(error instanceof P.GateError ? error.counts : {}) });
