@@ -11,7 +11,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { getEventListeners } from 'node:events';
 import http from 'node:http';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { addJob, cancelJob, checkJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld, rerunJob,
   markRestore, parseArgs, queueLines, readQueue, removeJob, restoreLines, restorePaused, restoreUnits,
@@ -42,11 +42,17 @@ const FIXTURES = path.join(HERE, 'fixtures');
 // The fixtures can sit in a worktree of this repository; the worktree check has its own tests.
 process.env.BUILD_PACK_ALLOW_WORKTREE = '1';
 
+// Every scratch folder lives under one root, removed when this file's tests finish, so a run
+// leaves nothing in the system temp folder.
+const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-test-'));
+after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
+const scratch = (prefix) => fs.mkdtempSync(path.join(SCRATCH_ROOT, prefix));
+
 const fixtureInputs = () => JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipeline.json'), 'utf8')).inputs;
 
 /** A config over the fixtures whose output and queue land in a fresh temp folder. */
 function fixtureConfig(overrides = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-'));
+  const dir = scratch('build-pack-');
   const raw = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipeline.json'), 'utf8'));
   // The memory check reads the machine running the tests, so it is off unless a test turns it on.
   // The release step is off too, so no test unloads a real model; the release tests turn it on.
@@ -1241,7 +1247,7 @@ test('the nightly queue takes no job outside its window and retries interrupted 
 });
 
 test('a job started on request runs first, then other start-now rows, within the configured cutoff', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-q-'));
+  const dir = scratch('build-pack-q-');
   const config = fixtureConfig({ queue: { file: path.join(dir, 'queue.json'), cutoff: '05:30' } });
   addJob(config, { issue: '100' });
   addJob(config, { issue: '200', now: true });
@@ -1390,7 +1396,7 @@ test('a run releases only its own lock', async () => {
 });
 
 test('clearing a stale lock never removes a lock another starter just took', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-lock-'));
+  const dir = scratch('build-pack-lock-');
   const lock = path.join(dir, 'queue.json.lock');
   // The file still holds what was judged stale: it goes.
   fs.writeFileSync(lock, '2147483646');
@@ -1717,7 +1723,7 @@ test('queue add --now on a queued row marks it and exits 0', () => {
 });
 
 test('a run whose intake read usable rules does not export them again in Phase 2', async () => {
-  const log = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'exports-')), 'log');
+  const log = path.join(scratch('exports-'), 'log');
   const config = fixtureConfig();
   config.inputs = { ...config.inputs, ruleExport: loggedExport(log) };
   const model = contextOnly('UC02 Overdue Fines');
@@ -1765,7 +1771,7 @@ test('an export outage in Phase 2 keeps the rules intake read and warns', async 
 });
 
 test('a document path outside the root gets the path code and no export runs', () => {
-  const log = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'exports-')), 'log');
+  const log = path.join(scratch('exports-'), 'log');
   const config = fixtureConfig();
   config.inputs = { ...config.inputs, ruleExport: ['node', '-e',
     `require("fs").appendFileSync(${JSON.stringify(log)}, process.argv[1]);`, '{doc}'] };
@@ -1876,7 +1882,7 @@ test('a checkpoint written without document paths resumes without re-reading the
 
 /** Two roots with the fixtures' files, a config over each, and one output folder both write. */
 function twoRoots() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'roots-'));
+  const base = scratch('roots-');
   const roots = ['a', 'b'].map((name) => {
     const root = path.join(base, name);
     fs.cpSync(FIXTURES, root, { recursive: true });
@@ -1936,7 +1942,7 @@ test('rootRelative keeps a document path relative to the root whatever it was gi
   assert.equal(rootRelative(config, '/elsewhere/docs/a/B.md'), 'docs/a/B.md');
   assert.equal(rootRelative(config, '/elsewhere/notes.md'), '/elsewhere/notes.md');
   // A path from a worktree whose top folder is above the root is cut to what exists under the root.
-  const sub = fs.mkdtempSync(path.join(os.tmpdir(), 'sub-'));
+  const sub = scratch('sub-');
   fs.mkdirSync(path.join(sub, 'docs'));
   fs.writeFileSync(path.join(sub, 'docs', 'B.md'), '');
   assert.equal(rootRelative({ root: sub }, '/top/.claude/worktrees/w/specs/docs/B.md'), 'docs/B.md');
@@ -1953,7 +1959,7 @@ test('rootRelative keeps a document path relative to the root whatever it was gi
 
 /** A git repository holding the fixtures and a pipeline config at its top, and a worktree of it. */
 function repoWithWorktree() {
-  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'wt-')));
+  const base = fs.realpathSync(scratch('wt-'));
   const main = path.join(base, 'main');
   fs.cpSync(FIXTURES, main, { recursive: true });
   const raw = JSON.parse(read(path.join(FIXTURES, 'pipeline.json')));
@@ -2035,7 +2041,7 @@ test('queue add stores each document relative to the root', () => {
 });
 
 test('a folder outside a repository is not a worktree', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plain-'));
+  const dir = scratch('plain-');
   assert.equal(mainCheckout(dir), null);
   const was = process.env.BUILD_PACK_ALLOW_WORKTREE;
   delete process.env.BUILD_PACK_ALLOW_WORKTREE;
@@ -2524,7 +2530,7 @@ function fakeSystemctl(active, failing = []) {
 
 /** A fake /proc with one process per [pid, comm, cgroup] row. */
 function fakeProc(rows) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-proc-'));
+  const root = scratch('build-pack-proc-');
   for (const [pid, comm, cgroup] of rows) {
     fs.mkdirSync(path.join(root, String(pid)));
     fs.writeFileSync(path.join(root, String(pid), 'comm'), `${comm}\n`);
@@ -3008,7 +3014,7 @@ test('release config has defaults and is validated', () => {
 
 /** The config with no release block, so the shipped default shows. */
 function loadDefault() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-'));
+  const dir = scratch('build-pack-');
   const raw = JSON.parse(fs.readFileSync(path.join(FIXTURES, 'pipeline.json'), 'utf8'));
   Object.assign(raw, { repoRoot: FIXTURES, output: path.join(dir, 'out'),
     queue: { file: path.join(dir, 'queue.json') } });
@@ -3019,7 +3025,7 @@ function loadDefault() {
 
 /** A config whose queue has the given sources, over the fixtures. */
 function sourcedConfig(sources, report = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-src-'));
+  const dir = scratch('build-pack-src-');
   return fixtureConfig({ queue: { file: path.join(dir, 'queue.json'), sources }, report });
 }
 
@@ -3036,7 +3042,7 @@ test('a job line is a bare number pair, a suite, or the full command-line form',
 });
 
 test('the queue fills itself from a folder of lists, and never queues a known job twice', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-in-'));
+  const dir = scratch('build-pack-in-');
   fs.writeFileSync(path.join(dir, 'build-12.txt'), '# build 12\n9415 7001\n501\nnot a job\n\nsuite LIB\n');
   fs.writeFileSync(path.join(dir, 'more.txt'), '501\n777\n');
   fs.writeFileSync(path.join(dir, '.hidden'), '999\n');
@@ -3067,7 +3073,7 @@ test('the queue fills from record file names and from a command, and a bad sourc
     { type: 'records', glob: 'issues/*.md', pattern: '^ISSUE_(\\d+)_(renewal)' },
     { type: 'command', command: ['node', '-e', 'console.log("600 6001"); console.log("suite LIB")'] },
     { type: 'command', command: ['node', '-e', 'process.exit(3)'] },
-    { type: 'folder', path: path.join(os.tmpdir(), 'build-pack-no-such-folder') },
+    { type: 'folder', path: path.join(SCRATCH_ROOT, 'no-such-folder') },
   ]);
   const result = fillQueue(config);
   // The second pattern's second group is read as a change number.
@@ -3087,7 +3093,7 @@ test('a queue source is checked when the config loads', () => {
 });
 
 test('a nightly run fills the queue once it holds it, and a run outside the window does not', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-in-'));
+  const dir = scratch('build-pack-in-');
   fs.writeFileSync(path.join(dir, 'list.txt'), '9415\n');
   const config = sourcedConfig([{ type: 'folder', path: dir }]);
   const ran = [];
@@ -3299,7 +3305,7 @@ test('the report command writes the daily file, and the weekly rollup on the set
   assert.deepEqual(names(writeReports(config, queue, { now: tuesday, period: 'week' })), ['weekly-2026-10-27.md']);
   assert.ok(fs.existsSync(path.join(config.output, 'reports', 'weekly-2026-10-27.md')));
   assert.throws(() => writeReports(config, queue, { period: 'month' }), /--period/);
-  const other = fixtureConfig({ report: { weeklyDay: 2, dir: path.join(os.tmpdir(), 'build-pack-reports') } });
+  const other = fixtureConfig({ report: { weeklyDay: 2, dir: path.join(scratch('build-pack-reports-'), 'reports') } });
   assert.deepEqual(names(writeReports(other, queue, { now: tuesday })),
     ['daily-2026-10-27.md', 'weekly-2026-10-27.md']);
   assert.throws(() => fixtureConfig({ report: { weeklyDay: 9 } }), /report.weeklyDay/);
@@ -3307,7 +3313,7 @@ test('the report command writes the daily file, and the weekly rollup on the set
 });
 
 test('the command line fills the queue and writes the report', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-in-'));
+  const dir = scratch('build-pack-in-');
   fs.writeFileSync(path.join(dir, 'list.txt'), '9415\n');
   const config = sourcedConfig([{ type: 'folder', path: dir }]);
   const cli = (...args) => spawnSync('node', [path.join(HERE, 'build-pack.mjs'), ...args,
@@ -3376,7 +3382,7 @@ test('an explicit start request takes a job that is waiting for the next night',
 });
 
 test('the default record pattern reads a change only when it starts with a digit', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-rec-'));
+  const dir = scratch('build-pack-rec-');
   for (const name of ['SIR-9415-credit-limit.md', 'SIR-9416-Create-account.md', 'SIR-9417-crash-on-save.md',
     'SIR-9418-change-7001.md', 'ISSUE_9419_CR7002_renewal.md', 'SIR-9421-changes-to-fees.md',
     'SIR-9422-CR-CHG7001.md', 'SIR-9423-CR-7001,7002.md', 'SIR-9424-CR-7001(1).md',
@@ -3394,7 +3400,7 @@ test('the default record pattern reads a change only when it starts with a digit
 });
 
 test('queue remove and queue fill by hand refuse while a run holds the queue', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-in-'));
+  const dir = scratch('build-pack-in-');
   fs.writeFileSync(path.join(dir, 'list.txt'), '9415\n');
   const config = sourcedConfig([{ type: 'folder', path: dir }]);
   addJob(config, { issue: '777' });
@@ -3449,7 +3455,7 @@ test('a start-only run leaves an interrupted row for the night', async () => {
 });
 
 test('a change token with no separator before it is still read, or counted when its number is bad', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-pack-rec-'));
+  const dir = scratch('build-pack-rec-');
   for (const name of ['SIR-9415CR7001.md', 'SIR-9416.CR7002.md', 'SIR-9417Create-account.md',
     'SIR-9418credit-limit.md', 'SIR-9419crash-on-save.md', 'SIR-9420changes-to-fees.md',
     'SIR-9421CR-CHG7001.md', 'SIR-9422.change.md']) {
@@ -4490,7 +4496,7 @@ test('a revalidation that leaves items open rates the pack again, with the Low l
 
 test('a job saved at the confidence step before the senior review moved reruns both', async () => {
   const { readCheckpoint, checkpointPath } = await import('./run.mjs');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkpoint-'));
+  const dir = scratch('checkpoint-');
   fs.mkdirSync(path.join(dir, 'work'));
   fs.writeFileSync(checkpointPath(dir), JSON.stringify({ phase: 'phase9-confidence', state: {} }));
   assert.equal(readCheckpoint(dir).phase, 'phase9-checklist');
@@ -5496,7 +5502,7 @@ test('a pauser wait ends at once when the stop signal aborts', async () => {
   const exec = (command, args) => (args.includes('list-units')
     ? { status: 0, stdout: 'x.service loaded active running\n' } : { status: 0, stdout: '' });
   // A unit with a busy worker inside it is waited for.
-  const proc = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'));
+  const proc = scratch('proc-');
   fs.mkdirSync(path.join(proc, '42'));
   fs.writeFileSync(path.join(proc, '42', 'comm'), 'worker\n');
   fs.writeFileSync(path.join(proc, '42', 'cgroup'), '0::/system.slice/x.service\n');
@@ -5620,7 +5626,7 @@ test('queue cancel stops a real run during a model call, frees the queue, and le
     res.end();
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const marker = path.join(os.tmpdir(), `released-${process.pid}-${Date.now()}`);
+  const marker = path.join(scratch('released-'), 'marker');
   try {
     const config = fixtureConfig({
       model: { endpoint: `http://127.0.0.1:${server.address().port}/api/v1`, name: 'test-model' },
@@ -6355,7 +6361,7 @@ test('a run records every model call with its prompt, reply and counts, in the o
 });
 
 test('a thinking call that is cut and retried records both attempts, and a second cut records as runaway', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'calls-ask-'));
+  const dir = scratch('calls-ask-');
   const reply = (cut) => ({ ok: true, json: async () => ({ choices: [{ finish_reason: cut ? 'length' : 'stop',
     message: { content: cut ? '{"a":' : '{"ok":true}' } }], usage: { prompt_tokens: 30, completion_tokens: 7 } }) });
   const { ask } = await import('./phases.mjs');
@@ -6438,7 +6444,7 @@ test('every phase that passes leaves a snapshot, and checkpoint.json is the last
 });
 
 test('a slice from Phase 9 revalidation runs that phase alone and leaves the job as it was', async () => {
-  const marker = path.join(os.tmpdir(), `slice-released-${process.pid}-${Date.now()}`);
+  const marker = path.join(scratch('slice-released-'), 'marker');
   const { config, model, result } = await finishedJob({
     release: { command: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] } });
   // The phase's output is written by the slice, so it is absent from the job's folder before the slice runs.

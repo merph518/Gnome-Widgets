@@ -14,7 +14,7 @@ steps to skip when there is no issue.
 
 Two parts are easy to miss:
 
-- The self review loop runs on every pull request, with an Opus review of every change,
+- The self review loop runs on every pull request, with a review of every change,
   including the last fix. Section 7 sets the pass limit.
 - When the loop ends, add the `Manual Review Needed` label and read it back. A pull request
   reported ready without the label is not ready.

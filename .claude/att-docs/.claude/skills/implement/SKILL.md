@@ -87,26 +87,26 @@ what runs instead.
 
 ## Overrides
 
-### Models
+### Plan and review
 
-Each step has one model:
+Each change goes through these steps, in order:
 
-| Step | Model |
+| Step | Produces |
 | --- | --- |
-| Planning and design advice, before any code is written | Opus |
-| Writing the code and its tests | Sonnet |
-| Reviewing every change, including the last fix | Opus |
-| Fixing review findings | Sonnet |
+| Planning and design advice, before any code is written | The approach, the files to change, the test seams, and the risks |
+| Writing the code and its tests | The change, built from the plan |
+| Reviewing every change, including the last fix | A list of real findings, or none |
+| Fixing review findings | A fix that is itself reviewed |
 
-Before coding, spawn an Opus agent with the issue or task and the files it touches, and
-ask it for the plan and design advice: the approach, the files to change, and the risks.
-Sonnet implements from that advice and records in the pull request body, under Judgment
-calls, any place it departed from it. A fix for a review finding is written by Sonnet, then
-reviewed by Opus.
+Before coding, spawn an agent with the issue or task and the files it touches, and ask it
+for the plan and design advice: the approach, the files to change, the test seams, and
+the risks. Build from that plan and record in the pull request body, under Judgment
+calls, any place the code departed from it. A fix for a review finding is reviewed like
+any other change.
 
 ### Test seams
 
-The Opus plan names the test seams. This overrides the `tdd` skill's step of confirming
+The plan names the test seams. This overrides the `tdd` skill's step of confirming
 seams with the user: when the code is built with `tdd`, the seams the plan names count as
 confirmed, so an unattended run does not stop to ask. A seam the plan did not name is
 asked through `AskUserQuestion` (or, in a subagent, returned in its report).
@@ -235,16 +235,14 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   `gh api -X PATCH repos/merph518/Overmind/pulls/<n> -F "body=@<file>"`.
 - Mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. Resolve a conflict by
   merging `origin/main` into the branch, never by rebase plus force-push.
-- Self review: Sonnet implements and fixes, and Opus reviews every change, including the
-  final fix (see Models above).
-  Spawn an Opus review agent on the diff, and run the `code-review` skill with
+- Self review: every change is reviewed, including the final fix (see Plan and review
+  above). Spawn a review agent on the diff, and run the `code-review` skill with
   `origin/<default-branch>` as its fixed point. Fix real findings and review again, for at
-  most three passes. The
-  fixes from the last pass still get an Opus review before the pull request is marked
-  ready; this replaces the general skill's rule that the third pass's fixes get no
-  fourth review. If that review finds another real bug, fix it, have Opus review that
-  fix, and say in the report that the loop ran past three passes. A fifth pass that
-  still finds a real bug stops the work and asks through `AskUserQuestion`.
+  most three passes. The fixes from the last pass still get a review before the pull
+  request is marked ready; this replaces the general skill's rule that the third pass's
+  fixes get no fourth review. If that review finds another real bug, fix it, have a review
+  agent review that fix, and say in the report that the loop ran past three passes. A
+  fifth pass that still finds a real bug stops the work and asks through `AskUserQuestion`.
 - Ready signal: never leave the pull request in draft. When the loop ends, mark it ready
   with `gh pr ready <n>`. The label is added only when every check on the pull request has
   passed on the current head. A read right after a push or a merge of `origin/main` can
@@ -273,7 +271,7 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   `AskUserQuestion`. Merging `origin/main` into the branch, or any push, starts the checks
   again, so the head check and the wait repeat after it.
 
-  A check that fails is a real failure to fix, then Opus reviews the fix and it is pushed
+  A check that fails is a real failure to fix, then the fix is reviewed and pushed
   like any other fix; the label stays off until the rerun passes. This holds for a docs-only
   branch too, because `test-all` runs the whole suite on every pull request: a failure
   already on `main` is fixed here, and the body's Verification reports the CI result. A
@@ -410,7 +408,7 @@ done until it finishes or is skipped.
   Releases section. Nothing pushes to a repository's `main`.
   - A bump whose diff is only the lock, `.claude/att-docs.lock`, and the vendored files
     under `.claude/att-docs/` is a pin-only pull request. It skips the self review loop,
-    the Opus review and the ready label, because the code it brings in was reviewed in
+    the review and the ready label, because the code it brings in was reviewed in
     this repository, and it merges by the next step without a confirm. The handoff says
     so, because that repository's own rules otherwise call for the full procedure.
   - A bump with any other change, such as an extension edit for a new minor version,

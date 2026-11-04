@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.31.8](https://github.com/merph518/Overmind/compare/v0.31.7...v0.31.8) (2026-11-04)
+
+
+### Features
+
+* doc-watch waits 30 seconds for a manual sign-in on an attended run ([#182](https://github.com/merph518/Overmind/issues/182)) ([#512](https://github.com/merph518/Overmind/issues/512)) ([93ac88b](https://github.com/merph518/Overmind/commit/93ac88bdc4d39f0c57757df56f462743970cff78))
+
+## [0.31.7](https://github.com/merph518/Overmind/compare/v0.31.6...v0.31.7) (2026-11-04)
+
+
+### Bug Fixes
+
+* Remove the build-pack test scratch folders after each run ([#506](https://github.com/merph518/Overmind/issues/506)) ([deced9a](https://github.com/merph518/Overmind/commit/deced9ac12e7212d8c1073fbe04d971f1a2bcf70))
+
 ## [0.31.6](https://github.com/merph518/Overmind/compare/v0.31.5...v0.31.6) (2026-11-04)
 
 
