@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.10](https://github.com/merph518/Overmind/compare/v0.31.9...v0.31.10) (2026-11-04)
+
+
+### Bug Fixes
+
+* guard the main checkout in sessions that load .omp extensions ([#517](https://github.com/merph518/Overmind/issues/517)) ([#518](https://github.com/merph518/Overmind/issues/518)) ([5e7ce09](https://github.com/merph518/Overmind/commit/5e7ce093b4c13de0343f1dc334901149854a355e))
+* keep the guard extension's shipped comments harness neutral ([#520](https://github.com/merph518/Overmind/issues/520)) ([2f6556e](https://github.com/merph518/Overmind/commit/2f6556e0e7d8bf090c9d675fa9601183da62f646))
+
 ## [0.31.9](https://github.com/merph518/Overmind/compare/v0.31.8...v0.31.9) (2026-11-04)
 
 
