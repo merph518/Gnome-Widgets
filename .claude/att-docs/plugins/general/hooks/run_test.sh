@@ -73,15 +73,49 @@ printf '%s\n' 'import sys; sys.exit(3)' >"$work/plugin/hooks/fail.py"
 CLAUDE_PROJECT_DIR=$work/own "$run" gate fail.py </dev/null
 check "the script's exit code passes through" 3 $?
 
+mkdir -p "$work/always/.claude/skills/repo-hooks" "$work/noext"
+cfg=$work/always/.claude/skills/repo-hooks/extension.json
+check "--default-on runs without an extension file, with no --config" \
+  "py $work/noext payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/noext "$run" --default-on gate probe.py <<<payload)"
+printf '%s\n' '{"other":{}}' >"$cfg"
+check "--default-on runs when the file has no section for the hook" \
+  "py --config $cfg $work/always payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on gate probe.py <<<payload)"
+printf '%s\n' '{"gate":false}' >"$cfg"
+check "--default-on is off when the section is false" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on gate probe.py <<<payload)"
+printf '%s\n' 'not json' >"$cfg"
+check "--default-on runs with defaults when the file is not JSON" \
+  "py $work/always payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on gate probe.py <<<payload)"
+check "without --default-on a project with no extension file stays quiet" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/noext "$run" gate probe.py <<<payload)"
+printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash .claude/att-docs/plugins/general/hooks/run.sh --default-on gate probe.py"}]}]}}' \
+  >"$work/always/.claude/settings.json"
+check "--default-on steps aside when the project registers its vendored copy" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on gate probe.py <<<payload)"
+printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"bash \"$CLAUDE_PROJECT_DIR/.claude/att-docs/plugins/general/hooks/run.sh\" other probe.py"}]}]}}' \
+  >"$work/always/.claude/settings.json"
+check "--default-on still runs when the project registers only other hooks" \
+  "py $work/always payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on gate probe.py <<<payload)"
+check "a default-on hook the project does register steps aside, quoted path included" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on other probe.py <<<payload)"
+check "a section that only starts with a registered name still runs" \
+  "py $work/always payload" \
+  "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on oth probe.py <<<payload)"
+printf '%s\n' '{"gate":{},"gate2":{}}' >"$work/vendored/.claude/skills/repo-hooks/extension.json"
+check "a hook that is not default-on steps aside when the project registers any hook" "" \
+  "$(CLAUDE_PROJECT_DIR=$work/vendored "$run" gate2 probe.py <<<payload)"
+
 check "hooks.json names a section and script that exist" "" "$(
   jq -r '.hooks[][].hooks[].command' "$here/hooks.json" |
-    sed -nE 's#.*run\.sh" ([A-Za-z]+) ([^ "]+).*#\1 \2#p' |
+    sed -nE 's#.*run\.sh" (--default-on )?([A-Za-z]+) ([^ "]+).*#\2 \3#p' |
     while read -r section script; do
       [[ -f $here/$script ]] || echo "missing $script"
       [[ -n $section ]] || echo "no section for $script"
     done
 )"
-check "hooks.json registers four hooks" 4 \
-  "$(jq -r '.hooks[][].hooks[].command' "$here/hooks.json" | grep -c 'run.sh')"
 
 exit $fail

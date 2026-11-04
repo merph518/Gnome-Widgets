@@ -6,8 +6,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** Field values a status line may carry: numbers, booleans, and short codes. */
-const SAFE = /^[A-Za-z0-9 _.:/=+-]{0,80}$/;
+/** Field values a status line may carry: numbers, booleans, and short codes. A sandbox job's ID joins its source and label with `~`. */
+const SAFE = /^[A-Za-z0-9 _.:/=+~-]{0,80}$/;
 
 /** The parsed lines of a status.log; a line cut off mid-write is skipped, and a missing log is empty. */
 export function readStatusLog(file) {

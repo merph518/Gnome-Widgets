@@ -41,7 +41,7 @@ This repository is private and for my own use.
 | `att-docs` | `retest-sir` | Retest a raised SIR against the application and report Retested or Failed Test |
 | `general` | `implement` | Take an issue to a reviewed pull request: claim it, work it in a worktree, test, open the PR, review it |
 | `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
-| `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, skipping any with an open blocker, one `implement` run at a time, and never merge |
+| `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, or the best next issue of one milestone ranked by dependents, priority and tracker order, skipping any with an open blocker or dependency, one `implement` run at a time, and never merge |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
@@ -58,6 +58,9 @@ plugins/<group>/
   shared/                         helpers and notes that more than one skill uses
 docs/<subject>/                   documents that have no place in the AZDO repository
 scripts/                          repository scripts, their tests, and the session guard
+scripts/consumer/                 the consumer sync, check, lock converter and wrapper
+                                  templates; they ship in every snapshot
+.gitattributes                    line-ending rules, vendored with every snapshot
 package.json                      dependencies the shared scripts import
 ```
 
@@ -66,6 +69,18 @@ refuses file edits and the git verbs checkout, switch, restore, stash, reset, me
 rebase and pull in the shared main checkout, so a session works in a worktree made with
 the EnterWorktree tool. Other commands, such as commit, are not blocked. A
 `git pull --ff-only` of main is allowed.
+
+Worktrees pile up under `.claude/worktrees/`. `scripts/worktree-cleanup.sh` lists each
+one with its branch, the state of its pull request, the count of uncommitted paths, and
+the count of commits that have not been pushed. A worktree is marked `remove` when its
+pull request merged, nothing in it is uncommitted, and every commit is at or below the
+head the pull request merged. Every other worktree is marked `keep` with the reason. That
+includes a worktree whose pull request state could not be read.
+
+`scripts/worktree-cleanup.sh --remove` asks about each worktree marked `remove`. It reads
+the answers from standard input, so an empty input removes nothing. After a yes it checks
+the worktree again. It then removes the worktree with `git worktree remove` without
+`--force`. It never removes the worktree it runs from, and it leaves the branch in place.
 
 `docs/` holds the documents about the harness on the repository side: the runners and
 their registration under `docs/runners/`, and the tester hand-off plan under
@@ -122,15 +137,20 @@ desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files
 
 ## How a repository uses it
 
-1. **Install by vendoring.** The whole repository is copied into the consuming
+1. **Install by vendoring.** The repository is copied into the consuming
    repository at `.claude/att-docs/`. Scripts are called by a path in the tree,
    which keeps CI jobs and `node` module resolution working, and no token or
-   submodule initialization is needed on a runner. A sync script does the copy: it
-   fetches a tag, removes the old copy, and reads the tag's tree under the prefix.
-2. **Pin by tag and tree.** `.claude/att-docs.lock` records the repository
-   (`merph518/Overmind`), the tag, the commit SHA, and the root tree SHA of the
-   snapshot. A check compares the tree of `.claude/att-docs` with the recorded one,
-   so a hand edit to a vendored file fails offline. Moving the pin is one pull
+   submodule initialization is needed on a runner. The sync script in
+   `scripts/consumer/` does the copy: it fetches a tag, removes the old copy, and
+   reads the tag's tree under the prefix. A repository that needs only part of it
+   lists the paths to keep; the copy then holds those paths plus `scripts/consumer`
+   and `.gitattributes`.
+2. **Pin by tag and tree.** `.claude/att-docs.lock` is a plain `key=value` file
+   that records the repository (`merph518/Overmind`), the tag, the commit SHA, and
+   the root tree SHA of the snapshot. A pruned copy also records `paths=` and
+   `copy_tree=`, the tree of what was copied. The check script compares the tree of
+   `.claude/att-docs` with the recorded one, so a hand edit, a stray file, or a
+   staged change to a vendored file fails offline. Moving the pin is one pull
    request that reruns the sync script.
 3. **Extend by a same-name skill.** `.claude/skills/<name>/SKILL.md` in the
    consuming repository has the skill's name and a description that carries that
@@ -142,6 +162,130 @@ desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files
 The repository name is read from the lock, so a move or rename of this repository
 changes one line there. A lock that still names an earlier location needs that line
 updated before its next sync.
+
+### Sync and check scripts
+
+`scripts/consumer/` holds the scripts and wrapper templates every consuming repository
+uses, so it ships in every vendored snapshot:
+
+- `overmind-sync.sh [<tag>]` vendors a tag and writes the lock. With no tag it
+  re-syncs the one in the lock, and it refuses when that tag now points at another
+  commit. It stages the copy and the lock but does not commit.
+- `overmind-check.sh [--remote]` fails when the vendored copy differs from the pinned tree, and
+  holds the lock to the pinned tag (below).
+- `overmind-lock-convert.sh` rewrites a JSON lock as `key=value`.
+- `wrapper-sync.sh.template` and `wrapper-check.sh.template` are the wrappers below.
+
+Nothing about a consuming repository is built into the scripts. Each value comes
+from the environment, then from the lock, then from the default:
+
+| Value | Environment | Lock key | Default |
+| --- | --- | --- | --- |
+| Repository | `ATT_DOCS_REPO` | `repo` | none; required on the first sync |
+| Upstream URL | `ATT_DOCS_URL` | `url` | `https://github.com/<repo>.git` |
+| Vendored folder | `ATT_DOCS_PREFIX` | `prefix` | `.claude/att-docs` |
+| Paths to keep | `ATT_DOCS_PATHS` | `paths` | the whole snapshot |
+| Lock file | `ATT_DOCS_LOCK` | none | `.claude/att-docs.lock` |
+
+A variable that is set but empty clears the lock's value for the URL and for the
+paths, so a wrapper that exports an empty `ATT_DOCS_URL` or `ATT_DOCS_PATHS` as a
+default drops what the lock holds. Export only the values the repository needs.
+
+A consuming repository keeps a thin wrapper in its own `scripts/` so people and
+automated jobs keep one stable command. Copy the templates and make them executable:
+
+```
+cp .claude/att-docs/scripts/consumer/wrapper-sync.sh.template scripts/overmind-sync.sh
+cp .claude/att-docs/scripts/consumer/wrapper-check.sh.template scripts/overmind-check.sh
+chmod +x scripts/overmind-sync.sh scripts/overmind-check.sh
+```
+
+The check wrapper runs `overmind-check.sh` from the base commit when the base has
+it, so a branch cannot weaken the check by editing the vendored script; when the base
+has no such script, it runs the vendored copy.
+With no `ATT_DOCS_BASE` and no `origin/main`, it runs the vendored copy and the base rules
+are skipped.
+A consuming repository that has its own `scripts/overmind-check_test.sh`, or any test
+that runs its own copy of the sync in a scratch repository, deletes that test and its CI
+step when it adopts the wrappers: the wrapper needs the vendored scripts, and the cases
+live in `scripts/consumer/overmind-consumer_test.sh`.
+The sync wrapper is a short `exec` of the vendored script at the default
+`.claude/att-docs`. A repository with another `prefix` edits both wrappers to
+point at its own folder. A setting the lock does not hold is exported in the
+wrapper before the `exec`. The sync replaces the vendored copy it lives in, so it
+keeps all of its work inside one function and exits right after it; bash has read
+the whole script before the copy is touched, and replacing itself while running is
+safe. A sync that fails before the new copy is ready, such as a path the tag lacks,
+leaves the existing vendored folder and the index as they were. A failure after the
+old copy is removed, up to the point the new copy is read in, restores the old copy
+from the last commit (or removes the partial copy on a first sync) and says so; if
+that fails, the sync prints the command to run. A failure while staging
+the lock leaves the new lock written but not staged; the sync says so and prints the
+`git add` to run, and the check fails until the lock is staged or the sync is rerun.
+An interrupt or termination signal during the swap restores the old copy the same way.
+A parent folder that is a symbolic link is refused. A sync refuses uncommitted or untracked
+files under the folder, but removes ignored files there along with the old copy.
+The folder is always read as a literal path, and a name that starts with `:` is
+refused. The scripts need LF line endings, so the repository's `.gitattributes`
+sets `eol=lf` for `*.sh`, `*.py`, `*.mjs`, `*.template` and the extensionless
+`speechctl`; a consumer that uses `core.autocrlf` gets those rules for the vendored
+folder from the snapshot's `.gitattributes`, which every sync vendors as
+`<prefix>/.gitattributes`, pruned copies included. The sync refuses a
+tag, URL, repository, or prefix that git or the filesystem could misread (an
+option, a refspec, `.git`, a folder that resolves outside the repository). A URL
+given in `ATT_DOCS_URL` is used for the fetch and never written to the lock; only a
+`url=` line already in the lock is kept.
+
+The check also holds the lock to the pinned tag. It compares the vendored folder
+with `copy_tree=` when the lock has one, else with `tree=`, and then compares the lock
+with the lock at the base commit: `repo=`, `url=` and `prefix=` must be unchanged, and the
+vendored tree cannot change unless `commit=` moves. When the lock and the vendored tree equal the
+base's, the check passes with no fetch. Otherwise it fetches `refs/tags/<tag>` at depth
+1 into a scratch repository and requires the tag's commit to equal `commit=` and the
+tag's root tree to equal `tree=`; a pruned lock is compared with its root `tree=` there,
+and its `copy_tree=` must equal the tree rebuilt from the tag and the lock's `paths=`
+(a `copy_tree=` with no `paths=` fails). A base lock in JSON form counts as
+no base lock, so a pull request that converts it passes the base rules. `--remote` is the same as
+`ATT_DOCS_REMOTE=require` and wins over the variable; any other argument exits 2. The
+wrapper passes its arguments through. These settings control the check:
+
+| Setting | Meaning |
+| --- | --- |
+| `ATT_DOCS_BASE` | The commit the lock is compared with. Default: the merge base of `HEAD` and `origin/main`. With no base at all, the base rules are skipped and the pin is proved against the tag; a CI checkout must fetch `origin/main` (full history, or enough to hold the merge base) for the base rules to apply. |
+| `ATT_DOCS_REMOTE` | `off` makes no fetch. `try` (default) warns and passes when the remote cannot be reached. `require` fails when it cannot. A tag the remote does not have fails in both. |
+| `ATT_DOCS_URL` | Where the tag is fetched from. Else `url=` in the lock, else `https://github.com/<repo>.git`; a set but empty value clears `url=`. |
+| `OVERMIND_READ_TOKEN` | A credential that reads the source repository. It reaches the fetch only through the environment, never the command line. |
+
+A mismatch between the tag and the lock fails in every mode that fetches.
+
+Moving `url=` or `prefix=` is a deliberate change: the check fails in the pull request
+that makes it, unless `ATT_DOCS_BASE` names a commit that already holds the new values.
+The check script that runs is the one at the base commit, so a change to the script
+itself takes effect one pull request later. The wrapper stops with an error when
+`ATT_DOCS_BASE` is set but is not a commit in the repository.
+
+A repository whose vendored copy does not hold `scripts/consumer` yet has no script
+to call, so it runs the script straight from the tag, from inside the consuming
+repository. These two commands work for a repository with no lock yet or a
+`key=value` lock; a repository with a JSON lock converts it first (below):
+
+```
+git fetch --no-tags https://github.com/merph518/Overmind.git refs/tags/<tag>
+git show FETCH_HEAD:scripts/consumer/overmind-sync.sh | ATT_DOCS_REPO=merph518/Overmind bash -s -- <tag>
+```
+
+Run the script from the tag being synced: it is the one that writes `copy_tree=`
+for a pruned lock and keeps `scripts/consumer` in the copy.
+
+A JSON lock is refused. Both the sync and the check name the
+converter; the sync does not read it. Convert it once, in place, with
+`.claude/att-docs/scripts/consumer/overmind-lock-convert.sh`, or without a vendored
+copy by piping `scripts/consumer/overmind-lock-convert.sh` from the fetched tag into
+`bash -s`. The converter checks the SHAs and leaves a `key=value` lock alone, so
+rerunning it is safe. The sync then works from the converted lock.
+
+The cases for the three scripts are in `scripts/consumer/overmind-consumer_test.sh`.
+They run against a local repository in place of the network.
 
 A machine installs all three plugins at user scope, so every session on it has the
 skills, including a session in this repository. The marketplace is pinned to a release
@@ -168,6 +312,21 @@ claude plugin install voice@att-docs --scope user
 
 Adding the marketplace again without removing it keeps the old tag, and
 `claude plugin marketplace update` stays on the tag it was added with.
+
+A plugin stays at the version it was installed or last updated at. A release does not reach a
+machine until someone runs the commands above, so the `voice` plugin's `SessionStart` hook,
+`hooks/plugin_version_check.py`, checks for one when a session starts. It compares the
+version each `att-docs` plugin is installed at for the session's project with the newest
+version in the marketplace clone's `plugin.json` files. It also compares it with the newest
+`v*` release tag on the clone's origin. The tag lookup runs at most every six hours, never
+prompts for a credential, and gives up after three seconds.
+
+A plugin that is behind gets a message to the user and to the session. The message holds the
+commands for a pinned or an unpinned marketplace, in the scope the plugin is installed in. A
+new session after the update lists the new skills. A plugin that the project turns off in
+`enabledPlugins`, a version that cannot be read and a lookup that fails produce no message.
+The hook exists only in a `voice` plugin that already holds it, so the first update to a
+release with the hook is by hand.
 
 A repository that vendors this one should turn the `att-docs` and `general` plugins off
 in its own `.claude/settings.json`, so their skills don't load a second time, possibly at a
@@ -209,13 +368,16 @@ installed and kept current with `claude plugin update voice@att-docs` after a ve
 packaged Baton is updated with apt), but the skill loads from the plugin install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
 `.claude/att-docs/` is not loaded as a skill.
 
-The `general` plugin also registers four repo hooks: a gate that refuses a pull request
+The `general` plugin also registers five repo hooks: a gate that refuses a pull request
 body whose Testing section a repository's checker cannot parse, a reminder to record a
-new pull request in the catch-up ledger and keep a merge watch running, the unit test
-that belongs to an edited file, and Prettier on an edited file. They read their values
-from `.claude/skills/repo-hooks/extension.json`, one section per hook, and a repository
-without that file gets no hook. A repository that vendors this one registers
-`plugins/general/hooks/run.sh` in its own settings. See the `repo-hooks` skill.
+new pull request in the catch-up ledger and keep a merge watch running, a gate that
+refuses a commit holding build artifacts or junk and `git add -A` or `git add .`, the
+unit test that belongs to an edited file, and Prettier on an edited file. Four of them
+read their values from `.claude/skills/repo-hooks/extension.json`, one section per hook,
+and a repository without that file gets none of the four. The stray-file gate runs in every
+repository and reads that file only to add patterns or turn itself off. A repository that
+vendors this one registers `plugins/general/hooks/run.sh` in its own settings. See the
+`repo-hooks` skill.
 
 Baton, the voice bridge server, is in `merph518/Code-Conductor` under `baton/`. The extension
 file at `.claude/skills/voice-bridge-hooks/extension.json` also names Baton's repository

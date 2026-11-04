@@ -17,7 +17,7 @@ trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$SANDBOX"' EXIT
 
 export HOME="$SANDBOX/home"
 mkdir -p "$SANDBOX/bin" "$HOME/.local/bin" "$HOME/.local/share/piper" "$HOME/.claude/projects/p"
-printf '%s\n' '#!/bin/sh' 'echo "$*" >> "${PIPER_ARGS:-/dev/null}"' \
+printf '%s\n' '#!/bin/sh' 'echo "$*" >> "${PIPER_ARGS:-/dev/null}"' 'sleep "${PIPER_WAIT:-0}"' \
   'while [ $# -gt 0 ] && [ "$1" != -f ]; do shift; done' 'cat > "$2"' \
   > "$HOME/.local/bin/piper"
 printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$ARGS"' 'for a in "$@"; do last=$a; done' \
@@ -26,6 +26,16 @@ printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$ARGS"' 'for a in "$@"; do last=$a; d
 printf '%s\n' '#!/bin/sh' '[ "$1" = -O ] && exit 0' '[ "$1" = -C ] && exit 0' \
   'for a in "$@"; do last=$a; done' 'echo "spd: $last" >> "$SPOKEN"' > "$SANDBOX/bin/spd-say"
 chmod +x "$HOME/.local/bin/piper" "$SANDBOX/bin/pw-play" "$SANDBOX/bin/spd-say"
+# pw-dump lists two PipeWire clients and their stream nodes: client 85 belongs to the process
+# in now.json's player_pid, client 86 to an unrelated one. pw-cli records what it is asked.
+printf '%s\n' '#!/bin/sh' \
+  'pid=$(jq -r ".player_pid // 0" "$XDG_RUNTIME_DIR/speak-attention/now.json" 2>/dev/null)' \
+  'jq -n --argjson pid "${pid:-0}" '"'"'[{id:85,type:"PipeWire:Interface:Client",info:{props:{"application.process.id":$pid}}},{id:86,type:"PipeWire:Interface:Client",info:{props:{"application.process.id":1}}},{id:90,type:"PipeWire:Interface:Node",info:{props:{"client.id":85,"media.class":"Stream/Output/Audio"}}},{id:91,type:"PipeWire:Interface:Node",info:{props:{"client.id":86,"media.class":"Stream/Output/Audio"}}},{id:92,type:"PipeWire:Interface:Node",info:{props:{"client.id":85,"media.class":"Audio/Sink"}}}]'"'" \
+  > "$SANDBOX/bin/pw-dump"
+printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$PWCLI"' > "$SANDBOX/bin/pw-cli"
+chmod +x "$SANDBOX/bin/pw-dump" "$SANDBOX/bin/pw-cli"
+# a process whose name is spd-say, to stand in for a Speech Dispatcher clip's player
+mkdir "$SANDBOX/spd" && cp "$(command -v sleep)" "$SANDBOX/spd/spd-say"
 export PATH="$SANDBOX/bin:$PATH"
 : > "$HOME/.local/share/piper/en_US-amy-medium.onnx"
 : > "$HOME/.local/share/piper/en_US-ryan-high.onnx"
@@ -131,6 +141,40 @@ check "$("$CTL" volume up)" 0.6 "volume up steps by a tenth"
 "$CTL" volume 3 2>/dev/null; check "$?" 2 "a volume out of range is refused"
 "$CTL" volume loud 2>/dev/null; check "$?" 2 "a volume that is no number is refused"
 check "$(jq -r .volume "$D/settings.json")" 0.6 "volume is saved in settings.json"
+
+# --- a volume change reaches the clip already playing
+export PWCLI="$SANDBOX/pwcli"
+fresh; : > "$PWCLI"; queue "one"; PLAY=3 hook
+until_ 5 playing; "$CTL" volume 0.5 > /dev/null
+check "$(cat "$PWCLI")" "set-param 90 Props { volume: 0.5 }" \
+  "volume sets the playing Piper clip's stream and no other"
+"$CTL" volume up > /dev/null
+check "$(tail -n 1 "$PWCLI")" "set-param 90 Props { volume: 0.6 }" "volume up reaches it too"
+check "$(jq -r .volume "$D/settings.json")" 0.6 "the level is saved as well"
+"$CTL" clear; until_ 10 gone $HOOK
+
+fresh; : > "$PWCLI"; "$CTL" volume 0.5 > /dev/null
+check "$(cat "$PWCLI")" "" "volume with nothing playing touches no stream"
+check "$(jq -r .volume "$D/settings.json")" 0.5 "and still saves the level"
+
+fresh; : > "$PWCLI"; queue "one"; PIPER_WAIT=2 PLAY=0.2 hook
+until_ 5 test -e "$D/now.json"
+check "$(jq -r '.player_pid' "$D/now.json")" null "the clip is still rendering"
+"$CTL" volume 0.5 > /dev/null
+check "$(cat "$PWCLI")" "" "a clip that is still rendering has no stream to set"
+until_ 10 gone $HOOK
+check "$(grep -c -- '--volume 0.5' "$ARGS")" 1 "a volume set during the render is the level the clip plays at"
+
+fresh; : > "$PWCLI"
+"$SANDBOX/spd/spd-say" 30 & SPD=$!
+jq -cn --argjson h $$ --argjson p $SPD '{session:"s1",name:"demo",text:"x",markdown:"x",started:0,clip:"1",
+  hook_pid:$h, player_pid:$p, engine:"spd-say"}' > "$D/now.json"
+"$CTL" volume 0.5 > /dev/null
+check "$(cat "$PWCLI")" "" "a Speech Dispatcher clip keeps its own level"
+check "$(jq -r .volume "$D/settings.json")" 0.5 "and the level is saved"
+kill $SPD
+
+# --- settings, continued
 check "$(env -u SPEAK_PIPER_LENGTH "$CTL" pace up)" 0.9 "pace up steps from the 0.85 default by a twentieth"
 check "$("$CTL" pace 1.0)" 1.0 "pace takes a number"
 check "$("$CTL" pace down)" 0.95 "pace down steps by a twentieth"

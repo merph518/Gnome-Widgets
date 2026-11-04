@@ -1,11 +1,12 @@
 ---
 name: oversee-development
 description: >-
-  Work the issues labeled `ready-for-agent` oldest first, one issue at a time per session,
-  unattended, opening one review-ready pull request per issue and never merging anything.
-  Use when asked to run through the backlog, work issues while the user is away, or keep
-  implementing issues on a loop - "/oversee-development", "work the backlog", "keep going
-  through the issues".
+  Work the issues labeled `ready-for-agent` oldest first, or the best next issue of one
+  milestone, one issue at a time per session, unattended, opening one review-ready pull
+  request per issue and never merging anything. Use when asked to run through the backlog
+  or a milestone, work issues while the user is away, or keep implementing issues on a
+  loop - "/oversee-development", "/oversee-development milestone <title>", "work the
+  backlog", "keep going through the issues".
 ---
 
 # Oversee Development
@@ -20,7 +21,12 @@ Arguments, all optional:
 - `/oversee-development` runs until the queue is empty or a stop condition hits
 - `/oversee-development 5` runs the next five issues, then reports and stops
 - `/oversee-development voice` narrows the queue to issues that carry that label as well as
-  `ready-for-agent`
+  `ready-for-agent`; the conductor runs `OVERSEE_FORCE=1 oversee.sh init voice` before
+  step 1
+- `/oversee-development milestone "<title>"` works one milestone: the conductor runs
+  `OVERSEE_FORCE=1 oversee.sh init --milestone "<title>"` before step 1 and the script
+  serves the best next issue in it, ranked as step 2 says. It combines with a label and a
+  count, and `resume` keeps the milestone.
 - `/oversee-development resume` re-reads the ledger and continues, queue as-is
 
 `oversee.sh` below is the script in this skill's folder, the base directory the Skill tool
@@ -47,8 +53,8 @@ transcript is not. A session that is compacted, interrupted, or killed resumes f
 files with nothing else.
 
 ```bash
-oversee.sh init [label]            # build the queue, once
-oversee.sh refresh [label]         # rebuild it from the live backlog
+oversee.sh init [--milestone <title>] [label]     # build the queue, once
+oversee.sh refresh [--milestone <title>] [label]  # rebuild it from the live backlog
 oversee.sh next                    # refresh, then what to work or why nothing is
 oversee.sh start <issue> <branch>
 oversee.sh adopt <issue>           # claim an orphaned in-flight issue
@@ -57,6 +63,12 @@ oversee.sh finish <issue> <done|stalled|skipped> <pr|-> <note>
 oversee.sh swap <issue> <from> <to>  # move a label, read back
 oversee.sh status                  # counts and the tail of the ledger
 ```
+
+The label and the milestone a queue was built for are saved with it. `next` refreshes
+the queue with a bare `refresh`, which keeps both, and a `refresh` given only one of them
+keeps the other. A forced `init` sets the whole scope: a label or milestone it is not
+given comes out empty, so a run that names a scope starts with it. It rewrites the queue,
+the filter, and the open list, and leaves the ledger alone.
 
 `start` tags its ledger row with the session's id and process id, from
 `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`. That tag is how several conductor sessions share
@@ -69,28 +81,49 @@ A title with no such prefix has no area and is never deferred.
 
 `next` prints one of these:
 
-- `NEXT <issue> <area> <title>` work it
+- `NEXT <issue> <area> <title>` work it; in a milestone run the line ends with
+  `pick: <reason>`, why this issue ranks first
 - `INFLIGHT <issue> ... branch <name> mine` this session's unfinished issue, resume it
   before anything else
 - `INFLIGHT <issue> ... branch <name> orphan` an unfinished issue whose session has exited,
-  adopt and resume it
+  adopt and resume it; a milestone run adopts an orphan only while the run would serve it,
+  and a session still resumes its own `mine` issue wherever it sits
 - `ELSEWHERE <issue> ... branch <name>` in flight in another live session, printed for the
-  record; its area is held until it finishes
+  record; its area is held until it finishes. A milestone run prints an orphan it does not
+  adopt the same way, and its area stays held while the branch is open
 - `DEFER <issue> ... area held by <PR or issue>` skipped this pass, printed for the record
 - `DEFER <issue> ... blocked by #<n>` skipped this pass because an open issue blocks it,
   printed for the record; it is served once the blockers close
+- `DEFER <issue> ... waits on #<n>` skipped this pass because its body names an open issue
+  it depends on, with `(pull request <pr> open)` when that issue is done and its pull
+  request is not merged yet; milestone runs only
 - `BLOCKED` everything left is deferred behind an unmerged pull request, an issue in flight
-  elsewhere, or an open blocker
+  elsewhere, an open blocker, or an open dependency
 - `EMPTY` queue exhausted
 
 ## 1. Resume before anything else
 
 Always start here, on every invocation, including the first.
 
+A run given a label or a milestone sets the whole scope first, before `status` and `next`,
+because `next` rebuilds the queue from the scope saved with it. A part the call does not
+name comes out empty, so no scope from an earlier run carries over:
+
+```bash
+OVERSEE_FORCE=1 oversee.sh init --milestone "<title>" [label]   # or: init voice
+```
+
+A bare run, a count-only run, and a `resume` run skip this call.
+
 ```bash
 oversee.sh status
 oversee.sh next
 ```
+
+`status` prints a `scope:` line when the run is scoped, `scope: milestone "<title>"` or
+`scope: label <label>`, and the label follows the milestone when both are set.
+An empty queue under that line means the milestone has no open ready issue, so run `next`
+and let it end the run. Never run a bare `init` on a resume: it would drop the milestone.
 
 `INFLIGHT` means a previous session never recorded the issue as finished. For a `mine` row,
 first check with `ListAgents` whether a subagent of this session is still working the issue.
@@ -112,11 +145,13 @@ git ls-remote origin "refs/heads/<branch>"
 
 ## 2. Build the queue
 
-When `status` reports zero queued entries:
+When `status` reports zero queued entries and the run was given no label or milestone:
 
 ```bash
-oversee.sh init          # or: oversee.sh init voice
+oversee.sh init
 ```
+
+A run given a label or milestone has built its queue with `init` in step 1 already.
 
 `next` rebuilds the queue from the live backlog on every call, through `refresh`, so an
 issue filed since the last call is in the queue it serves from. When the backlog read fails,
@@ -126,9 +161,10 @@ request still holds its area though `In Progress` would drop it.
 
 A `skipped` issue is served again once the reason it was skipped is gone:
 
-- a note starting `not workable at start:` names a label, a blocker, or a closed state, so
-  the issue comes back once the live backlog lists it without an excluded label; it is then
-  served only if it carries `ready-for-agent` and has no open blocker, like any other issue
+- a note starting `not workable at start:` names a label, a blocker, a closed state, or a
+  milestone, so the issue comes back once the live backlog lists it without an excluded
+  label; it is then served only if it carries `ready-for-agent`, has no open blocker, and,
+  in a milestone run, is in the milestone, like any other issue
 - any other note comes back once every issue or pull request number it names is closed
 - a note that names no other issue or pull request stays skipped, since nothing `next` can
   read says the reason is gone
@@ -137,23 +173,78 @@ A `skipped` issue is served again once the reason it was skipped is gone:
 `done` and `stalled` rows and in-flight rows are never served again. When `next` prints
 `BLOCKED` or `EMPTY`, that is the stop in step 5.
 
-This reads issue numbers, titles, labels, and blockers. Nothing else. An issue's body is
-read by `/implement` when that issue comes up, never all of them at once.
+Outside a milestone run this reads issue numbers, titles, labels, and blockers. Nothing
+else. An issue's body is read by `/implement` when that issue comes up, never all of them
+at once.
 
 The queue holds only cleared issues, the ones labeled `ready-for-agent`.
 `/oversee-development <label>` also requires that label, so an issue needs both. It drops
 issues labeled `In Progress`, `Blocked`, `Tracker`, `Already Done`, `DO NOT MERGE`,
 `question`, `wontfix`, `duplicate`, `needs-triage`, `needs-info`, `ready-for-human`, and
-`invalid`, even when they also carry `ready-for-agent`, and orders what is left oldest
-issue first, by issue number. An issue that is not cleared is never served, so a backlog
-nobody has labeled ends the run at `EMPTY`.
+`invalid`, even when they also carry `ready-for-agent`, and outside a milestone run orders
+what is left oldest issue first, by issue number. An issue that is not cleared is never
+served, so a backlog nobody has labeled ends the run at `EMPTY`.
 
 An issue with an open blocker is not served. A blocker is another issue that GitHub's issue
-dependencies list as blocking it, and it counts until that issue is closed. A `Blocked by:`
-line in an issue body is not read. `next` prints a `DEFER` line naming the blockers and
-serves the issue once they have all closed. The `Blocked` label is separate: it marks an
-issue waiting on something it cannot get for itself, such as another issue or pull request,
-a person, or a service. A person or the `implement` skill removes it.
+dependencies list as blocking it, and it counts until that issue is closed. Outside a
+milestone run, a `Blocked by:` line in an issue body is not read. `next` prints a `DEFER`
+line naming the blockers and serves the issue once they have all closed. The `Blocked`
+label is separate: it marks an issue waiting on something it cannot get for itself, such
+as another issue or pull request, a person, or a service. A person or the `implement`
+skill removes it.
+
+### A milestone run
+
+`oversee.sh init --milestone "<title>"` keeps the issues whose milestone title is exactly
+`<title>`, on top of the `ready-for-agent` gate and the excluded labels. In this mode the
+script reads every open issue's body, parses it, and writes the queue already sorted, so
+the conductor never sees a body. Each `NEXT` line ends with the reason the issue ranks
+first.
+
+Issues rank by, in order:
+
+1. How many open issues in the milestone depend on it, directly or through others, by a
+   dependency in their body or an open native blocker on GitHub. A dependency is always
+   ahead of what waits on it.
+2. Stated priority: `critical` or `P0`, `high` or `P1`, `medium` or `P2`, `low` or `P3`.
+   An issue with no priority statement ranks as `medium`.
+3. Its position in the milestone's tracker, when there is one.
+4. Issue number, lowest first.
+
+The script reads these lines in an issue's body, in any case, and skips fenced code blocks:
+
+- A dependency: the phrase `Depends on` or `Blocked by`, anywhere in a line, with an
+  optional colon or bold, followed by a leading run of references: `#<n>`, then more joined
+  to it by commas, `and`, or `&`. Only that run counts, so `Depends on #5 but see #12`
+  waits on 5 alone.
+- A dependency under a heading named `Depends on` or `Blocked by`: a line that starts, after
+  an optional list marker or checkbox, with `#<n>`. More references joined to it by commas,
+  `and`, or `&` count. Other prose in the section does not.
+- A priority: a line `Priority: <word>`, or the first line under a `Priority` heading. The
+  first statement wins, and an unknown word is ignored.
+
+A reference written `owner/repo#<n>` is skipped even when it names this repository. A
+reference to the issue itself, to a closed issue, or to a `Tracker` issue is not a
+dependency either. Dependencies are read only from the forms above: other wordings such as
+`requires #<n>` or `after #<n>`, and a reference in other prose, are not read. An open
+dependency outside the milestone still holds the dependent.
+
+A tracker is an open `Tracker` issue in the milestone. The `#<n>` that opens a task item
+(`- [ ] #<n>`, `- [x] #<n>`) or a numbered item (`1. #<n>`) in its body gives an order, and
+several trackers are read in tracker-number order. That order ranks and never holds an
+issue back.
+
+A dependent waits until its dependency issue closes, which happens when the user merges the
+pull request. While that pull request is open, `next` prints `DEFER` with `waits on` and
+serves another issue, so a chain of dependent issues ends at `BLOCKED` until the user
+merges.
+
+An issue the ledger names stays in the queue when it leaves the milestone, so work in
+flight is never dropped, and it is never served again. When `init` or `next` prints
+`no open issue in milestone "<title>"` on stderr, the title is misspelled or the milestone
+is done. Titles match whole and are case sensitive.
+`gh api repos/{owner}/{repo}/milestones --jq '.[].title'` lists them. A finished milestone
+ends as `EMPTY`.
 
 ## 3. The loop, one issue at a time per session
 
@@ -168,10 +259,11 @@ For each `NEXT`:
 oversee.sh start <issue> <type>/issue-<issue>-<short-description>
 ```
 
-`start` reads the issue's state, labels, and blockers again, since the queue is a snapshot.
-When the issue has closed, picked up an excluded label, lost `ready-for-agent`, or gained an
-open blocker since, it records the issue as `skipped` and exits non-zero: run `next` again
-rather than starting the issue. It also exits non-zero,
+`start` reads the issue's state, labels, blockers, and in a milestone run its milestone
+again, since the queue is a snapshot, and it writes the pick reason into the ledger row
+itself. When the issue has closed, picked up an excluded label, lost `ready-for-agent`,
+left the milestone, or gained an open blocker since, it records the issue as `skipped` and
+exits non-zero: run `next` again rather than starting the issue. It also exits non-zero,
 writing nothing, when another live session already started the issue: two sessions can read
 the same `NEXT`, and the ledger lock lets only the first `start` through. Run `next` again
 then too.
@@ -284,8 +376,9 @@ Stop the loop, write the final report, and stop starting issues when any of thes
 - `gh` stops authenticating
 
 `BLOCKED` is not an error. It means every remaining issue is in an area an unmerged pull
-request from this run already changed, is in flight in another session, or waits on an open
-blocker. The next move belongs to the user: review and merge, close the blocker, or both,
+request from this run already changed, is in flight in another session, waits on an open
+blocker, or waits on an open dependency named in its body. The next move belongs to the
+user: review and merge, close the blocker or dependency, or both,
 then run `/oversee-development resume`.
 
 `EMPTY` with open issues left usually means none carries `ready-for-agent`. Label the ones
@@ -307,8 +400,9 @@ session ending.
 
 ## Token discipline
 
-**The queue reads titles, never bodies.** An issue's body is read when that issue comes up
-and not before.
+**The queue reads titles, never bodies, outside a milestone run.** An issue's body is read
+when that issue comes up and not before. In a milestone run only the script reads the
+bodies, and it prints issue numbers and fixed words, never a body.
 
 **Record an issue in the ledger before running `next`**, so a compaction between issues
 loses nothing the next one needs.

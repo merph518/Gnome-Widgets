@@ -644,6 +644,47 @@ the model and exits at once, leaving the row `running` for the next run to
 settle. The process cannot act on the signal while it waits on a builder
 command, so a builder that runs past the three minutes ends the same way.
 
+### Rerunning part of a job
+
+After each phase passes, the job keeps the state it passed with in
+`work/checkpoints/<phase>.json`, beside `work/checkpoint.json`, which holds the
+latest. A job whose folder has no `checkpoints` folder cannot be sliced past
+intake. To try a change to one phase against a real job's state, run a slice of
+that job in a sandbox:
+
+```bash
+<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> [--until <phase>] [--as <label>] [--pause]
+```
+
+- The sandbox is a copy of the job's folder named `<job-id>~<label>`; the label
+  defaults to the time, `YYYYMMDDTHHMMSS`. The job's folder, its queue row and
+  its workbook are only read. The copy holds the job's logs and `work` folder,
+  without the pack file, the workbook or the snapshots from `--from` on.
+- The slice loads the snapshot of the phase before `--from`, runs `--from`
+  through `--until` (`--from` alone by default) with the current code and
+  config, and stops. It writes no pack and no workbook, and it does not unload
+  the model, so a slice run again meets a loaded model. `--from intake` needs no
+  snapshot and starts over in the sandbox. The job's documents come from the
+  snapshot, and its other options from its queue row. A job started by hand has
+  no row, so only its issue, change or suite, taken from its ID, reach a slice
+  from intake or Phase 2; `--doc`, `--description-file` and `--allow-derived-rules`
+  do not.
+- It holds the queue while it runs, so the nightly run waits for it and a run
+  already holding the queue makes the command exit 1. It stops no unit unless
+  `--pause` is given.
+- The sandbox's snapshots are its own, so a slice of the sandbox, `--job
+  <job-id>~<label>`, carries on from where the first slice ended.
+- When the slice passes, the command prints `sandbox <id>` and how the sandbox's
+  pack at `--until` differs from the job's snapshot of the same phase, as
+  counts: cards in each and how many were added or removed, the coverage
+  statuses that changed, the confidence level, and the open revalidation
+  items. The card IDs and the open items go to the sandbox's `detail.log`.
+- `queue status --job <job-id>~<label>` reads the sandbox's log like a job's.
+
+Exit codes: 0 the slice passed, 1 it stopped or the queue is running, 2 bad
+arguments, a job with no folder, no snapshot for the phase before `--from` (the
+message names the snapshot), or a setup error such as an unreadable config.
+
 ### Closing desktop apps before a run
 
 `pause` takes one scope, and desktop apps run as transient `app-*.scope` user

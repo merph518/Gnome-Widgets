@@ -8,6 +8,11 @@
             "type": "command",
             "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" prTestingGate pr_testing_gate.py",
             "timeout": 90
+          },
+          {
+            "type": "command",
+            "command": "exec \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" --default-on strayFiles stray_files_gate.py",
+            "timeout": 30
           }
         ]
       }
