@@ -56,8 +56,8 @@ reply text: the user does not see it there.**
 | `<ownership-unit>` | The folder the issue names: `plugins/<group>/skills/<name>/`, `plugins/<group>/hooks/`, or a root file |
 | `<ownership-rules>` | Under Overrides, Section 3 |
 | `<main-checkout>` | `~/Code/Overmind`, read-only |
-| `<worktree-script>` | The `EnterWorktree` tool, under Overrides, Section 3 |
-| `<edit-guard>` | The harness worktree guard, under Overrides, Section 3 |
+| `<worktree-script>` | `EnterWorktree` when available; otherwise the Git fallback under Overrides, Section 3 |
+| `<edit-guard>` | The harness worktree guard when available; isolation is required without it, under Overrides, Section 3 |
 | `<dependency-setup>` | `package.json` needs only `dotenv`. There is no lockfile, so run `npm install` in the worktree when a test imports it. `node_modules` is gitignored |
 | `<shell-text-note>` | Under Overrides, Section 3 |
 | `<branch-types>` | `feat`, `fix`, `chore`, `docs`, `ci` |
@@ -156,13 +156,29 @@ a comment on the issue when the harness allows one. In a loop over issues, read 
 remove the label and take the issue up. `Blocked` here also covers an issue waiting on
 another issue or pull request in this repository.
 
-Cut the branch with the `EnterWorktree` tool, which creates `.claude/worktrees/<name>`
-from `origin/main`, then rename it: `git branch -m <type>/issue-<N>-<slug>`.
+When `EnterWorktree` is available, fetch `origin/main`, then use the tool to create
+`.claude/worktrees/<name>` from `origin/main`. Rename the branch in the worktree:
+`git branch -m <type>/issue-<N>-<slug>`.
 
-The harness worktree guard blocks a write outside the worktree. It also refuses
-`git -C`, `cd` into the main checkout, and complex shell constructs. Keep shell commands
-simple, use absolute worktree paths, and put scripts and long text (commit messages,
-pull request bodies) in files in the session's scratchpad directory.
+When `EnterWorktree` is unavailable, after the label read-back and ownership checks,
+run these commands from the main checkout:
+
+```bash
+git fetch origin main
+git worktree add -b <type>/issue-<N>-<slug> ~/Code/Overmind/.claude/worktrees/<name> origin/main
+```
+
+Run the second command only if the fetch succeeds. Use a new worktree name and branch;
+if creation fails, stop rather than reuse either. For a change without an issue, use
+`<type>/<slug>` as the branch name.
+Run the base verification in the general skill's step 3, Cut the branch, before editing.
+All subsequent file operations and commands target that worktree; the main checkout's
+files and checked-out branch stay untouched.
+
+The harness worktree guard, when available, blocks a write outside the worktree. It also
+refuses `git -C`, `cd` into the main checkout, and complex shell constructs. Keep shell
+commands simple, use absolute worktree paths, and put scripts and long text (commit
+messages, pull request bodies) in files in the session's scratchpad directory.
 
 ### Section 5, static checks
 

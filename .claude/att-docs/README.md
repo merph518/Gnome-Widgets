@@ -60,6 +60,7 @@ docs/<subject>/                   documents that have no place in the AZDO repos
 scripts/                          repository scripts, their tests, and the session guard
 scripts/consumer/                 the consumer sync, check, lock converter and wrapper
                                   templates; they ship in every snapshot
+scripts/pin/                      opens the pin-move pull requests in the consumers
 .gitattributes                    line-ending rules, vendored with every snapshot
 package.json                      dependencies the shared scripts import
 ```
@@ -506,6 +507,70 @@ into the three `plugin.json` files, so every plugin carries the repository's ver
 
 The workflow's token comes from the automation GitHub App, described under
 [Automation GitHub App](#automation-github-app).
+
+## Pin pull requests
+
+A pin only moves when a consumer merges a pull request, so a consumer stays on its tag
+until someone decides otherwise. The pull requests are opened for you.
+
+When release-please tags a release, the release workflow calls
+`.github/workflows/pin-consumers.yml` with that tag. It opens one pull request in each
+repository listed in `.github/consumers.json`. Each consumer is its own job with its own
+token, so one failing does not stop the others, and the run fails if any job did. The run
+summary has one line per consumer.
+
+For each consumer, `scripts/pin/overmind-pin.sh`:
+
+1. Clones the default branch and reads the pinned tag from the lock. A consumer already on
+   the tag, or on a newer one, is left alone.
+2. Runs `overmind-sync.sh` and `overmind-check.sh` from `main` in this repository, which
+   also serves the tag, so a rerun for an old tag uses today's scripts. No consumer
+   wrapper runs, so a consumer needs no copy of the scripts. A sync or check that fails
+   stops that consumer before anything is pushed, and its output is kept: it is in the
+   job log, and the run summary line for that consumer ends with it.
+3. Reads `CHANGELOG.md` at the tag and writes the pull request body. A changelog that
+   cannot be read, or that has no section for the tag, fails that consumer; the body
+   never says there are no entries because the file was missing.
+4. Commits the move to the branch `overmind/pin-vX.Y.Z` as
+   `chore: Move the Overmind pin to vX.Y.Z`, with the author and committer
+   `overmind-automation[bot]` whatever identity the runner has configured, and pushes it.
+   The push is never forced. The branch is looked up by its exact name, so a branch that
+   only ends in it is not mistaken for it. If the branch exists already, the move goes on
+   top of whatever it holds, so commits a person added are kept, and a rerun that finds
+   nothing to change pushes nothing.
+5. Opens a pull request with the same title unless one is already open for the branch. A
+   rerun never opens a second one and never edits an open one.
+
+The body is read outside this repository, by people who cannot see its tracker, its
+builds or its assistants, so it names both versions, lists the entries after the pinned
+tag, and, when the minor version moved, says the extension contract changed. It links
+nothing, including the release. Trailing issue and commit references are removed from the
+entries. An entry that still names the tracker, a build, an assistant, a link, or this
+repository is left out whole, and the body says how many entries were left out, so the
+list does not pass for complete. The test is a list of words in `scripts/pin/pin_notes.py`
+and leans toward leaving an entry out; the full text is in the changelog.
+
+Nothing merges these pull requests, and nothing closes the ones for older tags. When a
+consumer is several releases behind, its open pull requests show it; merge the newest and
+close the rest by hand.
+
+To repeat a missed or failed run, run the workflow from `main`; it reads the consumer list
+from `main`, not from the tag. The tag must be `vMAJOR.MINOR.PATCH`, and the consumer, if
+given, must be listed in `.github/consumers.json`:
+
+```bash
+gh workflow run pin-consumers.yml -f tag=v0.32.0
+gh workflow run pin-consumers.yml -f tag=v0.32.0 -f consumer=Gnome-Widgets
+```
+
+The jobs read this private repository with the workflow's own token. The App token for
+each job is narrowed to that one consumer, with Contents and Pull requests write, and
+starts the consumer's checks (see [Automation GitHub App](#automation-github-app)).
+
+To add a consumer, list it in `.github/consumers.json` once its lock file is in the
+standard `key=value` format. `AI-Health-Coach` is not listed until its lock is migrated.
+
+The cases are in `scripts/pin/overmind-pin_test.sh` and `scripts/pin/pin_notes_test.py`.
 
 ## Automation GitHub App
 

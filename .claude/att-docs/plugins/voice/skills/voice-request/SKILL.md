@@ -161,6 +161,11 @@ as usual, with the structure Markdown gives. Two habits help the listener: do
 not announce a tool call before making it, and give clock times in US Eastern,
 12-hour, with AM or PM, such as "3:30 PM".
 
+A long block is not read out: the hooks read its opening sentence and leave the rest on
+screen, and a ready line is read as "Pull request N is ready for review." Put what the
+listener must hear in the first sentence of a long block, and keep a block that should be
+heard whole under about 600 characters.
+
 ## Driving Baton
 
 These apply to a Claude Code session that calls Baton's tools. The
@@ -180,6 +185,16 @@ skill, so these rules reach it only through Baton's own tool text.
   Never claim to have said a reply that was not said.
 - When starting a session with `start_session`, pick a name and go. Do not ask
   for approval of the name; it can be renamed later.
+- Name every session for its work, in a few plain words, such as `Voice bridge
+  repo aliases`, from the issue's title or the user's request. The issue or pull
+  request number may follow as a suffix, never stand alone: `Issue 57`, `PR 12`
+  and a branch name like `work/session-naming` say nothing about the work. When
+  all that is known is a number, read the issue or pull request first and name
+  the session from its title. The same holds for the name given to a session
+  that is started or handed a task.
+- When a session's work changes from what its name says, rename the session for
+  the new work: another session with `rename_session`, the session itself with
+  `session_title.py work`.
 - When changing a session's follow mode, confirm the change in a few words. Do
   not explain what the mode does; the user chose it knowing that.
 - The tracker tools (those that take `repo`) default to the repository holding

@@ -207,14 +207,14 @@ happens there: never run `git checkout`/`switch` there, commit, or edit a file
 in it. A fast-forward pull on `<default-branch>` (`git pull --ff-only`) keeps it
 current and is fine.
 
-```bash
-<worktree-script> <type>/issue-<N>-<slug>
-```
-
-Then enter the printed path with the `EnterWorktree` tool and make every edit
-there. A `cd` in Bash does not move the session. The `<edit-guard>` judges an
-edit by where the write lands, so a write to a file in the main checkout is
-blocked from any session, and the same file in the worktree goes through.
+Create and enter the worktree using `<worktree-script>` after the claim and
+ownership checks. When it names a command, run it with
+`<type>/issue-<N>-<slug>` and use the path it prints. When it names a tool,
+follow the repository's instructions for that tool or its fallback. Use
+absolute worktree paths for file operations and set the worktree directory
+for every command. A `cd` in Bash does not move the session. The
+`<edit-guard>`, when available, enforces where writes land; isolation is
+required without it too.
 
 When the worktree lacks dependencies the checks need, set them up once, before
 the first check, per `<dependency-setup>`.
@@ -241,16 +241,16 @@ Two failure modes the guard does not catch:
   Treat "clean, but the symbols I just added do not exist here" as proof of a
   reset cwd.
 
-`<type>` matches existing history: `<branch-types>`. The script fetches origin
-and branches from `origin/<default-branch>`, so the base is current.
-
-Verify the base is clean:
+`<type>` matches existing history: `<branch-types>`. The worktree starts at the
+freshly fetched `origin/<default-branch>`. Before editing, run in the worktree:
 
 ```bash
-git log --oneline origin/<default-branch>..HEAD
+git rev-parse HEAD origin/<default-branch>
 ```
 
-Must print nothing.
+Both commit IDs must match. If the remote-tracking branch advanced after the
+worktree was created, run `git merge --ff-only origin/<default-branch>` in the
+worktree and repeat the check. Stop if the merge fails or the IDs still differ.
 
 ### Name the session
 
@@ -261,15 +261,19 @@ plugin's `voice-bridge-hooks` folder (under `.claude/att-docs` in a repository
 that vendors the plugins), and never through the voice bridge's tools:
 
 ```bash
-python3 <voice-bridge-hooks folder>/session_title.py work "issue #57 read server window"
+python3 <voice-bridge-hooks folder>/session_title.py work "read server window #57"
 ```
 
-The work name starts with the issue, written with a `#`, and a few words from
-its title. The script finds the session
-it runs in, keeps its base title, such as `Overmind 2`, and replaces only the
+The work name is a few plain words from the issue's title that say what the
+session is doing, such as `read server window`, with the issue number after
+them as a suffix at most. A bare issue or pull request number is not a name
+(`issue 57`, `PR 12`), and neither is a branch name (`fix/issue-57-read-window`):
+none of them says what the work is. The script finds the session it runs in,
+keeps its base title, such as `Overmind 2`, and replaces only the
 work name after the dash, so names do not pile up when the session moves on to
 other work, and spoken references to the base title still find it. Run it again
-whenever the session starts work on a different issue. If the script is missing
+whenever the session starts a new issue or moves to different work on the same
+one, so the name keeps saying what the session does. If the script is missing
 or reports an error, skip the rename and go on, since the name is a convenience
 and never gates the work.
 
@@ -360,16 +364,17 @@ turn that changed neither costs no rename. Otherwise set the work, then the
 status, because naming the work takes a status away:
 
 ```bash
-python3 <voice-bridge-hooks folder>/session_title.py work "issue #57 block fix"
+python3 <voice-bridge-hooks folder>/session_title.py work "block fix #57"
 python3 <voice-bridge-hooks folder>/session_title.py status "working"
 ```
 
 The title reads `<Repo> <n> - <work name> (<status>)`, such as
-`Overmind 1 - issue #57 block fix (working)`. The base title and its number stay
-as they are. The work name starts with the issue or pull request the session is
-on, written with a `#`, and a few words: `issue #57 block fix`,
-`PR #12 rename all sessions`. Keep it under 30 characters, so the status never
-clips it; when `show` reads the same work name and status, the title is current.
+`Overmind 1 - block fix #57 (working)`. The base title and its number stay
+as they are. The work name is words for the work, as in the section above, with
+the number last: `block fix #57`, `rename all sessions #12`. Keep it under 30
+characters, so the status never clips it, and when the words need the room drop
+the number rather than the words; when `show` reads the same work name and
+status, the title is current.
 The voice bridge's rename of every session writes the same format and the same
 status words, keeps a work name set here, and refreshes only one it wrote
 itself. The bridge's session listing renames only the work names it gave itself,
@@ -1112,9 +1117,8 @@ same exchange:
    step runs no branch deletion, local or on origin, and no worktree removal.
    `<merge-cleanup>` collects the local side of a merged pull request. A
    worktree with uncommitted changes is a finding to report, not a reason to
-   discard the changes. The next task gets a worktree of its own: run
-   `<worktree-script> <branch>` and enter the printed path with
-   `EnterWorktree`, rather than cutting a branch in this one.
+   discard the changes. The next task gets a worktree of its own, created
+   and entered using the applicable path in Section 3.
 5. Report the merge in one line that names each step above as done, not
    needed and why, or failed, and says whether step 6 archives the session,
    per `<run-watch>`. Steps done without that line read as a missed merge.

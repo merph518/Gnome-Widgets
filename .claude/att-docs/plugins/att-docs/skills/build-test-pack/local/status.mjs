@@ -1,10 +1,13 @@
-// Two logs per job. status.log is the one a session may be shown: phase names,
+// Three records per job. status.log is the one a session may be shown: phase names,
 // pass or fail, reason codes, counts and timings, and nothing else. detail.log
-// holds what the model and the builder actually said, and stays in the job's
-// output folder on this machine.
+// holds what the model and the builder actually said, and work/calls holds each
+// model call's full prompt and reply. The last two stay in the job's output folder
+// on this machine.
 
 import fs from 'node:fs';
 import path from 'node:path';
+
+import { callRecorder } from './calls.mjs';
 
 /** Field values a status line may carry: numbers, booleans, and short codes. A sandbox job's ID joins its source and label with `~`. */
 const SAFE = /^[A-Za-z0-9 _.:/=+~-]{0,80}$/;
@@ -45,6 +48,7 @@ export function jobLogs(outDir, { echo = true } = {}) {
   fs.mkdirSync(outDir, { recursive: true });
   const statusPath = path.join(outDir, 'status.log');
   const detailPath = path.join(outDir, 'detail.log');
+  const calls = callRecorder(path.join(outDir, 'work', 'calls'));
   return {
     statusPath,
     detailPath,
@@ -59,5 +63,7 @@ export function jobLogs(outDir, { echo = true } = {}) {
       const text = typeof value === 'string' ? value : JSON.stringify(value, null, 1);
       fs.appendFileSync(detailPath, `--- ${new Date().toISOString()} ${label}\n${text}\n`);
     },
+    /** One model call's prompt, reply, counts and timings, in work/calls. Never echoed. */
+    call: (fields) => calls.record(fields),
   };
 }

@@ -28,6 +28,9 @@ jobs:
     if: vars.AUTOMATION_APP_CLIENT_ID != ''
     runs-on: [self-hosted, overmind]
     timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     env:
       # Node actions check certificates against a list bundled with Node. This flag makes
       # them read the operating system's store, which holds the inspecting proxy's root
@@ -67,3 +70,13 @@ jobs:
           TAG: ${{ steps.release.outputs.tag_name }}
         shell: bash
         run: echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  # A merged release pull request tags the release; this opens the pin-move pull request
+  # in each consumer. The called workflow reports one result per consumer.
+  pin-consumers:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/pin-consumers.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

@@ -277,6 +277,12 @@ check "$([[ -e $D/s2.managed && ! -e $D/s2.replies ]] && echo set)" set "managed
 "$CTL" managed Widget off > /dev/null
 check "$([[ ! -e $D/s2.managed ]] && echo cleared)" cleared "managed off removes .managed"
 "$CTL" managed Widget maybe 2> /dev/null; check "$?" 2 "managed takes only on or off"
+"$CTL" full-text Widget on > /dev/null
+check "$([[ -e $D/s2.fulltext && ! -e $D/s2.replies && ! -e $D/s2.managed ]] && echo set)" set \
+  "full-text on writes .fulltext and leaves speech and managed alone"
+"$CTL" full-text Widget off > /dev/null
+check "$([[ ! -e $D/s2.fulltext ]] && echo cleared)" cleared "full-text off removes .fulltext"
+"$CTL" full-text Widget maybe 2> /dev/null; check "$?" 2 "full-text takes only on or off"
 cp "$TRANSCRIPT" "$HOME/.claude/projects/p/s2.jsonl"
 
 "$CTL" speech Widget on > /dev/null
