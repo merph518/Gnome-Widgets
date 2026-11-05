@@ -280,16 +280,19 @@ what it updated.
 The session never reads the documents, the rules, the description, the pack
 file, the workbook, or the job's `detail.log` and `work` folder. It runs or
 queues the job and reports the content-free status lines: phase names, pass or
-fail, reason codes, counts and timings.
+fail, reason codes, counts and timings. The one exception is the build
+supervisor's step, while a job waits on its questions; see "Answering the
+model's questions".
 
 Each model call leaves a file in the job's `work/calls` folder, named
-`<seq>-<step>-<attempt>.json`: the step, the attempt, whether thinking was on, a hash of
-the whole prompt, a hash of the reply schema, the prompt itself, the reply, the token counts
-and the timings. A call
+`<seq>-<step>-<attempt>.json`: the step, the attempt, whether thinking was on, the seed the
+call was sent with, a hash of the whole prompt, a hash of the reply schema, the prompt
+itself, the reply, the token counts and the timings. A call
 that failed is recorded with its error code and no reply, and a retry is a second file.
 A job run again with `--resume` adds to the folder and never replaces a file. The files
 hold document and rule text, as `detail.log` does, so they stay on the machine and the
-session does not read them.
+session does not read them. A slice or a step can answer its calls from these files
+instead of the model; see "Replaying recorded calls".
 
 ```bash
 <pipeline> check --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
@@ -298,6 +301,7 @@ session does not read them.
 <pipeline> queue add --config <pipeline-config> --issue <n> [--change <m>] [--doc <path>]... [--allow-derived-rules] [--resume]
 <pipeline> queue start --config <pipeline-config> --job <job-id> [--cutoff HH:MM]
 <pipeline> queue status --config <pipeline-config> [--job <job-id>]
+<pipeline> queue watch --config <pipeline-config> --job <job-id>
 <pipeline> queue summary --config <pipeline-config>
 <pipeline> queue remove --config <pipeline-config> --job <job-id>
 <pipeline> queue cancel --config <pipeline-config> --job <job-id>
@@ -317,13 +321,24 @@ the assessment steps, and the overall level last), and
 `phase9-revalidate` (the rebuild, the revalidation and its one repair round, and a new
 rating when items stay open). The checklist calls, the
 first read and each read after a fix round, run with thinking off and an output
-limit of `model.maxOutput`. The five single-string confidence fields run the same way,
+budget of `model.maxOutput`. The five single-string confidence fields run the same way,
 with thinking off. The assessment steps, the overall level, the senior review and
 the revalidation calls think, each through one part of the review. A job resumed in Phase 9 keeps the
 steps that passed.
 
-A reasoning call can think for up to `model.reasoningOutput` tokens (40,960 by
-default), which takes well over an hour at local generation speeds, inside a
+Every call goes out with `model.temperature` (0 by default) and `model.seed` (42 by
+default). A `pipeline.json` can set either: the temperature from 0 to 0.2, the seed as a
+whole number from 0 to 4294967294. llama.cpp reads -1 and 4294967295 as "pick a random
+seed", so neither is accepted. With one slot (`-np 1` in Lemonade's `llamacpp_args`), the
+same server, model file and load options give the same reply byte for byte to the same
+prompt, whether the server reads it fresh or from its prompt cache. Two runs on the same
+inputs then stop at the same gate, and a sandbox comparison shows what a fix changed
+rather than what sampling changed. llama.cpp does not promise the same numbers across
+batch sizes, so more slots, another server version or other load options can change the
+reply; before comparing runs on such a setup, run one slice twice and compare the two.
+
+A reasoning call has an output budget of up to `model.reasoningOutput` tokens (40,960 by
+default), its thinking and its answer together, which takes well over an hour at local generation speeds, inside a
 `model.context` of 128,000 tokens by default, so a call waits up to
 `model.timeoutMinutes` (150 by default). The pipeline reads the model server's
 context size before every call and budgets the prompt against the smaller of it
@@ -338,40 +353,55 @@ only lower the budget and never fails the job. The window sizes are per slot.
 A window with no room left for a prompt fails the job
 with `model:window-too-small`. The server's own request time-out must still be at
 least `model.timeoutMinutes`, or the server ends the reply early and the call
-fails with `no-reply`. A thinking reply cut off at the output limit is retried
-once with thinking off and an output limit of `model.retryOutput` (8192 by
+fails with `no-reply`. Each call streams its reply, so when a call reaches
+`model.timeoutMinutes` or its run is stopped, the closed connection also stops
+the server generating the reply. A thinking reply cut off at its output budget is retried
+once with thinking off and an output budget of `model.retryOutput` (8192 by
 default); a second cut fails the job as `model:runaway`. A cut with thinking off
 is not retried and fails as `model:length`. Any other failure of a thinking call
 (no reply, network, a reply that does not parse) is retried once with thinking
 off at `model.maxOutput`.
 
-Each thinking step also has a limit of its own, so one step cannot run for an hour. The
-built-in limits are `phase1.rules` and `phase3.scope` 20,480, `phase1.understanding`,
-`phase5.objectives`, `phase9.senior`, `phase9.confidence-steps` and `phase9.revalidation`
-12,288, `phase4.impact` and `phase9.confidence-overall` 8,192. A step with an index or a
+Each thinking step also has an output budget of its own, so one step cannot run for an hour.
+The built-in budgets are `phase1.rules` and `phase3.scope` 20,480, `phase5.objectives`,
+`phase9.senior`, `phase9.confidence-steps` and `phase9.revalidation` 12,288, `phase4.impact`
+and `phase9.confidence-overall` 8,192. A step with an index or a
 repeat, such as `rules-3`, uses its name without it. `model.reasoningOutputByStep` changes
 them, for example `{ "phase4.impact": 4096 }`; each value is a whole number from 1024 to
 `model.reasoningOutput`, and its keys are the steps listed here. A call takes the first
-limit that applies: the config's for its step, or else the smallest of the config's for its
+budget that applies: the config's for its step, or else the smallest of the config's for its
 phase, the built-in one for its step and `model.reasoningOutput`, which also caps all of them. A step cut
-off at its limit is retried once with thinking off, as above.
+off at its budget is retried once with thinking off, as above.
 
-`model.reasoningOutputByPhase` lowers the thinking limit for single phases, for
+A thinking step cut at its output budget on two or more recorded runs gets thinking off.
+A larger budget does not help: the cut call's thinking and answer are lost, and the retry
+with thinking off answers anyway, so the thinking attempt adds its run time and nothing to
+the pack. Phase 1's understanding call runs with thinking off by this rule: its answer is
+about 540 tokens, and with thinking on it spends its whole budget thinking and never reaches
+the answer. A step with one recorded cut, such as `phase9.senior`, keeps thinking and is
+checked again on the next `repeated-cut` line or report.
+
+`model.reasoningOutputByPhase` lowers the output budget for single phases, for
 example `{ "phase9": 16384 }`. Its keys are `phase1`, `phase3`, `phase4`,
 `phase5` and `phase9`, and each value is a whole number from 1024 to
-`model.reasoningOutput`. In Phase 9 the limit covers the assessment steps, overall level, senior review
+`model.reasoningOutput`. In Phase 1 the budget covers the rule reading calls; the
+understanding call does not think and uses `model.maxOutput`. In Phase 9 the budget covers
+the assessment steps, overall level, senior review
 and revalidation calls; the checklist calls do not think and use `model.maxOutput`.
 `model.retryOutput` is a whole number from 1024 to
 `model.maxOutput`; when `model.maxOutput` is smaller than 8192 it defaults to
-`model.maxOutput`. To find the phases that hit their limit, read the `retry` and
+`model.maxOutput`. To find the steps that ran out their budget, read the `retry` and
 `call-fail` lines in `status.log`: a line whose `reason` is `length` or `runaway`
 was cut off, and its `phase` and `step` say where. A server may leave out the
 token usage on a cut reply, so do not rely on `outputTokens` matching `maxTokens`.
 `queue status --job` counts those lines with their phase and step, and
 `queue status` and the report show `model:runaway` and `model:length` for the jobs
-that failed this way. Set a lower limit for those phases. For a thinking call, space
+that failed this way. Each queue run also records on its row the thinking steps it asked
+and the ones cut at their budget, and `queue status --job` and the report name every step
+cut on two or more runs of the job in a row, with its budget, as the rule above asks. For
+a thinking call, space
 for the prompt is budgeted against the larger of `model.reasoningOutput` and
-`model.maxOutput`, never against a per-phase or per-step limit.
+`model.maxOutput`, never against a per-phase or per-step budget.
 
 A server-wide thinking budget is an opt-in alternative that nothing in the
 pipeline sets. Lemonade runs the model with the llama.cpp build it bundles for
@@ -379,7 +409,7 @@ the saved backend, not `/usr/bin/llama-server`, so check that binary's `--help`
 for `--reasoning-budget` first. If it is there, append `--reasoning-budget N` to
 the model's saved `llamacpp_args`. It caps every thinking call on the server,
 and when the budget runs out the model stops thinking and finishes the reply
-instead of failing at the output limit.
+instead of failing at its output budget.
 
 A quantized KV cache is another opt-in that nothing in the pipeline sets. Check
 the bundled binary's `--help` for `--cache-type-k` and `--cache-type-v` first, and
@@ -505,7 +535,9 @@ the phase now running and how long it has run, or the phase and reason code a
 stopped job ended with (and, for a gate stop, the count and numbers of the documents
 it names), the time each finished phase took, the count of `retry`
 and `call-fail` lines by reason, and a `cut` line for every `length` or
-`runaway` hit with its phase and step. Without `--job` it lists every row in
+`runaway` hit with its phase and step. Last comes a `repeated-cut` line, such as
+`repeated-cut step=phase9.senior budget=12288 runs=2`, for each thinking step cut at its
+output budget on two or more of the job's queue runs in a row. Without `--job` it lists every row in
 the queue with its status, phase, reason code and last update, so a job that
 stopped or can resume shows even when its ID is not remembered:
 
@@ -535,7 +567,113 @@ nothing until it writes its first line.
 
 Later checks use the same command, and only it. They never read the journal,
 `status.log` or anything else in the job's folder directly. Resume a stopped job
-the same way, with `--resume` on the `queue add`.
+the same way, with `--resume` on the `queue add`. A session that stays with the
+job to answer its questions runs `queue watch` instead, which prints the same
+lines and keeps the job's heartbeat fresh; the next section is the one exception
+to these rules.
+
+### Answering the model's questions
+
+Three gates stop a job on questions a person has to settle: Phase 1's
+`source-conflict`, Phase 2's `rule-conflict` and Phase 3's `needs-user-review`. When
+a session is watching the job, the job asks it, the build supervisor, instead of
+stopping, and waits with the model still loaded.
+
+A session that watches a running job is the build supervisor. It checks the job
+with `queue watch`, every few minutes and at least once every
+`supervisor.staleMinutes`:
+
+```bash
+<pipeline> queue watch --config <pipeline-config> --job <job-id>
+```
+
+Each check writes a heartbeat beside the queue file, `<queue file>.watch-<job-id>`,
+holding the time. A job waits at a question gate only when that heartbeat is newer
+than `supervisor.staleMinutes`; a sandbox job, `<source>~<label>`, also takes its
+source job's heartbeat. With no fresh heartbeat, as on a nightly run with no session
+attached, the gate stops the job at once with its usual reason, and the model is not
+left loaded through a wait nobody will answer.
+
+At the gate the job writes `work/questions-<phase>.json`, with the job ID, the phase,
+the time the wait ends, and the questions, each with an ID (`Q1`, `Q2`, and so on). It
+then waits up to `supervisor.waitMinutes` for `work/answers-<phase>.json`, checking
+for it and for the heartbeat every 15 seconds. `queue watch` shows the wait as
+`waiting phase=<phase> questions=<n> left=<minutes>` while the job's run holds the
+queue. A sandbox's wait shows until the time it ends, since a slice replayed with no
+live model holds no queue and the sandbox's log does not say whether its slice held one. When
+`supervisor.notifyUrl` is set, the job posts that line, with its job ID in front, to
+the URL once, such as an ntfy topic, so the user sees it too. The line names no
+document, rule or question. A failed post is a `warn notify-failed` status line
+and never stops the job.
+
+When the supervisor sees `waiting`, it answers:
+
+1. It reads `work/questions-<phase>.json` and the sources below, and nothing else in
+   the job's folder. It writes only `work/answers-<phase>.json`. It never edits the
+   pipeline's code, config, prompts, checkpoints, or any other file in the job's
+   folder, and it never fixes the build while the job runs.
+2. It answers from four sources only:
+   - the documentation: the converted documents and the process descriptions;
+   - the build's inputs: the change record and the `--doc` documents;
+   - the approved business rules, through `<rule-export>`;
+   - the issue's own record in the tracker, its fields and comments, from
+     `<description-source>`.
+   No outside knowledge, and nothing about how the application behaves that a
+   source does not state.
+3. It answers every question as well as those sources allow. Each answer cites
+   what it rests on: a document path and section, a rule ID, a tracker field or
+   comment with its date, or an input name. Each carries a confidence: `settled`
+   when a source states it, `best reading` when the sources point to it without
+   stating it. When no source bears on a question, the answer says so, with
+   `best reading` and no citations, and the pack carries it as an assumption
+   instead of stopping.
+4. It writes the file whole: to a temporary name in the same folder, then renamed
+   into place, so the job never reads half of it.
+
+The answers file holds one object:
+
+```json
+{ "answers": [
+  { "id": "Q1", "answer": "<a full sentence>", "confidence": "settled",
+    "citations": ["<document path>, <section>", "<rule ID>"] }
+] }
+```
+
+Every row has exactly these four fields. An ID the questions file does not hold, an
+ID given twice, a blank answer, another confidence, or a `settled` answer with no
+citation fails the schema: the job writes an `answers-rejected` status line with
+the reason code, keeps waiting, and reads the file again when it changes. A question
+the file leaves out is one the supervisor declined.
+
+Once a file passes, the job writes an `answers` status line with counts only:
+`answered`, `declined`, `settled` and `bestReading`. With every question answered
+the phase carries on from where it stopped, and nothing before it runs again; its
+`pass` line counts the answers as `supervised`. Each answer becomes an assumption
+in the pack, its why reading "Answered by the build supervisor (`<confidence>`)
+from `<citations>`" and its clarification naming the question for the change owner
+to confirm, and a line under Job Intake's assumptions to proceed. Phase 1 gives the
+understanding call the answers to the conflicts its rule batches found. The later
+phases read the rules as written, and the rules keep the impact Phase 3 classified
+them with, so each assumption's impact says what the answer did not change. A
+question declined, the wait running out (`wait-over reason=timeout`), or the
+heartbeat going stale during the wait (`wait-over reason=supervisor-gone`) stops
+the job with the gate's usual reason, so a person can still take it over.
+
+What the supervisor tells the user stays content-free like every other report:
+the phase, how many questions it answered and declined, and the confidence of
+each, never the questions, the answers or what the sources say.
+
+The `supervisor` block in the pipeline config sets the wait:
+
+```json
+"supervisor": { "waitMinutes": 30, "staleMinutes": 15, "notifyUrl": null }
+```
+
+`waitMinutes` (default 30) is how long a gate waits; 0 turns the wait off, and every
+gate stops at once. `staleMinutes` (default 15) is how old a
+heartbeat may be. `notifyUrl` (default none) is an http or https URL that receives
+the waiting line. A job waiting holds the queue, the paused units and the model
+for up to `waitMinutes`, so a wait can run past the cutoff.
 
 ### Freeing the machine for a job
 
@@ -625,7 +763,8 @@ command instead of stopping the unit:
 
 The command signals the process that holds the queue, whether the nightly unit
 or a `build-pack-now@` unit started it, and waits for it to end, for up to
-150 seconds. The run ends the model call in flight, keeps the job's checkpoint,
+150 seconds. The run ends the model call in flight, which stops the model
+server generating its reply, keeps the job's checkpoint,
 marks the row `stopped` with the phase it stopped in, starts the paused units
 again, unloads the model the way a finished run does, and frees the queue. A
 stop is not a failed try, so it never counts toward dropping the job. The
@@ -662,13 +801,14 @@ intake. To try a change to one phase against a real job's state, run a slice of
 that job in a sandbox:
 
 ```bash
-<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> [--until <phase>] [--as <label>] [--pause]
+<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> [--until <phase>] [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
 ```
 
 - The sandbox is a copy of the job's folder named `<job-id>~<label>`; the label
   defaults to the time, `YYYYMMDDTHHMMSS`. The job's folder, its queue row and
   its workbook are only read. The copy holds the job's logs and `work` folder,
-  without the pack file, the workbook or the snapshots from `--from` on.
+  without the pack file, the workbook, the call records or the snapshots from
+  `--from` on. The sandbox's `work/calls` holds the calls its own run made.
 - The slice loads the snapshot of the phase before `--from`, runs `--from`
   through `--until` (`--from` alone by default) with the current code and
   config, and stops. It writes no pack and no workbook, and it does not unload
@@ -680,7 +820,8 @@ that job in a sandbox:
   do not.
 - It holds the queue while it runs, so the nightly run waits for it and a run
   already holding the queue makes the command exit 1. It stops no unit unless
-  `--pause` is given.
+  `--pause` is given. A run answered from a recording holds neither, as
+  "Replaying recorded calls" says.
 - The sandbox's snapshots are its own, so a slice of the sandbox, `--job
   <job-id>~<label>`, carries on from where the first slice ended.
 - When the slice passes, the command prints `sandbox <id>` and how the sandbox's
@@ -692,7 +833,8 @@ that job in a sandbox:
 
 Exit codes: 0 the slice passed, 1 it stopped or the queue is running, 2 bad
 arguments, a job with no folder, no snapshot for the phase before `--from` (the
-message names the snapshot), or a setup error such as an unreadable config.
+message names the snapshot), a replay source with no recorded calls, or a setup
+error such as an unreadable config.
 
 ### Trying one step
 
@@ -700,7 +842,7 @@ A slice runs whole phases. To try one part of Phase 9, or the builder alone, run
 a step on a snapshot of the job:
 
 ```bash
-<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> [--as <label>] [--pause]
+<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> [--as <label>] [--pause] [--model replay:<source> [--replay-miss fail|live]]
 ```
 
 `--at` is a phase, read from the job's snapshot of it, or a sandbox of the job
@@ -710,15 +852,16 @@ queue row and workbook are only read.
 
 | Step | What it runs | Model |
 | --- | --- | --- |
-| `draft` | The draft the review reads: the builder on the pack, writing the review workbook | no |
-| `build` | The Phase 8 build on the pack, with no repair, with the review sheets left out of the failures until the confidence assessment | no |
+| `draft` | The Draft workbook: the builder command on the pack, writing it to `work/review` | no |
+| `build` | The Phase 8 build on the pack in memory, with no repair and no Draft workbook (`draft` writes that), with the review sheets left out of the failures until the confidence assessment | no |
 | `checklist` | The checklist reads and the fix rounds | yes |
 | `walk [--check <names>]` | One revalidation walk, or the named checks only, comma-separated, each an exact name or the start of one | yes |
 | `repair --finding <n>` | One repair round for finding `<n>` of the last walk, counted from 0 as the walk prints them | yes |
 | `confidence [--field <name>]` | One confidence field (`coverage`, `remainingRisks`, `assumptions`, `regressionScope`, `breakItScope`, `manualReview`), or the overall level when no field is named | yes |
 
 - A step that asks the model holds the queue and stops no unit unless `--pause`
-  is given, as a slice does. `draft` and `build` take neither.
+  is given, as a slice does. `draft` and `build` take neither, and neither does a
+  step answered from a recording.
 - `draft` and `build` print the builder's sheet results, one `PASS` or `FAIL`
   line for each sheet. `build` also prints `DEFERRED` for a review sheet that
   fails before the confidence assessment has run.
@@ -736,8 +879,66 @@ queue row and workbook are only read.
   second of resolution.
 
 Exit codes: 0 the step ran and its build passed, 1 it stopped, its build failed
-a sheet, or the queue is running, 2 bad arguments, a job with no folder, or no
-snapshot or step state at `--at`.
+a sheet, or the queue is running, 2 bad arguments, a job with no folder, no
+snapshot or step state at `--at`, or a replay source with no recorded calls.
+
+### Replaying recorded calls
+
+A slice or a step can answer every model call from the calls a job recorded in
+`work/calls`, so a change to the code around the model is tried against a real
+job with no model server:
+
+```bash
+<pipeline> run --config <pipeline-config> --job <job-id> --from <phase> --model replay:<source> [--replay-miss fail|live]
+<pipeline> step --config <pipeline-config> --job <job-id> --at <phase|sandbox> <step> --model replay:<source> [--replay-miss fail|live]
+```
+
+- `<source>` is the ID of a job or sandbox in the output folder, or the path of a
+  folder of call records: a job folder, its `work/calls`, or a folder of the
+  files themselves, such as a recording kept as a regression fixture. The
+  flags belong to `run --job` and `step`; no other command takes them.
+- Each call is answered from the recorded call for the same step and attempt, in
+  the order the calls were made. The reply, the token counts and the timings are
+  the recorded ones, so while the code around the model is unchanged the replay
+  builds the same pack as the run it came from. A recorded failure is raised
+  again as the same error, so the retry that followed it replays too. The replay
+  records its own calls in the sandbox, so a sandbox can be replayed in turn.
+  The seed is not compared: a replayed call notes the recorded call's seed, or none
+  when the record holds no seed, and a call sent to the live model notes the
+  config's.
+  When the next recorded call holds another prompt but a later one for the
+  same step and attempt holds this one, the calls ahead of it are skipped, so a
+  slice or a step replayed from a whole job passes over the calls of the phases
+  it does not run.
+- A call is a miss when its prompt hash is not the recorded one
+  (`prompt-changed`), when its reply schema is not (`schema-changed`), when it
+  asks with thinking on and the recorded call had it off, or the reverse
+  (`thinking-changed`), or when
+  the recording has no call left for it (`no-record`). A miss writes a
+  content-free `replay-miss` line to `status.log` with the step, the reason and
+  how many prompt lines differ, and the differing lines to `detail.log`: the
+  system and the user text apart, at most 20 lines on each side of the change.
+  When the run ends the command prints `replay  served <n>  live <n>  missed
+  <n>` and a line for each miss, such as `replay: prompt changed for <step>`.
+- By default a miss stops the run. The job fails with the reason
+  `replay:prompt-changed`, `replay:schema-changed`, `replay:thinking-changed` or `replay:no-record`, and no
+  phase retries it. With `--replay-miss live` the call goes to the model server
+  the config names, and every other call still comes from the recording, so the
+  steps whose prompts did not change cost nothing. A miss always uses up its
+  recorded call, and the recorded retry of a call that failed, so one changed
+  prompt does not shift the answers of the calls after it. A miss under
+  `--replay-miss live` does not change the exit code.
+- A run that cannot ask the live model, the default, holds no queue and stops no
+  unit, so it runs while the queue does, and `--pause` is refused. With
+  `--replay-miss live` it holds the queue as a slice does.
+- Replay an uninterrupted run or a sandbox. A job resumed after a stop holds the
+  interrupted run's calls first, error records included, and a replay repeats the
+  interruption.
+- Prompts are split to fit the model window, which a replay cannot read from a
+  server: it uses `model.context`. A recording made on a server whose window was
+  smaller than `model.context` misses where the batches split differently. Set
+  `model.context` in the replay's config to the window the `server-window` line
+  in the source's `status.log` names.
 
 ### Closing desktop apps before a run
 
@@ -869,7 +1070,9 @@ The unload runs once, when the run ends, after the paused units start again.
 A normal finish, a failed job, the cutoff and a SIGTERM, SIGINT or SIGHUP all
 end the same way, and the model is not reloaded between the jobs of one run. A
 run that started no job, such as one that found the queue held or empty,
-unloads nothing, and neither does a `run` outside the queue.
+unloads nothing, and neither does a `run` outside the queue. A run stopped
+during a model call has already closed that call, so the server is not busy
+generating its reply and the unload does not wait for it.
 
 The outcome is logged as `release: ok` or `release: failed` and as one
 `phase=release` line in the status log of the last job that ran, with the
@@ -1036,8 +1239,11 @@ stop), which name the documents by number. Once the documents or their rules are
 fixed, `queue add --issue <n> --resume` (or `--suite <code> --resume`) puts the job back in the queue as a new
 row with no failures, and the pre-check reads its checkpoint. A stop on
 `gate:needs-user-review` is the exception: the checkpoint keeps the old change record, so add
-the job again without `--resume` once the record holds the answer. A stop on
+the job again without `--resume` once the record holds the answer to each question in
+`work/phase3-review.json`. A stop on
 `gate:rule-export-failed` is an outage and is retried like any other failure.
+`gate:source-conflict`, `gate:rule-conflict` and `gate:needs-user-review` first wait
+for the build supervisor when one is watching; see "Answering the model's questions".
 
 **The report.** `report` reads the queue file and each job's `status.log`, and
 writes `daily-<date>.md`; on the configured weekday (`report.weeklyDay`, 1 for
@@ -1055,6 +1261,9 @@ a file can be opened or sent anywhere. Each has:
   counts (pass, limited, fail), the confidence rating and the run time;
 - the jobs that keep failing, with every reason code and whether each retries or
   has been dropped;
+- the steps cut at their output budget: for each job that finished in the period,
+  every thinking step its queue runs cut on two or more runs in a row, with the step's
+  budget and how many runs cut it;
 - a spot-check list: packs rated Low confidence first, then PASS WITH
   LIMITATIONS, up to `report.maxPriority` (6), then `report.sample` (2) more
   chosen at random from the other passed packs. `--seed <n>` or `report.seed`
@@ -1082,7 +1291,8 @@ half an hour after the queue's default cutoff.
   workbooks in the spot-check list and judge them. Packs with Low confidence or
   limitations come first because they are where the model was least sure. A
   queue depth that grows night over night means the jobs take longer than the
-  night allows.
+  night allows. A step under "Steps cut at their output budget" gets its thinking
+  turned off in `local/phases.mjs`, by the rule under the model settings above.
 - Restart the model server. Find its unit name: the port in the config's
   `model.endpoint` says which service listens, and `systemctl --user list-units
   --type=service` (or `systemctl list-units --type=service` for a system unit)
@@ -1252,7 +1462,7 @@ the phase that fills them:
 | `executiveSummary` | 4 | `{ scope, modules, sourceDocuments, strategy, execution, risks, confidence }` |
 | `impacts` | 4 | `{ windows, businessFunctions, upstream, downstream, data, security, batch, notices, reports, interfaces }`, each a list of short lines; an area the change does not reach is `[]` |
 | `objectives` | 5 | `{ objective, applicable, reason }` for each of `<workbook-standard>`'s `<objective-count>` |
-| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, steps[] }`; `focus[]` lists the tester's actions in order, one item per step, and the builder writes it as numbered steps; derivation is `Requirement` or `Quality`; each step is `{ description, expected, rules[] }` |
+| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, steps[] }`; `focus[]` lists the tester's actions in order, one item per step, and the builder writes it as numbered steps; derivation is `Requirement` or `Quality`; each step is `{ description, expected, rules[] }`; a card holds no scenario kind |
 | `testSets` | 7 | `{ number, name, objective, scope, ruleSummary[], cards[] }` |
 | `coverage` | 9 | `{ ruleId, status, strength, gap, recommendation }`, only where a rule is not plainly Covered |
 | `assumptions` | 9 | `{ assumption, why, impact, clarification }` |
@@ -1330,6 +1540,11 @@ In the local pipeline, blocking missing information stops the run as
 `gate:missing-information`, and its text is kept in the job's `work` folder.
 When the rules do not fit in one call with the documents, they are read in
 batches, and each batch can report conflicts and blocking missing information.
+The rule batches think; the understanding call that writes the summary runs with
+thinking off, at `model.maxOutput`. Conflicts alone, with no blocking missing
+information, wait for the build supervisor before they stop the run as
+`gate:source-conflict`; the understanding call reads the answers to the conflicts
+the rule batches found.
 
 **Phase 2, Business Rule / Requirement Intake.** Build `rules` from the included
 sources only. Rule IDs come from the master export exactly as held; source page
@@ -1340,7 +1555,7 @@ rules. These stop here, each with the findings in the job's `work` folder:
 | Code | Meaning |
 | --- | --- |
 | `duplicate-rule-wording` | two live rules of one document say the same thing in the same words (a short statement counts only when the names match too); `phase2-duplicates.json` holds the pairs, and the master has to retire one. Rules derived for a document the master holds none for are not checked. The job waits for a person |
-| `rule-conflict` | two live rules require different behavior for the same thing, as a model call reads them in batches (an exception is not a conflict, and a pair split across two batches is not compared); `phase2-conflicts.json` holds the pairs. A suite job skips this call. The job waits for a person |
+| `rule-conflict` | two live rules require different behavior for the same thing, as a model call reads them in batches (an exception is not a conflict, and a pair split across two batches is not compared); `phase2-conflicts.json` holds the pairs. A suite job skips this call. The job waits for the build supervisor's answers when one is watching, and otherwise for a person |
 | `untraceable-rule` | a rule has no name or no summary |
 
 A rule with no source page warns and never stops the run.
@@ -1351,9 +1566,22 @@ baseline is not the change: rules the change does not touch are `Not Impacted`
 or left out, and the count left out is said in the summary. Note ambiguities as
 assumptions. The four classes are Direct Change, Indirect Impact, Regression and Not Impacted.
 The phase ends with a downstream result: `READY`, `READY WITH ASSUMPTIONS` when it added
-assumptions, or `NEEDS USER REVIEW` when it listed a question only the user can settle. The
-last stops the run with `needs-user-review` before the impact analysis; the questions are in
-`work/phase3-review.json`. Put the answer in the `<change-term>` record and add the job again without `--resume`, so the record is read again.
+assumptions, or `NEEDS USER REVIEW` when a question only the user can settle is left.
+A question the scope call raises goes to a second call, with thinking off, that reads it
+against the `<change-term>` description alone, quotes the sentence that bears on it, and
+answers it, settles it with an assumption, or keeps it. An answer becomes an assumption
+whose why quotes that sentence, when the sentence is found in the description with only the
+words compared and is at least three words long; otherwise the answer is an ordinary assumption. A found sentence
+shows the quote is real, not that it decides the question, so read these assumptions with
+the pack. The run keeps a question the call rules kept, one whose answer is missing or under
+three words, and one whose assumption talks about how the pipeline ran. The status line counts
+the questions `raised`, `answered` and `assumed`, and `review` counts the ones kept. A kept
+question waits for the build supervisor when one is watching, and otherwise stops the run
+with `needs-user-review` before the impact analysis;
+`work/phase3-review.json` lists each one as `question`, the `quote` the second call gave,
+and `verbatim`, which is false when that quote is empty, under three words, or not in the description. Put
+the answer in the `<change-term>` record and add the job again without `--resume`, so the
+record is read again.
 
 **Phase 4, Impact Analysis.** Modules, windows, business functions, upstream and
 downstream effects, data, security and roles, batch, notices, reports and
@@ -1429,12 +1657,13 @@ tester reaches it, and the test data (which record, which child, with what
 values), and step 1 of each card opens the stage through that entry path. Never
 invent a path or data the document does not give.
 
-Every other scenario is a plain decision. A kind the document does not support
-is recorded as an assumption with the reason. Rules too many for one call are
-taken in batches, each shown the scenarios listed so far, and a reply holds at
-most one scenario per 150 tokens of the output limit; an assumption says when
-the limit was reached. Two scenarios with the same kind, rules, population and
-action are one; the second is dropped and counted.
+Every other scenario is a plain decision. The kinds the document does not
+support are recorded in one assumption per document, which names them and gives
+each kind's reason. Rules too many for one call are taken in batches, each shown
+the scenarios listed so far, and a reply holds at most one scenario per 150
+tokens of the output budget; an assumption says when a reply reached that many.
+Two scenarios with the same kind, rules, population and action are one; the
+second is dropped and counted.
 
 Write the cards in batches of scenarios (`cardScenariosPerCall` in the config,
 four by default). Each call is shown the scenarios still open, meaning those
@@ -1448,6 +1677,8 @@ dropped and counted. A scenario still open after its batch is asked for once
 more; if it is still open, an assumption names it, and any of its rules with no
 card get a `Missing` coverage row. A rule only an existing test covers gets a
 `Missing` row whose gap names that test and says to confirm and reuse it.
+
+A scenario's kind is used inside Phase 6 only. It decides which scenarios, and which cards written for them, are the same (same kind, rules, population and action), which kinds the document's assumption on empty kinds names, and which cards are break cards. A Phase 6 card holds its scenario's ID and a `breakIt` flag, which is true when the scenario is a break scenario and not every rule it names is retired; in an issue pack with a `<break-objective>` set, the flag puts the card in that set. The pack's `testCards` carry no kind, scenario ID or `breakIt` flag, so no sheet of the workbook shows a card's kind. A reviewer sees the break cards in the `<break-objective>` set, and the kinds with no scenario in the document's assumption on empty kinds.
 
 A retired rule Phase 3 classified Direct Change is marked in the scenario and
 card prompts as removed: its card verifies the behavior is gone, and the
@@ -1493,14 +1724,16 @@ before Phase 7, so no set holds it. The Phase 6 status line adds `redesigned`
 and `removed`, as numbers.
 
 An applicable objective that no card serves gets one targeted pass. Cards that
-pass adds are checked the same way. For an
-ordinary objective, the model is shown the cards written and names those that
-serve it; the objective is added to them, no card is written, and the objective
-is marked not applicable if none is named. For `<break-objective>`, a break-only
-inventory adds new break scenarios, each with one card; the objective is marked
-not applicable if there are none. `<full-coverage-objective>` needs no pass,
-since it holds every requirement card; Phase 6 marks it not applicable when no
-requirement-derived card exists.
+pass adds are checked the same way. For an ordinary objective, the model is
+shown the cards written and names those that serve it; the objective is added to
+them, no card is written, and the objective is marked not applicable if none is
+named. For `<break-objective>`, a break-only inventory adds new break scenarios,
+each with one card; the objective is marked not applicable if there are none.
+Once that inventory lists a break scenario, break leaves the document's
+assumption on empty kinds, even when an existing test covers the scenario and no
+card is written. `<full-coverage-objective>` needs no pass, since it holds every
+requirement card; Phase 6 marks it not applicable when no requirement-derived
+card exists.
 
 **Phase 7, Test Lab / Execution Design.** Group cards into test sets, one
 objective per set, in the order they should run: `<core-objective>` first,
@@ -1581,15 +1814,31 @@ WITH LIMITATIONS. The
 `<upload-sheet>` test name is the test case ID alone, as `<workbook-standard>`
 gives it; the title travels in `<cards-sheet>`.
 
-**Phase 9, Quality Review.** Build the workbook, read it back as text (every
-card, step and Expected Result, and the other sheets), and run
-`<validation-procedure>` against that text, in parts when it is longer than one
-call holds. A workbook read in parts opens each part with an index of the rules
-that part shows and the cards that cite them, and each part judges a rule's
-coverage from that index. When the builder writes no workbook for the review's
-draft, the review reads the pack summary instead and a `warn` status line says so; the
-senior review and the confidence calls read that summary too whenever the
-workbook needs more than one part. List issues and fixes, each issue under the
+In the local pipeline the build above runs in memory, and once it passes, Phase 8
+ends by writing the Draft workbook to the job's `work/review` folder with the builder
+command. Until Phase 9 rates the pack, the draft stands in for what the review writes:
+its review fields read `Pending review.`, the overall confidence and the Executive
+Summary confidence read `Low`, and `<confidence-sheet>` has the limitation `Pending
+review.`, so the draft never claims more than the pack supports. Once the pack is
+rated, the draft carries the real rating. The stand-ins live only in the draft and
+never reach the finished pack. Each sheet the builder command prints as FAIL goes to
+the same repair call with the indented lines under it, `<validation-sheet>` only when
+no other sheet failed, and the pack is built again. A status line with the event
+`draft` says whether the workbook was written and how many sheets failed. When the
+last try still leaves no Draft workbook, or the command writes none and names no
+failed sheet, the job stops with `gate:builder-fail`, and the command's output is in
+`detail.log`. Phase 8 does not pass without a Draft workbook on disk.
+
+**Phase 9, Quality Review.** Write the Draft workbook again from the pack as it
+stands, read it back as text (every card, step and Expected Result, and the other
+sheets), and run `<validation-procedure>` against that text, in parts when it is
+longer than one call holds. Every review call writes the draft again first, because
+the review's fix rounds change the pack. A workbook read in parts opens each part with
+an index of the rules that part shows and the cards that cite them, and each part
+judges a rule's coverage from that index. A draft the builder refuses stops the job
+with `gate:builder-fail`; no review call reads a summary in place of a refused
+draft. The senior review and the confidence calls read the pack summary whenever
+the workbook needs more than one part. List issues and fixes, each issue under the
 section of `<validation-procedure>` it falls under. A fix names the card, rule or sheet
 to change and what to change it to; one that is blank, a placeholder such as
 N/A, or names no card, rule or sheet of the pack is not applied. Each other one goes

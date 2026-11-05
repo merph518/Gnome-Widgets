@@ -30,6 +30,14 @@ test('an assumption that rules were not supplied goes once every rule is classif
   assert.equal(open.assumptions.length, 1);
 });
 
+test("the build supervisor's answers stay, and a model assumption with the same text is the duplicate that goes", () => {
+  const answer = { ...asm('The role list is final.'), answeredBy: 'build supervisor' };
+  const claim = { ...asm('Rules BR-9 to BR-12 were not supplied.'), answeredBy: 'build supervisor' };
+  const pack = packWith([asm('the role list is final'), answer, claim]);
+  assert.equal(tidyAssumptions({}, pack), 1);
+  assert.deepEqual(pack.assumptions, [answer, claim]);
+});
+
 test('reconcile removes duplicates and leaves a note when no assumption is left', () => {
   const pack = packWith([asm('Business rules were not supplied.')]);
   reconcile({}, pack);

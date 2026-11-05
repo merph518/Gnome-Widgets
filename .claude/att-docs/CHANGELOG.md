@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.31.16](https://github.com/merph518/Overmind/compare/v0.31.15...v0.31.16) (2026-11-05)
+
+
+### Features
+
+* Let the build supervisor answer a job's questions while it waits ([#542](https://github.com/merph518/Overmind/issues/542)) ([#549](https://github.com/merph518/Overmind/issues/549)) ([82bcb06](https://github.com/merph518/Overmind/commit/82bcb06fba1b97538229d44e22c5f25b5efcb334))
+* Send build calls at temperature 0 with a fixed seed and record the seed ([#541](https://github.com/merph518/Overmind/issues/541)) ([#547](https://github.com/merph518/Overmind/issues/547)) ([249b2a5](https://github.com/merph518/Overmind/commit/249b2a505901c89a43d1b1c48de94f5d28220f94))
+
+
+### Bug Fixes
+
+* Run phase 1 understanding with thinking off and flag repeated budget cuts ([#540](https://github.com/merph518/Overmind/issues/540)) ([#543](https://github.com/merph518/Overmind/issues/543)) ([52c9e86](https://github.com/merph518/Overmind/commit/52c9e868d4cf8276a9c85524782cf851598d9719))
+* Settle phase 3 review questions from the change description before stopping ([#538](https://github.com/merph518/Overmind/issues/538)) ([#546](https://github.com/merph518/Overmind/issues/546)) ([6edeb18](https://github.com/merph518/Overmind/commit/6edeb18dd96a56a9f1fe1ac35856e65d2ee54d76))
+* State that scenario kind stays inside Phase 6 ([#559](https://github.com/merph518/Overmind/issues/559)) ([fc6dba6](https://github.com/merph518/Overmind/commit/fc6dba6be7891bed6f919298d5a728f42e80f586))
+* Stream model calls so a cancel stops generation and the unload passes ([#552](https://github.com/merph518/Overmind/issues/552)) ([#556](https://github.com/merph518/Overmind/issues/556)) ([42e67dd](https://github.com/merph518/Overmind/commit/42e67ddbbb5756f6d0502423ecfbdc861391cfca))
+* Write one Phase 6 assumption per document for empty scenario kinds ([#551](https://github.com/merph518/Overmind/issues/551)) ([#558](https://github.com/merph518/Overmind/issues/558)) ([db1ed9b](https://github.com/merph518/Overmind/commit/db1ed9b02a0b309469a1fbdb2123c656b250d07e))
+* Write the Draft workbook at Phase 8 and drop the Phase 9 summary fallback ([#553](https://github.com/merph518/Overmind/issues/553)) ([#555](https://github.com/merph518/Overmind/issues/555)) ([e412768](https://github.com/merph518/Overmind/commit/e412768712b99bc3c917ed92566ad89bc0aee1a8))
+
+## [0.31.15](https://github.com/merph518/Overmind/compare/v0.31.14...v0.31.15) (2026-11-04)
+
+
+### Features
+
+* claim shared files so concurrent sessions in one repo do not collide ([#257](https://github.com/merph518/Overmind/issues/257)) ([#528](https://github.com/merph518/Overmind/issues/528)) ([44b8456](https://github.com/merph518/Overmind/commit/44b84562ee31e604c2b37be86035e26c65662f79))
+* replay recorded model calls with --model replay: ([#492](https://github.com/merph518/Overmind/issues/492)) ([#536](https://github.com/merph518/Overmind/issues/536)) ([3439d38](https://github.com/merph518/Overmind/commit/3439d38d35be0ae579dbce8069c389f05b16da3f))
+
+## [0.31.14](https://github.com/merph518/Overmind/compare/v0.31.13...v0.31.14) (2026-11-04)
+
+
+### Features
+
+* Check that skills name only Baton tools and arguments that exist ([#134](https://github.com/merph518/Overmind/issues/134)) ([#531](https://github.com/merph518/Overmind/issues/531)) ([c9edb20](https://github.com/merph518/Overmind/commit/c9edb2035953391bf53f0645c63109a54d08af99))
+
 ## [0.31.13](https://github.com/merph518/Overmind/compare/v0.31.12...v0.31.13) (2026-11-04)
 
 

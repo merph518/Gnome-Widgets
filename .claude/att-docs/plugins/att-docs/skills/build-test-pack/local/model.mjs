@@ -1,6 +1,13 @@
-// The one network client the local pipeline has: an OpenAI-compatible chat
-// endpoint on this machine. Every call asks for JSON against a schema, so the
-// reply always has the shape the phase writes into the pack.
+// The pipeline's model client: an OpenAI-compatible chat endpoint on this
+// machine, and the only network client that sends document or rule text. Every
+// call asks for JSON against a schema, so the reply always has the shape the
+// phase writes into the pack. The one other network call is the build
+// supervisor's waiting notice, a content-free line (supervisor.mjs).
+//
+// Each chat call streams its reply. Lemonade stops generating a streamed reply
+// when the connection closes, so a stop or a time-out frees the model at once.
+// An unstreamed reply runs to its end on the server even after the connection
+// closes, and an unload asked for in the meantime waits for it.
 
 import http from 'node:http';
 import https from 'node:https';
@@ -47,7 +54,9 @@ export class Cancelled extends Error {
  * A fetch-shaped request over node:http. Node's own fetch gives up when no
  * response headers arrive within five minutes, and a local server answering
  * one request at a time can hold a call longer than that before it starts. A
- * redirect is never followed: it comes back as a response that is not ok.
+ * redirect is never followed: it comes back as a response that is not ok. The
+ * whole body is read before the promise settles, so an abort, a time-out or a
+ * reset partway through the body rejects it and closes the connection.
  */
 export function localFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
   return new Promise((resolve, reject) => {
@@ -60,7 +69,7 @@ export function localFetch(url, { method = 'GET', headers = {}, body, signal } =
         response.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           resolve({ ok: response.statusCode >= 200 && response.statusCode < 300,
-            status: response.statusCode, json: async () => JSON.parse(text) });
+            status: response.statusCode, text: async () => text, json: async () => JSON.parse(text) });
         });
       });
     request.on('error', reject);
@@ -69,13 +78,58 @@ export function localFetch(url, { method = 'GET', headers = {}, body, signal } =
 }
 
 /**
- * A client for one model on one endpoint. `fetchImpl` stands in for fetch in
- * tests. `signal` stops a call in flight; the call then throws Cancelled.
- * `tokenize` asks the loaded llama.cpp backend for an exact count and falls
- * back to the estimate when the server offers none.
+ * The reply of a streamed chat call, from its server-sent events: the content
+ * deltas joined, the finish reason and the usage the last chunks carry. The
+ * thinking deltas (`reasoning_content`) are left out. Null when the stream did
+ * not end with `[DONE]`, or holds an event that is not JSON or is an error:
+ * Lemonade answers a request its backend refuses with a 200 whose body is a
+ * bare error object.
  */
-export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes = 150,
-  fetchImpl = localFetch, signal: stop = null }) {
+function readStream(text) {
+  let content = '';
+  let finish = null;
+  let usage = null;
+  for (const event of text.split(/\r?\n\r?\n/)) {
+    const lines = event.split(/\r?\n/).filter((line) => line.startsWith('data:'));
+    if (!lines.length) continue;
+    const data = lines.map((line) => line.slice(5).replace(/^ /, '')).join('\n');
+    if (data === '[DONE]') return { content, finish, usage };
+    let chunk;
+    try {
+      chunk = JSON.parse(data);
+    } catch {
+      return null;
+    }
+    if (!chunk || typeof chunk !== 'object' || chunk.error) return null;
+    const choice = chunk.choices?.[0];
+    if (typeof choice?.delta?.content === 'string') content += choice.delta.content;
+    if (choice?.finish_reason) finish = choice.finish_reason;
+    if (chunk.usage) usage = chunk.usage;
+  }
+  return null;
+}
+
+/**
+ * The sampling settings a call goes out with when the pipeline config sets none.
+ * Temperature 0 picks the likeliest token each time, and the fixed seed takes the
+ * place of the server's random one (llama.cpp's default). With one server slot,
+ * the same prompt then gets the same reply on the same server, model and load
+ * options; llama.cpp does not promise that across batch sizes.
+ */
+export const DEFAULT_TEMPERATURE = 0;
+export const DEFAULT_SEED = 42;
+
+/**
+ * A client for one model on one endpoint. `fetchImpl` stands in for fetch in
+ * tests. `signal` stops a call in flight; the call then throws Cancelled, and
+ * the closed connection stops the server generating its reply.
+ * `tokenize` asks the loaded llama.cpp backend for an exact count and falls
+ * back to the estimate when the server offers none. Every call is sent with
+ * `temperature` and `seed`; `json` returns the seed, and a ModelError it throws
+ * carries it, so the call record can say what the call was sent with.
+ */
+export function modelClient({ endpoint, name, temperature = DEFAULT_TEMPERATURE, seed = DEFAULT_SEED,
+  timeoutMinutes = 150, fetchImpl = localFetch, signal: stop = null }) {
   const base = localEndpoint(endpoint);
   let tokenizeUrl;
 
@@ -184,13 +238,23 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
   }
 
   /**
-   * One chat call. Returns the parsed JSON object and the call's timings. A
-   * reply cut off at maxTokens, or one that does not parse, is a ModelError
-   * whose message carries no reply text.
+   * One chat call. Returns the parsed JSON object, the call's timings and the
+   * seed it was sent with. A reply cut off at maxTokens, or one that does not
+   * parse, is a ModelError whose message carries no reply text.
    */
-  async function json({ system, user, schema, schemaName, reasoning, maxTokens }) {
+  async function json(request) {
+    try {
+      return { ...await send(request), seed };
+    } catch (error) {
+      if (error instanceof ModelError) error.seed = seed;
+      throw error;
+    }
+  }
+
+  async function send({ system, user, schema, schemaName, reasoning, maxTokens }) {
     const started = Date.now();
     let reply;
+    let text;
     try {
       reply = await fetchImpl(`${base}/chat/completions`, {
         method: 'POST',
@@ -202,7 +266,11 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
         body: JSON.stringify({
           model: name,
           temperature,
+          seed,
           max_tokens: maxTokens,
+          // The usage comes in a last chunk of its own, and only when asked for.
+          stream: true,
+          stream_options: { include_usage: true },
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
           chat_template_kwargs: { enable_thinking: Boolean(reasoning) },
           response_format: {
@@ -211,33 +279,31 @@ export function modelClient({ endpoint, name, temperature = 0.1, timeoutMinutes 
           },
         }),
       });
+      if (reply.ok) text = await reply.text();
     } catch {
       if (stop?.aborted) throw new Cancelled();
       // The cause can quote the request, so only the code goes on.
-      throw new ModelError('network', 'model endpoint could not be reached');
+      throw new ModelError('network', 'the connection to the model endpoint failed');
     }
     if (!reply.ok) throw new ModelError('http', `model endpoint answered HTTP ${reply.status}`);
-    let body;
-    try {
-      body = await reply.json();
-    } catch {
-      // A server that gives up on a request, such as at its own time-out, can end
-      // a 2xx reply with no body. The parse error quotes the body, so only the
-      // code goes on.
-      throw Object.assign(new ModelError('no-reply', 'model endpoint answered with no JSON'),
+    const parsed = readStream(text);
+    if (!parsed) {
+      // A server that gives up on a request, such as at its own time-out, or refuses
+      // it, can end a 2xx reply without its last event. The body can quote the
+      // request, so only the code goes on.
+      throw Object.assign(new ModelError('no-reply', 'model endpoint ended the reply early'),
         { usage: { promptTokens: 0, outputTokens: 0, ms: Date.now() - started } });
     }
-    const choice = body.choices?.[0];
     const usage = {
-      promptTokens: body.usage?.prompt_tokens ?? 0,
-      outputTokens: body.usage?.completion_tokens ?? 0,
+      promptTokens: parsed.usage?.prompt_tokens ?? 0,
+      outputTokens: parsed.usage?.completion_tokens ?? 0,
       ms: Date.now() - started,
     };
-    if (choice?.finish_reason === 'length') {
+    if (parsed.finish === 'length') {
       throw Object.assign(new ModelError('length', 'model output reached max_tokens'), { usage });
     }
     try {
-      return { value: JSON.parse(choice?.message?.content ?? ''), usage };
+      return { value: JSON.parse(parsed.content), usage };
     } catch {
       throw Object.assign(new ModelError('parse', 'model output is not JSON'), { usage });
     }

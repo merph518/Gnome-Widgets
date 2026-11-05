@@ -55,6 +55,7 @@ reply text: the user does not see it there.**
 | `<reference-docs>` | `README.md` and `docs/` |
 | `<ownership-unit>` | The folder the issue names: `plugins/<group>/skills/<name>/`, `plugins/<group>/hooks/`, or a root file |
 | `<ownership-rules>` | Under Overrides, Section 3 |
+| `<claim-script>` | `python3 plugins/general/skills/implement/claims.py`, under Overrides, Section 3 |
 | `<main-checkout>` | `~/Code/Overmind`, read-only |
 | `<worktree-script>` | `EnterWorktree` when available; otherwise the Git fallback under Overrides, Section 3 |
 | `<edit-guard>` | The harness worktree guard when available; isolation is required without it, under Overrides, Section 3 |
@@ -69,7 +70,7 @@ reply text: the user does not see it there.**
 | `<static-checks>` | Local checks, under Overrides, Section 5 |
 | `<pr-checks>` | The `test-all` job in `.github/workflows/ci.yml` runs every test and the static checks on a pull request and again on each push to its branch. The ready signal waits for it, under Overrides, Section 7, Ready signal. This replaces the general skill's wording that a pull request check runs static checks only: the local runs in Section 6 still go green before the pull request opens |
 | `<test-dispatch>` | Not applicable here, because nothing is dispatched. Tests run locally, under Overrides, Section 6 |
-| `<branch-age-note>` | Before opening the pull request and before marking it ready, merge `origin/main` into the branch when it is behind. Never rebase, and never force-push |
+| `<branch-age-note>` | Before opening the pull request and before marking it ready, merge `origin/main` into the branch when it is behind, and as soon as `<claim-script> sync` prints a file. Never rebase, and never force-push |
 | `<run-watch>` | No run watcher, because nothing is dispatched. After the ready signal, wait for the merge with a background command that has no command substitution: `until gh pr view <n> --json state --jq .state | grep -qvx OPEN; do sleep 120; done; gh pr view <n> --json state --jq .state`. When working under `oversee-development`, record the opened pull request on its ledger with `bash plugins/general/skills/oversee-development/oversee.sh finish <N> done <pr> "<note>"`, where `<pr>` is the pull request number. Outside it, only that wait |
 | `<fix-cycle-budget>` | Three cycles on one failure, then record it on the issue and stop |
 | `<mergeability-note>` | Under Overrides, Section 7 |
@@ -93,16 +94,19 @@ Each change goes through these steps, in order:
 
 | Step | Produces |
 | --- | --- |
-| Planning and design advice, before any code is written | The approach, the files to change, the test seams, and the risks |
+| Planning and design advice, before any code is written | The approach, the files to change, the test seams, the risks, and the edge cases, acceptance checks, and open questions of the general skill's step 4 |
 | Writing the code and its tests | The change, built from the plan |
 | Reviewing every change, including the last fix | A list of real findings, or none |
 | Fixing review findings | A fix that is itself reviewed |
 
 Before coding, spawn an agent with the issue or task and the files it touches, and ask it
-for the plan and design advice: the approach, the files to change, the test seams, and
-the risks. Build from that plan and record in the pull request body, under Judgment
-calls, any place the code departed from it. A fix for a review finding is reviewed like
-any other change.
+for the plan and design advice: the approach, the files to change, the test seams, the
+risks, and the general skill's step 4 list of edge cases, acceptance checks, and open
+questions. The session posts that list as the general skill's step 4 says, puts the
+answers to its open questions in it, and passes it in full to every agent that builds
+from it and to every review agent. Build from that plan and record in the pull request
+body, under Judgment calls, any place the code departed from it. A fix for a review
+finding is reviewed like any other change.
 
 ### Test seams
 
@@ -146,6 +150,16 @@ branch name containing `issue-<N>-`, or `Closes #<N>` in its body), means defer 
 issue. An issue labeled `Tracker` is not worked itself; work its open child issues. An `In Progress`
 label with no open pull request and no session holding it is stale: ask through
 `AskUserQuestion` before taking the issue over.
+
+Claims: the board above sees only open pull requests, so claim files before editing them,
+per the general skill's "Claim shared files". Claims live in the main checkout's git
+directory, so every worktree shares them. `claims.py` takes the session from
+`CLAUDE_CODE_SESSION_ID`, then `PI_SESSION_ID`; a session with neither passes
+`--session <id>` to every call. Pass `--pid <pid of the session>` too when it is known;
+without a pid a claim goes stale after twelve hours, so release it when the work ends or
+stops without a pull request. The files most often wanted by two sessions are `CLAUDE.md`,
+`README.md` and the two implement `SKILL.md` files: claim one of them right before its
+first edit and edit it in one pass.
 
 An issue that cannot be worked now, because it waits on another issue, on something
 only the user can do, or on code that is leaving this repository, gets the `Blocked`

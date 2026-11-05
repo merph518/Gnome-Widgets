@@ -2,7 +2,7 @@
 // every repository's builder gets them. They read the sheets the builder
 // returned, or, when it returns none, the same sheets worked out from the pack,
 // and report each problem as a failed sheet in the shape the builder's own
-// failures take: [sheet, 'Yes', 'Yes', 'FAIL', notes naming the cards and rules].
+// failures take, which `failedSheet` builds.
 
 import { cell, expandIds, packFromSheets, readSheet } from './pack.mjs';
 import { confidenceValues, dashboardCountMismatches, objectiveCardProblems, setNumbers }
@@ -10,6 +10,10 @@ import { confidenceValues, dashboardCountMismatches, objectiveCardProblems, setN
 
 const list = (v) => (Array.isArray(v) ? v : v == null || v === '' ? [] : [v]);
 const blank = (v) => list(v).every((x) => String(x ?? '').trim() === '');
+
+/** A failed sheet as the builder's own failures give it: [sheet, 'Yes', 'Yes', 'FAIL', notes]. */
+export const failedSheet = (sheet, notes) => [sheet, 'Yes', 'Yes', 'FAIL', notes];
+
 const ids = (text) => String(text ?? '').split(/[;\n,]+/).map((s) => s.trim()).filter(Boolean);
 
 /**
@@ -213,6 +217,6 @@ export function checkPack(pack, built) {
   const fresh = found.filter(({ sheet, keys }) => !keys.length
     || !keys.every((key) => (named.get(sheet) ?? '').includes(key)));
   const sheets = [...new Set(fresh.map((f) => f.sheet))];
-  return { failed: sheets.map((sheet) => [sheet, 'Yes', 'Yes', 'FAIL',
-    fresh.filter((f) => f.sheet === sheet).map((f) => f.text).join('\n')]), warnings };
+  return { failed: sheets.map((sheet) => failedSheet(sheet,
+    fresh.filter((f) => f.sheet === sheet).map((f) => f.text).join('\n'))), warnings };
 }

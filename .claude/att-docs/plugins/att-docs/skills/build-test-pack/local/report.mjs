@@ -1,13 +1,13 @@
 // Writes the maintainer's report: one Markdown file a day and a weekly rollup.
 // Like the status lines it carries no content, only job IDs, reason codes,
 // counts, confidence ratings and run times, so it can be opened or sent
-// anywhere. It reads the queue's rows and each job's status.log, never the
-// pack, the workbook or detail.log.
+// anywhere. It reads the queue's rows, with the cut records each run left on
+// its row, and each job's status.log, never the pack, the workbook or detail.log.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { countedTries, heldRow, MAX_MEMORY_STOPS, MAX_TRIES, memoryStops } from './config.mjs';
-import { readStatusLog } from './status.mjs';
+import { readStatusLog, recordedRuns, repeatedCuts } from './status.mjs';
 
 const DAY = 86400000;
 const DAYS = { day: 1, week: 7 };
@@ -103,6 +103,10 @@ export function reportData(config, queue, { period = 'day', now = new Date(), ra
     .sort((a, b) => new Date(a.at) - new Date(b.at));
   const count = (state) => jobs.filter((job) => job.state === state).length;
   const waiting = rows.filter((row) => row.status === 'queued');
+  // A step cut on run after run is named for each job that finished in the period,
+  // from every row the job has had, removed ones too.
+  const repeated = [...new Set(jobs.map((job) => job.id))]
+    .flatMap((id) => repeatedCuts(recordedRuns(queue, id)).map((step) => ({ id, ...step })));
   return {
     period, since: new Date(since), now, jobs,
     counts: { pass: count('PASS'), fail: count('FAIL'), retry: count('RETRY'), dropped: count('DROPPED'),
@@ -110,6 +114,7 @@ export function reportData(config, queue, { period = 'day', now = new Date(), ra
     queue: { depth: waiting.length, retrying: waiting.filter((row) => countedTries(row.failures) > 0).length,
       running: rows.filter((row) => row.status === 'running').length },
     failing: jobs.filter((job) => !['PASS', 'STOPPED'].includes(job.state)),
+    repeatedCuts: repeated,
     spot: spotChecks(jobs.filter((job) => job.state === 'PASS'), config.report, random),
   };
 }
@@ -183,6 +188,13 @@ export function renderReport(data) {
         : `- ${code(job.id)}: failed ${where}. Not retried.`);
   }
   if (data.failing.length) lines.push('');
+  lines.push('## Steps cut at their output budget', '');
+  if (!data.repeatedCuts.length) lines.push('None.', '');
+  for (const step of data.repeatedCuts) {
+    lines.push(`- ${code(step.id)}: ${code(step.step)} was cut at its output budget of ${cell(step.budget)}`
+      + ` tokens on its last ${cell(step.runs)} runs. Turn its thinking off.`);
+  }
+  if (data.repeatedCuts.length) lines.push('');
   lines.push('## Spot check', '');
   if (!data.spot.length) lines.push('No passed pack to check in this period.', '');
   for (const pick of data.spot) {

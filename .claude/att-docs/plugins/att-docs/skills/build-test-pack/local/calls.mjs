@@ -7,13 +7,13 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CALLS_VERSION = 1;
+export const CALLS_VERSION = 1;
 
 /**
  * A hash of the whole prompt, so two calls with the same text hash alike on any
  * machine. The array keeps the system and user texts apart: moving a line from one
- * to the other changes the hash. The schema, the output cap and the temperature are
- * not part of it, so tuning a cap does not read as a prompt change.
+ * to the other changes the hash. The schema, the output cap, the temperature and the
+ * seed are not part of it, so changing any of them does not read as a prompt change.
  */
 export function promptHash(system, user) {
   return `sha256:${createHash('sha256').update(JSON.stringify([system, user])).digest('hex')}`;
@@ -50,8 +50,8 @@ export function callRecorder(dir) {
   let seq = null;
   return {
     /** Writes one call, adding its sequence number, and returns the file's path. */
-    record({ step, attempt, thinking, maxTokens, system, user, schema, reply = null, errorCode = null,
-      usage = null, startedAt, endedAt }) {
+    record({ step, attempt, thinking, maxTokens, seed = null, system, user, schema, reply = null,
+      errorCode = null, usage = null, startedAt, endedAt }) {
       fs.mkdirSync(dir, { recursive: true });
       seq ??= lastSeq(dir);
       seq += 1;
@@ -63,6 +63,9 @@ export function callRecorder(dir) {
         attempt,
         thinking: Boolean(thinking),
         maxTokens,
+        // The seed the call was sent with; a replayed call notes the recorded call's,
+        // and null when that record holds none.
+        seed,
         promptHash: promptHash(system, user),
         schemaHash: schemaHash(schema),
         prompt: { system, user },

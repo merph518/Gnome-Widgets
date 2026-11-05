@@ -8,15 +8,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fixTargets, GateError, mergeChecks, phase8, reconcile, tidyCard } from './phases.mjs';
+import { fixTargets, GateError, mergeChecks, phase8, reconcile, REVIEW_SHEETS, tidyCard } from './phases.mjs';
 import { almStyle } from './compare.mjs';
 import { checkPack, derivedSheets } from './pack-checks.mjs';
-import { readPack } from './pack.mjs';
+import { readPack, readSheet } from './pack.mjs';
+import { readXlsx } from './xlsx.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const stub = await import(pathToFileURL(path.join(HERE, 'fixtures', 'builder-stub.mjs')).href);
+const FIXTURES = path.join(HERE, 'fixtures');
+const stub = await import(pathToFileURL(path.join(FIXTURES, 'builder-stub.mjs')).href);
+// Every Draft workbook lands under one root, removed when this file's tests finish.
+const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-checks-test-'));
+after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
 
 const rule = (id, extra = {}) => ({ id, name: `Rule ${id}`, module: 'MOD', sourceDocument: 'Doc',
   summary: `${id} summary`, impact: 'Direct Change', risk: 'Medium', ...extra });
@@ -287,13 +292,22 @@ test('a High-risk Not Impacted rule passes with a regression card or a stated re
 
 // ---- Phase 8 ----------------------------------------------------------------
 
-/** The parts of the pipeline's context that Phase 8 reads, over a model that answers from `reply`. */
-function context(pack, { reply, builder = stub, retries = 2 } = {}) {
+const STUB_COMMAND = ['node', 'builder-stub.mjs', '{pack}', '--out', '{out}'];
+/** The stub's command with a ceiling on the assumptions each confidence allows. */
+const CEILING_COMMAND = ['node', 'builder-ceiling.mjs', '{pack}', '--out', '{out}'];
+
+/**
+ * The parts of the pipeline's context that Phase 8 reads, over a model that answers from
+ * `reply`. The Draft workbook is written under a new temporary folder with `command`.
+ */
+function context(pack, { reply, builder = stub, retries = 2, command = STUB_COMMAND } = {}) {
   const calls = [];
+  const output = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'job-'));
   return { calls, ctx: {
     pack, builder, job: { id: 'job' }, repairs: 0, calls: 0, tokens: { prompt: 0, output: 0 },
     logs: { status() {}, detail() {}, call() {} },
-    config: { builder: { retries }, model: { context: 1e6, maxOutput: 100, reasoningOutput: 100 } },
+    config: { root: FIXTURES, output, builder: { retries, command },
+      model: { context: 1e6, maxOutput: 100, reasoningOutput: 100 } },
     ref: { docs: { workbookStandard: '' }, core: [], chapters: () => [] },
     model: {
       countTokens: async () => 1,
@@ -305,6 +319,47 @@ function context(pack, { reply, builder = stub, retries = 2 } = {}) {
   } };
 }
 const nothing = () => ({ cards: [], limitations: [], coverage: [] });
+const reviewDir = (ctx) => path.join(ctx.config.output, ctx.job.id, 'work', 'review');
+/** The pack the Draft workbook was written from. */
+const draftJson = (ctx) => JSON.parse(fs.readFileSync(path.join(reviewDir(ctx), 'draft-pack.json'), 'utf8'));
+/** A sheet of the Draft workbook as its Field or Item rows, each with its Value. */
+function draftFields(ctx, name) {
+  const book = fs.readdirSync(reviewDir(ctx)).find((file) => file.endsWith('.xlsx'));
+  const sheet = readXlsx(path.join(reviewDir(ctx), book)).map(readSheet).find((s) => s.name === name);
+  return Object.fromEntries(sheet.rows.map(({ cells }) => [cells.Field ?? cells.Item, cells.Value]));
+}
+const assumptions = (count) => Array.from({ length: count }, (_, i) => ({ assumption: `Assumption ${i + 1}.`,
+  why: 'The documents leave it open.', impact: 'Cards rest on it.', clarification: 'Confirm it.' }));
+
+test('Phase 8 rebuilds a pack rated Medium under its assumption limit with Medium in the Draft workbook', async () => {
+  const pack = goodPack();
+  pack.assumptions = assumptions(5);
+  pack.confidence = { overall: 'Medium', reason: 'Two cards cover the change.' };
+  pack.executiveSummary = { confidence: 'Medium. Two cards cover the change.' };
+  const { ctx, calls } = context(pack, { reply: nothing, command: CEILING_COMMAND });
+  await phase8(ctx, pack, 'rebuild');
+  assert.equal(calls.length, 0);
+  assert.equal(draftFields(ctx, 'Confidence Assessment').overall, 'Medium');
+  assert.equal(draftFields(ctx, 'Executive Summary').confidence, 'Medium. Two cards cover the change.');
+  assert.equal(draftFields(ctx, 'Dashboard')['Overall Confidence'], 'Medium');
+  assert.equal(draftJson(ctx).limitations['Confidence Assessment'], undefined);
+  assert.deepEqual([pack.confidence.overall, pack.limitations?.['Confidence Assessment']], ['Medium', undefined]);
+});
+
+test('Phase 8 writes an unrated pack past every assumption limit as a Low Draft workbook and leaves the pack unrated', async () => {
+  const pack = goodPack();
+  pack.assumptions = assumptions(12);
+  pack.confidence = {};
+  pack.executiveSummary = { confidence: 'Medium' };
+  const { ctx, calls } = context(pack, { reply: nothing, command: CEILING_COMMAND });
+  await phase8(ctx, pack, 'build', REVIEW_SHEETS);
+  assert.equal(calls.length, 0);
+  assert.equal(draftFields(ctx, 'Confidence Assessment').overall, 'Low');
+  assert.equal(draftFields(ctx, 'Executive Summary').confidence, 'Low');
+  assert.equal(draftJson(ctx).limitations['Confidence Assessment'], 'Pending review.');
+  assert.deepEqual([pack.confidence, pack.executiveSummary.confidence, pack.limitations['Confidence Assessment']],
+    [{}, 'Medium', undefined]);
+});
 
 test('Phase 8 sends a failed check to repair, and the repaired pack passes', async () => {
   const pack = goodPack();

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { callRecorder } from './calls.mjs';
+import { stepKey } from './config.mjs';
 
 /** Field values a status line may carry: numbers, booleans, and short codes. A sandbox job's ID joins its source and label with `~`. */
 const SAFE = /^[A-Za-z0-9 _.:/=+~-]{0,80}$/;
@@ -43,6 +44,47 @@ export function statusFields(fields) {
   }
   return fields;
 }
+
+/**
+ * What one run did with its thinking steps, from its status lines: the steps it
+ * asked with thinking on, keyed `<phase>.<step>` without an index or repeat
+ * suffix, and each one cut at its output budget, with that budget.
+ */
+export function runCuts(entries) {
+  const asked = new Set();
+  const cut = new Map();
+  for (const entry of entries) {
+    if (entry.attempt !== 1 || entry.reasoning !== true
+      || !['call', 'retry', 'call-fail'].includes(entry.event)) continue;
+    const step = `${entry.phase}.${stepKey(entry.step)}`;
+    asked.add(step);
+    if (entry.reason === 'length') cut.set(step, entry.maxTokens ?? null);
+  }
+  return { asked: [...asked], cut: [...cut].map(([step, budget]) => ({ step, budget })) };
+}
+
+/**
+ * The thinking steps cut at their output budget on the last two or more runs that
+ * asked them, in a row, from runs oldest first. Each has its latest budget and how
+ * many runs in a row cut it. A run that never asked a step, such as one resumed past
+ * its phase, neither breaks nor extends the streak.
+ */
+export function repeatedCuts(runs) {
+  const streaks = new Map();
+  for (const run of runs) {
+    const cut = new Map((run.cut ?? []).map((entry) => [entry.step, entry.budget]));
+    for (const step of run.asked ?? []) {
+      streaks.set(step, cut.has(step)
+        ? { budget: cut.get(step), runs: (streaks.get(step)?.runs ?? 0) + 1 } : { runs: 0 });
+    }
+  }
+  return [...streaks].filter(([, streak]) => streak.runs >= 2)
+    .map(([step, { budget, runs }]) => ({ step, budget, runs }));
+}
+
+/** A job's recorded runs, oldest first, from the `cuts` each of its queue rows holds. */
+export const recordedRuns = (queue, id) => queue.jobs.filter((row) => row.id === id)
+  .flatMap((row) => row.cuts ?? []);
 
 export function jobLogs(outDir, { echo = true } = {}) {
   fs.mkdirSync(outDir, { recursive: true });

@@ -91,6 +91,19 @@ export const scopeSchema = (ids, impacts) => obj({
   userReview: strs,
 });
 
+/** What a change scope review question comes to once it is read against the change description. */
+const REVIEW_RULINGS = ['kept', 'assumption', 'answered'];
+
+/**
+ * One row per review question, keyed Q1, Q2 and so on. The model server returns an
+ * object's properties in alphabetical order, so the names sort in the order the row is
+ * worked out: the sentence, the ruling it supports, then the statement and its parts.
+ */
+export const reviewTriageSchema = (keys) => obj({
+  questions: keyed('question', keys, { quote: str, ruling: oneOf(REVIEW_RULINGS), statement: str,
+    testImpact: str, toConfirm: str, why: str }),
+});
+
 /** The areas the impact analysis covers: the pack key and the label the prompts show. */
 export const IMPACT_AREAS = [['windows', 'Windows, pages and tabs'],
   ['businessFunctions', 'Business functions'], ['upstream', 'Upstream'],
