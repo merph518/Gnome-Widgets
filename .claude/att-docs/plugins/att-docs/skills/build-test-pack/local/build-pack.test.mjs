@@ -726,6 +726,39 @@ test('an ordinary objective no card serves is dropped when the model names none'
   assert.deepEqual(setCards(pack, 'Workflow Validation'), []);
 });
 
+// No card names Core Change Validation, so its objective pass runs.
+const NO_CORE = (value) => ({ ...titled(value), cards: titled(value).cards.map((card) => ({ ...card,
+  objectives: ['Workflow Validation', 'Negative / Exclusion', 'Regression Testing'] })) });
+
+test('a flagged break card in a pack with no BREAK IT set is offered to the core objective pass', async () => {
+  const run = lib({ phase5: (value) => {
+    value.objectives['BREAK IT'].applicable = false;
+    return value;
+  }, phase6_scenarios: inventory([{}, BREAK]), phase6_cards: NO_CORE });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const asked = run.model.calls.filter((c) => c.schemaName.startsWith('phase6_objective'));
+  assert.deepEqual(asked.map((c) => c.schemaName), ['phase6_objective_1']);
+  assert.deepEqual(asked[0].schema.properties.cards.items.enum, ['C1', 'C2']);
+  assert.match(asked[0].user, /C2 \| Case S2/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  assert.deepEqual(setCards(pack, 'Core Change Validation'), ['Case S1', 'Case S2']);
+});
+
+test('a flagged break card in a pack with a BREAK IT set stays out of the core objective pass', async () => {
+  const run = lib({ phase6_scenarios: inventory([{}, BREAK]), phase6_cards: NO_CORE });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const asked = run.model.calls.filter((c) => c.schemaName.startsWith('phase6_objective'));
+  assert.deepEqual(asked.map((c) => c.schemaName), ['phase6_objective_1']);
+  assert.deepEqual(asked[0].schema.properties.cards.items.enum, ['C1']);
+  assert.doesNotMatch(asked[0].user, /Case S2/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(setCards(pack, 'Core Change Validation'), ['Case S1']);
+  assert.deepEqual(setCards(pack, 'BREAK IT'), ['Case S2']);
+});
+
 const DROP_RUN = {
   phase6_scenarios: inventory([{}, {}, BREAK]), phase6_cards: NO_WORKFLOW,
   phase6_objective: (value) => ({ ...value, cards: [] }),

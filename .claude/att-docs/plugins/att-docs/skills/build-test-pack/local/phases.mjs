@@ -2446,8 +2446,9 @@ export async function phase6(ctx) {
         if (!served()) drop(objective);
       } else {
         // Ask which of the cards already written serve it; none new is written.
-        // A BREAK IT card stays out of the core set, so it cannot be named for it.
-        const pool = allCards().filter((card) => !(objective === ctx.coreObjective && card.breakIt));
+        // A card in the BREAK IT set stays out of the core set, so it cannot be named for it. A flagged
+        // card in a pack with no BREAK IT set is a plain card.
+        const pool = allCards().filter((card) => !(objective === ctx.coreObjective && breakItCard(ctx, card)));
         const refs = pool.map((card, i) => ({ card, ref: `C${i + 1}` }));
         const answer = refs.length ? await ask(ctx, {
           phase: 'phase6', step: `objective-${n + 1}`, reasoning: false,

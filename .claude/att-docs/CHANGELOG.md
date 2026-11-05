@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.18](https://github.com/merph518/Overmind/compare/v0.31.17...v0.31.18) (2026-11-05)
+
+
+### Bug Fixes
+
+* offer flagged break cards to the core objective pass when the pack has no BREAK IT set ([#567](https://github.com/merph518/Overmind/issues/567)) ([b5badc4](https://github.com/merph518/Overmind/commit/b5badc42b8c46dc55ba0276a9edf0c5871cdb7df)), closes [#565](https://github.com/merph518/Overmind/issues/565)
+
 ## [0.31.17](https://github.com/merph518/Overmind/compare/v0.31.16...v0.31.17) (2026-11-05)
 
 
