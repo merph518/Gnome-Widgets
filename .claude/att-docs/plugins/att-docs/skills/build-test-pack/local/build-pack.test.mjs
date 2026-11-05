@@ -6965,6 +6965,31 @@ test('a card that repeats another is dropped before verification and counted', a
   assert.ok(pack.assumptions.some((a) => /dropped as a repeat/.test(a.assumption)));
 });
 
+test('a BREAK IT card and a plain card that read alike both stay, in either order, each in its own sets', async () => {
+  const same = (value) => ({ ...value, cards: value.cards.map((card) => ({ ...card,
+    title: 'Renewal of a card', mission: 'Renewal of a card', focus: ['Renewal of a card'] })) });
+  for (const specs of [[{}, BREAK], [BREAK, {}]]) {
+    const order = specs[0] === BREAK ? 'break first' : 'plain first';
+    const run = lib({ phase6_scenarios: inventory(specs), phase6_cards: same });
+    const result = await runLib(run);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const pack = JSON.parse(read(result.packPath));
+    assert.equal(pack.testCards.length, 2, order);
+    assert.equal(phase6Pass(result.outDir).repeats, 0, order);
+    assert.ok(!pack.assumptions.some((a) => /dropped as a repeat/.test(a.assumption)), order);
+    // The inventory's break scenario serves BREAK IT, so no pass asks for more.
+    assert.ok(!run.model.calls.some((c) => c.schemaName.startsWith('phase6_scenarios_d1_break')), order);
+    const setOf = (objective) => {
+      assert.equal(pack.objectives.find((r) => r.objective === objective).applicable, true, `${order}: ${objective}`);
+      return pack.testSets.find((row) => row.objective === objective).cards;
+    };
+    const [breakIt, core] = [setOf('BREAK IT'), setOf('Core Change Validation')];
+    assert.equal(breakIt.length, 1, order);
+    assert.equal(core.length, 1, order);
+    assert.notEqual(breakIt[0], core[0], order);
+  }
+});
+
 test('rules a card takes from a folded or dropped card join its scenario, so a redesign keeps them', () => {
   const rule = (id) => ({ id, sourceDocument: 'D', module: 'M', impact: 'Direct Change', summary: `rule ${id}` });
   const step = (description, expected, rules) => ({ description, expected, rules });
@@ -6984,6 +7009,24 @@ test('rules a card takes from a folded or dropped card join its scenario, so a r
   assert.ok(!verified.has(raises) && !checked.has(raises));
   assert.deepEqual(ctx.designed.k.cards[0].rules, ['R1', 'R2']);
   assert.deepEqual(ctx.designed.k.cards[0].objectives, ['Core', 'Flow']);
+});
+
+test('a flagged break card is kept apart from a plain card only while the pack has a BREAK IT set', () => {
+  const alike = (scenario, breakIt) => ({ title: 'Renewal of a card', mission: 'Renewal of a card',
+    focus: ['Renewal of a card'], scenario, rules: ['R1'], objectives: ['Core'], breakIt,
+    steps: [{ description: 'Select Save', expected: 'The card renews', rules: ['R1'] }] });
+  const tidied = (applicable) => {
+    const ctx = { job: { suite: false }, breakItObjective: 'Break',
+      designed: { k: { cards: [alike('S1', false), alike('S2', true)], assumptions: [],
+        scenarios: [{ id: 'S1', rules: ['R1'] }, { id: 'S2', rules: ['R1'] }] } },
+      pack: { objectives: [{ objective: 'Core', applicable: true }, { objective: 'Break', applicable }],
+        rules: [{ id: 'R1', sourceDocument: 'D', module: 'M', impact: 'Direct Change', summary: 'Renewal of a card' }] } };
+    const done = tidyDocument(ctx, { key: 'k', name: 'D', module: 'M', text: 'Renewal of a card' }, new Set());
+    return [done.repeats, ctx.designed.k.cards.length];
+  };
+  assert.deepEqual(tidied(true), [0, 2]);
+  // Without the set the flagged card would sit in the plain card's sets, so it is a repeat.
+  assert.deepEqual(tidied(false), [1, 1]);
 });
 
 test('a BREAK IT card stays out of the core set', () => {
