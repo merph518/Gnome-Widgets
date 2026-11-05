@@ -1639,6 +1639,12 @@ const REMOVED_CARD = ' A rule whose summary starts with "Retired:" was removed: 
 const breakItOn = (ctx) => !ctx.job.suite && ctx.breakItObjective != null
   && cardObjectives(ctx).includes(ctx.breakItObjective);
 
+/**
+ * True when the card goes in the BREAK IT set: it is flagged `breakIt` and the
+ * pack has that set. A flagged card in a pack without it sits with the plain cards.
+ */
+const breakItCard = (ctx, card) => card.breakIt === true && breakItOn(ctx);
+
 // Rules go to the inventory a quarter of the room at a time; a reply lists at most one scenario per 150 tokens.
 const INVENTORY_SHARE = 4;
 const SCENARIO_TOKENS = 150;
@@ -1830,7 +1836,7 @@ const SETUP_EXPECTED = 'The step completes with no error shown.';
 export function setsOf(ctx, card) {
   const { fullCoverageObjective: full, breakItObjective: brk } = ctx;
   const applicable = cardObjectives(ctx);
-  const breakIt = brk != null && applicable.includes(brk) && card.breakIt === true;
+  const breakIt = breakItCard(ctx, card);
   if (breakIt && ctx.config.exclusiveSets) return [brk];
   // A BREAK IT card pushes past the ordinary case, so it stays out of the core set.
   const sets = list(card.objectives).filter((o) => applicable.includes(o) && o !== full && o !== brk
@@ -2235,7 +2241,9 @@ export function tidyDocument(ctx, doc, verified, checked = new Set()) {
     verified.delete(card);
     checked.delete(card);
   };
-  const fold = foldFollowUps(state.cards);
+  // A BREAK IT card and a plain card go in different sets, so neither joins nor repeats the other.
+  const isBreak = (card) => breakItCard(ctx, card);
+  const fold = foldFollowUps(state.cards, isBreak);
   state.cards = fold.cards;
   for (const { into, from } of fold.folded) {
     count.folded += 1;
@@ -2247,7 +2255,7 @@ export function tidyDocument(ctx, doc, verified, checked = new Set()) {
       impact: `Rules ${from.rules.join(', ')} are checked by the joined card.`,
       clarification: 'Split them again if they need to run apart.' });
   }
-  const drop = dropRepeats(state.cards, doc, docRules(ctx, doc));
+  const drop = dropRepeats(state.cards, doc, docRules(ctx, doc), isBreak);
   state.cards = drop.cards;
   for (const { kept, dropped } of drop.dropped) {
     count.repeats += 1;
@@ -2486,7 +2494,8 @@ export async function phase6(ctx) {
         impact: `Its Expected Result and steps for rules ${card.rules.join(', ')} are unchecked.`,
         clarification: 'Check its Expected Result and steps against the rules by hand.' });
     }
-    const left = repeatsLeft(ctx.designed[doc.key].cards, doc, docRules(ctx, doc));
+    const left = repeatsLeft(ctx.designed[doc.key].cards, doc, docRules(ctx, doc),
+      (card) => breakItCard(ctx, card));
     if (left > 0) throw new GateError('phase6', 'repeated-cards', { repeats: left });
   }
   const cards = Object.values(ctx.designed).reduce((n, d) => n + d.cards.length, 0);

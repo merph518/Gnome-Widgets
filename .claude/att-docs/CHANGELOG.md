@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.17](https://github.com/merph518/Overmind/compare/v0.31.16...v0.31.17) (2026-11-05)
+
+
+### Bug Fixes
+
+* keep BREAK IT and plain cards apart in the design tidy ([#560](https://github.com/merph518/Overmind/issues/560)) ([#564](https://github.com/merph518/Overmind/issues/564)) ([7dfce07](https://github.com/merph518/Overmind/commit/7dfce0706d7c25e845b97825758248ef4c91b78d))
+
 ## [0.31.16](https://github.com/merph518/Overmind/compare/v0.31.15...v0.31.16) (2026-11-05)
 
 

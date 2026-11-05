@@ -67,6 +67,20 @@ test('a card that answers a message with no card raising it shared by rule stays
   assert.equal(foldFollowUps([error, ok]).cards.length, 2);
 });
 
+test('a message is answered on a card of the same kind, BREAK IT or plain', () => {
+  const raises = (title, breakIt) => ({ ...card(title, 'Select the role', 'The error message Role blocked shows', ['R-34']), breakIt });
+  const ok = (breakIt) => ({ ...card('Ok closes it', 'Select Ok', 'The message closes', ['R-34']), breakIt });
+  // The break card comes first and raises the same message, but the plain answer joins the plain card.
+  const { cards, folded } = foldFollowUps([raises('Break it', true), raises('Plain', false), ok(false)]);
+  assert.deepEqual(folded.map((f) => [f.into.title, f.from.title]), [['Plain', 'Ok closes it']]);
+  assert.equal(cards[0].steps.length, 2);
+  assert.equal(cards[1].steps.length, 4);
+  // With only a card of the other kind raising it, the answer stays a card of its own.
+  assert.equal(foldFollowUps([raises('Plain', false), ok(true)]).cards.length, 2);
+  assert.equal(foldFollowUps([raises('Break it', true), ok(false)]).cards.length, 2);
+  assert.equal(foldFollowUps([raises('Break it', true), ok(true)]).cards.length, 1);
+});
+
 const view = (title, focus, rules, mission = 'Check the sex abuse allegation blocks the role') => ({ title, mission, focus: [focus], rules,
   steps: [{ description: 'Select the role', expected: 'ok', rules }, { description: 'Select Save', expected: 'no save', rules }] });
 
@@ -87,6 +101,25 @@ test('repeatsLeft counts a repeat that stands', () => {
   const cards = [view('Sex abuse allegation blocks the role', 'Select Save with a sex abuse allegation', ['R-34']),
     view('Sex abuse allegation blocks the role', 'Select Save with a sex abuse allegation', ['R-34'])];
   assert.equal(repeatsLeft(cards, DOC, RULES), 1);
+});
+
+test('a BREAK IT card is a repeat only of another BREAK IT card, and a plain card only of a plain one', () => {
+  const alike = (breakIt) => ({ ...view('Sex abuse allegation blocks the role',
+    'Select Save with a sex abuse allegation', ['R-34']), breakIt });
+  for (const pair of [[alike(false), alike(true)], [alike(true), alike(false)]]) {
+    assert.equal(dropRepeats(pair, DOC, RULES).dropped.length, 0);
+    assert.equal(repeatsLeft(pair, DOC, RULES), 0);
+  }
+  const breaks = [alike(true), alike(true)];
+  assert.equal(dropRepeats(breaks, DOC, RULES).cards.length, 1);
+  // With the kinds interleaved, each later card is a repeat of the first of its own kind, in document order.
+  const named = ['P0', 'B1', 'P2', 'B3'].map((name) => ({ ...alike(name[0] === 'B'), name }));
+  const { cards: kept, dropped } = dropRepeats(named, DOC, RULES);
+  assert.deepEqual(dropped.map((d) => [d.kept.name, d.dropped.name]), [['P0', 'P2'], ['B1', 'B3']]);
+  assert.deepEqual(kept.map((c) => c.name), ['P0', 'B1']);
+  assert.equal(repeatsLeft(kept, DOC, RULES), 0);
+  // The caller's test of which cards go in the BREAK IT set decides the kinds.
+  assert.equal(repeatsLeft([alike(false), alike(true)], DOC, RULES, () => false), 1);
 });
 
 test('stepRules adds a rule that governs a control the steps press, even when the card does not cite it', () => {

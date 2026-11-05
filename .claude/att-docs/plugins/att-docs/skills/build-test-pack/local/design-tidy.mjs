@@ -1,14 +1,19 @@
 // Tidies a document's designed cards before they are verified: scenarios that
 // only check retired rules are merged by the control they press, a card that
 // only answers a message or resets joins the card that raises the message, and
-// a card that repeats another is dropped. Pure functions over the design state;
-// the phase calls them and records what they report.
+// a card that repeats another is dropped. A BREAK IT card is only ever joined
+// to or dropped as a repeat of another BREAK IT card, and a plain card of a
+// plain one: the two go in different sets. `isBreak(card)` says which cards go
+// in the BREAK IT set; by default the cards flagged `breakIt`. Pure functions
+// over the design state; the phase calls them and records what they report.
 
 import { controlNames, repeatedCards, scenarioModel } from './floor.mjs';
 import { words } from './source.mjs';
 
 const list = (value) => (Array.isArray(value) ? value
   : value === undefined || value === null || value === '' ? [] : [value]);
+
+const flagged = (card) => card.breakIt === true;
 
 /** The control names a document and its rules mention. */
 export function docControls(doc, rules) {
@@ -22,6 +27,22 @@ const vocabOf = (doc, rules) => new Set([doc.text ?? '', ...rules.map((rule) => 
 /** A card as the scenario model reads it: an id, a title, a mission and a focus line. */
 const viewOf = (card, id) => ({ id, card, title: card.title ?? '', mission: card.mission ?? '',
   focus: list(card.focus).join('. '), rules: list(card.rules) });
+
+/**
+ * The repeats among a document's cards, found among the BREAK IT cards and
+ * among the rest apart, over one scenario model of every card so a word weighs
+ * the same in both. Groups and doubtful cards are in document order.
+ */
+function repeatsOf(cards, doc, rules, isBreak) {
+  const views = cards.map((card, i) => viewOf(card, i));
+  const model = scenarioModel(views, { controls: docControls(doc, rules), vocab: vocabOf(doc, rules) });
+  const found = [true, false].map((kind) => repeatedCards(views.filter((view) => isBreak(view.card) === kind),
+    model, (view) => view.rules));
+  const inOrder = (rows, at) => rows.sort((a, b) => at(a) - at(b));
+  return { groups: inOrder(found.flatMap((f) => f.groups), (g) => g.cards[0]),
+    doubtful: inOrder(found.flatMap((f) => f.doubtful), (d) => d.card),
+    repeats: found.reduce((n, f) => n + f.repeats, 0) };
+}
 
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')
   .replace(/&/g, '(?:&|and)');
@@ -88,12 +109,12 @@ const RAISES = /\b(?:message|error|warning|prompt|dialog|alert)\b/i;
 
 /**
  * Folds each card whose first step only answers a message (Ok, Yes, No,
- * Cancel) or resets into a card that raises a message and shares a rule with
- * it. The answering steps follow the target's, the rules join, and the target's
- * Expected Result is the new last step's. Returns { cards, folded } where
- * `folded` lists { into, from } cards.
+ * Cancel) or resets into a card of the same kind that raises a message and
+ * shares a rule with it. The answering steps follow the target's, the rules
+ * join, and the target's Expected Result is the new last step's. Returns
+ * { cards, folded } where `folded` lists { into, from } cards.
  */
-export function foldFollowUps(cards) {
+export function foldFollowUps(cards, isBreak = flagged) {
   const folded = [];
   const gone = new Set();
   for (const card of cards) {
@@ -101,6 +122,7 @@ export function foldFollowUps(cards) {
     if (steps.length === 0 || !ANSWER.test(steps[0].description ?? '')) continue;
     const mine = new Set(list(card.rules));
     const target = cards.find((other) => other !== card && !gone.has(other)
+      && isBreak(other) === isBreak(card)
       && list(other.steps).length > 0
       && RAISES.test(list(other.steps).at(-1).expected ?? '')
       && list(other.rules).some((id) => mine.has(id)));
@@ -115,17 +137,16 @@ export function foldFollowUps(cards) {
 }
 
 /**
- * Drops each card that repeats an earlier card of the document, by the same
- * detector `compare` reports with. A card that joined its group only by its
- * rules, reading unlike the first, is kept: a reader decides. Rules a dropped
- * card cited that the kept card does not go onto the kept card's last step.
+ * Drops each card that repeats an earlier card of the same kind in the
+ * document, by the same detector `compare` reports with. A card that joined
+ * its group only by its rules, reading unlike the first, is kept: a reader
+ * decides. Rules a dropped card cited that the kept card does not go onto the
+ * kept card's last step.
  * Returns { cards, dropped, doubtful, left } with `left` the repeats still
  * standing (the doubtful ones).
  */
-export function dropRepeats(cards, doc, rules) {
-  const views = cards.map((card, i) => viewOf(card, i));
-  const model = scenarioModel(views, { controls: docControls(doc, rules), vocab: vocabOf(doc, rules) });
-  const found = repeatedCards(views, model, (view) => view.rules);
+export function dropRepeats(cards, doc, rules, isBreak = flagged) {
+  const found = repeatsOf(cards, doc, rules, isBreak);
   const doubtful = new Set(found.doubtful.map((d) => d.card));
   const dropped = [];
   const gone = new Set();
@@ -149,9 +170,7 @@ export function dropRepeats(cards, doc, rules) {
 }
 
 /** How many repeats the cards still hold, not counting the doubtful ones a reader decides. */
-export function repeatsLeft(cards, doc, rules) {
-  const views = cards.map((card, i) => viewOf(card, i));
-  const model = scenarioModel(views, { controls: docControls(doc, rules), vocab: vocabOf(doc, rules) });
-  const found = repeatedCards(views, model, (view) => view.rules);
+export function repeatsLeft(cards, doc, rules, isBreak = flagged) {
+  const found = repeatsOf(cards, doc, rules, isBreak);
   return found.repeats - found.doubtful.length;
 }
