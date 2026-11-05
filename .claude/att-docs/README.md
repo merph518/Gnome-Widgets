@@ -140,6 +140,17 @@ parses, every `SKILL.md` has a `name` and a `description`, relative Markdown lin
 resolve, and every Python, JavaScript and shell file passes a syntax check. Pass
 `--tests-only` or `--checks-only` to run just one half.
 
+The same step runs `scripts/bridge-tools/skill_tools.py`, which compares the Baton tool
+and argument names in `README.md` and the two voice skills with `bridge-tools.json`, the
+tool list taken from Baton's definitions. A skill names a tool in a code span, and the
+arguments it takes in call form, as in `send(anyway)` or `read_pull_request(repo)`. The
+check fails on a tool or an argument that is not in the list, and on another Markdown file
+that names a Baton tool without being added to `SCANNED` in the script. It warns about
+an argument of a covered tool that no call form names. After a Baton release changes its
+tools, run `bash scripts/bridge-tools/refresh.sh` from a fetched Code Conductor checkout
+(`~/Code/Code-Conductor`, or pass its path), commit the new `bridge-tools.json`, and fix
+what the check then reports.
+
 The `test-all` check in `.github/workflows/ci.yml` runs this same command on every pull
 request and on each push to `main`. `shellcheck` also runs when it is installed, but
 its findings are advisory and never fail the run. The runners need `node`, `python3`,
@@ -394,6 +405,16 @@ settings. See the `repo-hooks` skill.
 for their defaults and the loop's stop and resume commands. Loop state is shared by
 worktrees in the main checkout. An interactive restart requires a prompt before the
 session can resume work.
+
+`implement` ships `claims.py`, which keeps sessions that work one repository at the same
+time out of each other's files. `claims.py check <path>...` reports a file that another
+live session has claimed or that another open pull request changes, `claim` records a
+claim, `release` drops it, and `sync` reports the files that both the default branch and
+the current branch changed, so another branch's merge is brought in before the pull
+request opens. Claims are files in the main checkout's git directory, shared by
+worktrees and held while the claiming process runs, or for twelve hours when no process
+is named. The `implement` skill's `<claim-script>` placeholder names the command; a
+repository that leaves it out skips the claim checks.
 
 Baton, the voice bridge server, is in `merph518/Code-Conductor` under `baton/`. The extension
 file at `.claude/skills/voice-bridge-hooks/extension.json` also names Baton's repository

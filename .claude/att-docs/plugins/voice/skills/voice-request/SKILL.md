@@ -133,7 +133,8 @@ the earlier instruction. The one exception is a call that came pre-approved with
 ## Please and thank you
 
 When the user's own spoken command ends with "please and thank you", that is
-the yes. For `answer_prompt`, `close_session` and `merge_pull_request`, the
+the yes. For `answer_prompt(preapproved)`, `close_session(preapproved)` and
+`merge_pull_request(preapproved)`, the
 voice chat passes `preapproved` true on the first call, the tool acts at once,
 and the answer is a receipt to read back to the user. Without the phrase, the
 read-back and the yes work as they always have.
@@ -197,5 +198,6 @@ skill, so these rules reach it only through Baton's own tool text.
   `session_title.py work`.
 - When changing a session's follow mode, confirm the change in a few words. Do
   not explain what the mode does; the user chose it knowing that.
-- The tracker tools (those that take `repo`) default to the repository holding
-  Baton's extension file, which is Playwright-Testing as Baton is set up. Pass `repo` only for a different repository.
+- The tracker tools (those that take `repo`, such as `read_pull_request(repo)`) use the
+  repository the followed sessions work in when `repo` is left out, or ask which one. Pass `repo` for
+  a different repository.

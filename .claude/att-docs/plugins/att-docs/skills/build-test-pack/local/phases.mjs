@@ -11,9 +11,10 @@ import * as S from './schemas.mjs';
 import { revisedDate, rulesStale, shapeProblems, uncitedStruck } from './rules.mjs';
 import { readSheet } from './pack.mjs';
 import { readXlsx } from './xlsx.mjs';
-import { checkPack, FILLED_GAP, NO_REASON_PROBLEM } from './pack-checks.mjs';
+import { checkPack, failedSheet, FILLED_GAP, NO_REASON_PROBLEM } from './pack-checks.mjs';
 import { docControls, dropRepeats, foldFollowUps, mergeRemovedScenarios, repeatsLeft } from './design-tidy.mjs';
 import { impossibleSteps, stepRules, stepSchema, STEP_QUESTION, stepsView } from './steps.mjs';
+import { ANSWERED_BY } from './supervisor.mjs';
 
 export class GateError extends Error {
   constructor(phase, code, counts = {}) {
@@ -143,7 +144,7 @@ export async function readWindow(ctx, phase) {
 /**
  * The pipeline's one way to call the model. Checks the token count first and
  * throws `too-big` rather than truncating, retries a failed call once with
- * thinking off (a thinking call cut off at its cap gets the smaller `retryOutput`,
+ * thinking off (a thinking call cut off at its output budget gets the smaller `retryOutput`,
  * and a second cut is `runaway`), and logs only counts and timings. Each call that
  * reaches the model, failed ones too, also gets its prompt, reply and timings written
  * to work/calls.
@@ -174,10 +175,10 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
     const recorded = { step: schemaName, attempt, thinking: think, maxTokens, system, user, schema,
       startedAt };
     try {
-      const { value, usage } = await ctx.model.json({
-        system, user, schema, schemaName, reasoning: think, maxTokens,
+      const { value, usage, seed } = await ctx.model.json({
+        system, user, schema, schemaName, attempt, reasoning: think, maxTokens,
       });
-      ctx.logs.call({ ...recorded, reply: value, usage, endedAt: new Date() });
+      ctx.logs.call({ ...recorded, seed, reply: value, usage, endedAt: new Date() });
       ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call', attempt, reasoning: think,
         promptTokens: usage.promptTokens, outputTokens: usage.outputTokens, ms: usage.ms });
       ctx.logs.detail(`${phase} ${step} reply`, value);
@@ -186,14 +187,15 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
       return S.unkey(schema, value);
     } catch (caught) {
       if (!(caught instanceof ModelError)) throw caught;
-      // A reply cut off at the cap with thinking off would be cut off again.
+      // A reply cut off at its output budget with thinking off would be cut off again.
       const cut = caught.code === 'length';
       let error = caught;
       if (cut && cutThinking) {
         error = Object.assign(new ModelError('runaway', 'model kept going after thinking was turned off'),
           { usage: caught.usage });
       }
-      ctx.logs.call({ ...recorded, errorCode: error.code, usage: error.usage, endedAt: new Date() });
+      ctx.logs.call({ ...recorded, seed: caught.seed, errorCode: error.code, usage: error.usage,
+        endedAt: new Date() });
       if (attempt === 2 || (cut && !think)) {
         ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call-fail', attempt, reasoning: think,
           maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,
@@ -216,9 +218,9 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
 }
 
 /**
- * The reply cap for a call. A thinking call takes the config's cap for its step when there
- * is one; otherwise the smallest of the config's cap for its phase, the built-in cap for
- * its step and `reasoningOutput`. No cap passes `reasoningOutput`.
+ * The output budget for a call. A thinking call takes the config's budget for its step when
+ * there is one; otherwise the smallest of the config's budget for its phase, the built-in
+ * budget for its step and `reasoningOutput`. No budget passes `reasoningOutput`.
  */
 export function outputCap(ctx, phase, think, step) {
   const { maxOutput, reasoningOutput, reasoningOutputByPhase, reasoningOutputByStep } = ctx.config.model;
@@ -247,8 +249,9 @@ function runCommand(ctx, template, values, { failure, output } = {}) {
     maxBuffer: 512 * 1024 * 1024 });
   if (output) Object.assign(output, { status: result.status, stdout: result.stdout ?? '' });
   if (result.status !== 0) {
-    ctx.logs.detail(`command ${argv[0]} failed`, `${result.stderr}`);
-    if (failure) failure.stderr = `${result.stderr ?? ''}${result.error?.message ?? ''}`;
+    const why = `${result.stderr ?? ''}${result.error?.message ?? ''}`;
+    ctx.logs.detail(`command ${argv[0]} failed`, why);
+    if (failure) failure.stderr = why;
     return null;
   }
   return result.stdout;
@@ -680,6 +683,49 @@ async function digestDocument(ctx, doc) {
   return doc.digest;
 }
 
+/**
+ * At a question gate: the build supervisor's answer to each of `questions`, recorded in
+ * `pack` and returned as `{ question, answer, confidence, citations }`. When no supervisor
+ * is watching, the wait runs out, or a question is left unanswered, the phase stops with
+ * `code` and `counts`. `impact` says what the pack rests on the answers for.
+ */
+async function askSupervisor(ctx, pack, phase, code, questions, counts, impact) {
+  const asked = questions.map((question, n) => ({ id: `Q${n + 1}`, question }));
+  const outcome = ctx.supervise ? await ctx.supervise(phase, asked) : null;
+  const byId = new Map(list(outcome?.answers).map((row) => [row.id, row]));
+  if (asked.some((q) => !byId.has(q.id))) throw new GateError(phase, code, counts);
+  const answers = asked.map(({ id, question }) => {
+    const { answer, confidence, citations } = byId.get(id);
+    return { question, answer, confidence, citations };
+  });
+  recordSupervisorAnswers(pack, answers, impact);
+  return answers;
+}
+
+/**
+ * The pack's assumptions for the supervisor's answers, each marked as answered by the
+ * build supervisor with its confidence and citations, and a line for each under Job Intake.
+ */
+function recordSupervisorAnswers(pack, answers, impact) {
+  const by = `Answered by the ${ANSWERED_BY}`;
+  pack.assumptions ??= [];
+  for (const a of answers) {
+    pack.assumptions.push({
+      assumption: a.answer,
+      why: `${by} (${a.confidence}) from ${a.citations.length
+        ? a.citations.join('; ') : 'no source, since none bears on the question'}.`,
+      impact,
+      clarification: `Confirm with the change owner: ${a.question.trim()}`,
+      answeredBy: ANSWERED_BY, confidence: a.confidence, citations: a.citations, question: a.question,
+    });
+  }
+  if (pack.intake && answers.length) {
+    pack.intake.assumptionsToProceed = [...list(pack.intake.assumptionsToProceed),
+      ...answers.map((a) => `${by} (${a.confidence}): ${a.answer}`)];
+    if (pack.intake.readiness === 'READY') pack.intake.readiness = 'READY WITH ASSUMPTIONS';
+  }
+}
+
 const phase1Tag = (rule) => (rule.status === 'retired' ? '[retired] ' : '');
 const phase1Line = (rule, summary = rule.rule_summary ?? rule.summary ?? '') =>
   `- ${phase1Tag(rule)}${rule.rule_id ?? rule.id}: ${rule.name ?? ''} | ${summary}`;
@@ -753,14 +799,21 @@ export async function phase1(ctx) {
   const extra = [];
   const earlyConflicts = read ? read.conflicts.filter((c) => String(c).trim()) : [];
   const earlyMissing = read ? read.blockingMissing.filter((c) => String(c).trim()) : [];
-  // What the rule batches found stops the gate before the understanding call and its processing.
+  // What the rule batches found stops the gate before the understanding call and its processing,
+  // unless the build supervisor answers the conflicts and nothing else is missing.
+  const answered = [];
   if (earlyConflicts.length || earlyMissing.length) {
     ctx.private('phase1-conflicts.json', earlyConflicts);
     ctx.private('phase1-missing.json', earlyMissing);
-    if (earlyConflicts.length) {
+    if (earlyMissing.length && !earlyConflicts.length) {
+      throw new GateError('phase1', 'missing-information', { missing: earlyMissing.length });
+    }
+    if (earlyMissing.length) {
       throw new GateError('phase1', 'source-conflict', { conflicts: earlyConflicts.length });
     }
-    throw new GateError('phase1', 'missing-information', { missing: earlyMissing.length });
+    answered.push(...await askSupervisor(ctx, pack, 'phase1', 'source-conflict', earlyConflicts,
+      { conflicts: earlyConflicts.length },
+      'The understanding summary reads the sources this way; later phases read the rules as written.'));
   }
   if (read) {
     // The rules that bear on the change go in whole; if even those are too many, each summary shrinks.
@@ -774,9 +827,15 @@ export async function phase1(ctx) {
       ?? ctx.documents.map((doc) => `- ${doc.name}: ${doc.rules.length} rule(s)`).join('\n');
     extra.push(['Rule reading notes', read.notes.join('\n')]);
   }
+  if (answered.length) {
+    extra.push(['Conflicts the build supervisor answered', asLines(answered.map((a) =>
+      `- ${noStop(a.question)}: ${a.answer}`))]);
+  }
   const names = ctx.documents.map((doc) => doc.name);
+  // Thinking off: the answer is about 540 tokens, and with thinking on the call spends its
+  // whole output budget thinking and never reaches it.
   const answer = await ask(ctx, {
-    phase: 'phase1', step: 'understanding', reasoning: true, refs,
+    phase: 'phase1', step: 'understanding', reasoning: false, refs,
     task: 'Run the Project Understanding Gate. Write the Project Understanding Summary,'
       + (job.suite ? '' : ' rank every source document by the authority order and decide its'
         + ' inclusion with a reason,')
@@ -790,7 +849,9 @@ export async function phase1(ctx) {
       + ' information directly affects the change. List as blocking missing information only'
       + ' what the change cannot be understood or scoped without; anything else goes in the'
       + ' summary as missing information. Write the reason for the confidence rating first, then'
-      + ' rate confidence honestly.',
+      + ' rate confidence honestly.'
+      + (answered.length ? ' A conflict the build supervisor answered is settled by that answer;'
+        + ' do not list it again.' : ''),
     inputs: [['Change description', ctx.description],
       ['Business rules', ruleText],
       ...extra,
@@ -868,18 +929,26 @@ export async function phase1(ctx) {
   }
   ctx.summary = answer.summary;
   // What a stopped gate found is the user's to read, in the job's own folder.
-  const conflicts = [...filled(answer.conflicts), ...filled(read?.conflicts)];
+  // A conflict the build supervisor already answered before the understanding call is settled.
+  const settled = new Set(answered.map((a) => plainWords(a.question)));
+  const conflicts = [...filled(answer.conflicts), ...filled(read?.conflicts)]
+    .filter((c) => !settled.has(plainWords(c)));
   const blockingMissing = [...filled(answer.blockingMissing), ...filled(read?.blockingMissing)];
   ctx.private('phase1-conflicts.json', conflicts);
   ctx.private('phase1-missing.json', blockingMissing);
   if (conflicts.length) {
-    throw new GateError('phase1', 'source-conflict', { conflicts: conflicts.length });
+    // The supervisor is asked only when the conflicts are all that stops the phase.
+    if (blockingMissing.length) throw new GateError('phase1', 'source-conflict', { conflicts: conflicts.length });
+    answered.push(...await askSupervisor(ctx, pack, 'phase1', 'source-conflict', conflicts,
+      { conflicts: conflicts.length },
+      'The understanding summary was written before this answer; later phases read the rules as written.'));
   }
   if (blockingMissing.length) {
     throw new GateError('phase1', 'missing-information', { missing: blockingMissing.length });
   }
   if (answer.summary.confidence === 'Low') throw new GateError('phase1', 'low-confidence');
-  return { included: ctx.documents.filter((d) => d.inclusion === 'Included').length };
+  return { included: ctx.documents.filter((d) => d.inclusion === 'Included').length,
+    ...(answered.length ? { supervised: answered.length } : {}) };
 }
 
 const summaryText = (ctx) => Object.entries(ctx.summary ?? {})
@@ -1038,9 +1107,9 @@ export async function phase2(ctx) {
   if (!rules.length) throw new GateError('phase2', 'no-rules');
   stopOnDuplicateWording(ctx, rules);
   const pagesMissing = warnMissingPages(ctx, rules);
-  if (!ctx.job.suite) await stopOnConflicts(ctx, rules);
+  const supervised = ctx.job.suite ? 0 : await settleConflicts(ctx, rules);
   pack.rules = rules;
-  return { rules: rules.length, derived, pagesMissing };
+  return { rules: rules.length, derived, pagesMissing, ...(supervised ? { supervised } : {}) };
 }
 
 const wordingKey = (rule) => String(rule.summary ?? '').toLowerCase().replace(/[^a-z0-9.<>%$=+-]+/g, ' ')
@@ -1108,11 +1177,12 @@ function warnMissingPages(ctx, rules) {
 }
 
 /**
- * Asks whether any two live rules require different behavior for the same thing, and stops
- * the run when they do. An exception to another rule is not a conflict. Rules are read in
- * batches, so a pair split across two batches is never compared.
+ * Asks whether any two live rules require different behavior for the same thing. When they
+ * do, the build supervisor is asked how to read each pair, and the run stops when it does
+ * not answer. An exception to another rule is not a conflict. Rules are read in batches, so a
+ * pair split across two batches is never compared. Returns how many conflicts were answered.
  */
-async function stopOnConflicts(ctx, rules) {
+async function settleConflicts(ctx, rules) {
   const refs = [...ctx.ref.core, ctx.ref.docs.ruleIntake];
   const live = rules.filter((r) => r.status !== 'Retired')
     .sort((a, b) => a.sourceDocument.localeCompare(b.sourceDocument));
@@ -1135,9 +1205,12 @@ async function stopOnConflicts(ctx, rules) {
       found.push(c);
     }
   }
-  if (!found.length) return;
+  if (!found.length) return 0;
   ctx.private('phase2-conflicts.json', found);
-  throw new GateError('phase2', 'rule-conflict', { conflicts: found.length });
+  const answers = await askSupervisor(ctx, ctx.pack, 'phase2', 'rule-conflict',
+    found.map((c) => `Rules ${c.rules.join(' and ')}: ${c.conflict}`), { conflicts: found.length },
+    'The cards test both rules as written; this answer says which reading holds.');
+  return answers.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1220,77 @@ const REVIEW_RULE = ' List under user review each question only the user can set
   + ' of two readings of the change applies; anything an assumption can settle stays an assumption.';
 
 const ruleLine = (rule) => `- ${rule.id} | ${rule.name} | ${rule.module} | ${rule.summary}`;
+
+/** Text as its words alone: lower case, every run of other characters one space. */
+const plainWords = (text) => String(text ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * The fewest words a quote or a settled reading may have: fewer cannot name both the
+ * thing and what holds for it, and a lone ruling word copied into the statement is caught.
+ */
+const MIN_WORDS = 3;
+const wordCount = (text) => plainWords(text).split(' ').filter(Boolean).length;
+
+/**
+ * Reads each review question the scope calls raised against the change description,
+ * with thinking off, and settles it there when it can. An answer becomes an assumption
+ * whose why quotes the sentence, when that sentence is found in the description with only
+ * the words compared; an answer whose sentence is not found is an ordinary assumption. A
+ * question one reading lets the work go on under becomes an assumption too. A question
+ * whose statement is blank or too short to stand alone, which a lone ruling word is, or
+ * whose assumption talks about how the pipeline ran, is returned in `kept` with the
+ * sentence the model quoted and whether that sentence was found. A found quote shows the
+ * sentence is in the description, not that it decides the question.
+ */
+async function triageReview(ctx, refs, questions) {
+  const task = 'Each question below was raised while the rules were classified against the change'
+    + ' description. Settle each one from the change description alone. In quote, copy the sentence'
+    + ' of the change description that bears most on the question, exactly as written, spelling'
+    + ' included, or leave it empty when no sentence does. In ruling: answered only when that sentence'
+    + ' decides between the readings the question names; assumption when the description leaves the'
+    + ' question open, such as a sentence that names one case when the question asks whether others'
+    + ' are included, but one reading lets the testing go on; kept only when the description says two'
+    + ' things that cannot both hold, or no one reading lets the testing go on. In statement, write'
+    + ' the answer or the assumed reading as a full sentence about the application. In testImpact,'
+    + ' write what the testing misses if the statement is wrong, in toConfirm the question to ask'
+    + ' the change owner, and in why the reason for the ruling. For kept, quote is the sentence'
+    + ' that leaves the question open, and statement, testImpact, toConfirm and why stay empty.'
+    + ASSUMPTION_RULE;
+  const source = ` ${plainWords(ctx.description)} `;
+  const found = (quote) => wordCount(quote) >= MIN_WORDS && source.includes(` ${plainWords(quote)} `);
+  const usable = (statement) => wordCount(statement) >= MIN_WORDS;
+  const out = { assumptions: [], kept: [], answered: 0, assumed: 0 };
+  const fixed = estimateTokens(ctx.description) + 2000;
+  for (const [i, group] of batches(questions, (q) => q, room(ctx, false, refs) - fixed).entries()) {
+    const keys = group.map((_, n) => `Q${n + 1}`);
+    const answer = await ask(ctx, {
+      phase: 'phase3', step: `review-${i + 1}`, reasoning: false, refs, task,
+      inputs: [['Change description', ctx.description],
+        ['Questions', asLines(group.map((q, n) => `- ${keys[n]}: ${q}`))]],
+      schema: S.reviewTriageSchema(keys),
+    });
+    const rows = new Map(answer.questions.map((row) => [row.question, row]));
+    group.forEach((question, n) => {
+      const row = rows.get(keys[n]) ?? {};
+      const quote = String(row.quote ?? '').trim();
+      const verbatim = found(quote);
+      const statement = String(row.statement ?? '').trim();
+      let ruling = usable(statement) ? row.ruling : 'kept';
+      if (ruling === 'answered' && !verbatim) ruling = 'assumption';
+      const [assumed] = ruling === 'kept' ? [] : withoutPipelineTerms(ctx, [{ assumption: statement,
+        why: ruling === 'answered' ? `The change description says: "${quote}"` : String(row.why ?? ''),
+        impact: String(row.testImpact ?? ''), clarification: String(row.toConfirm ?? '') }]);
+      if (assumed) {
+        out.assumptions.push(assumed);
+        out[ruling === 'answered' ? 'answered' : 'assumed'] += 1;
+      } else {
+        out.kept.push({ question, quote, verbatim });
+      }
+      ctx.logs.detail(`phase3 review ${assumed ? ruling : 'kept'}`, `${question}\n${quote}\n${statement}`);
+    });
+  }
+  return out;
+}
 
 export async function phase3(ctx) {
   const { pack, ref, job } = ctx;
@@ -1198,16 +1342,26 @@ export async function phase3(ctx) {
   }
   const counts = {};
   for (const rule of pack.rules) counts[rule.impact] = (counts[rule.impact] ?? 0) + 1;
-  const downstream = reviewQuestions.length ? 'NEEDS USER REVIEW'
-    : pack.assumptions.length > assumedBefore ? 'READY WITH ASSUMPTIONS' : 'READY';
-  pack.changeScope = { downstream };
-  if (reviewQuestions.length) {
-    ctx.private('phase3-review.json', reviewQuestions);
-    throw new GateError('phase3', 'needs-user-review',
-      { review: reviewQuestions.length, direct: counts['Direct Change'] ?? 0 });
+  const triage = await triageReview(ctx, refs, reviewQuestions);
+  pack.assumptions.push(...triage.assumptions);
+  const reviewed = reviewQuestions.length
+    ? { raised: reviewQuestions.length, answered: triage.answered, assumed: triage.assumed } : {};
+  let supervised = 0;
+  if (triage.kept.length) {
+    ctx.private('phase3-review.json', triage.kept);
+    pack.changeScope = { downstream: 'NEEDS USER REVIEW' };
+    // The rules keep the impact they were classified with; the answers stand beside them.
+    const answers = await askSupervisor(ctx, pack, 'phase3', 'needs-user-review',
+      triage.kept.map((k) => k.question),
+      { review: triage.kept.length, ...reviewed, direct: counts['Direct Change'] ?? 0 },
+      'The rules were classified before this answer; a different answer can change their impact.');
+    supervised = answers.length;
   }
+  const downstream = pack.assumptions.length > assumedBefore ? 'READY WITH ASSUMPTIONS' : 'READY';
+  pack.changeScope = { downstream };
   return { direct: counts['Direct Change'] ?? 0, indirect: counts['Indirect Impact'] ?? 0,
-    regression: counts.Regression ?? 0, notImpacted: counts['Not Impacted'] ?? 0, downstream };
+    regression: counts.Regression ?? 0, notImpacted: counts['Not Impacted'] ?? 0, downstream, ...reviewed,
+    ...(supervised ? { supervised } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,6 +1611,13 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 export const scenarioKey = (s) => [s.kind, [...new Set(s.rules)].sort().join(','), norm(s.population),
   norm(s.action)].join('|');
 
+/**
+ * The scenario ID after the highest of S1, S2 and so on that `scenarios` hold,
+ * `ahead` more places on. A merge leaves gaps in the numbering.
+ */
+const nextScenarioId = (scenarios, ahead = 0) => `S${Math.max(0,
+  ...scenarios.map((s) => Number(/^S(\d+)$/.exec(s.id)?.[1] ?? 0))) + ahead + 1}`;
+
 /** The document text for a call: whole if it fits beside what the call already carries, else its digest. */
 async function documentText(ctx, doc, refs, carried) {
   const budget = room(ctx, false, refs) - estimateTokens(carried + ctx.description) - 3000;
@@ -1487,7 +1648,8 @@ const SCENARIO_TOKENS = 150;
  * not fit one call go in batches, each shown the scenarios listed so far. Code
  * numbers the scenarios and drops any that repeats another's kind, rules,
  * population and action. With `only`, just that kind is asked for, and
- * `known` are the scenarios already listed.
+ * `known` are the scenarios already listed. `empty` holds each required kind
+ * with no scenario, and the reply's reason for it.
  */
 async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
   const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
@@ -1551,25 +1713,42 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
         continue;
       }
       seen.add(key);
-      scenarios.push({ ...row, id: `S${known.length + scenarios.length + 1}`,
+      scenarios.push({ ...row, id: nextScenarioId([...known, ...scenarios]),
         rules: [...new Set(row.rules)] });
     }
     for (const check of answer.kindChecks ?? []) {
       checks.set(check.kind, [...(checks.get(check.kind) ?? []), check.note]);
     }
   }
-  // A required kind with no scenario is said so, not left unmentioned.
-  for (const kind of required.filter((k) => !scenarios.some((s) => s.kind === k))) {
-    notes.push({ assumption: `${doc.name}: no ${kind} scenario was listed.`,
-      why: (checks.get(kind) ?? []).join(' '), impact: `No card tests a ${kind} scenario for this document.`,
-      clarification: 'Confirm the document supports none.' });
-  }
+  // The required kinds with no scenario, each with its reasons, for `emptyKindsNote`.
+  const empty = required.filter((k) => !scenarios.some((s) => s.kind === k)).map((kind) => ({ kind,
+    why: (checks.get(kind) ?? []).filter((note) => !blank(note)).map((note) => `${noStop(note)}.`).join(' ') }));
   if (capped) {
     notes.push({ assumption: `${doc.name}: the scenario list reached its limit of ${maxItems}.`,
       why: 'One reply holds only so many scenarios.', impact: 'Some scenarios may be missing.',
       clarification: 'Check the list against the document by hand.' });
   }
-  return { scenarios, notes, dropped };
+  return { scenarios, notes, dropped, empty };
+}
+
+/**
+ * One assumption for the kinds a document's inventory left empty, each with its
+ * reason; none when every kind has a scenario.
+ */
+function emptyKindsNote(docName, empty) {
+  if (!empty.length) return null;
+  if (empty.length === 1) {
+    const [{ kind, why }] = empty;
+    return { assumption: `${docName}: no ${kind} scenario was listed.`,
+      why: blank(why) ? 'No reason was given.' : why,
+      impact: `No card tests a ${kind} scenario for this document.`,
+      clarification: 'Confirm the document supports none.' };
+  }
+  const kinds = empty.map(({ kind }) => kind).join(', ');
+  return { assumption: `${docName}: no scenario was listed for these kinds: ${kinds}.`,
+    why: empty.map(({ kind, why }) => `${kind}: ${blank(why) ? 'no reason was given.' : why}`).join(' '),
+    impact: `No card tests these kinds of scenario for this document: ${kinds}.`,
+    clarification: 'Confirm the document supports none of them.' };
 }
 
 /**
@@ -1681,12 +1860,14 @@ const docRules = (ctx, doc) => ctx.pack.rules.filter((rule) => rule.sourceDocume
  * One document's scenarios, then its cards, one batch of scenarios at a time.
  * Given its earlier `designed` and `only`, it adds scenarios of that kind.
  * A scenario is settled by a card, by a skip saying an existing test covers it,
- * or by a skip saying no card can; each records how in its `settled`.
+ * or by a skip saying no card can; each records how in its `settled`. `empty`
+ * holds the required kinds the inventory listed no scenario for.
  */
 async function designDocument(ctx, doc, rules, objectives, { designed, only } = {}) {
-  const state = designed ?? { cards: [], uncovered: [], reuse: [], assumptions: [], scenarios: [] };
+  const state = designed
+    ?? { cards: [], uncovered: [], reuse: [], assumptions: [], scenarios: [] };
   const count = { retried: 0, duplicates: 0, unsettled: 0 };
-  if (!rules.length) return { designed: state, ...count };
+  if (!rules.length) return { designed: state, empty: [], ...count };
   const inventory = await scenarioInventory(ctx, doc, rules, { only, known: state.scenarios });
   // Absence checks of retired rules are not break cases and merge by the control they press.
   const retiredIds = new Set(ctx.pack.rules.filter(isRetired).map((rule) => rule.id));
@@ -1749,7 +1930,7 @@ async function designDocument(ctx, doc, rules, objectives, { designed, only } = 
     .flatMap((s) => s.rules));
   const owed = only ? [] : rules.filter((rule) => !cited().has(rule.id) && !named().has(rule.id));
   if (owed.length) {
-    const made = owed.map((rule, i) => ({ id: `S${state.scenarios.length + i + 1}`, kind: 'decision',
+    const made = owed.map((rule, i) => ({ id: nextScenarioId(state.scenarios, i), kind: 'decision',
       rules: [rule.id], ...(isRetired(rule)
         ? { population: 'a record the removed behavior used to apply to',
           action: `check that the behavior of ${rule.id} is gone`,
@@ -1796,7 +1977,7 @@ async function designDocument(ctx, doc, rules, objectives, { designed, only } = 
         recommendation: 'Design a card for this rule by hand.' });
   }
   state.uncovered = [...rows.values()];
-  return { designed: state, ...count };
+  return { designed: state, empty: inventory.empty, ...count };
 }
 
 // Words that reverse or narrow a result. Extra words like these on one side of a
@@ -2219,9 +2400,12 @@ export async function phase6(ctx) {
     add(await checkSteps(ctx, doc, objectives, checked, tag));
     add(await verifyDocument(ctx, doc, objectives, verified, `${tag}-steps`));
   };
+  // The required kinds each document's inventory left empty.
+  const emptyKinds = new Map();
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included')) {
     const done = await designDocument(ctx, doc, docRules(ctx, doc), objectives);
     ctx.designed[doc.key] = done.designed;
+    emptyKinds.set(doc.key, done.empty);
     add(done);
     await settle(doc, '');
   }
@@ -2250,11 +2434,6 @@ export async function phase6(ctx) {
             { designed: ctx.designed[doc.key], only: 'break' });
           add(done);
           await settle(doc, '-break');
-          if (served()) {
-            const gone = `${doc.name}: no break scenario was listed.`;
-            done.designed.assumptions = done.designed.assumptions
-              .filter((a) => a.assumption !== gone);
-          }
         }
         if (!served()) drop(objective);
       } else {
@@ -2278,6 +2457,14 @@ export async function phase6(ctx) {
         if (!served()) drop(objective);
       }
     }
+  }
+  // One note per document for the kinds its inventory left empty. A kind a later pass listed, such as
+  // break, is left out, whether or not a card serves its objective.
+  for (const doc of ctx.documents.filter((d) => emptyKinds.has(d.key))) {
+    const state = ctx.designed[doc.key];
+    const note = emptyKindsNote(doc.name, emptyKinds.get(doc.key)
+      .filter(({ kind }) => !state.scenarios.some((s) => s.kind === kind)));
+    if (note) state.assumptions.unshift(note);
   }
   // A redesign can bring a repeat back; tidy and check once more, then refuse any that stands.
   for (const doc of ctx.documents.filter((d) => d.inclusion === 'Included' && ctx.designed[d.key])) {
@@ -2472,7 +2659,8 @@ export function mergeSuite(ctx) {
  * Drops the assumptions that cite a rule ID the pack does not hold, or a count
  * of rules or cards the pack does not have. A count is checked against the
  * pack's totals, its counts by impact, risk, coverage status, derivation and
- * source document, and its set sizes. Returns how many were dropped.
+ * source document, and its set sizes. An answer from the build supervisor is
+ * kept: it cites its own sources. Returns how many were dropped.
  */
 export function dropUnfoundedAssumptions(ctx, pack) {
   const rules = list(pack.rules);
@@ -2512,7 +2700,8 @@ export function dropUnfoundedAssumptions(ctx, pack) {
   };
   const before = pack.assumptions.length;
   pack.assumptions = pack.assumptions.filter((a) => {
-    const ok = grounded([a.assumption, a.why, a.impact, a.clarification].filter(Boolean).join(' '));
+    const ok = a.answeredBy === ANSWERED_BY
+      || grounded([a.assumption, a.why, a.impact, a.clarification].filter(Boolean).join(' '));
     if (!ok) ctx?.logs?.detail?.('assumption dropped: it cites a rule or count the pack does not hold',
       String(a.assumption));
     return ok;
@@ -2552,15 +2741,19 @@ const ABOUT_SOURCE = /\b(?:spec|specification|documents?|source|export)\b/i;
 /**
  * Drops duplicate assumptions (same text once case, punctuation and spacing are
  * ignored; the first stays), and, once every rule has an impact, the ones saying
- * rules were not supplied. Returns how many were dropped.
+ * rules were not supplied. The build supervisor's answers always stay, and another
+ * assumption with the same text as one of them is the duplicate that goes. Returns
+ * how many were dropped.
  */
 export function tidyAssumptions(ctx, pack) {
   if (!list(pack.assumptions).length) return 0;
   const allClassified = list(pack.rules).length > 0 && list(pack.rules).every((r) => r.impact);
-  const seen = new Set();
+  const answered = (a) => a.answeredBy === ANSWERED_BY;
+  const seen = new Set(pack.assumptions.filter(answered).map((a) => plainWords(a.assumption)));
   const before = pack.assumptions.length;
   pack.assumptions = pack.assumptions.filter((a) => {
-    const key = String(a.assumption ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (answered(a)) return true;
+    const key = plainWords(a.assumption);
     if (key && seen.has(key)) {
       ctx?.logs?.detail?.('assumption dropped: duplicate', String(a.assumption));
       return false;
@@ -2693,7 +2886,7 @@ export function buildRound(ctx, pack, label = 'build', attempt = 0, deferred = [
   for (const { code, text } of warnings) ctx.logs.detail(`builder warning ${code} ${label} ${attempt}`, text);
   const built = { ...whole, failed: [...whole.failed.filter(([sheet]) => !deferred.includes(sheet)),
     ...checked.filter(([sheet]) => !deferred.includes(sheet)),
-    ...(mismatched.length ? [[EXPECTED_SHEET, 'Yes', 'Yes', 'FAIL', mismatched.join('\n')]] : [])] };
+    ...(mismatched.length ? [failedSheet(EXPECTED_SHEET, mismatched.join('\n'))] : [])] };
   const statuses = built.validation.map((row) => row[3]);
   ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'builder', attempt,
     failed: built.failed.length, limited: statuses.filter((s) => s === 'PASS WITH LIMITATIONS').length,
@@ -2702,10 +2895,25 @@ export function buildRound(ctx, pack, label = 'build', attempt = 0, deferred = [
   return built;
 }
 
+/**
+ * Phase 8: builds the pack, sends what fails to the repair, and ends by writing the
+ * Draft workbook to work/review with the repository's builder command. The sheets in
+ * `deferred` are left out of the in-memory failures only: the Draft workbook shows
+ * them with the review's stand-ins, and every sheet the builder command fails goes to
+ * the repair. Throws `builder-fail` when the pack still fails after the last repair, or
+ * when the builder command writes no workbook and names no sheet it failed.
+ */
 export async function phase8(ctx, pack, label = 'build', deferred = []) {
   for (let attempt = 0; ; attempt += 1) {
-    const built = buildRound(ctx, pack, label, attempt, deferred);
-    if (!built.failed.length) return pack;
+    let built = buildRound(ctx, pack, label, attempt, deferred);
+    if (!built.failed.length) {
+      const draft = draftWorkbook(ctx, pack, `${label} ${attempt}`);
+      ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'draft', attempt,
+        written: Boolean(draft.workbook), failed: draft.failed.length });
+      if (draft.workbook) return pack;
+      if (!draft.failed.length) throw new GateError('phase8', 'builder-fail', { sheets: 0 });
+      built = { ...built, failed: draft.failed };
+    }
     if (attempt >= ctx.config.builder.retries) {
       throw new GateError('phase8', 'builder-fail', { sheets: built.failed.length });
     }
@@ -2840,7 +3048,10 @@ const REVIEW_SHEET = 'Quality Review';
 
 /**
  * The pack with the sheets Phase 9 has not filled yet standing in, so the
- * builder writes a workbook for the review to read.
+ * builder writes the Draft workbook. Until the overall confidence is rated the
+ * draft reads Low, in the Confidence Assessment and the Executive Summary, with a
+ * limitation saying the review is pending, so no stand-in claims more than the
+ * pack supports. A rated pack keeps its rating.
  */
 function draftPack(ctx, pack) {
   const draft = reconcile(ctx, structuredClone(pack));
@@ -2852,11 +3063,12 @@ function draftPack(ctx, pack) {
     ...over });
   draft.seniorReview = standIn(draft.seniorReview, S.seniorReviewSchema.properties.seniorReview);
   draft.testerNotes = standIn(draft.testerNotes, S.seniorReviewSchema.properties.testerNotes);
+  const rated = ctx.builder.CONFIDENCE_LEVELS.includes(draft.confidence?.overall);
   draft.confidence = standIn(draft.confidence,
     { properties: Object.fromEntries(['overall', ...CONFIDENCE_FIELDS.map(([field]) => field)].map((key) => [key, 0])) },
-    ctx.builder.CONFIDENCE_LEVELS.includes(draft.confidence?.overall) ? {}
-      : { overall: ctx.builder.CONFIDENCE_LEVELS[1] ?? ctx.builder.CONFIDENCE_LEVELS[0] });
-  if (draft.executiveSummary) draft.executiveSummary.confidence ||= draft.confidence.overall;
+    rated ? {} : { overall: 'Low' });
+  // A rated pack's summary already carries the rating: reconcile writes it.
+  if (!rated && draft.executiveSummary) draft.executiveSummary.confidence = 'Low';
   // A Low rating needs a limitation saying why, or the draft fails the builder's own check.
   if (draft.confidence.overall === 'Low') {
     draft.limitations = { ...draft.limitations };
@@ -2866,11 +3078,36 @@ function draftPack(ctx, pack) {
 }
 
 /**
- * Writes the draft workbook the review reads to work/review, with the builder
- * command the repository gives, and says what the builder did: its exit `status`, the
- * PASS and FAIL `lines` it printed, and the `workbook` it wrote, null when it wrote none.
+ * The sheets a builder command printed as FAIL, each with the indented lines under
+ * it as its notes, in the shape the repair reads. The Workbook Validation line only
+ * sums up the other sheets, so it counts only when no other sheet failed.
  */
-export function draftReview(ctx, pack) {
+function builderFailures(stdout) {
+  const failed = [];
+  let current = null;
+  for (const line of stdout.split('\n')) {
+    const status = /^(FAIL|PASS WITH LIMITATIONS|PASS)\s+(\S.*?)\s*$/.exec(line);
+    if (status) {
+      current = status[1] === 'FAIL' ? { sheet: status[2], notes: [] } : null;
+      if (current) failed.push(current);
+    } else if (current && /^\s+\S/.test(line)) {
+      current.notes.push(line.trim());
+    } else {
+      current = null;
+    }
+  }
+  const sheets = failed.filter(({ sheet }) => sheet !== 'Workbook Validation');
+  return (sheets.length ? sheets : failed).map(({ sheet, notes }) => failedSheet(sheet, notes.join('\n')));
+}
+
+/**
+ * Writes the Draft workbook to work/review, with the builder command the repository
+ * gives, and says what the builder did: its exit `status`, its whole output as `text`,
+ * the PASS and FAIL `lines` it printed, the sheets it `failed` as the repair reads
+ * them, and the `workbook` it wrote, null when it wrote none. When it wrote none, the
+ * whole output goes to detail.log as `builder draft <label>`.
+ */
+export function draftWorkbook(ctx, pack, label) {
   const dir = path.join(ctx.config.output, ctx.job.id, 'work', 'review');
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
@@ -2878,16 +3115,18 @@ export function draftReview(ctx, pack) {
   fs.writeFileSync(file, JSON.stringify(draftPack(ctx, pack)));
   const output = {};
   runCommand(ctx, ctx.config.builder.command, { pack: file, out: dir }, { output });
+  const text = output.stdout ?? '';
   const book = fs.readdirSync(dir).find((name) => name.endsWith('.xlsx'));
-  return { dir, status: output.status, workbook: book ? path.join(dir, book) : null,
-    lines: (output.stdout ?? '').split('\n').filter((line) => /^(PASS|FAIL)/.test(line)) };
+  if (!book) ctx.logs.detail(`builder draft ${label}`, text);
+  return { dir, status: output.status, text, workbook: book ? path.join(dir, book) : null,
+    lines: text.split('\n').filter((line) => /^(PASS|FAIL)/.test(line)), failed: builderFailures(text) };
 }
 
-/** The workbook the builder writes for the pack as it stands, read back as sheets. */
+/** The Draft workbook the builder writes for the pack as it stands, read back as sheets. */
 function builtSheets(ctx, pack) {
-  const { workbook } = draftReview(ctx, pack);
-  if (!workbook) throw new GateError('phase9', 'review-workbook-missing');
-  return readXlsx(workbook).map(readSheet);
+  const draft = draftWorkbook(ctx, pack, 'review');
+  if (!draft.workbook) throw new GateError('phase9', 'builder-fail', { sheets: draft.failed.length });
+  return readXlsx(draft.workbook).map(readSheet);
 }
 
 /**
@@ -2925,28 +3164,16 @@ function rulesIndex(pack) {
  * What the review calls read: one view per piece of the built workbook. A
  * workbook in several parts opens each part with an index of the rules that part
  * shows and the cards that cite them, so a part that shows a rule but not its
- * cards can still see them; the index takes at most a third of the room. A
- * builder that writes no workbook for the draft leaves the review the
- * `packView` summary, labeled as such, in parts that fit.
+ * cards can still see them; the index takes at most a third of the room.
  */
 function reviewViews(ctx, pack, refs, extra = [], { review = false } = {}) {
   const budget = reviewBudget(ctx, refs, extra);
   if (budget < 1000) throw new GateError('phase9', 'pack-too-big-to-review');
-  const piecesFor = (tokens) => {
-    try {
-      return { label: 'Built workbook', pieces: workbookPieces(ctx, pack, tokens, { review }) };
-    } catch (error) {
-      if (!(error instanceof GateError) || error.code !== 'review-workbook-missing') throw error;
-      ctx.logs.status({ job: ctx.job.id, phase: 'phase9', event: 'warn', reason: error.code });
-      return { label: 'Pack summary (no workbook was built to read)',
-        pieces: splitText(packView(ctx, pack, true).map(([name, text]) => `${name}:\n${text}`)
-          .join('\n\n'), tokens) };
-    }
-  };
-  let { label, pieces } = piecesFor(budget);
+  const label = 'Built workbook';
+  let pieces = workbookPieces(ctx, pack, budget, { review });
   const index = rulesIndex(pack);
   const cap = Math.floor(budget / 3);
-  if (pieces.length > 1) ({ label, pieces } = piecesFor(budget - cap));
+  if (pieces.length > 1) pieces = workbookPieces(ctx, pack, budget - cap, { review });
   if (!pieces.length) throw new GateError('phase9', 'review-workbook-empty');
   if (pieces.length === 1) return [[[label, pieces[0]]]];
   return pieces.map((text, i) => {
@@ -3149,8 +3376,8 @@ async function fixRound(ctx, pack, findings, label, deferred) {
     if (to.sheets.includes('Coverage Matrix')) list(pack.rules).forEach((rule) => allow.rules.add(rule.id));
   }
   for (const [n, group] of fixGroups(ctx, pack, findings).entries()) {
-    await repair(ctx, pack, { failed: [[REVIEW_SHEET, 'Yes', 'Yes', 'FAIL',
-      group.map((item) => item.text).join('\n')]], validation: [] }, `${label}-g${n + 1}`,
+    await repair(ctx, pack, { failed: [failedSheet(REVIEW_SHEET, group.map((item) => item.text).join('\n'))],
+      validation: [] }, `${label}-g${n + 1}`,
     { assumptions: group.some((item) => item.to.assumptions) });
   }
   keepReviewEdits(pack, kept, allow);

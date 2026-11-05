@@ -41,11 +41,11 @@ test('the schema hash changes with the schema and leaves the prompt hash alone',
 
 test('a record holds the call as made and is named by sequence, step and attempt', () => {
   const dir = folder();
-  const file = callRecorder(dir).record(call({ thinking: true }));
+  const file = callRecorder(dir).record(call({ thinking: true, seed: 42 }));
   assert.equal(path.basename(file), '00001-phase1_rules-1.json');
   assert.equal(callFileName(12, 'phase9_walk', 2), '00012-phase9_walk-2.json');
   assert.deepEqual(read(file), {
-    version: 1, seq: 1, step: 'phase1_rules', attempt: 1, thinking: true, maxTokens: 100,
+    version: 1, seq: 1, step: 'phase1_rules', attempt: 1, thinking: true, maxTokens: 100, seed: 42,
     promptHash: promptHash('sys', 'usr'), schemaHash: schemaHash({ type: 'object' }), prompt: { system: 'sys', user: 'usr' },
     reply: { ok: true }, error: null, usage: { promptTokens: 9, outputTokens: 4 },
     startedAt: '2026-11-04T10:00:00.000Z', endedAt: '2026-11-04T10:00:01.000Z', ms: 70,
@@ -56,6 +56,8 @@ test('a failed call keeps its error code and no reply, and takes its time from t
   const file = callRecorder(folder()).record(call({ reply: undefined, errorCode: 'network', usage: null }));
   const record = read(file);
   assert.equal(record.reply, null);
+  // A call recorded with no seed, as a replay of a record that holds none is, notes null.
+  assert.equal(record.seed, null);
   assert.deepEqual(record.error, { code: 'network' });
   assert.deepEqual(record.usage, { promptTokens: 0, outputTokens: 0 });
   assert.equal(record.ms, 1000);

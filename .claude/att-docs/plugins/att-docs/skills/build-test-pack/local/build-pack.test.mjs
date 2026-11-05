@@ -22,7 +22,7 @@ import { countedTries, HOLD_REASONS, loadConfig, MAX_MEMORY_STOPS, mainCheckout,
 import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
 import { createAppCloser } from './close-apps.mjs';
 import { createPauser, markRestoreFile, onPauseList, pausedPath, readPaused } from './pause.mjs';
-import { Cancelled, ModelError, localEndpoint, modelClient } from './model.mjs';
+import { Cancelled, DEFAULT_SEED, ModelError, localEndpoint, modelClient } from './model.mjs';
 import * as S from './schemas.mjs';
 import { estimateTokens } from './model.mjs';
 import { almDescriptions, batches, candidateLine, documentInputs, documentRules, dropUnfoundedAssumptions, expectedProblems, impactsText, phase5,
@@ -35,8 +35,11 @@ import { renderReport, reportData, seededRandom, spotChecks, writeReports } from
 import { createReleaser } from './release.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
 import { callFileName, promptHash, schemaHash } from './calls.mjs';
-import { jobLogs, readStatusLog, statusFields } from './status.mjs';
+import { jobLogs, readStatusLog, repeatedCuts, runCuts, statusFields } from './status.mjs';
+import { replayModel, replaySource } from './replay.mjs';
 import { readPack } from './pack.mjs';
+import { answersPath, heartbeatPath, touchHeartbeat } from './supervisor.mjs';
+import { firstEvent, sse, streamed } from './fixtures/streamed.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures');
@@ -184,10 +187,14 @@ test('an issue pack builds end to end on the local model alone', async () => {
     'phase9-revalidate', 'phase10', 'done']);
   // Reasoning is on for the judgment phases and off for extraction.
   const thinking = new Map(model.calls.map((c) => [c.schemaName.split('_')[0], c.reasoning]));
-  // Phase 4 ends on its risk rating, an extraction; its impact analysis thinks.
-  assert.deepEqual(Object.fromEntries(thinking), { intake: false, phase1: true, phase2: false, phase3: true,
+  // Phase 4 ends on its risk rating, an extraction; its impact analysis thinks. Phase 1's
+  // understanding call is asked once, with thinking off.
+  assert.deepEqual(Object.fromEntries(thinking), { intake: false, phase1: false, phase2: false, phase3: true,
     phase4: false, phase5: true, phase6: false, phase7: false, phase9: true, phase10: false });
   assert.equal(model.calls.find((c) => c.schemaName.startsWith('phase4_impact')).reasoning, true);
+  assert.deepEqual(model.calls.filter((c) => c.schemaName.startsWith('phase1_understanding'))
+    .map((c) => c.reasoning), [false]);
+  assert.equal(statusLines(result.outDir).filter((l) => l.event === 'retry').length, 0);
   // Phase 9's checklist is a reading pass with thinking off; its other calls think.
   const checklist = model.calls.filter((c) => c.schemaName.startsWith('phase9_checklist'));
   assert.ok(checklist.length && checklist.every((c) => c.reasoning === false));
@@ -293,6 +300,10 @@ test('a suite pack builds through the repository\'s merge', async () => {
   assert.deepEqual([...new Set(cardCalls.map((l) => l.step.split('-')[1]))], ['d1', 'd2']);
   // The merge sees cards as the builder knows them, without the design pass's marks.
   assert.ok(pack.testCards.every((card) => !('scenario' in card) && !('breakIt' in card)));
+  // Phase 8 writes the suite's Draft workbook under the suite's file name.
+  assert.ok(statusLines(result.outDir).some((l) => l.phase === 'phase8' && l.step === 'build'
+    && l.event === 'draft' && l.written === true));
+  assert.ok(fs.existsSync(path.join(result.outDir, 'work', 'review', 'LIB_Suite_Pack.xlsx')));
   assertContentFree(read(path.join(result.outDir, 'status.log')));
 });
 
@@ -300,7 +311,7 @@ test('a suite pack builds through the repository\'s merge', async () => {
 
 const INTAKE = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
 // The fixture's retired rule is one the change does not concern, so no card is owed for it.
-const NOT_REMOVAL = { phase3: (value) => {
+const NOT_REMOVAL = { phase3_scope: (value) => {
   value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
   return value;
 } };
@@ -364,6 +375,8 @@ test('the scenario inventory is asked first and its scenarios and earlier cards 
   assert.equal(phase6Pass(result.outDir).scenarios, 5);
 });
 
+const emptyKindNotes = (pack) => pack.assumptions.filter((a) => /scenario was listed/.test(a.assumption));
+
 test('the inventory asks for control, isolation, combined, persistence and break scenarios', async () => {
   const run = lib();
   const result = await runLib(run);
@@ -381,15 +394,17 @@ test('the inventory asks for control, isolation, combined, persistence and break
   assert.match(call.user, /Reset restoring/);
   assert.match(call.user, /selected one only/);
   assert.match(call.user, /stage under test[\s\S]*how the tester reaches it[\s\S]*which child/);
-  // The fake lists only a control scenario, so the other three kinds are noted.
+  // The fake lists only a control scenario, so one note names the nine other kinds, each with its reason.
   const pack = JSON.parse(read(result.packPath));
-  for (const kind of kinds.slice(1)) {
-    assert.ok(pack.assumptions.some((a) => a.assumption.includes(`no ${kind} scenario`)));
-  }
-  assert.ok(!pack.assumptions.some((a) => a.assumption.includes('no control scenario')));
-  // The break pass found one, so its note is gone.
+  const notes = emptyKindNotes(pack);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].assumption, 'UC01 Patron Card Renewal: no scenario was listed for these kinds: isolation,'
+    + ' combined, persistence, negative, role, state-change, manual-batch, navigation, re-entry.');
+  for (const kind of kinds.slice(1)) assert.ok(notes[0].why.includes(`${kind}: `), `the why gives ${kind} a reason`);
+  assert.equal(notes[0].clarification, 'Confirm the document supports none of them.');
+  // The break pass found one, so the note leaves break out.
   assert.ok(run.model.calls.some((c) => c.schemaName === 'phase6_scenarios_d1_break'));
-  assert.ok(!pack.assumptions.some((a) => a.assumption.includes('no break scenario')));
+  assert.ok(!/break/.test(`${notes[0].assumption} ${notes[0].impact}`));
   // Every card is a Requirement card, so the pack says why none is quality-derived.
   assert.ok(pack.assumptions.some((a) => a.assumption === 'No card in this pack is quality-derived.'));
 });
@@ -537,6 +552,31 @@ test('rules too large for one inventory call go in batches, each shown the scena
   }
 });
 
+test('the empty-kind note joins each kind\'s reasons from every batch, and says when there is none', async () => {
+  const name = withMaster((row) => { row.rule_summary = `${row.rule_summary} ${'x'.repeat(30000)}`; });
+  try {
+    const inputs = { ...fixtureInputs(), ruleExport: ['node', 'export.mjs', '--doc', '{doc}', '--master', name] };
+    // Batch 1 leaves isolation's reason blank and each later batch gives one with no closing period;
+    // combined is always blank.
+    const run = lib({ phase6_scenarios: (value, calls) => {
+      if (!value.kindChecks) return value;
+      const part = Number(/\d+$/.exec(calls.at(-1).schemaName)[0]);
+      return { ...value, kindChecks: { ...value.kindChecks, combined: { note: '' },
+        isolation: { note: part === 1 ? ' ' : `Part ${part} has one record` } } };
+    } }, { inputs });
+    const result = await runLib(run);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const batches = run.model.calls.filter((c) => /^phase6_scenarios_d1_\d+$/.test(c.schemaName)).length;
+    assert.ok(batches >= 2, `${batches} inventory calls`);
+    const notes = emptyKindNotes(JSON.parse(read(result.packPath)));
+    assert.equal(notes.length, 1);
+    const parts = Array.from({ length: batches - 1 }, (_, i) => `Part ${i + 2} has one record.`).join(' ');
+    assert.ok(notes[0].why.startsWith(`isolation: ${parts} combined: no reason was given. `), notes[0].why);
+  } finally {
+    fs.rmSync(path.join(FIXTURES, name), { force: true });
+  }
+});
+
 // S1 and S2 are requirement cards, S3 is quality-derived and names both special sets.
 const SETS = (value) => ({ ...value, cards: value.cards.map((card) => {
   const base = ['Core Change Validation', 'Workflow Validation', 'Negative / Exclusion', 'Regression Testing'];
@@ -595,6 +635,68 @@ test('with no break scenario at all, BREAK IT stops being applicable', async () 
   const pack = JSON.parse(read(result.packPath));
   assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
   assert.deepEqual(setCards(pack, 'BREAK IT'), []);
+  assert.match(emptyKindNotes(pack)[0].assumption, /for these kinds: .*\bbreak\b/);
+});
+
+// The break pass lists a break scenario that an existing test covers, so it writes no card.
+const BREAK_REUSED = {
+  phase6_scenarios_d1_break: inventory([{ ...BREAK, population: 'junk input', action: 'enter junk', rule: 0 }]),
+  phase6_cards: (value, calls) => {
+    const call = calls.at(-1);
+    if (!call.schemaName.startsWith('phase6_cards_d1_break')) return titled(value);
+    const [id] = call.schema.properties.cards.items.properties.scenario.enum;
+    return { ...value, cards: [], skipped: [{ scenario: id, how: 'reused', reason: 'An existing test covers it.' }] };
+  },
+};
+
+test('a break scenario an existing test covers takes break out of the note, though BREAK IT is dropped', async () => {
+  // The break pass is matched before the inventory, whose name it extends.
+  const run = lib({ ...BREAK_REUSED, phase6_scenarios: inventory([{}, {}]) });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(phase6Pass(result.outDir).unsettled, 0);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  const notes = emptyKindNotes(pack);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].assumption, /for these kinds: control, isolation,/);
+  assert.ok(!/break/.test(`${notes[0].assumption} ${notes[0].why} ${notes[0].impact}`));
+});
+
+// One scenario of every required kind but break.
+const ALL_BUT_BREAK = ['control', 'isolation', 'combined', 'persistence', 'negative', 'role', 'state-change',
+  'manual-batch', 'navigation', 're-entry'].map((kind) => ({ kind }));
+// The pack of a run whose inventory lists ALL_BUT_BREAK unless `extra` gives its own.
+const breakOnlyEmpty = async (extra) => {
+  const run = lib({ ...extra, phase6_scenarios: extra.phase6_scenarios ?? inventory(ALL_BUT_BREAK) });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(phase6Pass(result.outDir).unsettled, 0);
+  return JSON.parse(read(result.packPath));
+};
+
+test('with break the only kind left empty, a break scenario an existing test covers leaves no note', async () => {
+  const pack = await breakOnlyEmpty(BREAK_REUSED);
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  assert.deepEqual(emptyKindNotes(pack), []);
+});
+
+test('with break the only kind left empty, a break scenario a card serves leaves no note', async () => {
+  const pack = await breakOnlyEmpty({ phase6_scenarios_d1_break: BREAK_REUSED.phase6_scenarios_d1_break,
+    phase6_cards: titled });
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, true);
+  assert.deepEqual(emptyKindNotes(pack), []);
+});
+
+test('with break the only kind left empty and no reason given, the note says so', async () => {
+  // The break pass lists only what the document already has; the inventory gives break a blank reason.
+  const pack = await breakOnlyEmpty({ phase6_scenarios: (value) => {
+    const reply = inventory(ALL_BUT_BREAK)(value);
+    return value.kindChecks ? { ...reply, kindChecks: { ...value.kindChecks, break: { note: ' ' } } } : reply;
+  } });
+  const notes = emptyKindNotes(pack);
+  assert.deepEqual(notes.map((a) => [a.assumption, a.why]),
+    [['UC01 Patron Card Renewal: no break scenario was listed.', 'No reason was given.']]);
 });
 
 // No card names Workflow Validation.
@@ -962,8 +1064,9 @@ test('the client contacts only the configured endpoint and the loopback backend'
     const body = JSON.parse(options.body);
     assert.equal(body.response_format.type, 'json_schema');
     assert.equal(body.chat_template_kwargs.enable_thinking, true);
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop',
-      message: { content: '{"a":1}' } }], usage: { prompt_tokens: 3, completion_tokens: 2 } }) };
+    // A streamed reply is one the server stops generating when the connection closes.
+    assert.deepEqual([body.stream, body.stream_options], [true, { include_usage: true }]);
+    return streamed({ content: '{"a":1}', usage: { prompt_tokens: 3, completion_tokens: 2 } });
   };
   const client = modelClient({ endpoint: 'http://localhost:13305/api/v1', name: 'm', fetchImpl });
   assert.equal(await client.countTokens('three tokens here'), 3);
@@ -975,11 +1078,43 @@ test('the client contacts only the configured endpoint and the loopback backend'
   }
 });
 
-test('no pipeline module reaches the network except the model client', () => {
+test('calls go out at temperature 0 with a fixed seed unless the config sets others, and say which seed', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    return streamed({ finish: body.max_tokens === 1 ? 'length' : 'stop' });
+  };
+  const request = { system: 's', user: 'u', schema: { type: 'object' }, schemaName: 'x', reasoning: false, maxTokens: 10 };
+  const model = (settings) => fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm', ...settings } }).model;
+  // Built as a run builds it, from the config's model block.
+  const defaults = modelClient({ ...model({}), fetchImpl });
+  const replies = [await defaults.json(request), await defaults.json(request)];
+  assert.deepEqual(bodies.map((b) => [b.temperature, b.seed]), [[0, DEFAULT_SEED], [0, DEFAULT_SEED]]);
+  assert.deepEqual(replies.map((r) => r.seed), [DEFAULT_SEED, DEFAULT_SEED]);
+  const configured = modelClient({ ...model({ temperature: 0.2, seed: 7 }), fetchImpl });
+  assert.equal((await configured.json(request)).seed, 7);
+  assert.deepEqual([bodies.at(-1).temperature, bodies.at(-1).seed], [0.2, 7]);
+  // A failed call still says which seed it was sent with.
+  await assert.rejects(configured.json({ ...request, maxTokens: 1 }),
+    (error) => error.code === 'length' && error.seed === 7);
+  // 0 is a seed like any other; -1 and the top 32-bit value mean a random seed to llama.cpp.
+  assert.equal(model({ seed: 0 }).seed, 0);
+  for (const seed of [-1, 4294967295, 1.5, '7', null]) {
+    assert.throws(() => model({ seed }), /model\.seed must be a whole number from 0 to 4294967294/, String(seed));
+  }
+  assert.throws(() => model({ temperature: 0.3 }), /model\.temperature/);
+});
+
+test('no pipeline module reaches the network except the model client and the waiting notice', () => {
   for (const name of fs.readdirSync(HERE).filter((n) => n.endsWith('.mjs') && !n.endsWith('.test.mjs'))) {
     const source = read(path.join(HERE, name));
     if (name === 'model.mjs') continue;
-    assert.ok(!/\bfetch\(|node:https?|node:net|https?:\/\//.test(source), `${name} reaches the network`);
+    // The notice posts one content-free line, the job ID and counts, and nothing else.
+    const allowed = name === 'supervisor.mjs'
+      ? source.replace(/export async function postNotice\(url, text\) \{\n.*\bfetch\(url, \{ method: 'POST', body: text,/, '')
+      : source;
+    assert.ok(!/\bfetch\(|node:https?|node:net|https?:\/\//.test(allowed), `${name} reaches the network`);
   }
 });
 
@@ -990,9 +1125,8 @@ async function askOver(finish, { model = {}, phase = 'phase1', step = 's', reaso
     const body = JSON.parse(options.body);
     bodies.push(body);
     const how = finish(body, bodies.length);
-    if (how === 'no-body') return { ok: true, json: async () => { throw new SyntaxError('x'); } };
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: how,
-      message: { content: '{"ok":true}' } }], usage: { completion_tokens: 7 } }) };
+    if (how === 'no-body') return { ok: true, text: async () => '' };
+    return streamed({ finish: how, content: '{"ok":true}', usage: { completion_tokens: 7 } });
   };
   const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm', ...model } });
   const { ask } = await import('./phases.mjs');
@@ -1090,15 +1224,14 @@ test('a model that runs away through a real client fails the job as model:runawa
     const body = JSON.parse(options.body);
     bodies.push(body);
     if (body.chat_template_kwargs.enable_thinking) {
-      return { ok: true, json: async () => ({ choices: [{ finish_reason: 'length',
-        message: { content: '{"a":' } }], usage: { completion_tokens: 7 } }) };
+      return streamed({ finish: 'length', content: '{"a":', usage: { completion_tokens: 7 } });
     }
     const { schema, name } = body.response_format.json_schema;
     // Thinking off still runs away once a thinking call has been cut.
     const cutAgain = bodies.some((earlier) => earlier.chat_template_kwargs.enable_thinking);
     const { value } = await answers.json({ schema, schemaName: name });
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: cutAgain ? 'length' : 'stop',
-      message: { content: JSON.stringify(value) } }], usage: { completion_tokens: 7 } }) };
+    return streamed({ finish: cutAgain ? 'length' : 'stop', content: JSON.stringify(value),
+      usage: { completion_tokens: 7 } });
   };
   const model = { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl }),
     countTokens: async () => 10, contextWindow: async () => null };
@@ -1161,6 +1294,8 @@ test('config refuses a bad reasoningOutputByStep', () => {
     ...model } });
   assert.doesNotThrow(bad({ reasoningOutputByStep: { 'phase4.impact': 4096 } }));
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.risk': 4096 } }), /not a reasoning step/);
+  // The understanding call does not think, so a budget for it would do nothing.
+  assert.throws(bad({ reasoningOutputByStep: { 'phase1.understanding': 4096 } }), /not a reasoning step/);
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.impact': 50000 } }), /1024 to model.reasoningOutput/);
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.impact': 0 } }), /1024 to model.reasoningOutput/);
   assert.throws(bad({ reasoningOutputByStep: [4096] }), /must be an object/);
@@ -1386,6 +1521,60 @@ test('a nightly row stays queued after a start, and a plain run still takes ever
   assert.deepEqual(readQueue(config).jobs.map((row) => row.status), ['passed', 'passed']);
 });
 
+test('queue status and the report name a thinking step cut at its output budget on two queue runs in a row', async () => {
+  const config = fixtureConfig();
+  // Each run starts a fresh log, as a run that does not resume does, and asks two thinking
+  // steps; a step named in `cuts` runs out its budget and the retry with thinking off answers.
+  const runWith = (cuts) => async (_config, job) => {
+    fs.rmSync(path.join(config.output, job.id), { recursive: true, force: true });
+    const logs = jobLogs(path.join(config.output, job.id), { echo: false });
+    for (const step of ['understanding', 'rules-1']) {
+      const base = { job: job.id, phase: 'phase1', step, attempt: 1, reasoning: true, ms: 1 };
+      if (cuts.includes(step)) {
+        logs.status({ ...base, event: 'retry', maxTokens: 12288, reason: 'length', outputTokens: 12288 });
+        logs.status({ ...base, event: 'call', attempt: 2, reasoning: false, promptTokens: 1, outputTokens: 1 });
+      } else logs.status({ ...base, event: 'call', promptTokens: 1, outputTokens: 1 });
+    }
+    return { ok: true, ms: 1 };
+  };
+  const drain = async (cuts) => {
+    addJob(config, { issue: '9415' });
+    await drainQueue(config, { run: runWith(cuts) });
+  };
+  const flagged = () => jobStatus(config, 'issue-9415').filter((line) => line.startsWith('repeated-cut'));
+  const report = () => reportData(config, readQueue(config),
+    { now: new Date(Date.now() + 60000), random: seededRandom(1) });
+  await drain(['understanding', 'rules-1']);
+  // One cut names nothing.
+  assert.deepEqual(flagged(), []);
+  assert.deepEqual(report().repeatedCuts, []);
+  assert.match(renderReport(report()), /## Steps cut at their output budget\n\nNone\./);
+  await drain(['understanding']);
+  assert.deepEqual(flagged(), ['repeated-cut step=phase1.understanding budget=12288 runs=2']);
+  assert.deepEqual(report().repeatedCuts, [{ id: 'issue-9415', step: 'phase1.understanding', budget: 12288, runs: 2 }]);
+  const text = renderReport(report());
+  assert.match(text, /- issue-9415: phase1\.understanding was cut at its output budget of 12288 tokens on its last 2 runs\./);
+  assertContentFree(text);
+  // A run that asks the step and answers ends the streak.
+  await drain([]);
+  assert.deepEqual(flagged(), []);
+  assert.deepEqual(report().repeatedCuts, []);
+});
+
+test('a run that never asks a step neither breaks nor extends its streak of cuts, and a cut with thinking off is none', () => {
+  const senior = { asked: ['phase9.senior'], cut: [{ step: 'phase9.senior', budget: 12288 }] };
+  const resumedPast = { asked: ['phase1.rules'], cut: [] };
+  assert.deepEqual(repeatedCuts([senior, resumedPast, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 2 }]);
+  assert.deepEqual(repeatedCuts([senior, resumedPast]), []);
+  assert.deepEqual(repeatedCuts([senior, senior, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 3 }]);
+  const plain = { phase: 'phase9', step: 'checklist-1', event: 'call-fail', attempt: 1, reasoning: false,
+    maxTokens: 8192, reason: 'length' };
+  const thinking = { phase: 'phase9', step: 'revalidation-again', event: 'retry', attempt: 1, reasoning: true,
+    maxTokens: 12288, reason: 'length' };
+  assert.deepEqual(runCuts([plain, thinking]),
+    { asked: ['phase9.revalidation'], cut: [{ step: 'phase9.revalidation', budget: 12288 }] });
+});
+
 test('a run releases only its own lock', async () => {
   const config = fixtureConfig();
   addJob(config, { issue: '9415' });
@@ -1597,8 +1786,7 @@ test('the client refuses redirects, so a prompt cannot be handed to another host
   const fetchImpl = async (url, options) => {
     seen.push(options.redirect);
     if (url.endsWith('/health')) return { ok: true, json: async () => ({ all_models_loaded: [] }) };
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop',
-      message: { content: '{}' } }], usage: {} }) };
+    return streamed();
   };
   const client = modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl });
   await client.countTokens('x');
@@ -1616,12 +1804,22 @@ test('one row per key is asked for as an object, so no key repeats or goes missi
   assert.deepEqual(reply.modules.map((row) => row.document), ['UC01', 'UC02']);
 });
 
-test('a reply with no JSON body is a no-reply error that carries none of the body', async () => {
-  const fetchImpl = async () => ({ ok: true,
-    json: async () => { throw new SyntaxError('Unexpected token < in "<html>Renewal"'); } });
-  const client = modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl });
-  await assert.rejects(client.json({ system: 's', user: 'u', schema: {}, schemaName: 'n',
-    maxTokens: 1 }), (error) => error.code === 'no-reply' && !/Renewal/.test(error.message));
+test('a reply that ends early is no-reply and quotes none of the body; parse and http stay apart', async () => {
+  const request = { system: 's', user: 'u', schema: {}, schemaName: 'n', maxTokens: 1 };
+  const over = (reply) => modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl: async () => reply });
+  const text = (body) => ({ ok: true, status: 200, text: async () => body });
+  const whole = sse({ content: '{"Renewal":1}' });
+  // Lemonade answers a request its backend refuses with a 200 holding a bare error object.
+  for (const body of ['', '<html>Renewal', '{"error":{"code":400,"message":"Renewal is not allowed"}}',
+    'data: {"error":{"message":"Renewal is not allowed"}}\n\n', 'data: Renewal\n\n',
+    whole.slice(0, whole.indexOf('data: [DONE]'))]) {
+    await assert.rejects(over(text(body)).json(request),
+      (error) => error.code === 'no-reply' && !/Renewal/.test(error.message), JSON.stringify(body));
+  }
+  // A whole stream whose content is not JSON is a parse error, and a refusal by status is http.
+  await assert.rejects(over(streamed({ content: 'Renewal' })).json(request),
+    (error) => error.code === 'parse' && !/Renewal/.test(error.message));
+  await assert.rejects(over({ ok: false, status: 503 }).json(request), (error) => error.code === 'http');
 });
 
 test('a failed rule export stops intake unless it says the document has no rules yet', async () => {
@@ -2289,6 +2487,40 @@ test('a scenario for a retired rule that a card settled without citing it still 
   assert.equal(callsNamed(run, 'phase6_cards_d1_rule').length, 1);
 });
 
+/**
+ * Two removal checks that press Save, which merge into S1, then S3 for the
+ * live rules `live` names. The break pass, whose name extends the inventory's,
+ * lists one break scenario.
+ */
+const mergedRun = (live) => struckRun({ phase6_scenarios: (value, calls) => ({ ...value,
+  scenarios: calls.at(-1).schemaName === 'phase6_scenarios_d1_break'
+    ? [{ kind: 'break', rules: ['BR-LIB.UC05-001'], population: 'junk', action: 'enter junk', outcome: 'o' }]
+    : [{ kind: 'decision', rules: [RETIRED], population: 'a loan', action: 'press Save', outcome: 'o' },
+      { kind: 'decision', rules: [RETIRED], population: 'another loan', action: 'press Save again', outcome: 'o' },
+      { kind: 'decision', rules: live, population: 'p', action: 'a', outcome: 'o' }] }) });
+const offered = (run, prefix) => callsNamed(run, prefix)[0].schema.properties.cards.items.properties.scenario.enum;
+const scenarioIds = (outDir) => Object.values(JSON.parse(read(path.join(outDir, 'work', 'checkpoints',
+  'phase6.json'))).state.designed).flatMap((d) => d.scenarios.map((s) => s.id));
+
+test('after a merge, a scenario made for a rule no scenario names gets an ID no scenario holds', async () => {
+  const run = mergedRun(['BR-LIB.UC05-001']);
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(offered(run, 'phase6_cards_d1_rule'), ['S4']);
+  const ids = scenarioIds(result.outDir);
+  assert.deepEqual(ids, [...new Set(ids)]);
+});
+
+test('after a merge, a scenario the break pass lists gets an ID no scenario holds', async () => {
+  const run = mergedRun(['BR-LIB.UC05-001', 'BR-LIB.UC05-002']);
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(callsNamed(run, 'phase6_cards_d1_rule').length, 0);
+  assert.deepEqual(offered(run, 'phase6_cards_d1_break'), ['S4']);
+  const ids = scenarioIds(result.outDir);
+  assert.deepEqual(ids, [...new Set(ids)]);
+});
+
 test('verification reads a retired rule as removed, so a card stating the behavior is absent survives', async () => {
   // A verifier that rejects a card citing the retired rule unless its Expected Result says it is gone.
   const judgeRemoved = (value, calls) => {
@@ -2443,7 +2675,7 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
       const config = fixtureConfig();
       const pick = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
       const failing = fakeModel({ ...pick, phase9_senior: () => {
-        throw new ModelError('no-reply', 'model endpoint answered with no JSON');
+        throw new ModelError('no-reply', 'model endpoint ended the reply early');
       } });
       const first = await runJob(config, job, { model: failing, echo: false });
       assert.equal(first.ok, false);
@@ -2491,12 +2723,11 @@ test('a reasoning call that fails for any reason is retried once with thinking o
   const fetchImpl = async (url, options) => {
     const body = JSON.parse(options.body);
     thinking.push(body.chat_template_kwargs.enable_thinking);
-    // A server that gives up at its own time-out ends the reply with no JSON.
+    // A server that gives up at its own time-out ends the reply early.
     if (body.chat_template_kwargs.enable_thinking) {
-      return { ok: true, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } };
+      return { ok: true, text: async () => '' };
     }
-    return { ok: true, json: async () => ({ choices: [{ finish_reason: 'stop',
-      message: { content: '{"ok":true}' } }], usage: {} }) };
+    return streamed({ content: '{"ok":true}' });
   };
   const config = fixtureConfig();
   const { ask } = await import('./phases.mjs');
@@ -4214,15 +4445,74 @@ test('a revalidation check that fails with a fix gets one repair round and one m
   assert.equal(JSON.parse(read(result.packPath)).revalidation, undefined);
 });
 
-test('a draft the builder writes no workbook for leaves the review the pack summary, and says so', async () => {
-  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
-    command: ['node', '-e', '0'] } });
+/** A builder command that also refuses a confidence its assumptions do not support. */
+const ceilingBuilder = { module: 'builder-stub.mjs', retries: 2,
+  command: ['node', 'builder-ceiling.mjs', '{pack}', '--out', '{out}'] };
+const reviewDir = (outDir) => path.join(outDir, 'work', 'review');
+
+test('a pack over the Medium assumption limit comes out of Phase 8 with a Draft workbook the review reads', async () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ assumption: `Assumption ${i + 1} holds for this change`,
+    basis: 'The document says so' }));
+  const model = fakeModel({ ...DOCS, phase3_scope: (value) => ({ ...value, assumptions: many }) });
+  const result = await runJob(fixtureConfig({ builder: ceilingBuilder }), { issue: '501', change: '7001' },
+    { model, echo: false, until: 'phase9-checklist' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const lines = statusLines(result.outDir);
+  assert.ok(lines.some((l) => l.phase === 'phase8' && l.event === 'draft' && l.written === true));
+  assert.ok(!lines.some((l) => l.reason === 'review-workbook-missing'));
+  assert.ok(fs.readdirSync(reviewDir(result.outDir)).some((name) => name.endsWith('.xlsx')));
+  const draft = JSON.parse(read(path.join(reviewDir(result.outDir), 'draft-pack.json')));
+  assert.ok(draft.assumptions.length > 10, `${draft.assumptions.length} assumptions`);
+  assert.deepEqual([draft.confidence.overall, draft.executiveSummary.confidence,
+    draft.limitations['Confidence Assessment']], ['Low', 'Low', 'Pending review.']);
+  assert.match(checksFor(model, 'phase9_checklist')[0].user, /\[Test Cards Markdown row/);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a Draft workbook the builder refuses after every repair stops the job at Phase 8', async () => {
+  const refuse = 'console.log(["FAIL                   Coverage Matrix", "    planted coverage note",'
+    + ' "FAIL                   Workbook Validation", "    1 worksheet fails"].join("\\n")); process.exit(1)';
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2, command: ['node', '-e', refuse] } });
   const model = fakeModel(DOCS);
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
-  assert.doesNotMatch(checksFor(model, 'phase9_checklist')[0].user, /\[ALM Upload row/);
-  assert.ok(statusLines(result.outDir).some((l) => l.phase === 'phase9' && l.event === 'warn'
-    && l.reason === 'review-workbook-missing'));
-  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  assert.deepEqual([result.ok, result.phase, result.reason], [false, 'phase8', 'gate:builder-fail']);
+  const repairs = checksFor(model, 'phase8_repair');
+  assert.equal(repairs.length, 2);
+  assert.match(repairs[0].user, /Coverage Matrix:\nplanted coverage note/);
+  assert.doesNotMatch(repairs[0].user, /Workbook Validation:\n/);
+  const lines = statusLines(result.outDir);
+  assert.deepEqual(lines.filter((l) => l.event === 'draft').map((l) => [l.written, l.failed]),
+    [[false, 1], [false, 1], [false, 1]]);
+  assert.ok(!lines.some((l) => l.phase.startsWith('phase9')));
+  assert.ok(!fs.readdirSync(reviewDir(result.outDir)).some((name) => name.endsWith('.xlsx')));
+});
+
+test('a builder that writes no Draft workbook and names no failed sheet stops Phase 8 without a repair', async () => {
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2, command: ['node', '-e', '0'] } });
+  const model = fakeModel(DOCS);
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.deepEqual([result.ok, result.phase, result.reason], [false, 'phase8', 'gate:builder-fail']);
+  assert.equal(checksFor(model, 'phase8_repair').length, 0);
+  assert.deepEqual(statusLines(result.outDir).filter((l) => l.event === 'draft').map((l) => [l.written, l.failed]),
+    [[false, 0]]);
+});
+
+test('a Draft workbook the builder refuses in Phase 9 stops the job, and the review never reads a summary instead', async () => {
+  // Refuses every draft once the senior review is written; the stub writes the ones before it.
+  const refuseAfterSenior = 'const fs = require("fs"); const [p, , o] = process.argv.slice(1);'
+    + ' if (JSON.parse(fs.readFileSync(p, "utf8")).seniorReview.missed !== "Pending review.") {'
+    + ' console.log("FAIL                   Senior Tester Review\\n    planted senior note"); process.exit(1); }'
+    + ' process.exit(require("child_process").spawnSync(process.execPath, ["builder-stub.mjs", p, "--out", o],'
+    + ' { stdio: "inherit" }).status);';
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
+    command: ['node', '-e', refuseAfterSenior, '{pack}', '--out', '{out}'] } });
+  const model = fakeModel(DOCS);
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.deepEqual([result.ok, result.phase, result.reason], [false, 'phase9-confidence', 'gate:builder-fail']);
+  assert.ok(checksFor(model, 'phase9_senior').length);
+  assert.ok(!model.calls.some((call) => /Pack summary/.test(call.user)));
+  assert.ok(!statusLines(result.outDir).some((l) => l.event === 'warn' && l.phase === 'phase9'));
+  assert.match(read(path.join(result.outDir, 'detail.log')), /planted senior note/);
 });
 
 test('every part of a split workbook opens with the rules index, and a job missing rules says which documents', async () => {
@@ -4262,7 +4552,7 @@ test('a job whose revalidation failed is not retried by the queue', async () => 
 
 test('Phase 4 rates the impacted rules from the impact analysis and raises a Direct Change rule below High', async () => {
   const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL,
-    phase3: (value) => {
+    phase3_scope: (value) => {
       value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
       value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
       value.rules['BR-LIB.UC01-002'] = { ...value.rules['BR-LIB.UC01-002'], impact: 'Indirect Impact' };
@@ -4290,7 +4580,7 @@ test('Phase 4 rates the impacted rules from the impact analysis and raises a Dir
 
 test('Phase 4 rates only the impacted rules when every rule carries a master risk', async () => {
   const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL,
-    phase3: (value) => {
+    phase3_scope: (value) => {
       for (const id of Object.keys(value.rules)) value.rules[id] = { ...value.rules[id], impact: 'Not Impacted' };
       value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
       return value;
@@ -4315,7 +4605,7 @@ test('the Phase 4 rating call carries the executive summary its batches are budg
   const config = fixtureConfig();
   const long = { phase4_impact: (value) => ({ ...value,
     executiveSummary: { ...value.executiveSummary, summary: 'Long summary. '.repeat(900) } }),
-  phase3: (value) => {
+  phase3_scope: (value) => {
     value.rules['BR-LIB.UC01-006'] &&= { ...value.rules['BR-LIB.UC01-006'], impact: 'Not Impacted' };
     value.rules['BR-LIB.UC01-001'] = { ...value.rules['BR-LIB.UC01-001'], impact: 'Direct Change' };
     return value;
@@ -4367,15 +4657,17 @@ test('the Coverage field is counted from the Coverage Matrix in code, never aske
       'professionalReview', 'residualRisk']);
 });
 
-test('a Low rating builds the draft workbook with no review-workbook-missing warning', async () => {
+test('a Low rating builds the Draft workbook with its own reason, and no stand-in reaches the pack', async () => {
   const model = fakeModel({ ...DOCS, phase9_confidence_overall: (value) => ({ ...value, overall: 'Low',
     reason: 'BR-LIB.UC01-001 has only one card and the criteria for Medium are not met.' }) });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, true, JSON.stringify(result));
-  const lines = statusLines(result.outDir);
-  assert.ok(!lines.some((l) => l.reason === 'review-workbook-missing'), 'a draft failed to build');
-  const pack = JSON.parse(read(result.packPath));
-  assert.match(pack.limitations['Confidence Assessment'], /only one card/);
+  assert.ok(fs.readdirSync(reviewDir(result.outDir)).some((name) => name.endsWith('.xlsx')));
+  const draft = JSON.parse(read(path.join(reviewDir(result.outDir), 'draft-pack.json')));
+  assert.match(draft.limitations['Confidence Assessment'], /only one card/);
+  const text = read(result.packPath);
+  assert.ok(!text.includes('Pending review.'), 'a stand-in reached the finished pack');
+  assert.match(JSON.parse(text).limitations['Confidence Assessment'], /only one card/);
 });
 
 test('every level carries its reason, which follows the level in the Executive Summary', async () => {
@@ -5515,26 +5807,101 @@ test('a pauser wait ends at once when the stop signal aborts', async () => {
   assert.ok(lines.includes('pause: waiting for x.service'));
 });
 
-test('a model call in flight ends as Cancelled when the signal aborts, and the server sees it close', async () => {
-  let closed;
-  const seen = new Promise((resolve) => { closed = resolve; });
+/** A loopback server that hands each request to `handle(res)` once its body is read. */
+async function chatServer(handle) {
   const server = http.createServer((req, res) => {
     req.resume();
-    res.on('close', closed);
+    req.on('end', () => handle(res));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { endpoint: `http://127.0.0.1:${server.address().port}/v1`,
+    close: () => { server.closeAllConnections(); server.close(); } };
+}
+
+const CHAT_CALL = { system: 's', user: 'u', schema: { type: 'object' }, schemaName: 'n', reasoning: false,
+  maxTokens: 10 };
+
+/**
+ * Holds a call open: with `start`, it answers with the stream's first event and never ends
+ * it; without, it sends nothing. `seen` settles when the client closes the connection.
+ */
+function openStream({ start = true } = {}) {
+  let closed;
+  const seen = new Promise((resolve) => { closed = resolve; });
+  const handle = (res) => {
+    res.on('close', closed);
+    if (!start) return;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(firstEvent());
+  };
+  return { handle, seen };
+}
+
+test('a model call in flight ends as Cancelled when the signal aborts, and the server sees it close', async () => {
+  // Before the reply starts, and partway through a streamed reply.
+  for (const start of [false, true]) {
+    const stream = openStream({ start });
+    const chat = await chatServer(stream.handle);
+    try {
+      const stop = new AbortController();
+      const client = modelClient({ endpoint: chat.endpoint, name: 'm', signal: stop.signal });
+      const call = client.json(CHAT_CALL);
+      setTimeout(() => stop.abort(), 50);
+      await assert.rejects(call, (error) => error instanceof Cancelled && !(error instanceof ModelError));
+      await stream.seen;
+    } finally {
+      chat.close();
+    }
+  }
+});
+
+test('a streamed reply still running at the time-out fails as network, and the server sees it close', async () => {
+  const stream = openStream();
+  const chat = await chatServer(stream.handle);
   try {
-    const stop = new AbortController();
-    const client = modelClient({ endpoint: `http://127.0.0.1:${server.address().port}/v1`, name: 'm',
-      signal: stop.signal });
-    const call = client.json({ system: 's', user: 'u', schema: { type: 'object' }, schemaName: 'n',
-      reasoning: false, maxTokens: 10 });
-    setTimeout(() => stop.abort(), 50);
-    await assert.rejects(call, (error) => error instanceof Cancelled && !(error instanceof ModelError));
-    await seen;
+    const client = modelClient({ endpoint: chat.endpoint, name: 'm', timeoutMinutes: 0.001 });
+    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network');
+    await stream.seen;
   } finally {
-    server.closeAllConnections();
-    server.close();
+    chat.close();
+  }
+});
+
+test('a streamed reply whose connection resets partway through fails as network', async () => {
+  const chat = await chatServer((res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(firstEvent(), () => res.socket.destroy());
+  });
+  try {
+    const client = modelClient({ endpoint: chat.endpoint, name: 'm' });
+    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network');
+  } finally {
+    chat.close();
+  }
+});
+
+test('a streamed reply is put together from its content deltas, without the thinking, with its usage', async () => {
+  for (const finish of ['stop', 'length']) {
+    const text = sse({ content: '{"text":"answer"}', reasoning: 'think it over', finish,
+      usage: { prompt_tokens: 30, completion_tokens: 7 } });
+    const chat = await chatServer((res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      // Pieces cut across events and lines, as a reply arrives in packets.
+      for (let at = 0; at < text.length; at += 7) res.write(text.slice(at, at + 7));
+      res.end();
+    });
+    try {
+      const call = modelClient({ endpoint: chat.endpoint, name: 'm' }).json(CHAT_CALL);
+      if (finish === 'stop') {
+        const { value, usage } = await call;
+        assert.deepEqual(value, { text: 'answer' });
+        assert.deepEqual([usage.promptTokens, usage.outputTokens], [30, 7]);
+      } else {
+        await assert.rejects(call, (error) => error.code === 'length' && error.usage.outputTokens === 7);
+      }
+    } finally {
+      chat.close();
+    }
   }
 });
 
@@ -5616,22 +5983,49 @@ test('cancel gives up and says so when the holder keeps the queue', async () => 
 });
 
 test('queue cancel stops a real run during a model call, frees the queue, and leaves a resumable row', async () => {
+  // The server acts as Lemonade does: a streamed call stops generating when its connection
+  // closes, an unstreamed one runs on to its end, and an unload waits until nothing generates.
   const requests = [];
+  const events = [];
+  let generating = false;
   const server = http.createServer((req, res) => {
     if (req.url.endsWith('/chat/completions')) {
-      requests.push(req.url);
-      req.resume();
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => {
+        requests.push(req.url);
+        generating = true;
+        if (!JSON.parse(Buffer.concat(chunks).toString('utf8')).stream) return;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(firstEvent());
+        res.on('close', () => {
+          generating = false;
+          events.push('close');
+        });
+      });
+      return;
+    }
+    if (req.url.endsWith('/unload')) {
+      events.push('unload');
+      // The wait ends with the connection too, so a release that gave up leaves no timer behind.
+      const answer = () => {
+        if (res.destroyed) return;
+        if (generating) setTimeout(answer, 20);
+        else res.end('{}');
+      };
+      answer();
       return;
     }
     res.statusCode = 404;
     res.end();
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const marker = path.join(scratch('released-'), 'marker');
   try {
+    const unload = `fetch('http://127.0.0.1:${server.address().port}/api/v1/unload', { method: 'POST' })`
+      + '.then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))';
     const config = fixtureConfig({
       model: { endpoint: `http://127.0.0.1:${server.address().port}/api/v1`, name: 'test-model' },
-      release: { command: [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`] },
+      release: { command: [process.execPath, '-e', unload], timeoutSeconds: 5 },
     });
     const script = path.join(HERE, 'build-pack.mjs');
     const cli = (...args) => spawnSync(process.execPath, [script, 'queue', ...args, '--config', config.file],
@@ -5644,14 +6038,25 @@ test('queue cancel stops a real run during a model call, frees the queue, and le
     assert.ok(requests.length, 'the run reached its first model call');
     assert.deepEqual(cli('status', '--job', 'issue-501-change-7001').stdout.split('\n')[0],
       'issue-501-change-7001  running  queue held');
-    const cancelled = cli('cancel', '--job', 'issue-501-change-7001');
+    // Spawned, not run in step, so this process's server answers the unload while cancel waits.
+    const cancelled = await new Promise((resolve) => {
+      const cancel = spawn(process.execPath, [script, 'queue', 'cancel', '--job', 'issue-501-change-7001',
+        '--config', config.file]);
+      const out = { stdout: '', stderr: '' };
+      cancel.stdout.on('data', (chunk) => { out.stdout += chunk; });
+      cancel.stderr.on('data', (chunk) => { out.stderr += chunk; });
+      cancel.on('close', (status) => resolve({ ...out, status }));
+    });
     assert.equal(cancelled.status, 0, cancelled.stderr);
     assert.match(cancelled.stdout, /^cancelled issue-501-change-7001$/m);
     assert.match(cancelled.stdout, /^issue-501-change-7001  stopped  queue free$/m);
     assert.match(cancelled.stdout, /^stopped phase=intake reason=cancelled$/m);
     const { code } = await exited;
     assert.equal(code, 0);
-    assert.equal(fs.existsSync(marker), true, 'the model was released');
+    // The cancel closed the call, so the server stopped generating before the unload asked.
+    assert.deepEqual(events, ['close', 'unload']);
+    const released = releaseLines(config, 'issue-501-change-7001');
+    assert.deepEqual(released.map((line) => [line.event, line.reason]), [['pass', undefined]]);
     const row = readQueue(config).jobs[0];
     assert.deepEqual([row.status, row.phase, row.resume, row.failures], ['stopped', 'intake', true, undefined]);
     assert.equal(lockHeld(config), false);
@@ -5661,7 +6066,6 @@ test('queue cancel stops a real run during a model call, frees the queue, and le
     assert.equal(cli('add', '--issue', '501', '--change', '7001', '--resume', '--now').status, 0);
     assert.equal(readQueue(config).jobs.at(-1).status, 'queued');
   } finally {
-    fs.rmSync(marker, { force: true });
     server.closeAllConnections();
     server.close();
   }
@@ -6194,26 +6598,293 @@ test('short identical wording under different names does not stop the run', asyn
   }
 });
 
-test('a NEEDS USER REVIEW result stops change scope before the impact analysis', async () => {
-  const run = lib({ phase3: (value) => ({ ...value, userReview: ['Which expiry date does the change mean?'] }) });
+// The scope reply raises one question; `triage` is the review call's row for it.
+const reviewRun = (triage, overrides = {}) => lib({
+  phase3_scope: (value) => ({ ...NOT_REMOVAL.phase3_scope(value), userReview: ['Does the fix apply to desk renewals?'] }),
+  phase3_review: { questions: { Q1: { quote: '', ruling: 'kept', statement: '', testImpact: '', toConfirm: '',
+    why: '', ...triage } } },
+}, overrides);
+const phase3Line = (outDir) => statusLines(outDir).find((l) => l.phase === 'phase3' && ['pass', 'fail'].includes(l.event));
+
+test('a review question the change description cannot settle stops change scope before the impact analysis', async () => {
+  const run = reviewRun({ quote: 'The fines block and the renewal window are unchanged.',
+    statement: 'The fix applies to desk renewals as well as online ones.' });
   const result = await runLib(run);
   assert.equal(result.phase, 'phase3');
   assert.equal(result.reason, 'gate:needs-user-review');
-  assert.equal(statusLines(result.outDir).at(-1).review, 1);
-  assert.deepEqual(work(result, 'phase3-review.json'), ['Which expiry date does the change mean?']);
+  const line = phase3Line(result.outDir);
+  assert.deepEqual([line.review, line.raised, line.answered, line.assumed], [1, 1, 0, 0]);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  assert.deepEqual(work(result, 'phase3-review.json'), [{ question: 'Does the fix apply to desk renewals?',
+    quote: 'The fines block and the renewal window are unchanged.', verbatim: true }]);
   assert.equal(work(result, 'partial-pack.json').changeScope.downstream, 'NEEDS USER REVIEW');
   assert.ok(!run.model.calls.some((c) => c.schemaName.startsWith('phase4')));
+  const [review, ...more] = run.model.calls.filter((c) => c.schemaName.startsWith('phase3_review'));
+  assert.equal(more.length, 0);
+  assert.equal(review.reasoning, false);
+  assert.match(review.user, /Online and desk renewals both take the fix\./);
+  assert.match(review.user, /- Q1: Does the fix apply to desk renewals\?/);
+});
+
+test('a review question the change description answers passes change scope with an assumption that quotes it', async () => {
+  // The model's copy breaks the line where the description does not; only the words are compared.
+  const result = await runLib(reviewRun({ quote: 'Online and desk\nrenewals both take the fix.', ruling: 'answered',
+    statement: 'The fix applies to desk renewals as well as online ones.', testImpact: 'Desk renewals go untested.',
+    toConfirm: 'Confirm desk renewals take the fix.' }));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const line = phase3Line(result.outDir);
+  assert.equal(line.downstream, 'READY WITH ASSUMPTIONS');
+  assert.deepEqual([line.raised, line.answered, line.assumed], [1, 1, 0]);
+  const pack = JSON.parse(read(result.packPath));
+  const held = pack.assumptions.find((a) => a.assumption === 'The fix applies to desk renewals as well as online ones.');
+  assert.deepEqual(held, { assumption: 'The fix applies to desk renewals as well as online ones.',
+    why: 'The change description says: "Online and desk\nrenewals both take the fix."',
+    impact: 'Desk renewals go untested.', clarification: 'Confirm desk renewals take the fix.' });
+  assert.ok(!fs.existsSync(path.join(result.outDir, 'work', 'phase3-review.json')));
+});
+
+test('a review answer whose sentence is not in the change description, or an assumption ruling, passes as an assumption', async () => {
+  for (const triage of [{ quote: 'Desk renewals are covered by the fix.', ruling: 'answered' },
+    { quote: 'Online and desk renewals both take the fix.', ruling: 'assumption' }]) {
+    const result = await runLib(reviewRun({ ...triage, statement: 'Desk renewals take the fix.',
+      why: 'The change names both renewal paths.' }));
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const line = phase3Line(result.outDir);
+    assert.deepEqual([line.raised, line.answered, line.assumed], [1, 0, 1], triage.ruling);
+    const held = JSON.parse(read(result.packPath)).assumptions.find((a) => a.assumption === 'Desk renewals take the fix.');
+    assert.equal(held.why, 'The change names both renewal paths.');
+  }
+});
+
+test('a review question whose statement is missing, a ruling word, too short, or about the pipeline still stops change scope', async () => {
+  const quote = 'Online and desk renewals both take the fix.';
+  for (const triage of [{ ruling: 'answered', quote }, { ruling: 'answered', quote, statement: 'Answered.' },
+    { ruling: 'assumption', statement: 'Both apply' },
+    { ruling: 'assumption', statement: 'The rules for desk renewals were not supplied, so they are out of scope.' }]) {
+    const result = await runLib(reviewRun(triage));
+    assert.equal(result.reason, 'gate:needs-user-review', JSON.stringify(triage));
+    const [kept] = work(result, 'phase3-review.json');
+    assert.equal(kept.verbatim, Boolean(triage.quote));
+    assert.equal(kept.quote, triage.quote ?? '');
+  }
 });
 
 test('change scope ends READY WITH ASSUMPTIONS when it adds assumptions and READY when it adds none', async () => {
   const phase3 = (outDir) => statusLines(outDir).find((l) => l.event === 'pass' && l.phase === 'phase3');
-  const first = await runLib(lib({ phase3: (value) => ({ ...value, assumptions: [
+  const first = await runLib(lib({ phase3_scope: (value) => ({ ...value, assumptions: [
     { assumption: 'The renewal window is calendar days', basis: 'The document says days' }] }) }));
   assert.equal(first.ok, true, JSON.stringify(first));
   assert.equal(phase3(first.outDir).downstream, 'READY WITH ASSUMPTIONS');
-  const second = await runLib(lib({ phase3: (value) => ({ ...value, assumptions: [] }) }));
+  const second = await runLib(lib({ phase3_scope: (value) => ({ ...value, assumptions: [] }) }));
   assert.equal(second.ok, true, JSON.stringify(second));
   assert.equal(phase3(second.outDir).downstream, 'READY');
+});
+
+// The build supervisor: at a question gate the job waits for answers while the
+// supervisor's `queue watch` heartbeat is fresh.
+
+const JOB_501 = 'issue-501-change-7001';
+const ANSWER = { id: 'Q1', answer: 'Desk renewals take the fix as well as online ones.', confidence: 'settled',
+  citations: ['docs/LIB/UC01-Card-Renewal.md, Renewal', 'change description'] };
+const writeAnswers = (run, phase, value) => fs.writeFileSync(answersPath(path.join(run.config.output, JOB_501), phase),
+  typeof value === 'string' ? value : JSON.stringify(value));
+
+/**
+ * Runs job 501 with a clock only the waits move and a fresh heartbeat. At each of the
+ * wait's polls the clock moves by the poll, the heartbeat is touched again, and
+ * `onSleep(n, t)` runs. `post` receives the notice line.
+ */
+async function supervisedRun(run, { onSleep = () => {}, post = async () => true } = {}) {
+  let t = Date.now();
+  const sleeps = [];
+  touchHeartbeat(run.config, JOB_501, new Date(t));
+  const result = await runJob(run.config, { issue: '501', change: '7001' }, { model: run.model, echo: false,
+    now: () => t, post,
+    sleep: async (ms) => {
+      t += ms;
+      sleeps.push(ms);
+      touchHeartbeat(run.config, JOB_501, new Date(t));
+      await onSleep(sleeps.length, t);
+    } });
+  return { result, sleeps };
+}
+
+test('a review question the build supervisor answers passes change scope with no further model call', async () => {
+  const run = reviewRun({});
+  const { result, sleeps } = await supervisedRun(run, {
+    onSleep: (n) => n === 1 && writeAnswers(run, 'phase3', { answers: [ANSWER] }) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(sleeps.length, 1);
+  assert.deepEqual(work(result, 'questions-phase3.json').questions,
+    [{ id: 'Q1', question: 'Does the fix apply to desk renewals?' }]);
+  const lines = statusLines(result.outDir);
+  const waiting = lines.find((l) => l.event === 'waiting');
+  assert.deepEqual([waiting.phase, waiting.questions, waiting.waitMinutes], ['phase3', 1, 30]);
+  const answered = lines.find((l) => l.event === 'answers');
+  assert.deepEqual([answered.answered, answered.declined, answered.settled, answered.bestReading], [1, 0, 1, 0]);
+  const line = phase3Line(result.outDir);
+  assert.deepEqual([line.event, line.supervised, line.downstream], ['pass', 1, 'READY WITH ASSUMPTIONS']);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+  // The scope call and the review call; the answer needs no third.
+  assert.equal(run.model.calls.filter((c) => c.schemaName.startsWith('phase3')).length, 2);
+  const pack = JSON.parse(read(result.packPath));
+  const held = pack.assumptions.find((a) => a.answeredBy === 'build supervisor');
+  assert.deepEqual(held, { assumption: ANSWER.answer,
+    why: 'Answered by the build supervisor (settled) from docs/LIB/UC01-Card-Renewal.md, Renewal; change description.',
+    impact: 'The rules were classified before this answer; a different answer can change their impact.',
+    clarification: 'Confirm with the change owner: Does the fix apply to desk renewals?',
+    answeredBy: 'build supervisor', confidence: 'settled', citations: ANSWER.citations,
+    question: 'Does the fix apply to desk renewals?' });
+  assert.ok(pack.intake.assumptionsToProceed.includes(`Answered by the build supervisor (settled): ${ANSWER.answer}`));
+});
+
+test('a review question nobody answers holds the job with its usual reason once the wait runs out', async () => {
+  const { result, sleeps } = await supervisedRun(reviewRun({}));
+  assert.equal(result.reason, 'gate:needs-user-review');
+  assert.ok(HOLD_REASONS.includes(result.reason));
+  assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), 30 * 60000);
+  const over = statusLines(result.outDir).find((l) => l.event === 'wait-over');
+  assert.equal(over.reason, 'timeout');
+  assert.equal(phase3Line(result.outDir).review, 1);
+});
+
+test('with the wait off, a stale heartbeat or none, a question gate holds at once', async () => {
+  for (const [overrides, ageMinutes] of [[{ supervisor: { waitMinutes: 0 } }, 0], [{}, 16], [{}, null]]) {
+    const run = reviewRun({}, overrides);
+    if (ageMinutes !== null) touchHeartbeat(run.config, JOB_501, new Date(Date.now() - ageMinutes * 60000));
+    const result = await runJob(run.config, { issue: '501', change: '7001' }, { model: run.model, echo: false,
+      sleep: () => assert.fail('the job waited') });
+    assert.equal(result.reason, 'gate:needs-user-review', JSON.stringify(overrides));
+    assert.ok(!statusLines(result.outDir).some((l) => l.event === 'waiting'));
+    assert.ok(!fs.existsSync(path.join(result.outDir, 'work', 'questions-phase3.json')));
+  }
+});
+
+test('the wait ends and the job holds when the heartbeat goes stale', async () => {
+  const run = reviewRun({});
+  let t = Date.now();
+  touchHeartbeat(run.config, JOB_501, new Date(t));
+  const result = await runJob(run.config, { issue: '501', change: '7001' }, { model: run.model, echo: false,
+    now: () => t, sleep: async (ms) => { t += ms; } });
+  assert.equal(result.reason, 'gate:needs-user-review');
+  assert.equal(statusLines(result.outDir).find((l) => l.event === 'wait-over').reason, 'supervisor-gone');
+});
+
+test('an answers file that fails its schema is logged and the wait goes on; one that leaves a question out holds the job', async () => {
+  const run = reviewRun({});
+  const files = ['{"answers": [', { answers: [{ ...ANSWER, confidence: 'sure' }] }, { answers: [ANSWER] }];
+  const { result, sleeps } = await supervisedRun(run, { onSleep: (n) => writeAnswers(run, 'phase3', files[n - 1]) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(sleeps.length, 3);
+  assert.deepEqual(statusLines(result.outDir).filter((l) => l.event === 'answers-rejected').map((l) => l.reason),
+    ['answers-not-json', 'answers-confidence']);
+  const declined = reviewRun({});
+  const held = await supervisedRun(declined, { onSleep: () => writeAnswers(declined, 'phase3', { answers: [] }) });
+  assert.equal(held.result.reason, 'gate:needs-user-review');
+  const line = statusLines(held.result.outDir).find((l) => l.event === 'answers');
+  assert.deepEqual([line.answered, line.declined], [0, 1]);
+});
+
+test('queue status shows a job waiting for the build supervisor while its run holds the queue, and the notice goes out once', async () => {
+  const run = reviewRun({}, { supervisor: { notifyUrl: 'https://ntfy.example/builds' } });
+  const posted = [];
+  let dead = null;
+  let shown = null;
+  const { result } = await supervisedRun(run, {
+    post: async (url, text) => { posted.push([url, text]); return true; },
+    onSleep: (n, t) => {
+      fs.writeFileSync(run.config.at(run.config.queue.file), JSON.stringify({ jobs: [
+        { id: JOB_501, issue: '501', change: '7001', status: 'running', started: new Date(t - 3600000).toISOString() }] }));
+      // With no live process holding the queue, the run died and nobody waits for an answer.
+      dead = jobStatus(run.config, JOB_501, { clock: () => new Date(t) });
+      const lock = `${run.config.at(run.config.queue.file)}.lock`;
+      fs.writeFileSync(lock, String(process.pid));
+      shown = jobStatus(run.config, JOB_501, { clock: () => new Date(t) });
+      fs.rmSync(lock);
+      writeAnswers(run, 'phase3', { answers: [ANSWER] });
+    } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.ok(dead.some((l) => l.startsWith('interrupted ')) && !dead.some((l) => l.startsWith('waiting')), dead.join('\n'));
+  assert.ok(shown.includes('waiting phase=phase3 questions=1 left=30'), shown.join('\n'));
+  assert.deepEqual(posted, [['https://ntfy.example/builds', `${JOB_501} waiting phase=phase3 questions=1 left=30`]]);
+  const failing = reviewRun({}, { supervisor: { notifyUrl: 'https://ntfy.example/builds' } });
+  const again = await supervisedRun(failing, { post: async () => { throw new Error('offline'); },
+    onSleep: () => writeAnswers(failing, 'phase3', { answers: [ANSWER] }) });
+  assert.equal(again.result.ok, true, JSON.stringify(again.result));
+  assert.ok(statusLines(again.result.outDir).some((l) => l.event === 'warn' && l.reason === 'notify-failed'));
+});
+
+test('the build supervisor answers a rule conflict and the job goes on past rule intake', async () => {
+  const run = lib({ phase2_conflicts: (value) => ({ ...value, conflicts: [
+    { rules: ['BR-LIB.UC01-001', 'BR-LIB.UC01-002'], conflict: 'Different renewal windows' }] }) });
+  const { result } = await supervisedRun(run, { onSleep: () => writeAnswers(run, 'phase2',
+    { answers: [{ ...ANSWER, answer: 'The 30-day window applies.', citations: ['BR-LIB.UC01-001'] }] }) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(work(result, 'questions-phase2.json').questions,
+    [{ id: 'Q1', question: 'Rules BR-LIB.UC01-001 and BR-LIB.UC01-002: Different renewal windows' }]);
+  assert.equal(statusLines(result.outDir).find((l) => l.event === 'pass' && l.phase === 'phase2').supervised, 1);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.assumptions.some((a) => a.answeredBy === 'build supervisor' && a.assumption === 'The 30-day window applies.'));
+});
+
+test('the build supervisor answers a source conflict and the understanding gate passes', async () => {
+  const run = lib({ phase1_understanding: (value) => ({ ...value, conflicts: ['UC01 and the defect record disagree'] }) });
+  const { result } = await supervisedRun(run, { onSleep: () => writeAnswers(run, 'phase1', { answers: [ANSWER] }) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(statusLines(result.outDir).find((l) => l.event === 'pass' && l.phase === 'phase1').supervised, 1);
+  assert.equal(run.model.calls.filter((c) => c.schemaName.startsWith('phase1_understanding')).length, 1);
+});
+
+test('a conflict the rule batches find is answered before the understanding call, which reads the answer', async () => {
+  const name = withMaster((row) => { row.rule_summary = `${row.rule_summary} ${'x'.repeat(30000)}`; });
+  try {
+    const inputs = { ...fixtureInputs(), ruleExport: ['node', 'export.mjs', '--doc', '{doc}', '--master', name] };
+    const run = lib({ phase1_rules_2: (value) => ({ ...value, conflicts: ['A and B disagree'] }) }, { inputs });
+    const { result, sleeps } = await supervisedRun(run, { onSleep: () => writeAnswers(run, 'phase1',
+      { answers: [{ ...ANSWER, answer: 'A governs.' }] }) });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // The batch's conflict comes back with the understanding call's, settled by the first answer.
+    assert.equal(sleeps.length, 1);
+    const final = run.model.calls.find((c) => c.schemaName.startsWith('phase1_understanding'));
+    assert.match(final.user, /- A and B disagree: A governs\./);
+  } finally {
+    fs.rmSync(path.join(FIXTURES, name), { force: true });
+  }
+});
+
+test('queue watch keeps the heartbeat fresh and shows the job', () => {
+  const config = fixtureConfig();
+  const watch = (id) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'queue', 'watch',
+    '--config', config.file, '--job', id], { encoding: 'utf8' });
+  const shown = watch(JOB_501);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.match(shown.stdout, new RegExp(`^${JOB_501}  not queued`));
+  const at = Date.parse(read(heartbeatPath(config, JOB_501)).trim());
+  assert.ok(Date.now() - at < 60000);
+  assert.notEqual(watch('../x').status, 0);
+});
+
+test("a sandbox's wait shows until its end time and the poll after it, with no queue lock", () => {
+  const config = fixtureConfig();
+  const id = `${JOB_501}~waits`;
+  const until = Date.parse('2026-11-05T04:29:17Z');
+  const line = (event, extra = {}) => JSON.stringify({ at: '2026-11-05T03:59:17.000Z', job: id, phase: 'phase3', event, ...extra });
+  fs.mkdirSync(path.join(config.output, id), { recursive: true });
+  fs.writeFileSync(path.join(config.output, id, 'status.log'), `${[line('resume', { after: 'phase2' }), line('start'),
+    line('waiting', { questions: 3, until: '2026-11-05T04:29:17Z', waitMinutes: 30 })].join('\n')}\n`);
+  const at = (ms) => jobStatus(config, id, { clock: () => new Date(ms) });
+  assert.ok(at(until - 60000).includes('waiting phase=phase3 questions=3 left=1'));
+  assert.ok(at(until + 15000).includes('waiting phase=phase3 questions=3 left=0'));
+  assert.ok(!at(until + 16000).some((l) => l.startsWith('waiting')));
+});
+
+test('the supervisor block is checked when the config loads', () => {
+  assert.deepEqual(fixtureConfig().supervisor, { waitMinutes: 30, staleMinutes: 15, notifyUrl: null });
+  for (const [supervisor, message] of [[{ wait: 1 }, /supervisor must be an object/],
+    [{ waitMinutes: -1 }, /waitMinutes/], [{ staleMinutes: 0 }, /staleMinutes/],
+    [{ notifyUrl: 'ftp://host/x' }, /notifyUrl/], [{ notifyUrl: 'not a url' }, /notifyUrl/]]) {
+    assert.throws(() => fixtureConfig({ supervisor }), message);
+  }
 });
 
 test('a rule with no source page warns and is named under Job Intake, and every rule carries its requirement type', async () => {
@@ -6245,8 +6916,10 @@ test('a conflict reported in both orders counts once, and a blank review questio
   const result = await runLib(run);
   assert.equal(result.reason, 'gate:rule-conflict');
   assert.equal(statusLines(result.outDir).at(-1).conflicts, 1);
-  const blank = await runLib(lib({ phase3: (value) => ({ ...value, userReview: ['', '  '] }) }));
-  assert.equal(blank.ok, true, JSON.stringify(blank));
+  const blank = lib({ phase3_scope: (value) => ({ ...value, userReview: ['', '  '] }) });
+  const passed = await runLib(blank);
+  assert.equal(passed.ok, true, JSON.stringify(passed));
+  assert.ok(!blank.model.calls.some((c) => c.schemaName.startsWith('phase3_review')));
 });
 
 // A step the rules forbid, planted on the first card of the step call.
@@ -6363,8 +7036,8 @@ test('a run records every model call with its prompt, reply and counts, in the o
 
 test('a thinking call that is cut and retried records both attempts, and a second cut records as runaway', async () => {
   const dir = scratch('calls-ask-');
-  const reply = (cut) => ({ ok: true, json: async () => ({ choices: [{ finish_reason: cut ? 'length' : 'stop',
-    message: { content: cut ? '{"a":' : '{"ok":true}' } }], usage: { prompt_tokens: 30, completion_tokens: 7 } }) });
+  const reply = (cut) => streamed({ finish: cut ? 'length' : 'stop', content: cut ? '{"a":' : '{"ok":true}',
+    usage: { prompt_tokens: 30, completion_tokens: 7 } });
   const { ask } = await import('./phases.mjs');
   const over = (cutOn) => ({ config: fixtureConfig(), calls: 0, tokens: { prompt: 0, output: 0 },
     logs: jobLogs(dir, { echo: false }), job: { id: 'j' },
@@ -6378,11 +7051,12 @@ test('a thinking call that is cut and retried records both attempts, and a secon
   // Cut on both attempts: the second cut is a runaway.
   await assert.rejects(call(over(() => true), 'repair'), { code: 'runaway' });
   const records = callRecords(dir);
-  assert.deepEqual(records.map((r) => [r.step, r.attempt, r.thinking, r.error?.code ?? null]), [
-    ['phase9_walk', 1, true, 'length'],
-    ['phase9_walk', 2, false, null],
-    ['phase9_repair', 1, true, 'length'],
-    ['phase9_repair', 2, false, 'runaway'],
+  // Every attempt notes the seed, the runaway too, whose error the retry makes anew.
+  assert.deepEqual(records.map((r) => [r.step, r.attempt, r.thinking, r.error?.code ?? null, r.seed]), [
+    ['phase9_walk', 1, true, 'length', DEFAULT_SEED],
+    ['phase9_walk', 2, false, null, DEFAULT_SEED],
+    ['phase9_repair', 1, true, 'length', DEFAULT_SEED],
+    ['phase9_repair', 2, false, 'runaway', DEFAULT_SEED],
   ]);
   assert.deepEqual(records[1].reply, { ok: true });
   assert.equal(records[0].reply, null);
@@ -6717,7 +7391,7 @@ const repairsStepOne = { phase8_repair: (value) => ({ ...correctingRepair(value)
     steps: card.steps.map((one, i) => (i ? one : { ...one, description: 'Repaired by the step' })) })) }) };
 const step = (config, options, run) => stepJob(config, { job: SOURCE_JOB, ...options }, run);
 
-test('the draft step builds the review workbook with no model and prints the builder\'s sheet results', async () => {
+test('the draft step writes the Draft workbook with no model and prints the builder\'s sheet results', async () => {
   const { config, result } = await finishedJob();
   const before = digest(result.outDir);
   const held = [];
@@ -6730,8 +7404,8 @@ test('the draft step builds the review workbook with no model and prints the bui
   assert.ok(done.result.report.every((line) => /^(PASS|FAIL)/.test(line)));
   const sandbox = path.join(config.output, done.id);
   assert.ok(fs.readdirSync(path.join(sandbox, 'work', 'review')).some((name) => name.endsWith('.xlsx')));
-  // No model call was made, and a builder step never takes the queue.
-  assert.deepEqual(fs.readdirSync(path.join(sandbox, 'work', 'calls')), fs.readdirSync(path.join(result.outDir, 'work', 'calls')));
+  // No model call was made, so the sandbox holds no call records, and a builder step never takes the queue.
+  assert.equal(fs.existsSync(path.join(sandbox, 'work', 'calls')), false);
   assert.deepEqual(held, [false]);
   assert.deepEqual(done.result.lines.map((line) => JSON.parse(line).event), ['begin', 'step']);
   assert.equal(JSON.parse(done.result.lines.at(-1)).calls, 0);
@@ -7012,4 +7686,187 @@ test('the command line runs a step, and refuses job options, a missing --at and 
   assert.match(cli('draft', '--job', SOURCE_JOB, '--at', 'phase8', '--finding', '1').stderr, /--finding does not go with draft/);
   assert.ok(fs.existsSync(result.workbook));
   assert.deepEqual(fs.readdirSync(config.output).filter((name) => name.includes('~')), [`${SOURCE_JOB}~cli`]);
+});
+
+// Replaying a job's recorded calls: a run answered from work/calls with no model server.
+
+/** The job's recorded calls copied to a scratch folder, so a test can change a record and leave the job alone. */
+function copiedCalls(config, job) {
+  const dir = scratch('replay-calls-');
+  fs.cpSync(path.join(config.output, job, 'work', 'calls'), dir, { recursive: true });
+  return dir;
+}
+
+/** Rewrites the first record of `step` in a calls folder to a prompt with one more line, as another version of the prompt would have recorded. */
+function recordWithChangedPrompt(dir, step) {
+  const names = fs.readdirSync(dir).filter((name) => name.includes(`-${step}-`)).sort();
+  assert.ok(names.length > 0, `${step} was not recorded`);
+  const file = path.join(dir, names[0]);
+  const saved = JSON.parse(read(file));
+  saved.prompt.user += '\nExtra line the old prompt had';
+  saved.promptHash = promptHash(saved.prompt.system, saved.prompt.user);
+  fs.writeFileSync(file, JSON.stringify(saved));
+}
+
+const replayRun = (config, model, label) => runJob(config,
+  { issue: '501', change: '7001', id: `${SOURCE_JOB}~${label}` }, { model, echo: false });
+
+test('a job replayed from its own recording with no model builds the identical pack', async () => {
+  const { config, model, result } = await finishedJob();
+  const live = { json: async () => { throw new Error('the live model was asked'); } };
+  const replay = replayModel({ dir: replaySource(config, SOURCE_JOB), live });
+  const again = await replayRun(config, replay, 'same');
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.equal(read(again.packPath), read(result.packPath));
+  assert.deepEqual(replay.report(), { served: model.calls.length, live: 0, misses: [] });
+  // The replay records its own calls, the same ones, so it can be replayed in turn.
+  const asked = (outDir) => callRecords(outDir).map((r) => [r.step, r.attempt, r.promptHash, r.schemaHash, r.reply, r.usage]);
+  assert.deepEqual(asked(again.outDir), asked(result.outDir));
+  assert.equal(statusLines(again.outDir).some((line) => line.event === 'replay-miss'), false);
+});
+
+test('a changed prompt stops the replay at that step alone, naming it, with the lines that differ in detail.log', async () => {
+  const { config } = await finishedJob();
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const replay = replayModel({ dir });
+  const again = await replayRun(config, replay, 'changed');
+  assert.equal(again.ok, false);
+  assert.equal(again.reason, 'replay:prompt-changed');
+  assert.equal(again.phase, 'phase9-confidence');
+  assert.deepEqual(replay.report().misses, [{ step: 'phase9_confidence_overall', code: 'prompt-changed', changed: 1 }]);
+  // Every call before it came from the recording; the phases before it passed.
+  assert.equal(replay.report().live, 0);
+  const lines = statusLines(again.outDir);
+  assert.ok(lines.some((line) => line.phase === 'phase9-senior' && line.event === 'pass'));
+  assert.deepEqual(lines.filter((line) => line.event === 'replay-miss').map(({ at, ...fields }) => fields),
+    [{ job: `${SOURCE_JOB}~changed`, phase: 'phase9', event: 'replay-miss', step: 'phase9_confidence_overall',
+      reason: 'prompt-changed', changedLines: 1 }]);
+  assert.equal(lines.at(-1).reason, 'replay:prompt-changed');
+  assertContentFree(read(path.join(again.outDir, 'status.log')));
+  assert.match(read(path.join(again.outDir, 'detail.log')),
+    /replay diff phase9_confidence_overall\nuser, from line \d+:\n- Extra line the old prompt had\n/);
+  assert.equal(fs.existsSync(again.packPath), false);
+});
+
+test('with miss live the changed step alone goes to the live model and the pack is as it was', async () => {
+  const { config, result } = await finishedJob();
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const replay = replayModel({ dir, miss: 'live', live });
+  const again = await replayRun(config, replay, 'live');
+  assert.equal(again.ok, true, JSON.stringify(again));
+  assert.deepEqual(live.calls.map((call) => call.schemaName), ['phase9_confidence_overall']);
+  assert.deepEqual(replay.report().misses, [{ step: 'phase9_confidence_overall', code: 'prompt-changed', changed: 1 }]);
+  assert.equal(replay.report().live, 1);
+  assert.equal(read(again.packPath), read(result.packPath));
+});
+
+test('a slice replayed with no model takes no queue, and a sandbox records only the calls its own run made', async () => {
+  const { config, model } = await finishedJob();
+  const held = [];
+  const replay = replayModel({ dir: replaySource(config, SOURCE_JOB) });
+  const slice = (label, from) => rerunJob(config, { job: SOURCE_JOB, from: 'phase9-senior', until: 'phase9-confidence', label },
+    { model: from, replayOnly: true, echo: false,
+      run: (...args) => { held.push(lockHeld(config)); return runJob(...args); } });
+  const one = await slice('one', replay);
+  assert.equal(one.result.ok, true, JSON.stringify(one.result));
+  assert.deepEqual(held, [false]);
+  const records = callRecords(path.join(config.output, one.id));
+  assert.ok(records.length > 0 && records.length < model.calls.length);
+  assert.equal(records.length, replay.report().served);
+  assert.deepEqual(records.map((r) => r.seq), records.map((_, i) => i + 1));
+  // The sandbox is a recording of its own: replaying it answers the same slice again.
+  const again = await slice('two', replayModel({ dir: replaySource(config, one.id) }));
+  assert.equal(again.result.ok, true, JSON.stringify(again.result));
+  const snapshot = (id) => read(path.join(config.output, id, 'work', 'checkpoints', 'phase9-confidence.json'));
+  assert.equal(snapshot(again.id), snapshot(one.id));
+  assert.deepEqual(held, [false, false]);
+});
+
+test('a step replayed from a sandbox recording asks no model, takes no queue and leaves the same state', async () => {
+  const { config } = await finishedJob();
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const recorded = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'asked' }, { model: live });
+  assert.equal(recorded.result.ok, true, JSON.stringify(recorded.result));
+  assert.ok(live.calls.length > 0);
+  const held = [];
+  const replay = replayModel({ dir: replaySource(config, recorded.id) });
+  const done = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'again' },
+    { model: replay, replayOnly: true, run: (...args) => { held.push(lockHeld(config)); return runStep(...args); } });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.deepEqual(held, [false]);
+  assert.deepEqual(replay.report(), { served: live.calls.length, live: 0, misses: [] });
+  assert.deepEqual(done.result.report, recorded.result.report);
+  assert.equal(slurp(path.join(config.output, done.id, 'work', 'step.json')),
+    slurp(path.join(config.output, recorded.id, 'work', 'step.json')));
+});
+
+test('a step stopped by a changed prompt fails as replay:prompt-changed and leaves the state it started from', async () => {
+  const { config, result } = await finishedJob();
+  const live = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const recorded = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'asked' }, { model: live });
+  const dir = copiedCalls(config, recorded.id);
+  recordWithChangedPrompt(dir, live.calls[0].schemaName);
+  const done = await step(config, { at: 'phase9-revalidate', step: 'walk', label: 'miss' },
+    { model: replayModel({ dir }), replayOnly: true });
+  assert.equal(done.result.ok, false);
+  assert.equal(JSON.parse(done.result.lines.at(-1)).reason, 'replay:prompt-changed');
+  const sandbox = path.join(config.output, done.id);
+  assert.equal(slurp(path.join(sandbox, 'work', 'step.json')),
+    slurp(path.join(result.outDir, 'work', 'checkpoints', 'phase9-revalidate.json')));
+});
+
+test('--model takes a value only outside compare, and the replay flags go with run --job and step', async () => {
+  assert.deepEqual(parseArgs(['run', '--job', 'x', '--from', 'p', '--model', 'replay:x', '--replay-miss', 'live']),
+    { docs: [], words: ['run'], job: 'x', from: 'p', model: 'replay:x', replayMiss: 'live' });
+  assert.deepEqual(parseArgs(['compare', '--model', '--config', 'c']), { docs: [], words: ['compare'], model: true, config: 'c' });
+  const { config } = await finishedJob();
+  const cli = (command, ...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), command,
+    '--config', config.file, ...args], { encoding: 'utf8' });
+  const slice = (...more) => cli('run', '--job', SOURCE_JOB, '--from', 'phase9-senior', '--as', 'refused', ...more);
+  const refused = (result, pattern) => {
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stderr, pattern);
+  };
+  refused(cli('queue', 'status', '--model', `replay:${SOURCE_JOB}`), /--model goes with step, or with run --job/);
+  refused(cli('run', '--issue', '501', '--replay-miss', 'live'), /--replay-miss goes with step, or with run --job/);
+  refused(slice('--replay-miss', 'live'), /--replay-miss goes with --model replay:<source>/);
+  refused(slice('--model', 'live'), /--model takes replay:/);
+  refused(slice('--model'), /--model takes replay:/);
+  refused(slice('--model', `replay:${SOURCE_JOB}`, '--replay-miss', 'maybe'), /--replay-miss takes fail or live/);
+  refused(slice('--model', `replay:${SOURCE_JOB}`, '--pause'), /--pause is for a run that can ask the live model/);
+  refused(slice('--model', 'replay:issue-9-change-1'), /issue-9-change-1 has no recorded calls/);
+  refused(cli('step', 'walk', '--job', SOURCE_JOB, '--at', 'phase9-revalidate', '--model', 'replay:../nowhere'),
+    /holds no call records/);
+  // Nothing was written for any of them.
+  assert.deepEqual(fs.readdirSync(config.output).filter((name) => name.includes('~')), []);
+});
+
+test('the command line replays a slice with no model and no queue, prints what was replayed, and stops on a changed prompt', async () => {
+  const { config } = await finishedJob();
+  const cli = (command, ...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), command,
+    '--config', config.file, ...args], { encoding: 'utf8' });
+  const slice = (label, source, ...more) => cli('run', '--job', SOURCE_JOB, '--from', 'phase9-senior', '--until', 'phase9-confidence',
+    '--as', label, '--model', source, ...more);
+  // A queue held by a live process does not stop a replay that can never ask the model.
+  const lock = `${config.at(config.queue.file)}.lock`;
+  fs.writeFileSync(lock, String(process.pid));
+  const ran = slice('replayed', `replay:${SOURCE_JOB}`);
+  const stoppedByQueue = slice('live', `replay:${SOURCE_JOB}`, '--replay-miss', 'live');
+  fs.rmSync(lock);
+  assert.equal(ran.status, 0, ran.stdout + ran.stderr);
+  assert.match(ran.stdout, new RegExp(`^sandbox ${SOURCE_JOB}~replayed$`, 'm'));
+  assert.match(ran.stdout, /^replay {2}served [1-9]\d* {2}live 0 {2}missed 0$/m);
+  // Where a miss may go to the live model, the queue is needed again.
+  assert.equal(stoppedByQueue.status, 1);
+  assert.match(stoppedByQueue.stderr, /the queue is running/);
+  const dir = copiedCalls(config, SOURCE_JOB);
+  recordWithChangedPrompt(dir, 'phase9_confidence_overall');
+  const changed = slice('changed', `replay:${dir}`);
+  assert.equal(changed.status, 1, changed.stdout + changed.stderr);
+  assert.match(changed.stdout, /^replay: prompt changed for phase9_confidence_overall \(1 line differs; the diff is in detail\.log\)$/m);
+  assert.match(changed.stdout, /"event":"fail".*"reason":"replay:prompt-changed"/);
+  assertContentFree(changed.stdout);
 });

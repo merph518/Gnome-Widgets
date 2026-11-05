@@ -12,7 +12,9 @@ import { pathToFileURL } from 'node:url';
 import { fill, globFiles, loadReference, MEMORY_STOP, rootRelative } from './config.mjs';
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { Cancelled, ModelError, modelClient } from './model.mjs';
+import { ReplayMiss } from './replay.mjs';
 import { jobLogs, readStatusLog } from './status.mjs';
+import { postNotice, waitForAnswers } from './supervisor.mjs';
 import * as P from './phases.mjs';
 
 /** The objective config names for a set, else the usual name if the builder lists it, else none. */
@@ -49,7 +51,7 @@ export const PHASES = ['intake', 'phase1', 'phase2', 'phase3', 'phase4', 'phase5
 // What a run builds for itself from the config; everything else on ctx is the job's state.
 const SETUP = new Set(['config', 'job', 'logs', 'builder', 'suiteMerge', 'model', 'ref', 'private',
   'existingTests', 'riskLevels', 'coreObjective', 'suiteSetOrder', 'suiteRunSets', 'fullCoverageObjective', 'breakItObjective', 'rulesFresh',
-  'window', 'windowNoted']);
+  'window', 'windowNoted', 'supervise']);
 
 export const checkpointPath = (outDir) => path.join(outDir, 'work', 'checkpoint.json');
 
@@ -110,6 +112,9 @@ export async function jobContext(config, job, { outDir, logs, model, signal = nu
       fs.writeFileSync(path.join(outDir, 'work', name), `${JSON.stringify(value, null, 1)}\n`);
     },
   };
+  // A replaying model answers from recorded calls and asks the live model only for a call
+  // it was told to send there, so the live client is made when that first happens.
+  model?.bind?.({ logs, job: job.id, live: () => modelClient({ ...config.model, signal }) });
   if (config.inputs.existingTests) {
     ctx.existingTests = globFiles(config.root, fill(config.inputs.existingTests, job))
       .map((file) => fs.readFileSync(file, 'utf8')).join('\n\n');
@@ -137,7 +142,7 @@ export function stateText(ctx, pack, phase) {
 }
 
 export async function runJob(config, job, { model, echo = true, now = Date.now, readMemory = readMeminfo,
-  sleep, signal = null, until = null } = {}) {
+  sleep, signal = null, until = null, post = postNotice } = {}) {
   const id = job.id ?? jobId(job);
   const outDir = path.join(config.output, id);
   const saved = job.resume ? readCheckpoint(outDir) : null;
@@ -162,6 +167,9 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   const logs = jobLogs(outDir, { echo });
   const started = now();
   const ctx = await jobContext(config, { ...job, id }, { outDir, logs, model, signal });
+  // At a question gate, a phase waits here for the build supervisor's answers.
+  ctx.supervise = (name, questions) => waitForAnswers({ config, id, outDir, phase: name, questions, logs,
+    now, ...(sleep ? { sleep } : {}), signal, post });
 
   // The merged suite pack is a separate object from ctx.pack once Phase 7 passes.
   let pack = ctx.pack;
@@ -235,8 +243,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       if (job.suite) pack = P.mergeSuite(ctx);
       return counts;
     });
-    // The first build checks everything Phase 9 does not fill; the review's
-    // sheets wait for it.
+    // The first build checks everything Phase 9 does not fill; the review's sheets wait for
+    // it. It ends by writing the Draft workbook the review starts from.
     await step('phase8', async () => {
       await P.phase8(ctx, pack, 'build', P.REVIEW_SHEETS);
       return { repairs: ctx.repairs };
@@ -246,6 +254,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
     await step('phase9-revalidate', async () => {
       delete pack.revalidation;
+      // The rebuild writes the Draft workbook again, with the rating the review gave.
       await P.phase8(ctx, pack, 'rebuild');
       const again = await P.revalidate(ctx, pack);
       // Items still open lower what the pack can claim, so the rating is made again with them in view.
@@ -297,7 +306,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   } catch (error) {
     const reason = error instanceof Cancelled ? 'cancelled' : error instanceof P.GateError ? `gate:${error.code}`
       : error instanceof ModelError ? `model:${error.code}`
-        : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
+        : error instanceof ReplayMiss ? `replay:${error.code}`
+          : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
     logs.detail('stopped', error.stack ?? String(error));
     const counts = error instanceof P.GateError || error instanceof MemoryLow ? error.counts : {};
     logs.status({ job: id, phase, event: 'fail', reason, ms: now() - started, calls: ctx.calls,

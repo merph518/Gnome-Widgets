@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { localEndpoint } from './model.mjs';
+import { DEFAULT_SEED, DEFAULT_TEMPERATURE, localEndpoint } from './model.mjs';
 
 const REQUIRED_REFERENCES = ['procedure', 'workbookStandard', 'implementationGuide'];
 
@@ -30,14 +30,18 @@ export const RULE_SHAPE = {
 export const REASONING_PHASES = ['phase1', 'phase3', 'phase4', 'phase5', 'phase9'];
 
 /**
- * The thinking limit of each reasoning step, in tokens, keyed `<phase>.<step>`. A step
- * with an index or a repeat suffix is keyed without it, so `rules-3` is `phase1.rules`.
- * `model.reasoningOutputByStep` overrides these, and `model.reasoningOutput` caps them.
- * A step not listed here has no limit of its own.
+ * The output budget of each thinking step, in tokens, keyed `<phase>.<step>`: the most
+ * one call may produce, its thinking and its answer together, sent as `max_tokens`. A
+ * step with an index or a repeat suffix is keyed without it, so `rules-3` is
+ * `phase1.rules`. `model.reasoningOutputByStep` overrides these, and none passes
+ * `model.reasoningOutput`. A step not listed here has no budget of its own.
+ *
+ * A thinking step cut at its output budget on two or more recorded runs gets thinking
+ * off, which is why `phase1.understanding` is not listed: the cut call's answer is lost,
+ * and the retry with thinking off answers anyway.
  */
 export const REASONING_STEPS = {
   'phase1.rules': 20480,
-  'phase1.understanding': 12288,
   'phase3.scope': 20480,
   'phase4.impact': 8192,
   'phase5.objectives': 12288,
@@ -190,8 +194,8 @@ export function loadConfig(configPath) {
   // of `context` (128000 by default) and the model server's own window; the
   // server's request time-out has to be at least as long as the call waits.
   const model = {
-    temperature: 0.1, context: 128000, maxOutput: 16384, reasoningOutput: 40960,
-    timeoutMinutes: 150, ...raw.model,
+    temperature: DEFAULT_TEMPERATURE, seed: DEFAULT_SEED, context: 128000, maxOutput: 16384,
+    reasoningOutput: 40960, timeoutMinutes: 150, ...raw.model,
   };
   // The reply cap for the retry of a thinking call that ran out its output budget; it
   // answers with thinking off, so it never needs more than a plain call's maxOutput.
@@ -200,6 +204,11 @@ export function loadConfig(configPath) {
   if (!model.name) throw new Error('config model.name is missing');
   if (!Number.isFinite(model.temperature) || model.temperature < 0 || model.temperature > 0.2) {
     throw new Error('config model.temperature must be between 0 and 0.2');
+  }
+  // llama.cpp reads the seed as an unsigned 32-bit number and takes its top value,
+  // which -1 also becomes, as "pick a random seed", so neither is accepted.
+  if (!Number.isInteger(model.seed) || model.seed < 0 || model.seed > 4294967294) {
+    throw new Error('config model.seed must be a whole number from 0 to 4294967294');
   }
   if (raw.model?.retryOutput !== undefined && (!Number.isInteger(model.retryOutput)
     || model.retryOutput < 1024 || model.retryOutput > model.maxOutput)) {
@@ -311,6 +320,27 @@ export function loadConfig(configPath) {
   if (!Number.isInteger(memory.waitMinutes) || memory.waitMinutes < 0) {
     throw new Error('config memory.waitMinutes must be a whole number of 0 or more');
   }
+  // How long a job waits at a question gate for the build supervisor's answers, and how
+  // recent the supervisor's `queue watch` heartbeat has to be for the job to wait at all.
+  const supervisorKeys = ['waitMinutes', 'staleMinutes', 'notifyUrl'];
+  if (raw.supervisor !== undefined && (!raw.supervisor || typeof raw.supervisor !== 'object'
+    || Array.isArray(raw.supervisor) || Object.keys(raw.supervisor).some((key) => !supervisorKeys.includes(key)))) {
+    throw new Error(`config supervisor must be an object with only ${supervisorKeys.join(', ')}`);
+  }
+  const supervisor = { waitMinutes: 30, staleMinutes: 15, notifyUrl: null, ...raw.supervisor };
+  if (!Number.isInteger(supervisor.waitMinutes) || supervisor.waitMinutes < 0) {
+    throw new Error('config supervisor.waitMinutes must be a whole number of 0 or more');
+  }
+  if (!Number.isInteger(supervisor.staleMinutes) || supervisor.staleMinutes < 1) {
+    throw new Error('config supervisor.staleMinutes must be a positive whole number');
+  }
+  if (supervisor.notifyUrl !== null) {
+    let url = null;
+    try { url = new URL(supervisor.notifyUrl); } catch { /* checked below */ }
+    if (!url || !['http:', 'https:'].includes(url.protocol)) {
+      throw new Error('config supervisor.notifyUrl must be an http or https URL, or null');
+    }
+  }
   if (raw.cardRulesPerCall !== undefined) {
     throw new Error('config cardRulesPerCall is replaced by cardScenariosPerCall');
   }
@@ -421,6 +451,7 @@ export function loadConfig(configPath) {
     closeApps,
     release,
     memory,
+    supervisor,
     queue,
     report,
   };
