@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.19](https://github.com/merph518/Overmind/compare/v0.31.18...v0.31.19) (2026-11-06)
+
+
+### Features
+
+* **att-docs:** add the sir-housekeeping skill ([#569](https://github.com/merph518/Overmind/issues/569)) ([6775ead](https://github.com/merph518/Overmind/commit/6775ead1a0c8d3cd1a21f2914533fb9d09d7ad73))
+
 ## [0.31.18](https://github.com/merph518/Overmind/compare/v0.31.17...v0.31.18) (2026-11-05)
 
 

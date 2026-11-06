@@ -108,6 +108,14 @@ from it and to every review agent. Build from that plan and record in the pull r
 body, under Judgment calls, any place the code departed from it. A fix for a review
 finding is reviewed like any other change.
 
+### Models
+
+A step that asks for a model the harness will not let the session choose (a subagent
+call that rejects a per-call model, for example) still runs, on the best model the
+harness offers. Do not skip the step, and do not withhold the ready signal for this
+reason alone. Record each such step in the pull request body twice: under Judgment calls
+and under Self review, naming the step, the model wanted and the model used.
+
 ### Test seams
 
 The plan names the test seams. This overrides the `tdd` skill's step of confirming
@@ -265,6 +273,8 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   fixes get no fourth review. If that review finds another real bug, fix it, have a review
   agent review that fix, and say in the report that the loop ran past three passes. A
   fifth pass that still finds a real bug stops the work and asks through `AskUserQuestion`.
+  The body's Self review section names the model used for each pass, and for the
+  review of the last fix, with the fallback from Models where a model could not be chosen.
 - Ready signal: never leave the pull request in draft. When the loop ends, mark it ready
   with `gh pr ready <n>`. The label is added only when every check on the pull request has
   passed on the current head. A read right after a push or a merge of `origin/main` can
