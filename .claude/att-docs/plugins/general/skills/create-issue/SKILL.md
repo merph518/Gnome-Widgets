@@ -204,4 +204,7 @@ change, nothing else.
 ## 8. Other skills
 
 The skills that file issues take their titles from this one rather than defining their
-own shapes, so a title created by any path through the repository looks the same.
+own shapes, so a title created by any path through the repository looks the same. The one
+exception is a skill that files issues from its own saved template, such as
+`wyatt-regression-issue`: it sets its title, labels and body, and runs its own duplicate
+check.

@@ -14,6 +14,8 @@
 #   oversee.sh start <issue> <branch>
 #   oversee.sh adopt <issue>               claim an orphaned in-flight issue
 #   oversee.sh withdraw <issue>            take back this session's own start
+#   oversee.sh runs <issue>                park this session's issue while its runs go
+#   oversee.sh resume <issue>              take a parked issue back
 #   oversee.sh finish <issue> <done|stalled|skipped> <pr|-> <note...>
 #   oversee.sh swap <issue> <from> <to>    move a label, read back
 #   oversee.sh status                      counts and the tail of the ledger
@@ -508,7 +510,7 @@ cmd_next() {
       # no owner predates the tags and counts as live elsewhere.
       for (i=1; i<=total; i++) {
         n = num[i]
-        if (status[n] != "start") continue
+        if (status[n] != "start" && status[n] != "runs") continue
         sid = ""; pid = ""
         if (match(note[n], /session [^ ]+/)) sid = substr(note[n], RSTART + 8, RLENGTH - 8)
         if (match(note[n], /pid [0-9]+/)) pid = substr(note[n], RSTART + 4, RLENGTH - 4)
@@ -526,6 +528,7 @@ cmd_next() {
         for (i=1; i<=total; i++) {
           n = num[i]
           if (pass == 2 && scoped && !servable[i]) continue
+          if (pass == 1 && status[n] == "runs") continue
           if (owner[n] == (pass == 1 ? "mine" : "orphan")) {
             print "INFLIGHT\t" line[i] "\tbranch " branch[n] "\t" owner[n]
             exit
@@ -540,6 +543,13 @@ cmd_next() {
           held[area[i]] = "PR #" pr[n]
         # An orphan a milestone run does not adopt is printed like an issue in
         # flight elsewhere, and holds its area while its branch is open.
+        # An issue of mine parked on its runs is printed, and holds its area, so
+        # an issue in the same area waits while the runs go.
+        if (owner[n] == "mine" && status[n] == "runs") {
+          print "RUNS\t" line[i] "\tbranch " branch[n]
+          busy++
+          if (area[i] != "-") held[area[i]] = "issue " n " waiting on its runs"
+        }
         skipped_orphan = (owner[n] == "orphan" && scoped && !servable[i])
         if (owner[n] == "elsewhere" || skipped_orphan) {
           print "ELSEWHERE\t" line[i] "\tbranch " branch[n]
@@ -633,7 +643,7 @@ cmd_blocked() {
     fi
     printf 'BLOCKED\t%s\t%s\t%s\n' "$issue" "$title" "$note"
   done <<< "$listed"
-  printf '%s\n' "$next" | awk '/^DEFER\t/'
+  printf '%s\n' "$next" | awk '/^(DEFER|RUNS)\t/'
 }
 
 # The queue is a snapshot from init, and labels move after it: another session
@@ -706,8 +716,12 @@ refuse_if_held() {
   [ -n "$last" ] || return 0
   status=$(cut -f3 <<< "$last")
   note=$(cut -f6 <<< "$last")
-  [ "$status" = start ] || return 0
+  [ "$status" = start ] || [ "$status" = runs ] || return 0
   read -r sid pid <<< "$(tag_owner "$note")"
+  # A parked issue of this session is taken back with resume, which checks that
+  # no other issue is in flight; a start would overwrite the park.
+  [ "$status" != runs ] || [ -z "$SESSION" ] || [ "$sid" != "$SESSION" ] ||
+    die "issue $issue is parked on its runs; use oversee.sh resume $issue"
   [ "$sid" != - ] && [ "$sid" != "$SESSION" ] || return 0
   ! marker_holds "$sid" || die "issue $issue is held by loop session $sid; run next again"
   [ "$pid" = - ] || ps -p "$pid" > /dev/null || return 0
@@ -722,7 +736,7 @@ cmd_adopt() {
   lock_ledger
   exec 8>"$DIR/loops.lock"
   flock -w 30 8 || die "the loop markers are locked by another session; try again"
-  branch=$(awk -F'\t' -v i="$issue" '$2==i {s=$3; b=$4} END {if (s == "start") print b}' "$LEDGER")
+  branch=$(awk -F'\t' -v i="$issue" '$2==i {s=$3; b=$4} END {if (s == "start" || s == "runs") print b}' "$LEDGER")
   [ -n "$branch" ] || die "issue $issue is not in flight; nothing to adopt"
   last=$(latest_row "$issue")
   read -r sid pid <<< "$(tag_owner "$(cut -f6 <<< "$last")")"
@@ -757,6 +771,45 @@ cmd_withdraw() {
   row "$issue" "$st" "$branch" "$pr" "$note"
 }
 
+# Parks this session's in-flight issue while its test runs go, so next serves a
+# different issue and the parked one keeps its area held. The row carries the
+# branch, the owner and the pick reason of the start row it follows.
+cmd_runs() {
+  local issue=$1 last sid pid note pick= branch
+  lock_ledger
+  last=$(latest_row "$issue")
+  [ "$(cut -f3 <<< "$last")" = start ] || die "issue $issue is not being worked; nothing to park"
+  note=$(cut -f6 <<< "$last")
+  read -r sid pid <<< "$(tag_owner "$note")"
+  [ -n "$SESSION" ] && [ "$sid" = "$SESSION" ] ||
+    die "issue $issue was started by session $sid, not this one"
+  branch=$(cut -f4 <<< "$last")
+  [[ $note =~ (pick:\ .*) ]] && pick=${BASH_REMATCH[1]}
+  row "$issue" runs "$branch" - "$(owner_tag)${pick:+; $pick}"
+}
+
+# Takes a parked issue back. One issue is worked at a time per session, so it
+# refuses while another issue of this session is in flight.
+cmd_resume() {
+  local issue=$1 last sid pid note pick= branch other
+  lock_ledger
+  last=$(latest_row "$issue")
+  [ "$(cut -f3 <<< "$last")" = runs ] || die "issue $issue is not waiting on runs"
+  note=$(cut -f6 <<< "$last")
+  read -r sid pid <<< "$(tag_owner "$note")"
+  [ -n "$SESSION" ] && [ "$sid" = "$SESSION" ] ||
+    die "issue $issue was parked by session $sid, not this one"
+  other=$(awk -F'\t' -v me="$SESSION" '
+    { status[$2] = $3; note[$2] = $6 }
+    END { for (i in status)
+            if (status[i] == "start" && index(note[i], "session " me " ") > 0) { print i; exit } }' \
+    "$LEDGER")
+  [ -z "$other" ] || die "issue $other is being worked; park or finish it first"
+  branch=$(cut -f4 <<< "$last")
+  [[ $note =~ (pick:\ .*) ]] && pick=${BASH_REMATCH[1]}
+  row "$issue" start "$branch" - "$(owner_tag) resumed${pick:+; $pick}"
+}
+
 # Moves a label on an issue through the REST endpoints, since `gh issue edit`
 # fails here on the classic projects lookup, and reads the labels back. The
 # new label must already exist in the repository; it is never created.
@@ -781,8 +834,8 @@ cmd_status() {
   awk -F'\t' '
     { status[$2]=$3 }
     END { for (i in status) n[status[i]]++
-          printf "done %d  stalled %d  skipped %d  in-flight %d\n",
-                 n["done"], n["stalled"], n["skipped"], n["start"] }' "$LEDGER"
+          printf "done %d  stalled %d  skipped %d  in-flight %d  on runs %d\n",
+                 n["done"], n["stalled"], n["skipped"], n["start"], n["runs"] }' "$LEDGER"
   echo "queued $(wc -l < "$QUEUE") total"
   load_scope
   if [ -n "$saved_milestone" ]; then
@@ -844,6 +897,10 @@ case "${1:-}" in
           cmd_adopt "$2" ;;
   withdraw) [ $# -ge 2 ] || die "usage: oversee.sh withdraw <issue>"
           cmd_withdraw "$2" ;;
+  runs)   [ $# -ge 2 ] || die "usage: oversee.sh runs <issue>"
+          cmd_runs "$2" ;;
+  resume) [ $# -ge 2 ] || die "usage: oversee.sh resume <issue>"
+          cmd_resume "$2" ;;
   swap)   [ $# -ge 4 ] || die "usage: oversee.sh swap <issue> <from> <to>"
           cmd_swap "$2" "$3" "$4" ;;
   finish) [ $# -ge 4 ] || die "usage: oversee.sh finish <issue> <status> <pr|-> <note>"
@@ -856,5 +913,5 @@ case "${1:-}" in
           row "$issue" "$st" "$branch" "$pr" "$@" ;;
   status) cmd_status ;;
   *)      die "usage: oversee.sh" \
-              "init|refresh|next|blocked|start|adopt|withdraw|swap|finish|status" ;;
+              "init|refresh|next|blocked|start|adopt|withdraw|runs|resume|swap|finish|status" ;;
 esac

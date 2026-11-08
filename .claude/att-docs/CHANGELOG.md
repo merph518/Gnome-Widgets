@@ -1,5 +1,96 @@
 # Changelog
 
+## [0.31.29](https://github.com/merph518/Overmind/compare/v0.31.28...v0.31.29) (2026-11-08)
+
+
+### Features
+
+* **general:** add the azdo-sync skill ([#590](https://github.com/merph518/Overmind/issues/590)) ([#625](https://github.com/merph518/Overmind/issues/625)) ([e378bc0](https://github.com/merph518/Overmind/commit/e378bc08d48855471ea8f0f32b7528333a01ab0d))
+
+## [0.31.28](https://github.com/merph518/Overmind/compare/v0.31.27...v0.31.28) (2026-11-08)
+
+
+### Features
+
+* **general:** add the azdo-stories skill ([#589](https://github.com/merph518/Overmind/issues/589)) ([#624](https://github.com/merph518/Overmind/issues/624)) ([045591d](https://github.com/merph518/Overmind/commit/045591dee65968d33124fd9c9eb95fe2188981bc))
+
+## [0.31.27](https://github.com/merph518/Overmind/compare/v0.31.26...v0.31.27) (2026-11-08)
+
+
+### Features
+
+* **general:** add the azdo-build-issue skill ([#586](https://github.com/merph518/Overmind/issues/586)) ([#617](https://github.com/merph518/Overmind/issues/617)) ([6c11dd2](https://github.com/merph518/Overmind/commit/6c11dd2ec1775fefccbf57c2cb1233577914fd9f))
+* **general:** add the azdo-digest skill ([#587](https://github.com/merph518/Overmind/issues/587)) ([#621](https://github.com/merph518/Overmind/issues/621)) ([c205fe4](https://github.com/merph518/Overmind/commit/c205fe4dac72cc4c5e2a697de7d2b045a5f32a36))
+* **general:** add the azdo-review skill ([#588](https://github.com/merph518/Overmind/issues/588)) ([#623](https://github.com/merph518/Overmind/issues/623)) ([528de8c](https://github.com/merph518/Overmind/commit/528de8c23fea7fd72f19833dc29c8b64f7432dc2))
+* **general:** add the wyatt-review-phase-1 skill ([#593](https://github.com/merph518/Overmind/issues/593)) ([#619](https://github.com/merph518/Overmind/issues/619)) ([2599c0a](https://github.com/merph518/Overmind/commit/2599c0a0bb62b6fa436f64134de3d8a073ed0424))
+* **general:** add the wyatt-review-phase-2 skill ([#618](https://github.com/merph518/Overmind/issues/618)) ([#622](https://github.com/merph518/Overmind/issues/622)) ([5c1d1dc](https://github.com/merph518/Overmind/commit/5c1d1dc8bd560420fb75cac296617e6fa3af93d5))
+
+## [0.31.26](https://github.com/merph518/Overmind/compare/v0.31.25...v0.31.26) (2026-11-08)
+
+
+### Features
+
+* **general:** add runs and resume to the oversee ledger ([#611](https://github.com/merph518/Overmind/issues/611)) ([#614](https://github.com/merph518/Overmind/issues/614)) ([9181c12](https://github.com/merph518/Overmind/commit/9181c12bf296d5431d3d8e17da377bf0536a7a77))
+* **general:** add the sql-discovery-learning-log skill ([#612](https://github.com/merph518/Overmind/issues/612)) ([e94a6bb](https://github.com/merph518/Overmind/commit/e94a6bba23ce551007771532c245fc76934228c6))
+* **general:** add the wyatt-regression-issue skill ([#592](https://github.com/merph518/Overmind/issues/592)) ([#615](https://github.com/merph518/Overmind/issues/615)) ([366e71c](https://github.com/merph518/Overmind/commit/366e71cbe548e9d7181278f34d2075fcb6a53757))
+
+## [0.31.25](https://github.com/merph518/Overmind/compare/v0.31.24...v0.31.25) (2026-11-08)
+
+
+### Features
+
+* **general:** add the new-branch skill ([#591](https://github.com/merph518/Overmind/issues/591)) ([#610](https://github.com/merph518/Overmind/issues/610)) ([f89c484](https://github.com/merph518/Overmind/commit/f89c4842c8a992f6b725678c98543be4e570dcfa))
+* **general:** add the sql-lookup skill ([#584](https://github.com/merph518/Overmind/issues/584)) ([#608](https://github.com/merph518/Overmind/issues/608)) ([b3b0427](https://github.com/merph518/Overmind/commit/b3b0427743e9dc366ef1c6d44c85e22d697debe9))
+
+## [0.31.24](https://github.com/merph518/Overmind/compare/v0.31.23...v0.31.24) (2026-11-08)
+
+
+### Features
+
+* **general:** add the sweep-suite skill ([#583](https://github.com/merph518/Overmind/issues/583)) ([#606](https://github.com/merph518/Overmind/issues/606)) ([cd942eb](https://github.com/merph518/Overmind/commit/cd942eb99852de531a5a056cd0ac34b0e404a80e))
+
+## [0.31.23](https://github.com/merph518/Overmind/compare/v0.31.22...v0.31.23) (2026-11-08)
+
+
+### Bug Fixes
+
+* show needs you only for a question to the user, add waiting on a partner ([#601](https://github.com/merph518/Overmind/issues/601)) ([#604](https://github.com/merph518/Overmind/issues/604)) ([6381647](https://github.com/merph518/Overmind/commit/638164728612e74c38733868debfbdc57986aa08))
+
+## [0.31.22](https://github.com/merph518/Overmind/compare/v0.31.21...v0.31.22) (2026-11-08)
+
+
+### Features
+
+* **att-docs:** add the skip-ledger skill ([#600](https://github.com/merph518/Overmind/issues/600)) ([e9643b1](https://github.com/merph518/Overmind/commit/e9643b12d5d8416789ae2d8c943aeb8ec0c6a583))
+* **general:** add the manual-spec skill ([#581](https://github.com/merph518/Overmind/issues/581)) ([#599](https://github.com/merph518/Overmind/issues/599)) ([932eec4](https://github.com/merph518/Overmind/commit/932eec4526a9b5814dac3286ce88b212adcbdc17))
+
+## [0.31.21](https://github.com/merph518/Overmind/compare/v0.31.20...v0.31.21) (2026-11-08)
+
+
+### Features
+
+* **general:** add the debug-spec skill ([#580](https://github.com/merph518/Overmind/issues/580)) ([#597](https://github.com/merph518/Overmind/issues/597)) ([db02183](https://github.com/merph518/Overmind/commit/db021837d94bc98051c48c885c2953ff8dba28bd))
+
+## [0.31.20](https://github.com/merph518/Overmind/compare/v0.31.19...v0.31.20) (2026-11-08)
+
+
+### Features
+
+* **att-docs:** add the manual-validation-walkthrough skill ([#596](https://github.com/merph518/Overmind/issues/596)) ([f0c941e](https://github.com/merph518/Overmind/commit/f0c941eaf24f90be86f4e9705bfdb87268087ca9))
+
+
+### Bug Fixes
+
+* cut a long list of document numbers so a gate stop still writes its fail line ([#413](https://github.com/merph518/Overmind/issues/413)) ([#577](https://github.com/merph518/Overmind/issues/577)) ([77a8d79](https://github.com/merph518/Overmind/commit/77a8d795b2198c3abdbbd3421f3a8310eee84dce))
+* let the revalidation repair build the new cards a finding names ([#487](https://github.com/merph518/Overmind/issues/487)) ([#574](https://github.com/merph518/Overmind/issues/574)) ([3b09445](https://github.com/merph518/Overmind/commit/3b094450c4d158095f6a2db5bd00c7b0d2b36c92))
+
+## [0.31.19](https://github.com/merph518/Overmind/compare/v0.31.18...v0.31.19) (2026-11-06)
+
+
+### Features
+
+* **att-docs:** add the sir-housekeeping skill ([#569](https://github.com/merph518/Overmind/issues/569)) ([6775ead](https://github.com/merph518/Overmind/commit/6775ead1a0c8d3cd1a21f2914533fb9d09d7ad73))
+
 ## [0.31.18](https://github.com/merph518/Overmind/compare/v0.31.17...v0.31.18) (2026-11-05)
 
 

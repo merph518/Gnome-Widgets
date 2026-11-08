@@ -11,7 +11,8 @@ import { callRecorder } from './calls.mjs';
 import { stepKey } from './config.mjs';
 
 /** Field values a status line may carry: numbers, booleans, and short codes. A sandbox job's ID joins its source and label with `~`. */
-const SAFE = /^[A-Za-z0-9 _.:/=+~-]{0,80}$/;
+export const FIELD_MAX = 80;
+const SAFE = new RegExp(`^[A-Za-z0-9 _.:/=+~-]{0,${FIELD_MAX}}$`);
 
 /** The parsed lines of a status.log; a line cut off mid-write is skipped, and a missing log is empty. */
 export function readStatusLog(file) {
@@ -43,6 +44,26 @@ export function statusFields(fields) {
     }
   }
   return fields;
+}
+
+/**
+ * A stop's counts cut to fit a status line: a string count longer than a field
+ * allows keeps the first space-separated numbers that fit, each whole, and a
+ * string with no space to cut at becomes empty. The count beside it, such as
+ * `documents`, still holds the full total.
+ */
+export function fitCounts(counts) {
+  const limit = FIELD_MAX;
+  const fitted = {};
+  for (const [key, value] of Object.entries(counts)) {
+    if (typeof value !== 'string' || value.length <= limit) {
+      fitted[key] = value;
+      continue;
+    }
+    const cut = value.slice(0, limit + 1).lastIndexOf(' ');
+    fitted[key] = cut > 0 ? value.slice(0, cut) : '';
+  }
+  return fitted;
 }
 
 /**
