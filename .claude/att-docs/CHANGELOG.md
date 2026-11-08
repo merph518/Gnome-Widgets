@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.31.21](https://github.com/merph518/Overmind/compare/v0.31.20...v0.31.21) (2026-11-08)
+
+
+### Features
+
+* **general:** add the debug-spec skill ([#580](https://github.com/merph518/Overmind/issues/580)) ([#597](https://github.com/merph518/Overmind/issues/597)) ([db02183](https://github.com/merph518/Overmind/commit/db021837d94bc98051c48c885c2953ff8dba28bd))
+
+## [0.31.20](https://github.com/merph518/Overmind/compare/v0.31.19...v0.31.20) (2026-11-08)
+
+
+### Features
+
+* **att-docs:** add the manual-validation-walkthrough skill ([#596](https://github.com/merph518/Overmind/issues/596)) ([f0c941e](https://github.com/merph518/Overmind/commit/f0c941eaf24f90be86f4e9705bfdb87268087ca9))
+
+
+### Bug Fixes
+
+* cut a long list of document numbers so a gate stop still writes its fail line ([#413](https://github.com/merph518/Overmind/issues/413)) ([#577](https://github.com/merph518/Overmind/issues/577)) ([77a8d79](https://github.com/merph518/Overmind/commit/77a8d795b2198c3abdbbd3421f3a8310eee84dce))
+* let the revalidation repair build the new cards a finding names ([#487](https://github.com/merph518/Overmind/issues/487)) ([#574](https://github.com/merph518/Overmind/issues/574)) ([3b09445](https://github.com/merph518/Overmind/commit/3b094450c4d158095f6a2db5bd00c7b0d2b36c92))
+
+## [0.31.19](https://github.com/merph518/Overmind/compare/v0.31.18...v0.31.19) (2026-11-06)
+
+
+### Features
+
+* **att-docs:** add the sir-housekeeping skill ([#569](https://github.com/merph518/Overmind/issues/569)) ([6775ead](https://github.com/merph518/Overmind/commit/6775ead1a0c8d3cd1a21f2914533fb9d09d7ad73))
+
 ## [0.31.18](https://github.com/merph518/Overmind/compare/v0.31.17...v0.31.18) (2026-11-05)
 
 
