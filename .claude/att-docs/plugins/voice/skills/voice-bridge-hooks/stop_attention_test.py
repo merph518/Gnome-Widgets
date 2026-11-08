@@ -47,6 +47,20 @@ def wrap_up(**fields):
     return tool_use(sa.WRAP_UP, recap='done', **fields)
 
 
+class StatusCommands(unittest.TestCase):
+    def test_the_statuses_a_turn_set_come_back_in_order_without_a_failed_one(self):
+        rows = [
+            tool_use('Bash', 'a', command='python3 x/session_title.py status "needs you"'),
+            tool_use('Bash', 'b', command="cd y && python3 session_title.py status 'stuck' && ls"),
+            tool_result('b', error=True),
+            tool_use('Bash', 'c', command='python3 session_title.py status "waiting on Data"'),
+            tool_use('Bash', 'd', command='python3 session_title.py work "x"'),
+            tool_use('Read', 'e', command='session_title.py status "idle"'),
+        ]
+        self.assertEqual(sa.status_commands(rows), ['needs you', 'waiting on Data'])
+        self.assertEqual(sa.status_commands([]), [])
+
+
 class Announcement(unittest.TestCase):
     def check(self, rows, expected, reply='Done.'):
         payload = {'last_assistant_message': reply}

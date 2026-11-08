@@ -34,18 +34,32 @@ step 8 does not mark it ready: once its `code-review` pass ends, it goes through
 Section 7 self review loop, checks and the `Manual Review Needed` label, and Section 7
 marks it ready. Its body has one `Closes #<N>` line per issue it closes.
 
+## Harness substitutes
+
+This procedure names tools that belong to one harness. When the harness lacks one, use
+the substitute, and record each substitution in the pull request body under Judgment
+calls, naming the tool missing and the substitute used:
+
+| Tool named here | Substitute when it is absent |
+| --- | --- |
+| `EnterWorktree` | The Git fallback under Overrides, Section 3: a worktree at `.claude/worktrees/<name>` from `origin/main`. `.claude/worktrees/` is the one folder inside the main checkout that the main-checkout guard exempts |
+| `AskUserQuestion` | The harness's own ask tool, with the same rule: never ask only in reply text |
+| The Skill tool | Read the skill by its path under `.claude/skills/` or `plugins/*/skills/`, or by its `skill://<name>` URL, and follow it |
+| `session_title.py` | Skip the session title and status when the script is absent; the rename never gates the work |
+| `ListAgents` | Decide whether another session holds a unit or a pull request from the sources Section 3 lists: the issue's `In Progress` label, the open pull requests and their files, the oversee ledger and the file claims |
+
 ## Base
 
 Read [the general skill](../../../plugins/general/skills/implement/SKILL.md), which lives in this repository rather than in a vendored copy, first and follow it, except where this file overrides it.
 
 ## Paths
 
-**Every question to the user goes through the `AskUserQuestion` tool. Never ask only in
-reply text: the user does not see it there.**
+**Every question to the user goes through the `AskUserQuestion` tool, or its substitute under
+Harness substitutes. Never ask only in reply text: the user does not see it there.**
 
 | Placeholder | Value here |
 | --- | --- |
-| `<asking-note>` | Every question goes through the `AskUserQuestion` tool, never only in reply text, because the user will not see it there |
+| `<asking-note>` | Every question goes through the `AskUserQuestion` tool, never only in reply text, because the user will not see it there. Without that tool, the harness's own ask tool, under Harness substitutes |
 | `<in-progress-label>` | `In Progress` |
 | `<ready-label>` | `Manual Review Needed` |
 | `<preflight>` | In the main checkout: `node --version`, `python3 --version`, `gh --version` and `gh auth status` must succeed, and a change whose tests import `dotenv` also needs `node -e "require.resolve('dotenv')"` to succeed. On a failure, label the issue `Blocked` and comment with the failed command and its exact fix: `apt install nodejs` or `apt install python3` for a missing tool, GitHub's official apt repository with its signing key for a missing `gh`, `gh auth login` for authentication, `npm install` in the main checkout for `dotenv` |
@@ -57,8 +71,8 @@ reply text: the user does not see it there.**
 | `<ownership-rules>` | Under Overrides, Section 3 |
 | `<claim-script>` | `python3 plugins/general/skills/implement/claims.py`, under Overrides, Section 3 |
 | `<main-checkout>` | `~/Code/Overmind`, read-only |
-| `<worktree-script>` | `EnterWorktree` when available; otherwise the Git fallback under Overrides, Section 3 |
-| `<edit-guard>` | The harness worktree guard when available; isolation is required without it, under Overrides, Section 3 |
+| `<worktree-script>` | `EnterWorktree` when available; otherwise the Git fallback under Overrides, Section 3, which cuts the worktree at `.claude/worktrees/<name>` from `origin/main` (see Harness substitutes) |
+| `<edit-guard>` | The harness worktree guard when available; isolation is required without it, under Overrides, Section 3. The main-checkout guard exempts only `.claude/worktrees/`, so a fallback worktree goes there |
 | `<dependency-setup>` | `package.json` needs only `dotenv`. There is no lockfile, so run `npm install` in the worktree when a test imports it. `node_modules` is gitignored |
 | `<shell-text-note>` | Under Overrides, Section 3 |
 | `<branch-types>` | `feat`, `fix`, `chore`, `docs`, `ci` |
@@ -107,6 +121,14 @@ answers to its open questions in it, and passes it in full to every agent that b
 from it and to every review agent. Build from that plan and record in the pull request
 body, under Judgment calls, any place the code departed from it. A fix for a review
 finding is reviewed like any other change.
+
+### Models
+
+A step that asks for a model the harness will not let the session choose (a subagent
+call that rejects a per-call model, for example) still runs, on the best model the
+harness offers. Do not skip the step, and do not withhold the ready signal for this
+reason alone. Record each such step in the pull request body twice: under Judgment calls
+and under Self review, naming the step, the model wanted and the model used.
 
 ### Test seams
 
@@ -182,9 +204,11 @@ git fetch origin main
 git worktree add -b <type>/issue-<N>-<slug> ~/Code/Overmind/.claude/worktrees/<name> origin/main
 ```
 
-Run the second command only if the fetch succeeds. Use a new worktree name and branch;
-if creation fails, stop rather than reuse either. For a change without an issue, use
-`<type>/<slug>` as the branch name.
+Keep the path under `.claude/worktrees/`: the main-checkout guard exempts only that
+folder, so a worktree elsewhere inside the main checkout has its writes refused. Run the
+second command only if the fetch succeeds. Use a new worktree name and branch; if creation
+fails, stop rather than reuse either. For a change without an issue, use `<type>/<slug>` as
+the branch name.
 Run the base verification in the general skill's step 3, Cut the branch, before editing.
 All subsequent file operations and commands target that worktree; the main checkout's
 files and checked-out branch stay untouched.
@@ -246,6 +270,7 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   Verification (the static checks and each test file run with its result), Judgment
   calls, Pre-existing failures fixed, Overlap, Self review, Settled decisions, then the
   attribution lines the session gives.
+  Tool substitutions (see Harness substitutes) are recorded in one place, Judgment calls.
   The `pr` skill may be loaded when a body is written; this section's order wins. The
   `pr` skill's Summary section goes under What changes and its before/after Evidence
   under Verification; its Merge Danger section (Door and Blast Radius) goes under
@@ -265,6 +290,8 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   fixes get no fourth review. If that review finds another real bug, fix it, have a review
   agent review that fix, and say in the report that the loop ran past three passes. A
   fifth pass that still finds a real bug stops the work and asks through `AskUserQuestion`.
+  The body's Self review section names the model used for each pass, and for the
+  review of the last fix, with the fallback from Models where a model could not be chosen.
 - Ready signal: never leave the pull request in draft. When the loop ends, mark it ready
   with `gh pr ready <n>`. The label is added only when every check on the pull request has
   passed on the current head. A read right after a push or a merge of `origin/main` can

@@ -33,17 +33,21 @@ sets "working": the user has answered, so a status is over. `hook stop` (Stop) s
   after the stop;
 - "idle", otherwise.
 
-A "stuck", "stopped", "waiting on CI" or "needs you" already on the title is kept at a stop,
-since the prompt set "working" at the start of the turn and the session set it since. When
-the payload says another Stop hook blocked and the turn went on (stop_hook_active), no prompt
-came first, so a "needs you" may be this hook's own and is recomputed. A prompt the user types
-sets "working", and naming new work takes any status away, so either ends it. A prompt that is
-an automated event leaves a "stuck", "stopped" or "waiting on CI" and sets "working" over any
-other status. The hook does nothing for a subagent (a payload with an agent_id), for any event
-but the one the command names, for a session with no title, for a stop with no transcript,
-when another rename changed the title while it ran, or when the
-payload's session is not this one. The extension file's review label is read when --config
-names one that reads; without one the label check is skipped.
+A "stuck", "stopped" or "waiting on CI" already on the title is kept at a stop, since the
+prompt set "working" at the start of the turn and the session set it since. A "needs you" or
+a "waiting on <partner>" (the session waits on another session, such as "waiting on Data", and
+needs nothing from the user) is kept only when a `status` command in the turn that just ended
+set it last, so one left from an earlier turn does not stick when a relayed message started
+this turn with no prompt hook. While the title says it waits on a partner, a closing question
+and the review label are not for the user and change nothing; a question in the wrap-up box is,
+and sets "needs you". A prompt the user types sets "working", and naming new work takes any
+status away, so either ends it. A prompt that is an automated event leaves a "stuck",
+"stopped" or "waiting on CI" and sets "working" over any other status, a partner wait
+included, since the partner may have answered. The hook does nothing for a subagent (a
+payload with an agent_id), for any event but the one the command names, for a session with no
+title, for a stop with no transcript, when another rename changed the title while it ran, or
+when the payload's session is not this one. The extension file's review label is read when
+--config names one that reads; without one the label check is skipped.
 
 SESSION_TITLE_SESSIONS_DIR, SESSION_TITLE_PROC_DIR and SESSION_TITLE_PID point it at fixtures
 in tests. It prints what happened and exits 0, or prints why not to stderr and exits 1.
@@ -73,7 +77,22 @@ POLL_SECONDS = 0.25
 # A status with the number Claude Code may add after it to a title another session holds:
 # "Merge (idle) 2". Group 1 is the status and group 2 the number, with its space.
 NUMBERED_STATUS = re.compile(
-    r"\s+\((%s)\)(\s+\d+)?$" % "|".join(re.escape(s) for s in STATUSES))
+    r"\s+\((%s|waiting on [^()]+?)\)(\s+\d+)?$" % "|".join(re.escape(s) for s in STATUSES))
+# "waiting on <partner>": the session waits on another session, not on the user. The partner is
+# a short name; "you" and "CI" are statuses of their own.
+PARTNER_WAIT = re.compile(r"waiting on ([^()]+)")
+NOT_PARTNERS = ("you", "ci")
+MAX_PARTNER = 24
+
+
+def is_partner_wait(status):
+    """Whether status is "waiting on <partner>" with a name that fits a title."""
+    found = PARTNER_WAIT.fullmatch(status or "")
+    if not found:
+        return False
+    name = found.group(1)
+    return (name == " ".join(name.split()) and len(name) <= MAX_PARTNER
+            and name.lower() not in NOT_PARTNERS)
 
 
 def split_title(title):
@@ -126,8 +145,8 @@ def new_title(current, command, value):
     base, work, status = split_title(current)
     if command == "work":
         return compose(base, value, "")
-    if value and value not in STATUSES:
-        raise ValueError("status is one of: %s" % ", ".join(STATUSES))
+    if value and value not in STATUSES and not is_partner_wait(value):
+        raise ValueError("status is one of: %s, waiting on <partner>" % ", ".join(STATUSES))
     return compose(base, work, value)
 
 
@@ -197,11 +216,17 @@ HOOK_EVENTS = {"prompt": "UserPromptSubmit", "stop": "Stop"}
 # idle, so one of these on the title is the session's own, and the hook leaves it. A prompt
 # the user types sets working, which ends it; so does the session naming new work.
 KEPT_ACROSS_EVENTS = ("stuck", "stopped", "waiting on CI")
-# At a stop, "needs you" is also the session's: a prompt sets working at the start of the
-# turn, so one on the title at the stop was set during it. A prompt that is an automated event
-# does not end it as a user's prompt does, so the hook cannot tell its own "needs you" from
-# the session's there and replaces it with working.
-KEPT_STATUSES = KEPT_ACROSS_EVENTS + ("needs you",)
+# "needs you" and "waiting on <partner>" are the session's too, but the hook writes the first
+# itself and a relayed message starts a turn with no prompt hook to end either. At a stop they
+# are kept only when the session set them in the turn that just ended (set_this_turn).
+
+
+def set_this_turn(turn, status):
+    """Whether the latest status command of the turn set status."""
+    commands = stop_attention.status_commands(turn)
+    return bool(commands) and commands[-1] == status
+
+
 # How long the hook waits for its rename to show in the session's file, so a hook that runs
 # right after it reads the title it set. A short turn can end that fast.
 RENAME_WAIT_SECONDS = 1.0
@@ -284,18 +309,25 @@ def _hook(event, stdin, sessions_dir, proc_dir, start, config):
             return
         status = "working"
     else:
-        # A turn that goes on after another Stop hook blocked has no prompt hook ahead of it,
-        # so a "needs you" on the title may be this hook's own from the stop before.
-        kept = KEPT_ACROSS_EVENTS if payload.get("stop_hook_active") else KEPT_STATUSES
-        if split_title(current)[2] in kept:
+        shown = split_title(current)[2]
+        if shown in KEPT_ACROSS_EVENTS:
             return
         path = payload.get("transcript_path") or ""
         entries = read_transcript(path) if os.path.isfile(path) else []
         if not entries:
             # With no transcript to read, the turn's work is unknown, so the title stays.
             return
-        status = stop_status(payload, entries, int(entry["pid"]), proc_dir, stop_ms,
-                             _load_config(config))
+        turn = stop_attention.last_turn(entries)
+        held = (shown == "needs you" or is_partner_wait(shown)) and set_this_turn(turn, shown)
+        # A closing question or the review label is not for the user while the session waits
+        # on a partner. A question in the wrap-up box is, by construction.
+        if held and (shown == "needs you" or not stop_attention.asked(turn)):
+            return
+        if held:
+            status = "needs you"
+        else:
+            status = stop_status(payload, entries, int(entry["pid"]), proc_dir, stop_ms,
+                                 _load_config(config))
     name = new_title(current, "status", status)
     if name == current:
         return
