@@ -13,7 +13,7 @@ import { fill, globFiles, loadReference, MEMORY_STOP, rootRelative } from './con
 import { MemoryLow, readMeminfo, waitForMemory } from './meminfo.mjs';
 import { Cancelled, ModelError, modelClient } from './model.mjs';
 import { ReplayMiss } from './replay.mjs';
-import { jobLogs, readStatusLog } from './status.mjs';
+import { fitCounts, jobLogs, readStatusLog } from './status.mjs';
 import { postNotice, waitForAnswers } from './supervisor.mjs';
 import * as P from './phases.mjs';
 
@@ -311,7 +311,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     logs.detail('stopped', error.stack ?? String(error));
     const counts = error instanceof P.GateError || error instanceof MemoryLow ? error.counts : {};
     logs.status({ job: id, phase, event: 'fail', reason, ms: now() - started, calls: ctx.calls,
-      ...counts });
+      ...fitCounts(counts) });
     if (Object.keys(ctx.pack).length) {
       fs.writeFileSync(path.join(outDir, 'work', 'partial-pack.json'),
         `${JSON.stringify(ctx.pack, null, 1)}\n`);

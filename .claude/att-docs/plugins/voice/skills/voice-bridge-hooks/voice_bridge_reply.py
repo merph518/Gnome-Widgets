@@ -13,7 +13,7 @@ usage: voice_bridge_reply.py < <Stop hook payload>
 Each form takes `--config <extension.json>` ahead of its name, for the ready line and the
 review label it reads through ready_line.py, and a missing one exits 64.
 
-voice-bridge.mjs posts a spoken request into a session's inbox socket and leaves a marker named
+Baton posts a spoken request into a session's inbox socket and leaves a marker named
 for that socket in $XDG_RUNTIME_DIR/voice-bridge/pending. When this session stops and its own
 socket (CLAUDE_CODE_MESSAGING_SOCKET) has a marker, the turn's last_assistant_message is written
 to voice-bridge/replies/<socket name>.json for the bridge's read_reply tool. While the phone
@@ -43,8 +43,10 @@ The answer form is the only one that answers a prompt, and it answers only the o
 PermissionRequest it runs for, with what the user said in a voice chat. It writes the prompt
 to voice-bridge/prompts/<socket name>/<id>.json under an id made for that request, and waits
 up to ANSWER_WAIT_SECONDS for the bridge's answer_prompt tool to write
-voice-bridge/answers/<socket name>/<id>.json, which the bridge does only after reading the
-prompt back and hearing a yes. An answer under the request's id becomes the hook's decision:
+voice-bridge/answers/<socket name>/<id>.json, which the bridge does after reading the
+prompt back and hearing a yes. When the user's spoken command ended with "please and thank
+you", a deny, or a question's answers that name its options, are written at once. An allow on
+a permission prompt always waits for the yes. An answer under the request's id becomes the hook's decision:
 allow, deny, or for an AskUserQuestion call allow with the answers, and the hook leaves
 answers/<socket name>/<id>.took beside it before removing it, so the bridge knows the
 request was still waiting when the answer landed. It never
