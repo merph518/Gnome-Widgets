@@ -41,6 +41,27 @@ class Titles(unittest.TestCase):
         # Parentheses that are not one of the statuses stay part of the title.
         self.assertEqual(st.split_title("Overmind (draft)"), ("Overmind (draft)", "", ""))
 
+    def test_a_partner_wait_splits_and_round_trips(self):
+        self.assertEqual(st.split_title("Navi 2 - work (waiting on Data)"),
+                         ("Navi 2", "work", "waiting on Data"))
+        self.assertEqual(st.split_title("Navi (waiting on Data) 2"),
+                         ("Navi 2", "", "waiting on Data"))
+        self.assertEqual(st.split_title("Navi 2 (waiting on CI)"), ("Navi 2", "", "waiting on CI"))
+        title = st.new_title("Navi 2 - work", "status", "waiting on Data")
+        self.assertEqual(title, "Navi 2 - work (waiting on Data)")
+        self.assertEqual(st.new_title(title, "status", ""), "Navi 2 - work")
+
+    def test_a_partner_wait_needs_a_short_name_that_is_not_you_or_ci(self):
+        for good in ("waiting on Data", "waiting on Data-2", "waiting on Ünï"):
+            self.assertTrue(st.is_partner_wait(good), good)
+        for bad in ("waiting on", "waiting on ", "waiting on (x)", "waiting on you",
+                    "waiting on CI", "waiting on ci", "waiting on You", "waiting on  Data",
+                    "waiting on " + "x" * 25, "idle", ""):
+            self.assertFalse(st.is_partner_wait(bad), bad)
+            if bad and bad not in st.STATUSES:
+                with self.assertRaises(ValueError):
+                    st.new_title("Navi 2", "status", bad)
+
     def test_work_replaces_the_work_name_and_takes_the_status_away(self):
         title = st.new_title("Overmind 2 - old work (stuck)", "work", "read   window")
         self.assertEqual(title, "Overmind 2 - read window")
@@ -457,25 +478,93 @@ class Hook(Fixture):
         self.write_session("Overmind 2 - read window")
         self.expect("working", "prompt", {"prompt": notice})
 
-    def test_a_needs_you_is_recomputed_when_a_stop_hook_blocked_the_turn_before(self):
-        self.write_session("Overmind 2 - read window (needs you)")
-        rows = [human(), reply("All done.")]
-        self.expect("idle", "stop", {"stop_hook_active": True}, rows)
-        # The statuses only the session can know stay either way.
-        for word in st.KEPT_ACROSS_EVENTS:
-            self.write_session("Overmind 2 - read window (%s)" % word)
-            self.expect(None, "stop", {"stop_hook_active": True}, rows)
+    def title(self, status):
+        self.write_session("Overmind 2 - read window (%s)" % status)
 
-    def test_a_needs_you_the_session_set_survives_a_stop_with_no_question(self):
-        self.write_session("Overmind 2 - read window (needs you)")
-        self.expect(None, "stop", rows=[human(), reply("Please review the pull request.")])
+    def sets(self, status, ident="t1"):
+        return [bash('python3 x/session_title.py status "%s"' % status, ident),
+                output(ident, "Overmind 2 - read window (%s)\n" % status)]
+
+    def test_a_needs_you_set_this_turn_is_kept_at_a_stop(self):
+        self.title("needs you")
+        rows = [human()] + self.sets("needs you") + [reply("Please review the pull request.")]
+        self.expect(None, "stop", rows=rows)
+        # Also when another Stop hook blocked and the turn went on.
+        self.expect(None, "stop", {"stop_hook_active": True}, rows)
+
+    def test_a_needs_you_left_from_an_earlier_turn_is_recomputed(self):
+        # A relayed message starts a turn with no prompt hook, so nothing ended the old one.
+        self.title("needs you")
+        rows = self.sets("needs you") + [human("Voice request: x"), reply("All done.")]
+        self.expect("idle", "stop", rows=rows)
+        self.received.clear()
+        self.title("needs you")
+        self.expect("idle", "stop", {"stop_hook_active": True}, [human(), reply("All done.")])
+
+    def test_a_needs_you_is_recomputed_to_a_real_question(self):
+        self.write_session("Overmind 2 - read window")
+        self.expect("needs you", "stop", {"last_assistant_message": "Which one?"},
+                    [human(), reply("Which one?")])
+
+    def test_the_latest_status_command_of_the_turn_decides(self):
+        self.title("needs you")
+        rows = [human()] + self.sets("needs you") + self.sets("stuck", "t2") + [reply()]
+        self.expect("idle", "stop", rows=rows)
+
+    def test_a_status_command_that_failed_or_is_written_another_way_is_read(self):
+        failed = [bash('python3 session_title.py status "needs you"'),
+                  {"type": "user", "message": {"role": "user", "content": [
+                      {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                       "content": "no session"}]}}]
+        self.title("needs you")
+        self.expect("idle", "stop", rows=[human()] + failed + [reply()])
+        for command in ("cd x && python3 /a/b/session_title.py status 'needs you' && ls",
+                        'python3 session_title.py status -- "needs you"'):
+            self.assertEqual(st.stop_attention.status_commands([bash(command)]), ["needs you"])
+
+    def test_a_partner_wait_ignores_a_closing_question_and_the_review_label(self):
+        self.title("waiting on Data")
+        rows = [human()] + self.sets("waiting on Data")
+        self.expect(None, "stop", {"last_assistant_message": "Anything else?"},
+                    rows + [reply("Anything else?")])
+        label = [bash('gh pr edit 5 --add-label "Ready for Review"', "t9"),
+                 output("t9", "https://github.com/o/r/pull/5\n")]
+        self.expect(None, "stop", rows=rows + label + [reply()])
+        self.expect(None, "stop", {"stop_hook_active": True}, rows + [reply()])
+
+    def test_a_partner_wait_keeps_over_background_work(self):
+        self.title("waiting on Data")
+        rows = [human()] + self.sets("waiting on Data") + [background(), reply()]
+        self.expect(None, "stop", rows=rows)
+
+    def test_a_wrap_up_question_beats_a_partner_wait(self):
+        self.title("waiting on Data")
+        rows = [human()] + self.sets("waiting on Data") + [
+            tool("mcp__ccd_turn__wrap_up", {"ask": "Merge it?"}, "t7")]
+        self.expect("needs you", "stop", rows=rows)
+
+    def test_a_partner_wait_not_set_this_turn_is_recomputed(self):
+        self.title("waiting on Data")
+        self.expect("idle", "stop", rows=[human(), reply()])
+        self.received.clear()
+        self.title("waiting on Data")
+        self.expect("needs you", "stop", {"last_assistant_message": "Which one?"},
+                    [human(), reply("Which one?")])
+
+    def test_a_prompt_ends_a_partner_wait(self):
+        notice = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+        for prompt in ("carry on", notice):
+            self.received.clear()
+            self.title("waiting on Data")
+            self.expect("working", "prompt", {"prompt": prompt})
 
     def test_a_status_only_the_session_can_know_is_kept_at_a_stop(self):
-        for word in st.KEPT_STATUSES:
+        for word in st.KEPT_ACROSS_EVENTS:
             for title in ("Overmind 2 - read window (%s)", "Overmind 2 (%s)",
                           "Overmind 2 - read window (%s) 2"):
                 self.write_session(title % word)
                 self.expect(None, "stop", rows=[human(), reply()])
+                self.expect(None, "stop", {"stop_hook_active": True}, [human(), reply()])
 
     def test_a_status_the_hook_writes_is_replaced_at_a_stop(self):
         for word in ("working", "idle", "waiting on you"):
@@ -487,7 +576,7 @@ class Hook(Fixture):
                 self.expect("idle", "stop", rows=[human(), reply()])
 
     def test_a_prompt_ends_a_kept_status(self):
-        for word in st.KEPT_STATUSES:
+        for word in st.KEPT_ACROSS_EVENTS + ("needs you",):
             self.received.clear()
             self.write_session("Overmind 2 - read window (%s)" % word)
             self.expect("working", "prompt", {"prompt": "carry on"})

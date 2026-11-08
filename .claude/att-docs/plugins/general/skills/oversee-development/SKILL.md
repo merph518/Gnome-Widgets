@@ -67,7 +67,7 @@ issue as an orphan. A missing process ID cannot establish that the owner exited.
 
 `oversee.sh` needs gh 2.94 or newer, because the queue reads each issue's blockers with
 `gh issue list --json blockedBy`. `init`, `refresh`, `next`, `blocked`, and `start` stop with the install
-fix when gh is older. `finish`, `swap`, `status`, `adopt`, and `withdraw` do not read
+fix when gh is older. `finish`, `swap`, `status`, `adopt`, `withdraw`, `runs`, and `resume` do not read
 blockers and run on any gh, so finished work is still recorded.
 
 ## What this never does
@@ -93,6 +93,8 @@ oversee.sh blocked                 # list blocked issues and their reasons
 oversee.sh start <issue> <branch>
 oversee.sh adopt <issue>           # claim an orphaned in-flight issue
 oversee.sh withdraw <issue>        # take back this session's own start
+oversee.sh runs <issue>            # park this session's issue while its runs go
+oversee.sh resume <issue>          # take a parked issue back
 oversee.sh finish <issue> <done|stalled|skipped> <pr|-> <note>
 oversee.sh swap <issue> <from> <to>  # move a label, read back
 oversee.sh status                  # counts and the tail of the ledger
@@ -139,6 +141,13 @@ A title with no such prefix has no area and is never deferred.
 - `INFLIGHT <issue> ... branch <name> orphan` an unfinished issue whose session has exited,
   adopt and resume it; a scoped run adopts an orphan only while the run would serve it,
   and a session still resumes its own `mine` issue wherever it sits
+- `RUNS <issue> ... branch <name>` this session's issue parked on its runs with
+  `oversee.sh runs <issue>`; its area stays held (`issue <n> waiting on its runs`), and
+  `next` serves a different issue. Take it back with `oversee.sh resume <issue>`, which
+  refuses while another issue of this session is in flight; `start` refuses a parked issue
+  and points at `resume`. While an issue is parked and nothing else is workable, `next`
+  prints `BLOCKED`, not `EMPTY`, and `blocked` lists the `RUNS` line. A `runs` row whose session has
+  exited is served as an `INFLIGHT ... orphan`, and `adopt` claims it
 - `ELSEWHERE <issue> ... branch <name>` held by another session or its active or paused
   loop marker; its area stays held. A scoped run prints an orphan it does not adopt the
   same way, and its area stays held while the branch is open

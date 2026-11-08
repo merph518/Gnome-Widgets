@@ -253,14 +253,20 @@ export const revalidationSchema = ({ verdicts = ['pass', 'fail'], checks = REVAL
   checks: keyed('check', checks, { why: str, verdict: oneOf(verdicts), fix: str }),
 });
 
+/** The most new cards one repair call may return. */
+export const NEW_CARDS_MAX = 3;
+
+// `newIds` are the rules a new card may cover: those the findings name, none in a suite pack.
 export const repairSchema = ({ cardIds, ids, objectives, derivations, statuses, sheets,
-  assumptions }) => obj({
+  assumptions, newIds = [] }) => obj({
   cards: listOf({
     ...cardSchema({ ids, objectives, derivations }),
     properties: { id: oneOf(cardIds.length ? cardIds : ['none']),
       ...cardSchema({ ids, objectives, derivations }).properties },
     required: ['id', ...cardSchema({ ids, objectives, derivations }).required],
   }, { minItems: cardIds.length, maxItems: cardIds.length }),
+  newCards: listOf(cardSchema({ ids: newIds.length ? newIds : ['none'], objectives, derivations }),
+    { maxItems: newIds.length ? NEW_CARDS_MAX : 0 }),
   coverage: listOf(obj({
     ruleId: oneOf(ids), status: oneOf(statuses), strength: str, gap: str, recommendation: str,
   })),
