@@ -79,6 +79,27 @@ def asked(rows):
                for entry in rows for use in tool_uses(entry))
 
 
+# `session_title.py status "<status>"` in a Bash command, however the script is reached.
+STATUS_COMMAND = re.compile(r"""session_title\.py\s+status\s+(?:--\s+)?(["'])(.*?)\1""")
+
+
+def status_commands(rows):
+    """The statuses the rows' Bash commands set with session_title.py, in order, leaving out
+    a command that failed."""
+    sets = [(use.get('id'), found.group(2).strip())
+            for entry in rows for use in tool_uses(entry) if use.get('name') == 'Bash'
+            for found in STATUS_COMMAND.finditer(
+                str((use.get('input') or {}).get('command') or ''))]
+    failed = set()
+    for entry in rows:
+        content = message_content(entry) if entry.get('type') == 'user' else None
+        for block in content if isinstance(content, list) else []:
+            if (isinstance(block, dict) and block.get('type') == 'tool_result'
+                    and block.get('is_error')):
+                failed.add(block.get('tool_use_id'))
+    return [status for ident, status in sets if ident not in failed]
+
+
 def ends_in_question(reply):
     lines = [line for line in (reply or '').splitlines() if line.strip()]
     return bool(lines) and TRAILING.sub('', lines[-1]).endswith('?')

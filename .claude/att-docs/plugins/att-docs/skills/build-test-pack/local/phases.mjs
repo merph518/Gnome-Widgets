@@ -2964,8 +2964,51 @@ function statedReasons(pack, failed) {
   return left.map(([sheet, notes]) => `${sheet}:\n${notes}`).join('\n\n');
 }
 
-/** One repair call: the builder's FAIL text, the cards and rules it names, and their fixes. */
-async function repair(ctx, pack, built, step, { assumptions = false } = {}) {
+// A problem that asks for a card the pack does not have yet.
+const ASKS_NEW_CARD = /\b(add|create|build|write|new)\b[^\n]{0,60}\bcards?\b/i;
+
+/**
+ * A new card from a repair, numbered after the module's last card and put in the sets its
+ * objectives name. It covers only rules the findings named. Returns the card, or null when it
+ * names none of them or no included document holds their module.
+ */
+function addRepairCard(ctx, pack, fresh, named) {
+  const rules = list(pack.rules).filter((rule) => named.has(rule.id) && fresh.rules.includes(rule.id));
+  const doc = ctx.documents.find((d) => d.inclusion === 'Included' && d.module === rules[0]?.module);
+  if (!doc) return null;
+  const same = new Set(rules.filter((rule) => rule.module === doc.module).map((rule) => rule.id));
+  const tidy = tidyCard(fresh, same);
+  if (!tidy.rules.length) return null;
+  const prefix = `TC-${doc.abbreviation}-${ctx.job.issue}-`;
+  const last = Math.max(0, ...list(pack.testCards).filter((card) => card.id.startsWith(prefix))
+    .map((card) => Number(card.id.slice(prefix.length)) || 0));
+  const card = { id: `${prefix}${String(last + 1).padStart(3, '0')}`, title: tidy.title,
+    module: doc.module, sourceDocument: doc.name, mission: tidy.mission, focus: tidy.focus,
+    expected: tidy.expected, rules: tidy.rules, objectives: tidy.objectives,
+    derivation: tidy.derivation, steps: tidy.steps };
+  card.objectives = setsOf(ctx, card);
+  pack.testCards.push(card);
+  for (const set of list(pack.testSets)) {
+    if (!card.objectives.includes(set.objective)) continue;
+    set.cards = [...list(set.cards), card.id];
+    set.ruleSummary = setSummary(pack.testCards.filter((c) => set.cards.includes(c.id)));
+  }
+  return card;
+}
+
+/** Takes a repair's new card back out of the pack and its sets. */
+function dropRepairCard(pack, card) {
+  pack.testCards = pack.testCards.filter((c) => c.id !== card.id);
+  for (const set of list(pack.testSets)) {
+    set.cards = list(set.cards).filter((id) => id !== card.id);
+    set.ruleSummary = setSummary(pack.testCards.filter((c) => set.cards.includes(c.id)));
+  }
+}
+
+/**
+ * One repair call: the builder's FAIL text, the cards and rules it names, and their fixes.
+ */
+async function repair(ctx, pack, built, step, { assumptions = false, newCards = false } = {}) {
   const text = statedReasons(pack, built.failed);
   if (!text) return;
   const cards = list(pack.testCards).filter((card) => text.includes(card.id));
@@ -2976,11 +3019,18 @@ async function repair(ctx, pack, built, step, { assumptions = false } = {}) {
     .filter((sheet) => sheet !== 'Workbook Validation');
   const objectives = ctx.job.suite ? ctx.builder.OBJECTIVES
     : pack.objectives.filter((row) => row.applicable).map((row) => row.objective);
+  // Only a fix round takes new cards. A new card covers a rule a problem names, never one that
+  // only a named card cites. A suite pack takes no new card: its cards come from the suite files.
+  const newIds = !newCards || ctx.job.suite ? []
+    : named.filter((rule) => citesId(text, rule.id)).map((rule) => rule.id);
   const answer = await ask(ctx, {
     phase: 'phase8', step: `repair-${step}`, reasoning: false, refs: [ctx.ref.docs.workbookStandard],
     task: 'The workbook builder failed these sheets. Fix each problem: return every named card'
       + ' corrected in full, a coverage row for each rule whose coverage is wrong, and a'
-      + ' limitation for a sheet that cannot be completed, saying why. A reason comes from the'
+      + ' limitation for a sheet that cannot be completed, saying why.'
+      + (newIds.length ? ' When a problem asks for a card that does not exist, return it under'
+        + ' newCards, covering only a rule the problem names; the card is numbered for you.' : '')
+      + ' A reason comes from the'
       + ' change description, the existing and new behavior, or the rules. Do not call a feature'
       + ' or window new unless the new behavior says so; behavior that exists already is what'
       + ' regression protects.',
@@ -2991,8 +3041,18 @@ async function repair(ctx, pack, built, step, { assumptions = false } = {}) {
       ['Rules named', asLines(named.map(ruleLine))]],
     schema: S.repairSchema({ cardIds: cards.map((card) => card.id), ids: ruleIds, objectives,
       derivations: ctx.builder.DERIVATIONS, statuses: ctx.builder.COVERAGE_STATUSES, sheets,
-      assumptions }),
+      assumptions, newIds }),
   });
+  const fresh = new Set(newIds);
+  const added = [];
+  for (const card of list(answer.newCards).slice(0, S.NEW_CARDS_MAX)) {
+    const made = addRepairCard(ctx, pack, card, fresh);
+    if (made) added.push(made);
+  }
+  // A new card's Expected Result follows from its rules, as a repaired card's does; one that
+  // does not is left out.
+  const { failed: unsound } = await verifyCards(ctx, added, `recheck-new-${step}`);
+  for (const card of unsound.keys()) dropRepairCard(pack, card);
   const before = new Map(cards.map((card) => [card.id, card.expected]));
   for (const fixed of answer.cards) {
     const card = pack.testCards.find((c) => c.id === fixed.id);
@@ -3019,7 +3079,11 @@ async function repair(ctx, pack, built, step, { assumptions = false } = {}) {
   }
   const rows = new Map(list(pack.coverage).map((row) => [row.ruleId, row]));
   for (const row of answer.coverage) rows.set(row.ruleId, row);
-  pack.coverage = [...rows.values()];
+  // A rule a kept new card covers is no longer Missing or Not Applicable, whatever the reply
+  // says about it; a card dropped as unsound clears nothing.
+  const covers = new Set(added.filter((card) => !unsound.has(card)).flatMap((card) => card.rules));
+  pack.coverage = [...rows.values()].filter((row) => !(covers.has(row.ruleId)
+    && DENIES_COVERAGE.includes(row.status)));
   for (const { sheet, text: why } of answer.limitations) {
     if (!blank(why)) pack.limitations[sheet] = why;
   }
@@ -3321,7 +3385,7 @@ export async function checklistRounds(ctx, pack) {
 const PLACEHOLDER_FIX = /^\W*(n\/?a|none|nothing|no change|not applicable|no fix)\b/i;
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** True when `text` names `id` whole, so BR-1 is not found inside BR-10. */
-const citesId = (text, id) => new RegExp(`(?<![A-Za-z0-9.-])${escapeRe(id)}(?![A-Za-z0-9]|[.-][A-Za-z0-9])`).test(text);
+export const citesId = (text, id) => new RegExp(`(?<![A-Za-z0-9.-])${escapeRe(id)}(?![A-Za-z0-9]|[.-][A-Za-z0-9])`).test(text);
 
 /**
  * True when `text` names the sheet: a name of several words as a phrase in any case, a
@@ -3371,6 +3435,25 @@ function fixableFindings(ctx, pack, rows) {
 }
 
 /**
+ * Records, for each finding that asks for a new card, whether a rule it names is still
+ * without one. The status log says so, and the finding stays open with the reason.
+ */
+function noteUnapplied(ctx, pack, group, step) {
+  ctx.unapplied ??= {};
+  for (const { row, to, text } of group) {
+    const asks = to.rules.length && !to.cards.length && ASKS_NEW_CARD.test(text);
+    const bare = to.rules.some((id) => !list(pack.testCards).some((card) => list(card.rules).includes(id)));
+    if (!asks || !bare) {
+      delete ctx.unapplied[row.section];
+      continue;
+    }
+    ctx.unapplied[row.section] = ctx.job.suite ? 'a suite pack takes no new card' : 'repair produced no card';
+    ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: `repair-${step}`, event: 'repair-not-applied',
+      reason: ctx.job.suite ? 'new-card-refused-suite' : 'no-card' });
+  }
+}
+
+/**
  * One repair of findings: the repair call, the pack's edits that came from the
  * review kept, the rebuild, and the findings noted as attempted. A coverage row
  * or limitation changes only for a rule or sheet a finding names; every other
@@ -3386,9 +3469,10 @@ async function fixRound(ctx, pack, findings, label, deferred) {
     if (to.sheets.includes('Coverage Matrix')) list(pack.rules).forEach((rule) => allow.rules.add(rule.id));
   }
   for (const [n, group] of fixGroups(ctx, pack, findings).entries()) {
-    await repair(ctx, pack, { failed: [failedSheet(REVIEW_SHEET, group.map((item) => item.text).join('\n'))],
-      validation: [] }, `${label}-g${n + 1}`,
-    { assumptions: group.some((item) => item.to.assumptions) });
+    await repair(ctx, pack, { failed: [failedSheet(REVIEW_SHEET,
+      group.map((item) => item.text).join('\n'))], validation: [] }, `${label}-g${n + 1}`,
+    { assumptions: group.some((item) => item.to.assumptions), newCards: true });
+    noteUnapplied(ctx, pack, group, `${label}-g${n + 1}`);
   }
   keepReviewEdits(pack, kept, allow);
   await phase8(ctx, pack, label, deferred);
@@ -3411,12 +3495,14 @@ function keepReviewEdits(pack, kept, allow) {
   const impacted = new Set(list(pack.rules).filter((rule) => rule.impact !== 'Not Impacted')
     .map((rule) => rule.id));
   const before = new Map(list(kept.coverage).map((row) => [row.ruleId, row]));
+  const contradicting = (row) => impacted.has(row.ruleId)
+    && DENIES_COVERAGE.includes(row.status) === cited.has(row.ruleId);
   pack.coverage = list(pack.coverage).map((row) => {
     const old = before.get(row.ruleId);
-    const contradicts = impacted.has(row.ruleId)
-      && DENIES_COVERAGE.includes(row.status) === cited.has(row.ruleId);
-    return allow.rules.has(row.ruleId) && !contradicts ? row : (old ?? row);
-  });
+    if (allow.rules.has(row.ruleId) && !contradicting(row)) return row;
+    // An old row that contradicts the cards now is dropped, so the build writes the true one.
+    return old && contradicting(old) ? null : (old ?? row);
+  }).filter(Boolean);
   const limitations = { ...kept.limitations };
   for (const sheet of allow.sheets) {
     if (!blank(pack.limitations?.[sheet])) limitations[sheet] = pack.limitations[sheet];
@@ -3803,6 +3889,11 @@ export async function revalidate(ctx, pack) {
         repaired = true;
         result = await walkChecks(ctx, pack, 'revalidation-again');
         ctx.revalidationChecks = result.checks;
+        // A check whose repair built no card carries that reason after its finding.
+        result.remaining = result.remaining.map((line) => {
+          const check = Object.keys(ctx.unapplied ?? {}).find((name) => line.startsWith(`${name}: `));
+          return check ? `${line} (${ctx.unapplied[check]})` : line;
+        });
       } catch (error) {
         if (!(error instanceof GateError)) throw error;
         ctx.appliedFixes = appliedFixes;

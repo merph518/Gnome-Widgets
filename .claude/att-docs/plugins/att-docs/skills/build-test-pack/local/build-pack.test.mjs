@@ -26,7 +26,7 @@ import { Cancelled, DEFAULT_SEED, ModelError, localEndpoint, modelClient } from 
 import * as S from './schemas.mjs';
 import { estimateTokens } from './model.mjs';
 import { almDescriptions, batches, candidateLine, documentInputs, documentRules, dropUnfoundedAssumptions, expectedProblems, impactsText, phase5,
-  resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
+  citesId, resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
 import { compareSnapshots, readStep } from './rerun.mjs';
 import { checkStep, runStep } from './step-job.mjs';
@@ -35,7 +35,7 @@ import { renderReport, reportData, seededRandom, spotChecks, writeReports } from
 import { createReleaser } from './release.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
 import { callFileName, promptHash, schemaHash } from './calls.mjs';
-import { jobLogs, readStatusLog, repeatedCuts, runCuts, statusFields } from './status.mjs';
+import { FIELD_MAX, fitCounts, jobLogs, readStatusLog, repeatedCuts, runCuts, statusFields } from './status.mjs';
 import { replayModel, replaySource } from './replay.mjs';
 import { readPack } from './pack.mjs';
 import { answersPath, heartbeatPath, touchHeartbeat } from './supervisor.mjs';
@@ -108,6 +108,8 @@ function fakeModel(answers = {}) {
       if ('assumptionsToProceed' in value) value.assumptionsToProceed = [];
       if (Array.isArray(value.uncovered)) value.uncovered = [];
       if (Array.isArray(value.skipped)) value.skipped = [];
+      // A repair builds no new card unless a test returns one.
+      if (Array.isArray(value.newCards)) value.newCards = [];
       // The checklist finds nothing unless a test plants a finding, so no fix round runs.
       if (request.schemaName.startsWith('phase9_checklist')) value.issues = [];
       // A confidence field is a sentence that names a rule or card, as the call requires.
@@ -1922,6 +1924,36 @@ test('every Included document without rules is reported in one stop', async () =
   assert.equal(result.reason, 'gate:rules-not-extracted');
   const last = statusLines(result.outDir).at(-1);
   assert.deepEqual([last.documents, last.numbers], [2, '1 3']);
+});
+
+test('a Phase 2 stop that names 40 documents still writes its fail line and returns a failed result', async () => {
+  const root = scratch('many-docs-');
+  fs.cpSync(FIXTURES, root, { recursive: true });
+  const docs = Array.from({ length: 40 }, (_, i) => `docs/OTHER/UC${i + 10}-Unmapped.md`);
+  for (const doc of docs) {
+    fs.copyFileSync(path.join(root, 'docs/OTHER/UC09-Unmapped.md'), path.join(root, doc));
+  }
+  const result = await runJob(fixtureConfig({ repoRoot: root }), issueJob(docs),
+    { model: fakeModel(), echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:rules-not-extracted');
+  assert.equal(result.counts.documents, 40);
+  const last = statusLines(result.outDir).at(-1);
+  assert.equal(last.event, 'fail');
+  assert.equal(last.documents, 40);
+  assert.ok(last.numbers.length <= FIELD_MAX, last.numbers);
+  assert.match(last.numbers, /^1 2 3 /);
+  assert.ok(result.counts.numbers.startsWith(last.numbers), 'the cut keeps whole leading numbers');
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('fitCounts keeps a short list whole and cuts a long one at a whole number', () => {
+  assert.deepEqual(fitCounts({ documents: 2, numbers: '1 3' }), { documents: 2, numbers: '1 3' });
+  const long = Array.from({ length: 40 }, (_, i) => i + 1).join(' ');
+  const fitted = fitCounts({ documents: 40, numbers: long });
+  assert.equal(fitted.documents, 40);
+  assert.ok(fitted.numbers.length <= FIELD_MAX && long.startsWith(`${fitted.numbers} `));
+  assert.deepEqual(fitCounts({ numbers: 'x'.repeat(FIELD_MAX + 10) }), { numbers: '' });
 });
 
 test('a job resumed after the rules are extracted reads the new export', async () => {
@@ -6298,6 +6330,25 @@ test('queue status shows the count and numbers of a Phase 2 stop', async () => {
   assertContentFree(lines.join('\n'));
 });
 
+test('queue status and the summary show a Phase 2 stop that names 40 documents', async () => {
+  const config = fixtureConfig();
+  addJob(config, issueJob(['docs/OTHER/UC09-Unmapped.md']));
+  const numbers = Array.from({ length: 40 }, (_, i) => i + 1).join(' ');
+  const run = gateStop('gate:rules-not-extracted', { documents: 40, numbers });
+  await drainQueue(config, { cutoff: '07:00', run, clock: () => new Date('2026-11-01T08:00:00') });
+  const lines = jobStatus(config, 'issue-501-change-7001');
+  const stopped = lines.find((line) => line.startsWith('stopped phase=phase2'));
+  assert.ok(stopped?.includes('documents=40 numbers=1 2 3 '), lines.join('\n'));
+  assert.ok(numbers.startsWith(stopped.split('numbers=')[1]), 'a whole leading run of the numbers');
+  assert.match(summaryLines(readQueue(config))[0], /documents 40 \(1 2 3 /);
+  // A row that holds the full list still prints, cut.
+  const rows = readQueue(config);
+  rows.jobs[0].numbers = numbers;
+  fs.writeFileSync(config.at(config.queue.file), JSON.stringify(rows));
+  const again = jobStatus(config, 'issue-501-change-7001').find((line) => line.startsWith('stopped phase=phase2'));
+  assert.equal(again, stopped);
+});
+
 test('a row with no stored stop fields shows them from its last fail line', () => {
   const config = fixtureConfig();
   seedJob(config, { status: 'stopped', resume: true, phase: 'phase2', reason: 'gate:rules-not-extracted',
@@ -7553,6 +7604,232 @@ test('a repair step repairs one finding of the snapshot\'s revalidation in the s
     .state.pack.testCards.some((card) => card.steps[0].description === 'Repaired by the step'));
   assert.deepEqual(digest(failed.outDir), before);
   assertContentFree(done.result.lines.join('\n'));
+});
+
+// A revalidation finding that asks for a new card for a rule no card covers.
+const asksNewCard = { phase9_revalidation: (value) => failCheck(value, 'Traceability complete',
+  'BR-LIB.UC01-001 has no card', 'Create a new test card for BR-LIB.UC01-001') };
+const newCardFor = (value, calls) => {
+  const item = calls.at(-1).schema.properties.newCards.items.properties;
+  return { ...value, coverage: [], limitations: [], cards: [],
+    newCards: [{ title: 'New card', mission: 'Cover the rule', focus: ['focus'], expected: 'expected value',
+      rules: ['BR-LIB.UC01-001'], objectives: [item.objectives.items.enum[0]], derivation: item.derivation.enum[0],
+      steps: [{ description: 'Do it', expected: 'expected value', rules: ['BR-LIB.UC01-001'] }] }] };
+};
+
+/** Leaves the rule no card, with the Missing row Phase 7 writes for it, in the snapshot. */
+const uncover = (outDir, rule, phase = 'phase9-revalidate') => editSnapshot(outDir, phase, (saved) => {
+  const pack = savedPack(saved);
+  pack.testCards = pack.testCards.filter((card) => card.rules.some((id) => id !== rule));
+  for (const card of pack.testCards) {
+    card.rules = card.rules.filter((id) => id !== rule);
+    for (const one of card.steps) one.rules = one.rules.filter((id) => id !== rule);
+  }
+  for (const set of pack.testSets) set.cards = set.cards.filter((id) => pack.testCards.some((c) => c.id === id));
+  pack.coverage = [...pack.coverage.filter((row) => row.ruleId !== rule),
+    { ruleId: rule, status: 'Missing', strength: 'None', gap: 'No card covers this rule.', recommendation: 'Add a card.' }];
+});
+
+test('a repair builds the new card a revalidation finding asks for, so the rule is covered', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  const { config } = setup;
+  uncover(failed.outDir, 'BR-LIB.UC01-001');
+  const before = savedPack(JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json'))));
+  const done = await step(config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'new' },
+    { model: fakeModel({ phase8_repair: newCardFor }) });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  const pack = savedPack(readStep(path.join(config.output, done.id)));
+  const added = pack.testCards.filter((card) => !before.testCards.some((old) => old.id === card.id));
+  assert.equal(added.length, 1);
+  assert.match(added[0].id, /^TC-MOD-501-\d{3}$/);
+  assert.deepEqual(added[0].rules, ['BR-LIB.UC01-001']);
+  assert.ok(pack.testSets.some((set) => set.cards.includes(added[0].id)));
+  assert.ok(!pack.coverage.some((row) => row.ruleId === 'BR-LIB.UC01-001' && row.status === 'Missing'));
+});
+
+const missingRow = (ruleId) => ({ ruleId, status: 'Missing', strength: 'None', gap: 'No card covers this rule.',
+  recommendation: 'Add a card.' });
+const rejectsAll = (value) => ({ ...value, cards: Object.fromEntries(Object.keys(value.cards).map((label) => [label,
+  { why: 'The Expected Result contradicts the rule.', verdict: 'does not follow' }])) });
+
+test('a new card dropped as unsound is left out and clears no Missing row', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  uncover(failed.outDir, 'BR-LIB.UC01-001');
+  const before = savedPack(JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json'))));
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'unsound' },
+    { model: fakeModel({ phase8_repair: newCardFor, phase6_recheck: rejectsAll }) });
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  const added = pack.testCards.filter((card) => !before.testCards.some((old) => old.id === card.id));
+  assert.equal(added.length, 0);
+  assert.ok(!pack.testSets.some((set) => set.cards.some((id) => !pack.testCards.some((card) => card.id === id))));
+  assert.ok(pack.coverage.some((row) => row.ruleId === 'BR-LIB.UC01-001' && row.status === 'Missing'));
+});
+
+test('a new card dropped as unsound clears no Not Applicable row the reply returns for its rule', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  const rule = 'BR-LIB.UC01-001';
+  uncover(failed.outDir, rule);
+  // A limitation lets the rebuilt workbook pass with the rule uncovered.
+  editSnapshot(failed.outDir, 'phase9-revalidate', (saved) => {
+    savedPack(saved).limitations = { ...savedPack(saved).limitations, 'Coverage Matrix': `${rule} has no card.` };
+  });
+  const notApplicable = { ruleId: rule, status: 'Not Applicable', strength: 'None',
+    gap: 'The change does not touch this rule.', recommendation: 'None.' };
+  const reply = (value, calls) => ({ ...newCardFor(value, calls), coverage: [notApplicable] });
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'kept' },
+    { model: fakeModel({ phase8_repair: reply, phase6_recheck: rejectsAll }) });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  assert.ok(!pack.testCards.some((card) => card.id.endsWith('-003')));
+  assert.equal(pack.coverage.find((row) => row.ruleId === rule)?.status, 'Not Applicable');
+});
+
+test('a reply with a new card and a Missing row for the same rule ends with the row cleared', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  const rule = 'BR-LIB.UC01-001';
+  uncover(failed.outDir, rule);
+  // The fix round takes the new card; the reply still returns the Missing row for its rule.
+  const stale = (value, calls) => ({ ...newCardFor(value, calls), coverage: [missingRow(rule)] });
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'row' },
+    { model: fakeModel({ phase8_repair: stale }) });
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  assert.ok(pack.testCards.some((card) => card.rules.includes(rule) && card.id.endsWith('-003')));
+  assert.ok(!pack.coverage.some((row) => row.ruleId === rule && row.status === 'Missing'));
+});
+
+test('a Phase 8 builder-failure repair offers no new cards', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  await runLib(setup);
+  const rule = 'BR-LIB.UC01-001';
+  // A Missing row for a rule the cards cite fails the builder, so Phase 8 repairs the sheet.
+  const run = async (cfg, parameters, options) => {
+    const file = path.join(cfg.output, parameters.id, 'work', 'checkpoint.json');
+    const saved = JSON.parse(slurp(file));
+    const pack = savedPack(saved);
+    pack.coverage = [...pack.coverage.filter((row) => row.ruleId !== rule), missingRow(rule)];
+    fs.writeFileSync(file, JSON.stringify(saved));
+    const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+    const result = await runJob(cfg, parameters, { ...options, model, echo: false });
+    calls.push(...model.calls);
+    return result;
+  };
+  const calls = [];
+  await rerunJob(setup.config, { job: 'issue-501-change-7001', from: 'phase9-revalidate', label: 'p8' }, { run });
+  const repairs = calls.filter((call) => call.schemaName.startsWith('phase8_repair'));
+  assert.ok(repairs.length >= 1);
+  assert.ok(repairs.every((call) => call.schema.properties.newCards.maxItems === 0));
+});
+
+test('a repair takes no more new cards than the schema allows', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  uncover(failed.outDir, 'BR-LIB.UC01-001');
+  const before = savedPack(JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json'))));
+  const many = (value, calls) => {
+    const one = newCardFor(value, calls);
+    return { ...one, newCards: Array.from({ length: S.NEW_CARDS_MAX + 2 }, () => one.newCards[0]) };
+  };
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'many' },
+    { model: fakeModel({ phase8_repair: many }) });
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  assert.equal(pack.testCards.length - before.testCards.length, S.NEW_CARDS_MAX);
+});
+
+/** Reruns the revalidation of `job` over a pack with `rule` left without a card, on `model`. */
+async function rerunUncovered(config, job, rule, model, limited = true) {
+  const run = async (cfg, parameters, options) => {
+    const where = path.join(cfg.output, parameters.id);
+    // The resume reads work/checkpoint.json; the limitation lets the rebuilt workbook pass with the rule uncovered.
+    uncover(where, rule, 'phase9-confidence');
+    const file = path.join(where, 'work', 'checkpoint.json');
+    fs.copyFileSync(path.join(where, 'work', 'checkpoints', 'phase9-confidence.json'), file);
+    const saved = JSON.parse(slurp(file));
+    if (limited) savedPack(saved).limitations = { ...savedPack(saved).limitations, 'Coverage Matrix': `${rule} has no card.` };
+    fs.writeFileSync(file, JSON.stringify(saved));
+    return runJob(cfg, parameters, { ...options, model, echo: false });
+  };
+  const { id } = await rerunJob(config, { job, from: 'phase9-revalidate', label: 'u' }, { run });
+  return path.join(config.output, id);
+}
+
+test('a revalidation item whose repair produced no card says so', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  await runLib(setup);
+  const sandbox = await rerunUncovered(setup.config, 'issue-501-change-7001', 'BR-LIB.UC01-001', setup.model);
+  const { remaining } = JSON.parse(slurp(path.join(sandbox, 'work', 'phase9-revalidation.json')));
+  assert.ok(remaining.some((line) => line.endsWith('(repair produced no card)')), remaining.join('\n'));
+});
+
+test('a suite pack refuses a new card and logs why', async () => {
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const config = fixtureConfig();
+  const first = await runJob(config, { suite: 'LIB' }, { model, echo: false });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const pack = JSON.parse(read(first.packPath));
+  const rule = pack.rules[0].id;
+  const asks = fakeModel({ ...INTAKE, ...NOT_REMOVAL, phase9_revalidation: (value) => failCheck(value,
+    'Traceability complete', `${rule} has no card`, `Create a new test card for ${rule}`),
+  phase8_repair: correctingRepair });
+  const sandbox = await rerunUncovered(config, 'suite-LIB', rule, asks);
+  assert.match(slurp(path.join(sandbox, 'status.log')), /new-card-refused-suite/);
+});
+
+test('the repair schema offers new cards only for named rules and never in a suite pack', async () => {
+  const { repairSchema } = S;
+  const base = { cardIds: [], ids: ['R1', 'R2'], objectives: ['O'], derivations: ['Requirement'],
+    statuses: ['Covered'], sheets: ['Coverage Matrix'] };
+  const open = repairSchema({ ...base, newIds: ['R1'] }).properties.newCards;
+  assert.equal(open.maxItems, S.NEW_CARDS_MAX);
+  assert.deepEqual(open.items.properties.rules.items.enum, ['R1']);
+  assert.equal(repairSchema(base).properties.newCards.maxItems, 0);
+});
+
+test('a repair that returns no card for a rule left without one is logged as not applied', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  uncover(failed.outDir, 'BR-LIB.UC01-001');
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'none' },
+    { model: fakeModel({ phase8_repair: correctingRepair }) });
+  const status = slurp(path.join(setup.config.output, done.id, 'status.log'));
+  assert.match(status, /repair-not-applied/);
+  assert.match(status, /no-card/);
+});
+
+test('a fix that edits an existing card is not reported as a missing new card', async () => {
+  const rule = 'BR-LIB.UC01-001';
+  const names = { phase9_revalidation: (value, calls) => failCheck(value, 'Traceability complete',
+    `${cardIdIn(calls.at(-1).user)} reads wrong`,
+    `Add a new step to card ${cardIdIn(calls.at(-1).user)} so it covers ${rule}`) };
+  const setup = lib({ ...names, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  // The rule has no card, and the fix names a card and the rule: it edits the card.
+  uncover(failed.outDir, rule);
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'edit' },
+    { model: fakeModel({ phase8_repair: (value) => { // the edit leaves the rule uncovered
+      const fixed = correctingRepair(value);
+      return { ...fixed, cards: fixed.cards.map((card) => ({ ...card,
+        rules: card.rules.filter((id) => id !== rule) })) };
+    } }) });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  assert.doesNotMatch(slurp(path.join(setup.config.output, done.id, 'status.log')), /repair-not-applied/);
+});
+
+test('a rule ID is matched whole, so BR-1 does not open new cards for BR-10', () => {
+  assert.equal(citesId('BR-10 has no card', 'BR-1'), false);
+  assert.equal(citesId('BR-1 has no card', 'BR-1'), true);
 });
 
 test('a build step at a failed revalidation reads the builder without the verdict, and a state with no verdicts takes them from the revalidation file', async () => {
