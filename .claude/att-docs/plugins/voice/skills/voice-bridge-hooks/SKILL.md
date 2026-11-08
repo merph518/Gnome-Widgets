@@ -181,7 +181,7 @@ and keeping its extension file.
 
 Hook changes load when a session starts, so a session open during the switch keeps the
 hooks it started with. Claude Code installs the plugin into its plugin cache and refreshes
-that copy only when the plugin's version changes, so the cached scripts fall behind the
+that copy only when the plugin's version changes, so the cached scripts fall behind
 Baton between version bumps. To keep them in step, a Baton run from a Code Conductor checkout writes the voice
 plugin folder it runs from to `$XDG_RUNTIME_DIR/voice-bridge/plugin`, and the cached
 `run.sh` hands every hook to the `run.sh` in that folder when it has one. The scripts then
@@ -203,15 +203,16 @@ A message inside a `cross-session-message` wrapper, or without the marker, is a 
 The stop line, the correction lead and the archive message are written by Baton, not
 by the user. A repository needs the `voice` plugin installed and kept current with
 `claude plugin update voice@att-docs` after a version bump. `update_bridge` fast-forwards a
-Baton checkout and redirects the hooks (a packaged Baton is updated with apt), but the skill loads from the cached plugin install,
-which can lag. See the `voice-request` skill.
+Baton checkout, which the hook scripts run from, and restarts Baton on it (a packaged Baton is
+updated with apt), but the skill loads from the cached plugin install, which can
+lag. See the `voice-request` skill.
 
 ## Tools that load at startup
 
 Claude Code defers MCP tools behind a tool search, which pauses the first call. Baton's
 `tools/list` marks `send`, `read_reply` and `catch_up` with `_meta` `anthropic/alwaysLoad`
 set to true, so Claude Code lists those three up front, and leaves every other tool
-deferred to keep the startup list short. The set is `ALWAYS_LOAD_TOOLS` in Baton's `voice-bridge.mjs`.
+deferred to keep the startup list short. The set is `ALWAYS_LOAD_TOOLS` in Baton's `voice-bridge-server.mjs`.
 
 ## Checking GitHub before work goes out
 
@@ -239,15 +240,17 @@ request's status finds it.
 ## Titles for every session at once
 
 Baton's `rename_all_sessions` tool gives each running session the title `<base> - <task>
-(<state>)` in one call, such as `Playwright 2 - PR 5593 move the Overmind pin (needs you)`. The
+(<state>)` in one call, such as `Playwright 2 - PR #5593 move the Overmind pin (needs you)`. The
 task is the work name the session set, else its open pull request with its title, else its
 issue, else the start of its latest reply. The state is `needs you` (it waits or asks, or
 reported a pull request ready), `working` or `idle`. A status the session set that says more,
-`stuck`, `stopped`, `waiting on CI`, `needs you` or `working`, is kept; `idle` and `waiting on
-you` are read fresh each time, so one of them left on a session is replaced. A session is never
+`stuck`, `stopped`, `waiting on CI`, `needs you` or `working`, is kept while the session is idle;
+once its state is `needs you` or `working`, the live state replaces it. `idle` and `waiting on you` are read
+fresh each time, so one of them left on a session is replaced. A session is never
 given the exact title another session holds. A title that already reads so, the Session
-Launcher and a session the user stopped following are left alone, and the answer lists what
-changed and what was left. `session_title.py` and Baton share the status words, so a title
+Launcher, a session the user stopped following, one Baton cannot reach, one whose pull request
+could not be read, and one whose own work name leaves no room for the state are left alone, and
+the answer lists what changed, what already fit and what was left. `session_title.py` and Baton share the status words, so a title
 written by either is taken apart the same way by both. A work name a session sets is
 words for the work, with a number at most as a suffix, so the title Baton keeps and reads
 out says what the session does.

@@ -35,13 +35,17 @@ This repository is private and for my own use.
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `att-docs` | `validate-sir` | Reproduce a suspected defect and write the SIR text for the dev team or the design team |
+| `att-docs` | `manual-validation-walkthrough` | Walk the user through reproducing a validated SIR by hand and record what the check found |
 | `att-docs` | `raise-sir` | File one verified SIR record into ALM without opening the desktop client |
 | `att-docs` | `read-sir` | Read one SIR back out of ALM by number: status, owner, description, comments |
 | `att-docs` | `update-sir` | Change a SIR already in ALM: status, fields, comments, or a Draft's text |
 | `att-docs` | `retest-sir` | Retest a raised SIR against the application and report Retested or Failed Test |
+| `att-docs` | `skip-ledger` | Keep the ledger of every parked test and check that no skip lands or lifts without its row |
 | `general` | `implement` | Take an issue to a reviewed pull request, or run the backlog with `--loop` |
 | `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
 | `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, or the best next issue of one milestone ranked by dependents, priority and tracker order, skipping any with an open blocker or dependency, one `implement` run at a time, and never merge |
+| `general` | `debug-spec` | Diagnose and fix a failing or flaky spec issue-first, verify it with title-scoped runs, then open a linked pull request |
+| `general` | `manual-spec` | Turn one manual test row into an automated spec that prints each step's evidence as a block ready to paste under the row |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
