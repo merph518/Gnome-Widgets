@@ -46,7 +46,7 @@ import { compareSnapshots, jobParameters, prepareSandbox, prepareStepSandbox, sa
   stepStart } from './rerun.mjs';
 import { checkStep, runStep, stepUsesModel } from './step-job.mjs';
 import { lineArgs, sourceLines } from './sources.mjs';
-import { jobLogs, readStatusLog, recordedRuns, repeatedCuts, runCuts, statusFields } from './status.mjs';
+import { fitCounts, jobLogs, readStatusLog, recordedRuns, repeatedCuts, runCuts, statusFields } from './status.mjs';
 import { POLL_MS, touchHeartbeat, WAIT_ENDS } from './supervisor.mjs';
 
 const USAGE = `usage:
@@ -120,10 +120,14 @@ export function jobFrom(args) {
     ...(args.resume ? { resume: true } : {}) };
 }
 
-/** The counts a gate stop names: how many documents and which, by number. Codes and numbers only. */
+/**
+ * The counts a gate stop names: how many documents and which, by number. Codes and numbers
+ * only, and a long list of numbers is cut to what a status line holds, so a row stored with
+ * the full list still prints.
+ */
 const STOP_FIELDS = ['documents', 'numbers', 'document'];
-const stopFields = (from = {}) => Object.fromEntries(
-  STOP_FIELDS.filter((key) => from[key] !== undefined).map((key) => [key, from[key]]));
+const stopFields = (from = {}) => fitCounts(Object.fromEntries(
+  STOP_FIELDS.filter((key) => from[key] !== undefined).map((key) => [key, from[key]])));
 
 /** The stop fields of the last `fail` line a run wrote for `reason`, for a row that holds none. */
 const loggedStop = (entries, reason) => stopFields(

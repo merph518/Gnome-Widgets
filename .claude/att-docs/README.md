@@ -35,6 +35,7 @@ This repository is private and for my own use.
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `att-docs` | `validate-sir` | Reproduce a suspected defect and write the SIR text for the dev team or the design team |
+| `att-docs` | `manual-validation-walkthrough` | Walk the user through reproducing a validated SIR by hand and record what the check found |
 | `att-docs` | `raise-sir` | File one verified SIR record into ALM without opening the desktop client |
 | `att-docs` | `read-sir` | Read one SIR back out of ALM by number: status, owner, description, comments |
 | `att-docs` | `update-sir` | Change a SIR already in ALM: status, fields, comments, or a Draft's text |
