@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.31.32](https://github.com/merph518/Overmind/compare/v0.31.31...v0.31.32) (2026-11-09)
+
+
+### Features
+
+* log check verdicts, repairs, progress and call usage to status.log ([#635](https://github.com/merph518/Overmind/issues/635)) ([39ed3e3](https://github.com/merph518/Overmind/commit/39ed3e3e23ca2e3fe21b9c2ad1c1d7221fee3457))
+
+## [0.31.31](https://github.com/merph518/Overmind/compare/v0.31.30...v0.31.31) (2026-11-09)
+
+
+### Features
+
+* split the revalidation walk and the senior review into one call per group or part ([#488](https://github.com/merph518/Overmind/issues/488)) ([#632](https://github.com/merph518/Overmind/issues/632)) ([3631a30](https://github.com/merph518/Overmind/commit/3631a30ecf27129f6becf0fe555a0472b514a49e))
+
+
+### Bug Fixes
+
+* fail acronym verify when a cited source file is missing ([#631](https://github.com/merph518/Overmind/issues/631)) ([de8bb3b](https://github.com/merph518/Overmind/commit/de8bb3b468be0e2e7287ed39b4383622735161b3))
+
 ## [0.31.30](https://github.com/merph518/Overmind/compare/v0.31.29...v0.31.30) (2026-11-09)
 
 

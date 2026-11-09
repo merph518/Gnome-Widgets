@@ -917,7 +917,8 @@ function tally(entries, keys) {
  * the phase now running and how long it has run, where a job that is not
  * running stopped, how long each finished phase took, and how many `retry` and
  * `call-fail` lines the job wrote by reason, with the phase and step of every
- * `length` and `runaway` cut. Last, every thinking step cut at its output budget
+ * `length` and `runaway` cut. Then the last `check` and `repair` line the job
+ * wrote. Last, every thinking step cut at its output budget
  * on two or more runs in a row, read from all of the job's rows, with its budget.
  * `clock` supplies the current time.
  */
@@ -1004,6 +1005,14 @@ export function jobStatus(config, id, { clock = () => new Date() } = {}) {
     && ['length', 'runaway'].includes(entry.reason));
   for (const { fields, count } of tally(cuts, ['event', 'phase', 'step', 'reason'])) {
     lines.push(fieldText('cut', { ...fields, count }));
+  }
+  // The last verdict and the last repair the job logged, beside the phase timings.
+  for (const [event, label] of [['check', 'last-check'], ['repair', 'last-repair']]) {
+    const hit = own.findLast((entry) => entry.event === event);
+    if (hit) {
+      const { at, job, event: kind, ...fields } = hit;
+      lines.push(fieldText(label, fields));
+    }
   }
   for (const { step, budget, runs } of repeatedCuts(recordedRuns(readQueue(config), id))) {
     lines.push(fieldText('repeated-cut', { step, budget: budget ?? '-', runs }));
