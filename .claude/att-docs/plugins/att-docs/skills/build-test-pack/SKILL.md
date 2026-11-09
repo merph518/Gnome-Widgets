@@ -1782,8 +1782,8 @@ sees the card in full, and the problem tells it to keep the card's Expected
 Result and change the final step's expected result to say the same. A repair
 that changes a card's Expected Result is checked against the rules again with
 the same verification call; if the card does not follow, the change is undone,
-the final step included, and an assumption says so. The card is never removed
-at this phase. The two agree when they are equal once case and
+the final step included, and an assumption says so. The repair never removes an
+existing card at this phase. The two agree when they are equal once case and
 punctuation are set aside, or when one holds the other as whole words and the
 longer side adds no negation (`no`, `not`, `never`, `cannot`, `without`, `none`,
 `nothing`, `n't`) and no condition (`unless`, `until`, `only`, `except`); a
@@ -1843,7 +1843,18 @@ section of `<validation-procedure>` it falls under. A fix names the card, rule o
 to change and what to change it to; one that is blank, a placeholder such as
 N/A, or names no card, rule or sheet of the pack is not applied. Each other one goes
 through the Phase 8 repair, which returns corrected cards, coverage rows, limitations
-and, for a finding about assumptions, assumptions. A coverage row changes only for a rule
+and, for a finding about assumptions, assumptions. Only this fix section lets the repair
+add cards; the repair of a Phase 8 builder failure takes none. Here it also accepts `newCards`,
+at most 3, each covering only a rule a finding names; the card is numbered and added to
+its test sets by code. A new card's Expected Result is checked against its rules like a
+repaired card's, and a card that does not follow is dropped and clears nothing. A kept
+new card replaces a Missing or Not Applicable coverage row for each rule it covers, even
+when the reply returns such a row. A suite pack refuses new cards, since its cards come
+from the suite files. When a finding asks for a new card and a rule it names is still
+without one, `status.log` gets a `repair-not-applied` event with the reason `no-card`,
+or `new-card-refused-suite` for a suite pack, and a revalidation item that remains ends
+with "(repair produced no card)" ("(a suite pack takes no new card)" for a suite pack).
+A coverage row changes only for a rule
 a finding names (every rule when it names the Coverage Matrix), and a limitation only for
 a sheet it names; a row whose status contradicts the cards is not kept. Every other row
 and limitation stays as the pack had it. The pack is rebuilt, and the checklist
