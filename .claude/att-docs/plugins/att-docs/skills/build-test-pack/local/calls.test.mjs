@@ -95,3 +95,17 @@ test('a folder with files that are not call records still gives the next number'
   const file = callRecorder(dir).record(call());
   assert.equal(path.basename(file), '00008-phase1_rules-1.json');
 });
+
+test('a record keeps the thinking and timing figures the server gave and the end of a cut call\'s thinking', () => {
+  const usage = { promptTokens: 9, outputTokens: 90, ms: 70, reasoningTokens: 80, answerTokens: 10, promptMs: 12,
+    genMs: 50, cachedTokens: 4 };
+  const cut = read(callRecorder(folder()).record(call({ reply: undefined, errorCode: 'length', usage,
+    reasoningTail: 'the last thought' })));
+  assert.deepEqual(cut.usage, { promptTokens: 9, outputTokens: 90, reasoningTokens: 80, answerTokens: 10,
+    promptMs: 12, genMs: 50, cachedTokens: 4 });
+  assert.equal(cut.reasoningTail, 'the last thought');
+  // A call that has none of them records none, so a record from before they existed reads the same.
+  const plain = read(callRecorder(folder()).record(call({ reasoningTail: '' })));
+  assert.deepEqual(plain.usage, { promptTokens: 9, outputTokens: 4 });
+  assert.ok(!('reasoningTail' in plain));
+});

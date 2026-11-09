@@ -141,10 +141,22 @@ function checkEnv({ home }, out) {
   return env.get('PATH') ?? null;
 }
 
+/** What `sudo -n -l` prints for this user; empty when sudo cannot list. */
+export function sudoListing(exec = defaultExec) {
+  return exec('sudo', ['-n', '-l']).stdout;
+}
+
+/** The verbs of `verbs` that `listing` does not let the user run on `unit` with no password. */
+export function sudoersRefused(listing, unit, verbs) {
+  return verbs.filter((verb) => !sudoersAllows(listing, `/usr/bin/systemctl ${verb} ${unit}`));
+}
+
+const checkLine = (area, name, pass, code) => `${area}  ${name}  ${pass ? 'pass' : 'fail'}  ${code}`;
+
 function checkPause({ exec }, config, out) {
   const { units: patterns, scope } = config.pause;
   const user = scope === 'user';
-  let sudoListing;
+  let listing;
   for (const pattern of patterns) {
     // A unit that other units refer to but that is not installed lists as `not-found`.
     const names = (result) => [...new Set(result.stdout.split('\n').map((l) => l.trim().split(/\s+/))
@@ -162,18 +174,31 @@ function checkPause({ exec }, config, out) {
       out('pause', pattern, false, `missing; scope ${scope}`);
       continue;
     }
-    sudoListing ??= user ? '' : exec('sudo', ['-n', '-l']).stdout;
+    listing ??= user ? '' : sudoListing(exec);
     for (const unit of units) {
       if (user) {
         out('pause', unit, true, 'found; scope user');
         continue;
       }
-      const refused = ['stop', 'start']
-        .filter((verb) => !sudoersAllows(sudoListing, `/usr/bin/systemctl ${verb} ${unit}`));
+      const refused = sudoersRefused(listing, unit, ['stop', 'start']);
       out('pause', unit, !refused.length,
         refused.length ? `sudoers-refused ${refused.join(' ')}` : 'found; sudoers allows stop and start');
     }
   }
+}
+
+/**
+ * The lines of the setup check's pause section that fail, for a check that
+ * runs before a job. A host with no `pause.units` reads nothing, and the user
+ * scope never calls sudo.
+ */
+export function pauseFailures(config, { exec = defaultExec } = {}) {
+  const lines = [];
+  checkPause({ exec }, config, (area, name, pass, code) => {
+    if (!pass) lines.push(checkLine(area, name, pass, code));
+  });
+  // Two patterns can name one unit.
+  return [...new Set(lines)];
 }
 
 async function checkModel({ fetchImpl }, config, out) {
@@ -222,7 +247,7 @@ export async function setupCheck(config, { exec = defaultExec, fetchImpl = local
   let ok = true;
   const out = (area, name, pass, code) => {
     ok &&= pass;
-    lines.push(`${area}  ${name}  ${pass ? 'pass' : 'fail'}  ${code}`);
+    lines.push(checkLine(area, name, pass, code));
   };
   checkUnits({ unitsDir, home, exec }, out);
   const envPath = checkEnv({ home }, out);

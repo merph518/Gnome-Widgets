@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { controlsIn, docControls, dropRepeats, foldFollowUps, mergeRemovedScenarios, repeatsLeft } from './design-tidy.mjs';
+import { fromWire } from './schemas.mjs';
 import { impossibleSteps, stepRules, stepSchema } from './steps.mjs';
 
 const DOC = { text: 'Selecting Save or Save & Close, the role is stored. Select Ok, the message closes. Select Reset, the saved value returns. '
@@ -135,4 +136,26 @@ test('stepSchema asks for one row per card with its steps, and impossibleSteps r
   const row = { card: 'C1', steps: [{ step: 1, possible: true, why: 'fine' }, { step: 2, possible: false, why: 'R-32 disables Save' }] };
   assert.deepEqual(impossibleSteps(row), [{ step: 2, why: 'R-32 disables Save' }]);
   assert.deepEqual(impossibleSteps(undefined), []);
+});
+
+test('a step row is asked for number first, then the decision, then the reason, however its properties are sorted', () => {
+  const schema = stepSchema(['C1']);
+  const row = schema.properties.cards.items.properties.steps.items;
+  assert.deepEqual(Object.keys(row.properties).sort(), ['01_step', '02_possible', '03_why']);
+  assert.deepEqual(row.required, ['01_step', '02_possible', '03_why']);
+  // A reply as a server that sorts the properties sends it reads back under the plain names.
+  const reply = { cards: [{ card: 'C1', steps: [{ '01_step': 1, '02_possible': true, '03_why': 'fine' },
+    { '01_step': 2, '02_possible': false, '03_why': 'R-32 disables Save' }] }] };
+  const read = fromWire(schema, reply);
+  assert.deepEqual(read.cards[0].steps[0], { step: 1, possible: true, why: 'fine' });
+  assert.deepEqual(impossibleSteps(read.cards[0]), [{ step: 2, why: 'R-32 disables Save' }]);
+});
+
+test('a step row with no decision is taken as possible, and one with no reason is still flagged', () => {
+  const schema = stepSchema(['C1']);
+  const reply = { cards: [{ card: 'C1', steps: [{ '01_step': 1, '03_why': 'R-32 disables Save' },
+    { '01_step': 2, '02_possible': false }] }] };
+  const read = fromWire(schema, reply);
+  assert.deepEqual(read.cards[0].steps, [{ step: 1, why: 'R-32 disables Save' }, { step: 2, possible: false }]);
+  assert.deepEqual(impossibleSteps(read.cards[0]), [{ step: 2, why: undefined }]);
 });

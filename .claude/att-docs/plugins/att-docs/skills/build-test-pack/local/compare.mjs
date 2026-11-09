@@ -17,6 +17,7 @@ import { consistencyChecks } from './consistency.mjs';
 import { controlNames, crosswalkCards, repeatedCards, scenarioModel, setReport, splitGroups } from './floor.mjs';
 import { readPack, stepsOf } from './pack.mjs';
 import { qualityChecks } from './quality.mjs';
+import { fromWire } from './schemas.mjs';
 import { impossibleSteps, stepRules, stepSchema, STEP_QUESTION } from './steps.mjs';
 import { dice, loadRules, parseDoc, quoteOf, wordSet, words } from './source.mjs';
 import { citedIds, citedRules, crosswalkRows, expectedResultChecks, retiredRecord, retiredRules, staleHits,
@@ -238,7 +239,7 @@ export async function modelPass({ client, reference, pack, rules, unmatched, ret
   const out = { run: true, follows: [], same: [], grouped: [], steps: [], errors: 0 };
   const ask = async (schemaName, schema, system, user) => {
     try {
-      return (await client.json({ system, user, schema, schemaName, maxTokens })).value;
+      return fromWire(schema, (await client.json({ system, user, schema, schemaName, maxTokens })).value);
     } catch (error) {
       out.errors += 1;
       return { error: error.code ?? 'error' };

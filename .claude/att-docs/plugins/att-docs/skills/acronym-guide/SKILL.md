@@ -154,6 +154,11 @@ on page 3 and use a different code on page 9, and a row built on that reads as
 sourced when nobody checked. Run it whenever rows are added, and read the rows
 it lists as answered by a person: those are the ones no file can confirm.
 
+A row whose fourth column names a file that does not exist fails the check, so
+deleting or renaming a cited document has to be followed by repointing its rows.
+A fourth column counts as a file when it ends in `.md`, or holds a slash and no
+whitespace and is not a URL.
+
 A universally known technical term has no file to cite, so a row for one says
 `<standard-term-text>` in its fourth column. Such a row is there only because
 `<answerer>` asked for it by name. The rest of that family sits in

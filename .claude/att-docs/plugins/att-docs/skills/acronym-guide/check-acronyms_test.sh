@@ -124,6 +124,14 @@ run --verify
 check "verify exit" 0 "$code"
 has "verify summary" "2 row(s) checked against their source, 0 failed." "$out"
 
+# A row citing a file that is gone fails --verify and names the row and the path.
+cp terms.tsv terms.keep
+printf 'GONE\tGone Word\t*\tdocs/gone.md\n' >>terms.tsv
+run --verify
+check "verify missing source exit" 1 "$code"
+has "verify names missing source" "GONE: docs/gone.md does not exist" "$out"
+mv terms.keep terms.tsv
+
 # Bad invocations exit 64.
 out=$(bash "$script" docs/a.md 2>&1); check "no config exit" 64 $?
 has "no config message" "--config <file> is required" "$out"

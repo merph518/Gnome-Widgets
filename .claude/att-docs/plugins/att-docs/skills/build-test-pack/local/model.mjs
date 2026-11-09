@@ -4,13 +4,16 @@
 // phase writes into the pack. The one other network call is the build
 // supervisor's waiting notice, a content-free line (supervisor.mjs).
 //
-// Each chat call streams its reply. Lemonade stops generating a streamed reply
-// when the connection closes, so a stop or a time-out frees the model at once.
-// An unstreamed reply runs to its end on the server even after the connection
-// closes, and an unload asked for in the meantime waits for it.
+// Each chat call streams its reply, and the client reads it as it arrives. Lemonade
+// stops generating a streamed reply when the connection closes, so a stop or a
+// time-out frees the model at once. An unstreamed reply runs to its end on the
+// server even after the connection closes, and an unload asked for in the meantime
+// waits for it. While a call runs, the client reports how much it has read every few
+// minutes, so a long thinking call shows as progress and not as silence.
 
 import http from 'node:http';
 import https from 'node:https';
+import { StringDecoder } from 'node:string_decoder';
 
 /** Hosts a model endpoint may name. Anything else could be a cloud API. */
 export const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]', '::1'];
@@ -57,14 +60,23 @@ export class Cancelled extends Error {
  * redirect is never followed: it comes back as a response that is not ok. The
  * whole body is read before the promise settles, so an abort, a time-out or a
  * reset partway through the body rejects it and closes the connection.
+ * `onData` receives the body's text as each piece arrives.
+ *
+ * Every request opens a connection of its own and closes it (`agent: false`).
+ * The model server answers a streamed reply as kept alive and then closes the
+ * connection a moment later, and a request sent on that connection is reset.
  */
-export function localFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+export function localFetch(url, { method = 'GET', headers = {}, body, signal, onData } = {}) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const request = (target.protocol === 'https:' ? https : http).request(target,
-      { method, headers, signal }, (response) => {
+      { method, headers, signal, agent: false }, (response) => {
         const chunks = [];
-        response.on('data', (chunk) => chunks.push(chunk));
+        const decoder = new StringDecoder('utf8');
+        response.on('data', (chunk) => {
+          chunks.push(chunk);
+          if (onData) onData(decoder.write(chunk));
+        });
         response.on('error', reject);
         response.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
@@ -78,35 +90,118 @@ export function localFetch(url, { method = 'GET', headers = {}, body, signal } =
 }
 
 /**
- * The reply of a streamed chat call, from its server-sent events: the content
- * deltas joined, the finish reason and the usage the last chunks carry. The
- * thinking deltas (`reasoning_content`) are left out. Null when the stream did
- * not end with `[DONE]`, or holds an event that is not JSON or is an error:
- * Lemonade answers a request its backend refuses with a 200 whose body is a
- * bare error object.
+ * What a failed connection was, as a short code: Node's own for it (ECONNRESET,
+ * ECONNREFUSED, ABORT_ERR), `timeout` when the call's time-out ended it, or `unknown`.
+ * Never the error's message, which can quote the request.
  */
-function readStream(text) {
-  let content = '';
-  let finish = null;
-  let usage = null;
-  for (const event of text.split(/\r?\n\r?\n/)) {
+function causeOf(error) {
+  if (error?.name === 'TimeoutError' || error?.cause?.name === 'TimeoutError') return 'timeout';
+  return [error?.cause?.code, error?.code]
+    .find((code) => typeof code === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(code)) ?? 'unknown';
+}
+
+/** How much of a call's thinking text is kept, from its end. */
+export const REASONING_TAIL_CHARS = 2000;
+
+/**
+ * Reads the server-sent events of a streamed chat call as they arrive. `feed` takes
+ * text in any pieces; `counts` says how many thinking and answer deltas have come so
+ * far, about one per token; `finish` gives the reply: the content deltas joined, the
+ * finish reason, the usage and `timings` blocks the last chunks carry, the end of the
+ * thinking text (`reasoning_content`) and the delta counts. `finish` is null when the
+ * stream did not end with `[DONE]`, or holds an event that is not JSON or is an error:
+ * Lemonade answers a request its backend refuses with a 200 whose body is a bare
+ * error object. Whatever follows `[DONE]` is ignored.
+ */
+function streamReader() {
+  let buffer = '';
+  let ended = false;
+  let failed = false;
+  const seen = { content: '', finish: null, usage: null, timings: null, thinking: '',
+    reasoningDeltas: 0, answerDeltas: 0 };
+
+  function take(event) {
     const lines = event.split(/\r?\n/).filter((line) => line.startsWith('data:'));
-    if (!lines.length) continue;
+    if (!lines.length) return;
     const data = lines.map((line) => line.slice(5).replace(/^ /, '')).join('\n');
-    if (data === '[DONE]') return { content, finish, usage };
+    if (data === '[DONE]') {
+      ended = true;
+      return;
+    }
     let chunk;
     try {
       chunk = JSON.parse(data);
     } catch {
-      return null;
+      failed = true;
+      return;
     }
-    if (!chunk || typeof chunk !== 'object' || chunk.error) return null;
+    if (!chunk || typeof chunk !== 'object' || chunk.error) {
+      failed = true;
+      return;
+    }
     const choice = chunk.choices?.[0];
-    if (typeof choice?.delta?.content === 'string') content += choice.delta.content;
-    if (choice?.finish_reason) finish = choice.finish_reason;
-    if (chunk.usage) usage = chunk.usage;
+    if (typeof choice?.delta?.content === 'string' && choice.delta.content) {
+      seen.content += choice.delta.content;
+      seen.answerDeltas += 1;
+    }
+    if (typeof choice?.delta?.reasoning_content === 'string' && choice.delta.reasoning_content) {
+      seen.thinking = (seen.thinking + choice.delta.reasoning_content).slice(-REASONING_TAIL_CHARS);
+      seen.reasoningDeltas += 1;
+    }
+    if (choice?.finish_reason) seen.finish = choice.finish_reason;
+    if (chunk.usage) seen.usage = chunk.usage;
+    if (chunk.timings) seen.timings = chunk.timings;
   }
-  return null;
+
+  function drain(events) {
+    for (const event of events) {
+      if (ended || failed) return;
+      take(event);
+    }
+  }
+
+  return {
+    feed(text) {
+      buffer += text;
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop();
+      drain(events);
+    },
+    counts: () => ({ reasoningTokens: seen.reasoningDeltas, answerTokens: seen.answerDeltas }),
+    finish() {
+      drain([buffer]);
+      buffer = '';
+      return ended && !failed ? seen : null;
+    },
+  };
+}
+
+const whole = (n) => (Number.isFinite(n) && n >= 0 ? Math.round(n) : null);
+
+/**
+ * A call's usage: the prompt and output token counts and the milliseconds it took,
+ * and, when the server gave them, how the output splits between thinking and answer
+ * (`reasoningTokens`, `answerTokens`), how long it spent on the prompt and on
+ * generating (`promptMs`, `genMs`) and how many prompt tokens came from its cache
+ * (`cachedTokens`). A key the server did not give is left out.
+ */
+function usageOf(seen, ms) {
+  const { usage, timings } = seen;
+  const usageOut = { promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0, ms };
+  const reasoning = whole(usage?.completion_tokens_details?.reasoning_tokens)
+    ?? (seen.reasoningDeltas ? seen.reasoningDeltas : null);
+  if (reasoning !== null) {
+    usageOut.reasoningTokens = reasoning;
+    usageOut.answerTokens = usageOut.outputTokens
+      ? Math.max(0, usageOut.outputTokens - reasoning) : seen.answerDeltas;
+  }
+  const promptMs = whole(timings?.prompt_ms);
+  const genMs = whole(timings?.predicted_ms);
+  const cached = whole(timings?.cache_n) ?? whole(usage?.prompt_tokens_details?.cached_tokens);
+  if (promptMs !== null) usageOut.promptMs = promptMs;
+  if (genMs !== null) usageOut.genMs = genMs;
+  if (cached !== null) usageOut.cachedTokens = cached;
+  return usageOut;
 }
 
 /**
@@ -119,17 +214,25 @@ function readStream(text) {
 export const DEFAULT_TEMPERATURE = 0;
 export const DEFAULT_SEED = 42;
 
+/** Minutes between the progress reports of a call in flight. */
+export const PROGRESS_MINUTES = 5;
+
 /**
  * A client for one model on one endpoint. `fetchImpl` stands in for fetch in
- * tests. `signal` stops a call in flight; the call then throws Cancelled, and
- * the closed connection stops the server generating its reply.
+ * tests, and `clock` for the time and the timers. `signal` stops a call in flight;
+ * the call then throws Cancelled, and the closed connection stops the server
+ * generating its reply.
  * `tokenize` asks the loaded llama.cpp backend for an exact count and falls
  * back to the estimate when the server offers none. Every call is sent with
  * `temperature` and `seed`; `json` returns the seed, and a ModelError it throws
- * carries it, so the call record can say what the call was sent with.
+ * carries it, so the call record can say what the call was sent with. A call whose
+ * request holds `onProgress` reports `{ reasoningTokens, answerTokens, elapsedMs }`
+ * every `progressMinutes` until it ends; the token counts are the deltas read so
+ * far, about one per token.
  */
 export function modelClient({ endpoint, name, temperature = DEFAULT_TEMPERATURE, seed = DEFAULT_SEED,
-  timeoutMinutes = 150, fetchImpl = localFetch, signal: stop = null }) {
+  timeoutMinutes = 150, progressMinutes = PROGRESS_MINUTES, fetchImpl = localFetch,
+  clock = { now: Date.now, setInterval, clearInterval }, signal: stop = null }) {
   const base = localEndpoint(endpoint);
   let tokenizeUrl;
 
@@ -251,10 +354,22 @@ export function modelClient({ endpoint, name, temperature = DEFAULT_TEMPERATURE,
     }
   }
 
-  async function send({ system, user, schema, schemaName, reasoning, maxTokens }) {
-    const started = Date.now();
+  async function send({ system, user, schema, schemaName, reasoning, maxTokens, onProgress }) {
+    const started = clock.now();
+    const reader = streamReader();
+    let fed = false;
+    let timer = null;
+    if (onProgress) {
+      timer = clock.setInterval(() => {
+        try {
+          onProgress({ ...reader.counts(), elapsedMs: clock.now() - started });
+        } catch {
+          // A report that cannot be written must not stop the call it reports on.
+        }
+      }, progressMinutes * 60000);
+      timer?.unref?.();
+    }
     let reply;
-    let text;
     try {
       reply = await fetchImpl(`${base}/chat/completions`, {
         method: 'POST',
@@ -263,6 +378,10 @@ export function modelClient({ endpoint, name, temperature = DEFAULT_TEMPERATURE,
         headers: { 'content-type': 'application/json' },
         signal: stop ? AbortSignal.any([stop, AbortSignal.timeout(timeoutMinutes * 60000)])
           : AbortSignal.timeout(timeoutMinutes * 60000),
+        onData: (piece) => {
+          fed = true;
+          reader.feed(piece);
+        },
         body: JSON.stringify({
           model: name,
           temperature,
@@ -279,28 +398,32 @@ export function modelClient({ endpoint, name, temperature = DEFAULT_TEMPERATURE,
           },
         }),
       });
-      if (reply.ok) text = await reply.text();
-    } catch {
+      if (reply.ok) {
+        const text = await reply.text();
+        // A fetch that does not hand over the body in pieces still holds it whole.
+        if (!fed) reader.feed(text);
+      }
+    } catch (error) {
       if (stop?.aborted) throw new Cancelled();
-      // The cause can quote the request, so only the code goes on.
-      throw new ModelError('network', 'the connection to the model endpoint failed');
+      // The error's message can quote the request, so only its code goes on.
+      throw Object.assign(new ModelError('network', 'the connection to the model endpoint failed'),
+        { causeCode: causeOf(error) });
+    } finally {
+      if (timer) clock.clearInterval(timer);
     }
     if (!reply.ok) throw new ModelError('http', `model endpoint answered HTTP ${reply.status}`);
-    const parsed = readStream(text);
+    const parsed = reader.finish();
     if (!parsed) {
       // A server that gives up on a request, such as at its own time-out, or refuses
       // it, can end a 2xx reply without its last event. The body can quote the
       // request, so only the code goes on.
       throw Object.assign(new ModelError('no-reply', 'model endpoint ended the reply early'),
-        { usage: { promptTokens: 0, outputTokens: 0, ms: Date.now() - started } });
+        { usage: { promptTokens: 0, outputTokens: 0, ms: clock.now() - started } });
     }
-    const usage = {
-      promptTokens: parsed.usage?.prompt_tokens ?? 0,
-      outputTokens: parsed.usage?.completion_tokens ?? 0,
-      ms: Date.now() - started,
-    };
+    const usage = usageOf(parsed, clock.now() - started);
     if (parsed.finish === 'length') {
-      throw Object.assign(new ModelError('length', 'model output reached max_tokens'), { usage });
+      throw Object.assign(new ModelError('length', 'model output reached max_tokens'),
+        { usage, reasoningTail: parsed.thinking });
     }
     try {
       return { value: JSON.parse(parsed.content), usage };
