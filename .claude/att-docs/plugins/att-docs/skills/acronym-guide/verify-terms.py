@@ -18,8 +18,12 @@ The expansion appearing somewhere else in the file is not enough. A file can
 say "Adoptive Parent" about one code and use a different code two pages later,
 and a dictionary built on that reads as sourced when it is not.
 
-A row whose fourth column is not a path is listed separately. Those are the
-rows a person answered for, and they are read rather than checked.
+A row whose fourth column looks like a path (it ends in .md, or holds a slash
+and no whitespace) fails when that file is missing, so a deleted or renamed
+document cannot leave its rows citing nothing. A row whose fourth column is
+prose, a URL, or a file this check cannot read (a JSON dump) is listed
+separately. Those are the rows a person answered for, and they are read
+rather than checked.
 
 Exit 0 when every path-sourced row checks out, 1 otherwise, 64 when there is
 no config.
@@ -57,6 +61,12 @@ def states(haystack, acronym, expansion):
     return re.search(near, haystack) is not None
 
 
+def looks_like_path(source):
+    if source.endswith(".md"):
+        return True
+    return "/" in source and "://" not in source and not any(c.isspace() for c in source)
+
+
 def main():
     failures = 0
     answered = []
@@ -69,7 +79,11 @@ def main():
         acronym, expansion = parts[0].strip(), parts[1].strip()
         source = parts[3].strip() if len(parts) > 3 else ""
         path = os.path.join(ROOT, source)
-        if not source.endswith(".md") or not os.path.exists(path):
+        if looks_like_path(source) and not os.path.exists(path):
+            print(f"{acronym}: {source} does not exist")
+            failures += 1
+            continue
+        if not source.endswith(".md"):
             answered.append(f"{acronym} = {expansion} ({source or 'no source'})")
             continue
         with open(path, encoding="utf-8", errors="replace") as handle:

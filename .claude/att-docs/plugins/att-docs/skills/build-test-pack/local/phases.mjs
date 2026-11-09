@@ -147,13 +147,15 @@ export async function readWindow(ctx, phase) {
  * thinking off (a thinking call cut off at its output budget gets the smaller `retryOutput`,
  * and a second cut is `runaway`), and logs only counts and timings. Each call that
  * reaches the model, failed ones too, also gets its prompt, reply and timings written
- * to work/calls.
+ * to work/calls. A `question` rides last, after every input, so calls that share their
+ * inputs and differ only in what they ask also share the start of their prompt.
  */
-export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task }) {
+export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task, question }) {
   const system = [SYSTEM, ...refs.filter(Boolean).map((text, i) => section(`Reference ${i + 1}`, text))]
     .join('\n');
   const user = [section('Task', task), ...inputs.filter(([, text]) => !blank(text))
-    .map(([label, text]) => section(label, text))].join('\n');
+    .map(([label, text]) => section(label, text)),
+  ...(question ? [section('Question', question)] : [])].join('\n');
   await readWindow(ctx, phase);
   const promptTokens = await ctx.model.countTokens(`${system}\n${user}`);
   const firstCap = outputCap(ctx, phase, reasoning, step);
@@ -3136,7 +3138,7 @@ function draftPack(ctx, pack) {
     ...Object.fromEntries(Object.entries(current ?? {}).filter(([, value]) => !blank(value))),
     ...over });
   draft.seniorReview = standIn(draft.seniorReview, S.seniorReviewSchema.properties.seniorReview);
-  draft.testerNotes = standIn(draft.testerNotes, S.seniorReviewSchema.properties.testerNotes);
+  draft.testerNotes = standIn(draft.testerNotes, S.testerNotesSchema.properties.testerNotes);
   const rated = ctx.builder.CONFIDENCE_LEVELS.includes(draft.confidence?.overall);
   draft.confidence = standIn(draft.confidence,
     { properties: Object.fromEntries(['overall', ...CONFIDENCE_FIELDS.map(([field]) => field)].map((key) => [key, 0])) },
@@ -3778,42 +3780,66 @@ export async function reRateConfidence(ctx, pack) {
   return rateOverall(ctx, pack, confidenceExtra(ctx, pack), list(ctx.confidenceSteps));
 }
 
+/** The two parts of the senior review, each asked in a call of its own. */
+const SENIOR_PARTS = [
+  { step: 'senior-review', sheet: 'Senior Tester Review', key: 'seniorReview', schema: S.seniorReviewSchema },
+  { step: 'senior-notes', sheet: 'Tester Notes', key: 'testerNotes', schema: S.testerNotesSchema },
+];
+
 /**
- * The senior review questions and the tester notes, written before the confidence
- * assessment, which reads them, with the checklist's issues in view. An answer with a field that repeats another
- * or cites a card or rule the workbook lacks is asked for once more with what was wrong.
+ * One part of the senior review. The fields of the parts before it ride in the input, so the
+ * part does not restate them. An answer with a field that repeats another or cites a card or
+ * rule the workbook lacks is asked for once more with what was wrong; the accepted fields join
+ * `earlier` only when the whole part is accepted.
  */
-export async function phase9SeniorReview(ctx, pack) {
-  const input = reviewInputs(ctx, pack, [['Checklist issues', issueText(ctx)],
-    impactsInput(ctx, pack, true, [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')])]);
+async function askSeniorPart(ctx, pack, part, shared, earlier) {
+  const input = reviewInputs(ctx, pack, [...shared, ...(earlier.length
+    ? [['Fields already written', asLines(earlier.map((row) => `- ${row.name}: ${row.text}`))]] : [])]);
+  const fieldNames = Object.keys(part.schema.properties[part.key].properties).join(', ');
   let refusal = '';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const answer = await ask(ctx, {
-      phase: 'phase9', step: 'senior', reasoning: true, ...input,
-      task: `Answer the senior review questions for this pack and write the tester notes. Each`
-        + ` field says something of its own and names only cards and rules in the workbook.${refusal}`,
-      schema: S.seniorReviewSchema,
+      phase: 'phase9', step: part.step, reasoning: true, ...input,
+      task: 'Answer the senior review questions for this pack and write the tester notes. Each'
+        + ' field says something of its own and names only cards and rules in the workbook.',
+      question: `Write the ${part.sheet} fields: ${fieldNames}.${refusal}`,
+      schema: part.schema,
     });
-    const earlier = [];
-    const fields = [...Object.entries(answer.seniorReview).map(([f, t]) => [`Senior Tester Review ${f}`, t]),
-      ...Object.entries(answer.testerNotes).map(([f, t]) => [`Tester Notes ${f}`, t])];
+    const accepted = [...earlier];
     const problems = [];
-    for (const [name, text] of fields) {
-      const problem = fieldProblem(pack, Array.isArray(text) ? text.join(' ') : text, earlier);
+    for (const [field, text] of Object.entries(answer[part.key])) {
+      const name = `${part.sheet} ${field}`;
+      const flat = Array.isArray(text) ? text.join(' ') : text;
+      const problem = fieldProblem(pack, flat, accepted);
       if (problem) problems.push(`${name}: ${problem}`);
-      else earlier.push({ name, text: String(Array.isArray(text) ? text.join(' ') : text).trim() });
+      else accepted.push({ name, text: String(flat).trim() });
     }
     if (!problems.length) {
-      pack.seniorReview = answer.seniorReview;
-      pack.testerNotes = answer.testerNotes;
-      if (ctx.reuse.length) {
-        pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
-      }
-      return {};
+      earlier.push(...accepted.slice(earlier.length));
+      return answer[part.key];
     }
     refusal = ` Your last answer was refused: ${problems.join('; ')}.`;
   }
   throw new GateError('phase9', 'review-field-unsupported');
+}
+
+/**
+ * The senior review questions and the tester notes, written before the confidence
+ * assessment, which reads them, with the checklist's issues in view. Each part is a call
+ * of its own, so no one call thinks through both; the pack is written once both are accepted.
+ */
+export async function phase9SeniorReview(ctx, pack) {
+  const shared = [['Checklist issues', issueText(ctx)],
+    impactsInput(ctx, pack, true, [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')])];
+  const earlier = [];
+  const written = {};
+  for (const part of SENIOR_PARTS) written[part.key] = await askSeniorPart(ctx, pack, part, shared, earlier);
+  pack.seniorReview = written.seniorReview;
+  pack.testerNotes = written.testerNotes;
+  if (ctx.reuse.length) {
+    pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
+  }
+  return {};
 }
 
 /**
@@ -3838,31 +3864,39 @@ export function mergeChecks(answers, names = S.REVALIDATION_CHECKS) {
 
 /**
  * One walk of the Revalidation checks named in `names` (all seven by default) over the
- * finished workbook, in parts when it is long.
+ * finished workbook, in parts when it is long. Each group of checks that read the same
+ * sheets is a call of its own under its own reasoning budget (`revalidation-<group>`, and
+ * `-again` after the repair round). Every call of a part carries the same prompt up to its
+ * question, which names the group, so the server reads the workbook once for the groups.
  */
-async function walkChecks(ctx, pack, step, names = S.REVALIDATION_CHECKS) {
+async function walkChecks(ctx, pack, again = false, names = S.REVALIDATION_CHECKS) {
   const refs = [...ctx.ref.core, ctx.ref.docs.revalidation];
   const extra = [['Fixes the review attempted (judge the workbook, not the attempt)',
     list(ctx.appliedFixes).join('\n')],
   ['Checklist findings still open after the last check', openText(ctx) || 'None.']];
   const views = reviewViews(ctx, pack, refs, extra, { review: true });
+  const groups = S.REVALIDATION_GROUPS
+    .map((group) => ({ ...group, checks: group.checks.filter((check) => names.includes(check)) }))
+    .filter((group) => group.checks.length);
   const answers = [];
   for (const view of views) {
-    answers.push(await ask(ctx, {
-      phase: 'phase9', step, reasoning: true, refs,
-      task: 'Revalidate the pack after the review\'s fixes. Give a verdict for '
-        + (names.length === S.REVALIDATION_CHECKS.length ? 'each of the seven Revalidation checks'
-          : `only the Revalidation check${names.length === 1 ? '' : 's'} in the schema`)
-        + ', with the reason first. For a check that fails, give the fix: the'
-        + ' card, rule or sheet to change and what to change it to; leave it blank when no change'
-        + ' to the pack can settle it.'
-        + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
-          + ` shows, answer "${S.NOT_SHOWN}" for a check it does not show, and judge a rule's`
-          + ' coverage from the cards the rules index lists for it.' : ''),
-      inputs: [['Change description', ctx.description], ...extra, ...view],
-      schema: S.revalidationSchema({ checks: names, verdicts: views.length > 1 ? ['pass', 'fail', S.NOT_SHOWN]
-        : ['pass', 'fail'] }),
-    }));
+    for (const group of groups) {
+      answers.push(await ask(ctx, {
+        phase: 'phase9', step: `revalidation-${group.key}${again ? '-again' : ''}`, reasoning: true, refs,
+        task: 'Revalidate the pack after the review\'s fixes. Give a verdict for each Revalidation'
+          + ' check the question names, with the reason first. For a check that fails, give the fix: the'
+          + ' card, rule or sheet to change and what to change it to; leave it blank when no change'
+          + ' to the pack can settle it.'
+          + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
+            + ` shows, answer "${S.NOT_SHOWN}" for a check it does not show, and judge a rule's`
+            + ' coverage from the cards the rules index lists for it.' : ''),
+        inputs: [['Change description', ctx.description], ...extra, ...view],
+        question: `Judge ${group.checks.length === 1 ? 'this Revalidation check' : 'these Revalidation checks'},`
+          + ` which read mainly ${group.reads}:\n${group.checks.map((check) => `- ${check}`).join('\n')}`,
+        schema: S.revalidationSchema({ checks: group.checks, verdicts: views.length > 1
+          ? ['pass', 'fail', S.NOT_SHOWN] : ['pass', 'fail'] }),
+      }));
+    }
   }
   return mergeChecks(answers, names);
 }
@@ -3876,7 +3910,7 @@ async function walkChecks(ctx, pack, step, names = S.REVALIDATION_CHECKS) {
  * validation sheet as FAIL.
  */
 export async function revalidate(ctx, pack) {
-  let result = await walkChecks(ctx, pack, 'revalidation');
+  let result = await walkChecks(ctx, pack);
   ctx.revalidationChecks = result.checks;
   let repaired = false;
   if (!result.passed) {
@@ -3887,7 +3921,7 @@ export async function revalidate(ctx, pack) {
       try {
         await fixRound(ctx, pack, findings, 'revalidation', []);
         repaired = true;
-        result = await walkChecks(ctx, pack, 'revalidation-again');
+        result = await walkChecks(ctx, pack, true);
         ctx.revalidationChecks = result.checks;
         // A check whose repair built no card carries that reason after its finding.
         result.remaining = result.remaining.map((line) => {
@@ -3933,7 +3967,7 @@ export async function walkSelected(ctx, pack, names = S.REVALIDATION_CHECKS) {
   if (names.length < known.length && !ctx.revalidationChecks && pack.revalidation) {
     throw new StepInputError('this state holds no verdicts for the other checks; walk all seven first');
   }
-  const result = await walkChecks(ctx, pack, 'revalidation', names);
+  const result = await walkChecks(ctx, pack, false, names);
   const checks = known.flatMap((check) => result.checks.find((row) => row.check === check)
     ?? list(ctx.revalidationChecks).filter((row) => row.check === check));
   ctx.revalidationChecks = checks;

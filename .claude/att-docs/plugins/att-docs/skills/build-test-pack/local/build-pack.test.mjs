@@ -1282,12 +1282,24 @@ test('a built-in step cap applies, with the index of a repeated step left off', 
   await impact.run();
   const rules = await askOver(() => 'stop', { phase: 'phase1', step: 'rules-3' });
   await rules.run();
-  const again = await askOver(() => 'stop', { phase: 'phase9', step: 'revalidation-again' });
+  const again = await askOver(() => 'stop', { phase: 'phase9', step: 'revalidation-traceability-again' });
   await again.run();
   const unlisted = await askOver(() => 'stop', { phase: 'phase4', step: 'risk-1' });
   await unlisted.run();
   assert.deepEqual([impact, rules, again, unlisted].map((over) => over.bodies[0].max_tokens),
     [8192, 20480, 12288, 40960]);
+});
+
+test('each group of the revalidation walk and each part of the senior review has a step cap of its own', async () => {
+  const steps = ['revalidation-traceability', 'revalidation-resolution', 'revalidation-readiness',
+    'senior-review', 'senior-notes'];
+  const asked = [];
+  for (const step of steps) {
+    const over = await askOver(() => 'stop', { phase: 'phase9', step });
+    await over.run();
+    asked.push(over.bodies[0].max_tokens);
+  }
+  assert.deepEqual(asked, [12288, 8192, 8192, 12288, 12288]);
 });
 
 test('a step cap from the config beats a phase cap, a phase cap only lowers the built-in step cap, and reasoningOutput caps all', async () => {
@@ -1329,6 +1341,11 @@ test('config refuses a bad reasoningOutputByStep', () => {
     ...model } });
   assert.doesNotThrow(bad({ reasoningOutputByStep: { 'phase4.impact': 4096 } }));
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.risk': 4096 } }), /not a reasoning step/);
+  assert.doesNotThrow(bad({ reasoningOutputByStep: { 'phase9.revalidation-resolution': 4096,
+    'phase9.senior-notes': 4096 } }));
+  // Only each group and each part has a budget, not the whole walk or the whole senior review.
+  assert.throws(bad({ reasoningOutputByStep: { 'phase9.revalidation': 4096 } }), /not a reasoning step/);
+  assert.throws(bad({ reasoningOutputByStep: { 'phase9.senior': 4096 } }), /not a reasoning step/);
   // The understanding call does not think, so a budget for it would do nothing.
   assert.throws(bad({ reasoningOutputByStep: { 'phase1.understanding': 4096 } }), /not a reasoning step/);
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.impact': 50000 } }), /1024 to model.reasoningOutput/);
@@ -1597,17 +1614,17 @@ test('queue status and the report name a thinking step cut at its output budget 
 });
 
 test('a run that never asks a step neither breaks nor extends its streak of cuts, and a cut with thinking off is none', () => {
-  const senior = { asked: ['phase9.senior'], cut: [{ step: 'phase9.senior', budget: 12288 }] };
+  const senior = { asked: ['phase9.senior-notes'], cut: [{ step: 'phase9.senior-notes', budget: 12288 }] };
   const resumedPast = { asked: ['phase1.rules'], cut: [] };
-  assert.deepEqual(repeatedCuts([senior, resumedPast, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 2 }]);
+  assert.deepEqual(repeatedCuts([senior, resumedPast, senior]), [{ step: 'phase9.senior-notes', budget: 12288, runs: 2 }]);
   assert.deepEqual(repeatedCuts([senior, resumedPast]), []);
-  assert.deepEqual(repeatedCuts([senior, senior, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 3 }]);
+  assert.deepEqual(repeatedCuts([senior, senior, senior]), [{ step: 'phase9.senior-notes', budget: 12288, runs: 3 }]);
   const plain = { phase: 'phase9', step: 'checklist-1', event: 'call-fail', attempt: 1, reasoning: false,
     maxTokens: 8192, reason: 'length' };
-  const thinking = { phase: 'phase9', step: 'revalidation-again', event: 'retry', attempt: 1, reasoning: true,
-    maxTokens: 12288, reason: 'length' };
-  assert.deepEqual(runCuts([plain, thinking]),
-    { asked: ['phase9.revalidation'], cut: [{ step: 'phase9.revalidation', budget: 12288 }] });
+  const thinking = { phase: 'phase9', step: 'revalidation-traceability-again', event: 'retry', attempt: 1,
+    reasoning: true, maxTokens: 12288, reason: 'length' };
+  assert.deepEqual(runCuts([plain, thinking]), { asked: ['phase9.revalidation-traceability'],
+    cut: [{ step: 'phase9.revalidation-traceability', budget: 12288 }] });
 });
 
 test('a run releases only its own lock', async () => {
@@ -2739,7 +2756,7 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
     await t.test(job.suite ? 'suite' : 'issue', async () => {
       const config = fixtureConfig();
       const pick = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
-      const failing = fakeModel({ ...pick, phase9_senior: () => {
+      const failing = fakeModel({ ...pick, phase9_senior_review: () => {
         throw new ModelError('no-reply', 'model endpoint ended the reply early');
       } });
       const first = await runJob(config, job, { model: failing, echo: false });
@@ -2752,8 +2769,8 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
       assert.equal(result.ok, true, JSON.stringify(result));
       // Only the checklist passed before the failure, so only the calls after them run again.
       const stepNames = [...new Set(model.calls.map((c) => c.schemaName))];
-      assert.equal(stepNames[0], 'phase9_senior');
-      assert.deepEqual(stepNames.slice(-2), ['phase9_revalidation', 'phase10_notes']);
+      assert.equal(stepNames[0], 'phase9_senior_review');
+      assert.deepEqual(stepNames.slice(-2), ['phase9_revalidation_readiness', 'phase10_notes']);
       assert.ok(stepNames.includes('phase9_confidence_overall'));
       const lines = statusLines(result.outDir);
       assert.ok(lines.some((l) => l.event === 'resume' && l.phase === 'phase9-senior'
@@ -4250,8 +4267,9 @@ const plantedChecklist = () => {
 const correctingRepair = (value) => ({ ...value, coverage: [], limitations: [],
   cards: value.cards.map((card) => ({ ...card,
     steps: card.steps.map((step, i) => (i ? step : { ...step, description: 'Corrected step' })) })) });
-const failCheck = (value, check, why, fix = '') => ({ ...value,
-  checks: { ...value.checks, [check]: { why, verdict: 'fail', fix } } });
+// A revalidation call holds only the checks of its group, so a check that is not in the reply is left alone.
+const failCheck = (value, check, why, fix = '') => (check in value.checks ? { ...value,
+  checks: { ...value.checks, [check]: { why, verdict: 'fail', fix } } } : value);
 const failsRevalidation = { phase9_revalidation: (value) =>
   failCheck(value, 'All issues resolved', 'Step 1 still reads wrong') };
 
@@ -4294,7 +4312,9 @@ test('the checklist calls run with thinking off; confidence, senior review and r
     assert.equal(call.reasoning, false);
     assert.equal(call.maxTokens, config.model.maxOutput);
   }
-  for (const name of ['phase9_confidence_overall', 'phase9_confidence_steps', 'phase9_senior', 'phase9_revalidation']) {
+  for (const name of ['phase9_confidence_overall', 'phase9_confidence_steps', 'phase9_senior_review',
+    'phase9_senior_notes', 'phase9_revalidation_traceability', 'phase9_revalidation_resolution',
+    'phase9_revalidation_readiness']) {
     const calls = checksFor(model, name);
     assert.ok(calls.length, name);
     assert.ok(calls.every((c) => c.reasoning === true), name);
@@ -4378,7 +4398,7 @@ test('a workbook too long for one review call is read in parts, and a failing pa
   };
   const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
   const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink, phase9_revalidation: (value, calls) =>
-    (calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length === 2
+    (/part 2 of/.test(calls.at(-1).user)
       ? failCheck(value, 'Traceability complete', 'A card lost its rule') : value) });
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
   const parts = checksFor(model, 'phase9_checklist');
@@ -4488,11 +4508,13 @@ test('revalidation reads the review sheets and the validation sheet that the che
 test('revalidation answers one verdict for each Revalidation check, and a failed check is named in what remains', async () => {
   const model = fakeModel({ ...DOCS, ...failsRevalidation });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
-  const [call] = checksFor(model, 'phase9_revalidation');
-  assert.deepEqual(Object.keys(call.schema.properties.checks.properties), [
-    'All issues resolved', 'No regressions introduced', 'Requirement ID references preserved',
-    'Requirements Matrix integrity preserved', 'Traceability complete',
-    'No uncovered Requirement IDs remain unless explicitly documented', 'Test pack is ready for ALM execution']);
+  const calls = checksFor(model, 'phase9_revalidation');
+  const asked = calls.map((call) => Object.keys(call.schema.properties.checks.properties));
+  assert.deepEqual(asked, [
+    ['Requirement ID references preserved', 'Requirements Matrix integrity preserved', 'Traceability complete',
+      'No uncovered Requirement IDs remain unless explicitly documented'],
+    ['All issues resolved', 'No regressions introduced'],
+    ['Test pack is ready for ALM execution']]);
   assert.equal(result.reason, 'gate:revalidation-failed');
   assert.deepEqual(JSON.parse(read(result.packPath)).revalidation.remaining,
     ['All issues resolved: Step 1 still reads wrong']);
@@ -4500,14 +4522,97 @@ test('revalidation answers one verdict for each Revalidation check, and a failed
 
 test('a revalidation check that fails with a fix gets one repair round and one more revalidation', async () => {
   const model = fakeModel({ ...DOCS, phase8_repair: correctingRepair,
-    phase9_revalidation: (value, calls) => (calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length === 1
+    phase9_revalidation: (value, calls) => (!calls.at(-1).schemaName.endsWith('_again')
       ? failCheck(value, 'Traceability complete', `${cardIdIn(calls.at(-1).user)} reads wrong`,
         `Change step 1 of ${cardIdIn(calls.at(-1).user)} to read Corrected step`) : value) });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(checksFor(model, 'phase8_repair_revalidation').length, 1);
-  assert.equal(checksFor(model, 'phase9_revalidation').length, 2);
+  // The fix a group's verdict carried is what the repair round is asked to apply.
+  assert.match(checksFor(model, 'phase8_repair_revalidation')[0].user,
+    /Section: Traceability complete\n {2}Fix: Change step 1 of TC-\S+ to read Corrected step/);
+  assert.deepEqual(checksFor(model, 'phase9_revalidation').map((call) => call.schemaName), [
+    'phase9_revalidation_traceability', 'phase9_revalidation_resolution', 'phase9_revalidation_readiness',
+    'phase9_revalidation_traceability_again', 'phase9_revalidation_resolution_again',
+    'phase9_revalidation_readiness_again']);
   assert.equal(JSON.parse(read(result.packPath)).revalidation, undefined);
+});
+
+test('the revalidation calls of one workbook share their prompt up to a last question that names the group, and each thinks under its own limit', async () => {
+  const config = fixtureConfig();
+  const model = fakeModel(DOCS);
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const calls = checksFor(model, 'phase9_revalidation');
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((call) => call.maxTokens), [12288, 8192, 8192]);
+  const split = (call) => call.user.split('\n## Question\n');
+  const [shared] = split(calls[0]);
+  for (const call of calls) {
+    assert.equal(call.system, calls[0].system);
+    assert.equal(split(call).length, 2);
+    assert.equal(split(call)[0], shared);
+    assert.ok(split(call)[1].trim().split('\n').length >= 2, 'the question is the last section');
+  }
+  assert.match(split(calls[0])[1], /- Traceability complete/);
+  assert.match(split(calls[1])[1], /- All issues resolved\n- No regressions introduced/);
+  assert.match(split(calls[2])[1], /- Test pack is ready for ALM execution/);
+  assert.doesNotMatch(shared, /Traceability complete/);
+});
+
+test('a workbook read in parts is walked part by part, every group of a part before the next part', async () => {
+  const config = fixtureConfig();
+  const shrink = (value) => {
+    Object.assign(config.model, { context: 7700, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
+    return value;
+  };
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
+  const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink });
+  await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const first = checksFor(model, 'phase9_revalidation').slice(0, 6);
+  assert.deepEqual(first.map((call) => /part (\d+) of/.exec(call.user)[1]), ['1', '1', '1', '2', '2', '2']);
+  assert.deepEqual(first.slice(0, 3).map((call) => call.schemaName), [
+    'phase9_revalidation_traceability', 'phase9_revalidation_resolution', 'phase9_revalidation_readiness']);
+  // A part the check is not shown in answers with the verdict that says so.
+  assert.ok(first.every((call) => call.schema.properties.checks.properties[Object.keys(
+    call.schema.properties.checks.properties)[0]].properties.verdict.enum.includes('not shown in this part')));
+});
+
+test('a senior review is asked in two calls, the notes seeing the review fields already written', async () => {
+  const model = fakeModel(DOCS);
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [review, notes, ...more] = checksFor(model, 'phase9_senior');
+  assert.deepEqual(more, []);
+  assert.deepEqual([review.schemaName, notes.schemaName], ['phase9_senior_review', 'phase9_senior_notes']);
+  assert.deepEqual([review.maxTokens, notes.maxTokens], [12288, 12288]);
+  assert.deepEqual(Object.keys(review.schema.properties), ['seniorReview']);
+  assert.deepEqual(Object.keys(notes.schema.properties), ['testerNotes']);
+  assert.doesNotMatch(review.user, /Fields already written/);
+  assert.match(notes.user, /Fields already written[\s\S]*- Senior Tester Review missed: missed value/);
+  // The question comes last and names the part's fields.
+  assert.match(review.user, /## Question\n\nWrite the Senior Tester Review fields: missed, businessBehavior[^\n]*\n$/);
+  assert.match(notes.user, /## Question\n\nWrite the Tester Notes fields: testData, execution[^\n]*\n$/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.seniorReview.missed, 'missed value');
+  assert.equal(pack.testerNotes.testData, 'testData value');
+});
+
+test('a tester note that repeats a review field is asked for again, and a second refusal fails the senior step whole', async () => {
+  const twin = 'The renewal flow was exercised end to end and nothing was missed.';
+  const model = fakeModel({ ...DOCS,
+    phase9_senior_review: (value) => ({ ...value, seniorReview: { ...value.seniorReview, missed: twin } }),
+    phase9_senior_notes: (value) => ({ ...value, testerNotes: { ...value.testerNotes, testData: twin } }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:review-field-unsupported');
+  assert.equal(checksFor(model, 'phase9_senior_review').length, 1);
+  const notes = checksFor(model, 'phase9_senior_notes');
+  assert.equal(notes.length, 2);
+  assert.match(notes[1].user, /Your last answer was refused: Tester Notes testData: it repeats the text of Senior Tester Review missed/);
+  // The part that passed is not kept on its own: the step fails whole and a resume asks both again.
+  assert.equal(result.phase, 'phase9-senior');
+  assert.ok(!statusLines(result.outDir).some((l) => l.event === 'pass' && l.phase === 'phase9-senior'));
 });
 
 /** A builder command that also refuses a confidence its assumptions do not support. */
@@ -4690,7 +4795,7 @@ test('each Confidence Assessment field is written on its own after the senior re
   assert.equal(result.ok, true, JSON.stringify(result));
   const names = [...new Set(model.calls.map((call) => call.schemaName))]
     .filter((name) => /^phase9_(confidence|senior)/.test(name));
-  assert.deepEqual(names, ['phase9_senior', 'phase9_confidence_remainingRisks',
+  assert.deepEqual(names, ['phase9_senior_review', 'phase9_senior_notes', 'phase9_confidence_remainingRisks',
     'phase9_confidence_assumptions', 'phase9_confidence_regressionScope',
     'phase9_confidence_breakItScope', 'phase9_confidence_manualReview',
     'phase9_confidence_steps', 'phase9_confidence_overall']);
@@ -4701,8 +4806,9 @@ test('each Confidence Assessment field is written on its own after the senior re
   assert.match(second.user, /Cards and the rules they cite[\s\S]*TC-MOD-501-001/);
   assert.match(second.user, /\[Test Cards Markdown row \d+\]/);
   // The senior review no longer sees a confidence assessment; the assessment sees the review.
-  const senior = model.calls.find((call) => call.schemaName === 'phase9_senior');
-  assert.doesNotMatch(senior.user, /Confidence assessment/);
+  for (const part of ['phase9_senior_review', 'phase9_senior_notes']) {
+    assert.doesNotMatch(model.calls.find((call) => call.schemaName === part).user, /Confidence assessment/);
+  }
   assert.match(second.user, /Senior review/);
   const pack = JSON.parse(read(result.packPath));
   assert.match(pack.confidence.manualReview, /^The manualReview is covered by /);
@@ -4864,14 +4970,14 @@ test('a job saved at the confidence step before the senior review moved reruns b
 });
 
 test('a senior review answer with a repeated or unsupported field is asked for again', async () => {
-  const model = fakeModel({ ...DOCS, phase9_senior: (value, calls) => {
-    const tries = calls.filter((call) => call.schemaName === 'phase9_senior').length;
+  const model = fakeModel({ ...DOCS, phase9_senior_review: (value, calls) => {
+    const tries = calls.filter((call) => call.schemaName === 'phase9_senior_review').length;
     return tries === 1
       ? { ...value, seniorReview: { ...value.seniorReview, missed: 'See BR-LIB.UC01-099.' } } : value;
   } });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, true, JSON.stringify(result));
-  const asks = model.calls.filter((call) => call.schemaName === 'phase9_senior');
+  const asks = model.calls.filter((call) => call.schemaName === 'phase9_senior_review');
   assert.equal(asks.length, 2);
   assert.match(asks[1].user, /Senior Tester Review missed: it cites BR-LIB\.UC01-099/);
   assert.equal(JSON.parse(read(result.packPath)).seniorReview.missed, 'missed value');
@@ -6558,7 +6664,8 @@ test('the Phase 4 impact analysis is kept on the pack and given to the Phase 6 a
   assert.deepEqual(pack.impacts.upstream, ['Fines batch feeds the due date']);
   assert.deepEqual(pack.impacts.data, []);
   const section = /Impact analysis by area\s+Windows, pages and tabs: Renewal tab/;
-  for (const name of ['phase6_scenarios_d1', 'phase6_cards_d1_1', 'phase9_checklist', 'phase9_senior']) {
+  for (const name of ['phase6_scenarios_d1', 'phase6_cards_d1_1', 'phase9_checklist', 'phase9_senior_review',
+    'phase9_senior_notes']) {
     const call = callOf(run, name);
     assert.match(call.user, section, name);
     assert.match(call.user, /Upstream: Fines batch feeds the due date/, name);

@@ -206,11 +206,15 @@ export const checklistSchema = ({ statuses }) => obj({
   assumptions: listOf(assumptionSchema),
 });
 
+// The senior review is asked in two parts, each a call of its own: the review questions and the
+// tester notes. Each part's answer holds its own key.
 export const seniorReviewSchema = obj({
   seniorReview: obj({
     missed: str, businessBehavior: str, upstreamDownstream: str, obviousFirst: str,
     qualityDerived: str,
   }),
+});
+export const testerNotesSchema = obj({
   testerNotes: obj({
     testData: str, execution: str, regressionTargets: str, breakIt: str, screenshots: str,
     sqlValidation: str, knownRisks: str, cautions: str,
@@ -246,6 +250,16 @@ export const REVALIDATION_CHECKS = ['All issues resolved', 'No regressions intro
   'Traceability complete',
   'No uncovered Requirement IDs remain unless explicitly documented',
   'Test pack is ready for ALM execution'];
+// The checks grouped by the sheets they read; the revalidation walk makes one call per group.
+export const REVALIDATION_GROUPS = [
+  { key: 'traceability', reads: 'the rules index and the matrices',
+    checks: ['Requirement ID references preserved', 'Requirements Matrix integrity preserved',
+      'Traceability complete', 'No uncovered Requirement IDs remain unless explicitly documented'] },
+  { key: 'resolution', reads: 'the open findings, the fixes applied and the cards',
+    checks: ['All issues resolved', 'No regressions introduced'] },
+  { key: 'readiness', reads: 'the whole workbook',
+    checks: ['Test pack is ready for ALM execution'] },
+];
 // The verdict for a check the part of the workbook in view does not show.
 export const NOT_SHOWN = 'not shown in this part';
 

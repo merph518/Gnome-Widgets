@@ -316,9 +316,9 @@ phases left. Without `--resume` a job starts over from intake.
 
 Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
 (issues, coverage rows, assumptions, the fix rounds), `phase9-senior` (the senior review
-and tester notes), `phase9-confidence` (each field of the assessment, one call per field,
+and the tester notes, a call for each), `phase9-confidence` (each field of the assessment, one call per field,
 the assessment steps, and the overall level last), and
-`phase9-revalidate` (the rebuild, the revalidation and its one repair round, and a new
+`phase9-revalidate` (the rebuild, the revalidation in a call for each group of checks that read the same sheets, its one repair round, and a new
 rating when items stay open). The checklist calls, the
 first read and each read after a fix round, run with thinking off and an output
 budget of `model.maxOutput`. The five single-string confidence fields run the same way,
@@ -364,8 +364,11 @@ off at `model.maxOutput`.
 
 Each thinking step also has an output budget of its own, so one step cannot run for an hour.
 The built-in budgets are `phase1.rules` and `phase3.scope` 20,480, `phase5.objectives`,
-`phase9.senior`, `phase9.confidence-steps` and `phase9.revalidation` 12,288, `phase4.impact`
-and `phase9.confidence-overall` 8,192. A step with an index or a
+`phase9.senior-review`, `phase9.senior-notes`, `phase9.confidence-steps` and
+`phase9.revalidation-traceability` 12,288, `phase4.impact`,
+`phase9.confidence-overall`, `phase9.revalidation-resolution` and
+`phase9.revalidation-readiness` 8,192. The senior review and the revalidation walk make one
+call per part or group, each under its own budget. A step with an index or a
 repeat, such as `rules-3`, uses its name without it. `model.reasoningOutputByStep` changes
 them, for example `{ "phase4.impact": 4096 }`; each value is a whole number from 1024 to
 `model.reasoningOutput`, and its keys are the steps listed here. A call takes the first
@@ -378,7 +381,7 @@ A larger budget does not help: the cut call's thinking and answer are lost, and 
 with thinking off answers anyway, so the thinking attempt adds its run time and nothing to
 the pack. Phase 1's understanding call runs with thinking off by this rule: its answer is
 about 540 tokens, and with thinking on it spends its whole budget thinking and never reaches
-the answer. A step with one recorded cut, such as `phase9.senior`, keeps thinking and is
+the answer. A step with one recorded cut, such as `phase9.senior-notes`, keeps thinking and is
 checked again on the next `repeated-cut` line or report.
 
 `model.reasoningOutputByPhase` lowers the output budget for single phases, for
@@ -536,7 +539,7 @@ stopped job ended with (and, for a gate stop, the count and numbers of the docum
 it names), the time each finished phase took, the count of `retry`
 and `call-fail` lines by reason, and a `cut` line for every `length` or
 `runaway` hit with its phase and step. Last comes a `repeated-cut` line, such as
-`repeated-cut step=phase9.senior budget=12288 runs=2`, for each thinking step cut at its
+`repeated-cut step=phase9.senior-notes budget=12288 runs=2`, for each thinking step cut at its
 output budget on two or more of the job's queue runs in a row. Without `--job` it lists every row in
 the queue with its status, phase, reason code and last update, so a job that
 stopped or can resume shows even when its ID is not remembered:
@@ -855,7 +858,7 @@ queue row and workbook are only read.
 | `draft` | The Draft workbook: the builder command on the pack, writing it to `work/review` | no |
 | `build` | The Phase 8 build on the pack in memory, with no repair and no Draft workbook (`draft` writes that), with the review sheets left out of the failures until the confidence assessment | no |
 | `checklist` | The checklist reads and the fix rounds | yes |
-| `walk [--check <names>]` | One revalidation walk, or the named checks only, comma-separated, each an exact name or the start of one | yes |
+| `walk [--check <names>]` | One revalidation walk, a call for each group of checks that read the same sheets, or the named checks only, comma-separated, each an exact name or the start of one | yes |
 | `repair --finding <n>` | One repair round for finding `<n>` of the last walk, counted from 0 as the walk prints them | yes |
 | `confidence [--field <name>]` | One confidence field (`coverage`, `remainingRisks`, `assumptions`, `regressionScope`, `breakItScope`, `manualReview`), or the overall level when no field is named | yes |
 

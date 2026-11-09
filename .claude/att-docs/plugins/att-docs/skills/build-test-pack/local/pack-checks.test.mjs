@@ -14,6 +14,7 @@ import { fixTargets, GateError, mergeChecks, phase8, reconcile, REVIEW_SHEETS, t
 import { almStyle } from './compare.mjs';
 import { checkPack, derivedSheets } from './pack-checks.mjs';
 import { readPack, readSheet } from './pack.mjs';
+import { REVALIDATION_CHECKS, REVALIDATION_GROUPS } from './schemas.mjs';
 import { readXlsx } from './xlsx.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -542,4 +543,22 @@ test('mergeChecks fails a check one part fails, passes one a part shows passing,
   const none = mergeChecks([two]);
   assert.equal(none.remaining.length, 7);
   assert.match(none.remaining[0], /Not evidenced/);
+});
+
+test('the groups of checks the revalidation walk asks together hold each check once, and their answers merge to one verdict per check', () => {
+  const grouped = REVALIDATION_GROUPS.flatMap((group) => group.checks);
+  assert.deepEqual([...grouped].sort(), [...REVALIDATION_CHECKS].sort());
+  const answer = (group, fail) => ({ checks: group.checks.map((check) => (check === fail
+    ? { check, verdict: 'fail', why: 'Lost', fix: 'Add a card for it' } : { check, verdict: 'pass', why: '', fix: '' })) });
+  const merged = mergeChecks(REVALIDATION_GROUPS.map((group) => answer(group)));
+  assert.equal(merged.passed, true);
+  assert.deepEqual(merged.checks.map((row) => row.check), REVALIDATION_CHECKS);
+  // One group's failed check fails the pack and keeps its fix for the repair round.
+  const failed = mergeChecks(REVALIDATION_GROUPS.map((group) => answer(group, 'Traceability complete')));
+  assert.equal(failed.passed, false);
+  assert.deepEqual(failed.checks.find((row) => row.check === 'Traceability complete'),
+    { check: 'Traceability complete', verdict: 'fail', why: 'Lost', fix: 'Add a card for it' });
+  assert.deepEqual(failed.remaining, ['Traceability complete: Lost']);
+  // A group left out of the walk leaves its checks unevidenced.
+  assert.equal(mergeChecks(REVALIDATION_GROUPS.slice(1).map((group) => answer(group))).remaining.length, 4);
 });
