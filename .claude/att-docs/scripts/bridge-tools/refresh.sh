@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Rewrites bridge-tools.json from the tool list in a Code Conductor checkout.
 #
-#   bash scripts/bridge-tools/refresh.sh [checkout] [ref]
+#   bash scripts/bridge-tools/refresh.sh [checkout] [ref] [out]
 #
 # checkout  a Code Conductor repository (default ~/Code/Code-Conductor)
 # ref       the commit to read (default origin/main); fetch first for the latest
+# out       the file to write (default bridge-tools.json beside this script)
 #
 # Baton builds its tool list in baton/voice-bridge-tools.mjs. The script unpacks that
 # folder from the ref into a scratch folder, imports TOOLS, and writes each tool's name and
@@ -15,7 +16,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 checkout="${1:-$HOME/Code/Code-Conductor}"
 ref="${2:-origin/main}"
-out="$here/bridge-tools.json"
+out="${3:-$here/bridge-tools.json}"
 
 command -v node >/dev/null || { echo "node is not installed" >&2; exit 1; }
 sha="$(git -C "$checkout" rev-parse --verify --quiet "$ref^{commit}")" \

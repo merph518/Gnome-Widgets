@@ -807,5 +807,71 @@ check "$([ -s "$R2/.claude/oversee/loops/A.queue.tsv" ] && echo yes || echo no)"
 
 cd "$SANDBOX/repo" || exit 1
 
+# --- runs and resume: park an issue while its runs go, then take it back
+R3="$SANDBOX/repo3"
+mkdir -p "$R3"
+git -C "$R3" init -q
+cd "$R3" || exit 1
+LEDGER3="$R3/.claude/oversee/ledger.tsv"
+echo '[
+ {"number":1,"title":"voice: first","state":"OPEN","labels":[{"name":"ready-for-agent"}]},
+ {"number":2,"title":"voice: second","state":"OPEN","labels":[{"name":"ready-for-agent"}]},
+ {"number":3,"title":"att-docs: third","state":"OPEN","labels":[{"name":"ready-for-agent"}]}
+]' > "$FIXTURES/issues.json"
+echo '[]' > "$FIXTURES/prs.json"
+as A "$LIVE" init > /dev/null
+as A "$LIVE" runs 1 2> /dev/null
+check "$?" 1 "runs refuses an issue that is not being worked"
+as A "$LIVE" resume 1 2> /dev/null
+check "$?" 1 "resume refuses an issue that is not waiting on runs"
+as A "$LIVE" start 1 feat/issue-1-first
+as B "$LIVE" runs 1 2> /dev/null
+check "$?" 1 "runs refuses an issue another session started"
+as A "$LIVE" runs 1
+check "$(tail -n 1 "$LEDGER3" | cut -f2-4)" "1	runs	feat/issue-1-first" \
+  "runs appends a runs row on the same branch"
+check "$(tail -n 1 "$LEDGER3" | cut -f6 | grep -c "session A pid $LIVE")" 1 "the runs row carries the owner tag"
+out=$(as A "$LIVE" next)
+check "$(grep -c '^RUNS	1' <<< "$out")" 1 "next prints a parked issue as RUNS"
+check "$(grep -c '^INFLIGHT' <<< "$out")" 0 "a parked issue is not served as in flight"
+check "$(grep -c '^DEFER	2.*area held by issue 1 waiting on its runs' <<< "$out")" 1 \
+  "a parked issue holds its area"
+check "$(grep -c '^NEXT	3' <<< "$out")" 1 "next serves a different issue while one is parked"
+before=$(wc -l < "$LEDGER3")
+as A "$LIVE" start 1 feat/issue-1-first 2> /dev/null
+check "$?" 1 "start refuses the session's own parked issue"
+check "$(wc -l < "$LEDGER3")" "$before" "and writes no row over the park"
+check "$(as A "$LIVE" blocked | grep -c '^RUNS	1')" 1 "blocked reports a parked issue"
+cp "$FIXTURES/issues.json" "$FIXTURES/issues.full.json"
+jq '[.[] | select(.number != 3 and .number != 2)]' "$FIXTURES/issues.full.json" > "$FIXTURES/issues.json"
+check "$(as A "$LIVE" next | tail -n 1)" "BLOCKED" \
+  "next is BLOCKED, not EMPTY, while a parked issue is the only work left"
+cp "$FIXTURES/issues.full.json" "$FIXTURES/issues.json"
+out=$(as B "$LIVE" next)
+check "$(grep -c '^ELSEWHERE	1' <<< "$out")" 1 "another session sees the parked issue as in flight elsewhere"
+as B "$LIVE" start 1 feat/issue-1-other 2> /dev/null
+check "$?" 1 "a second session cannot start a parked issue held by a live one"
+check "$(as A "$LIVE" status | head -n 1 | grep -c 'on runs 1')" 1 "status counts the issue on runs"
+as A "$LIVE" start 3 feat/issue-3-third
+as A "$LIVE" resume 1 2> /dev/null
+check "$?" 1 "resume refuses while another issue of the session is in flight"
+as A "$LIVE" finish 3 done - "ok"
+as B "$LIVE" resume 1 2> /dev/null
+check "$?" 1 "resume refuses an issue another session parked"
+as A "$LIVE" resume 1
+check "$(tail -n 1 "$LEDGER3" | cut -f2-4)" "1	start	feat/issue-1-first" \
+  "resume appends a start row on the same branch"
+check "$(tail -n 1 "$LEDGER3" | cut -f6 | grep -c 'resumed')" 1 "and says it was resumed"
+check "$(as A "$LIVE" next | first)" "INFLIGHT	1" "a resumed issue is served as in flight again"
+as A "$LIVE" runs 1
+sleep 0 & DEAD3=$!; wait "$DEAD3"
+as C "$DEAD3" start 3 feat/issue-3-third 2> /dev/null
+echo "$(printf '2026-01-01T00:00:00Z\t2\truns\tfeat/issue-2-second\t-\tsession Z pid %s' "$DEAD3")" >> "$LEDGER3"
+check "$(as A "$LIVE" next | first)" "INFLIGHT	2" "an orphaned runs row is offered as an in-flight orphan"
+as A "$LIVE" adopt 2
+check "$(tail -n 1 "$LEDGER3" | cut -f2-3)" "2	start" "adopt claims an orphaned runs row"
+
+cd "$SANDBOX/repo" || exit 1
+
 if ((fails)); then echo "$fails failed"; exit 1; fi
 echo "all passed"

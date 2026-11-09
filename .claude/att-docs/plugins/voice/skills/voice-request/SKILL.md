@@ -78,8 +78,8 @@ A consumer needs the `voice` plugin installed and kept current:
 `claude plugin update voice@att-docs` after a version bump. The skill loads from
 the cached plugin install, which Claude Code refreshes only when the plugin
 version changes, so the cache can lag. Baton's `update_bridge` tool
-fast-forwards a Baton checkout and redirects the hooks, but does not update
-the skill. Do not also copy
+fast-forwards a Baton checkout, which the hook scripts run from, and restarts Baton on it,
+but does not update the skill. Do not also copy
 `voice-request` into the repository's `.claude/skills/`: the session would list
 the skill twice beside the user-scope plugin. A vendored copy under
 `.claude/att-docs/` is not loaded as a skill. The header in the message text
@@ -123,8 +123,8 @@ settings, and never get round the block by running the same call another way.
 ## Asking for a yes
 
 Every read-back the voice chat gives for a two-call Baton action ends with the
-plain words "I need a yes for that." That covers closing a session, creating or
-changing an issue, merging, running a command, and the rest. When the user's earlier instruction
+plain words "I need a yes for that." That covers closing a session, creating,
+editing or closing an issue, merging, running a command, and the rest. When the user's earlier instruction
 already covers the action, such as "stop both and restart them", Baton still needs a fresh yes after the
 read-back. Read it back, end with the same words, and wait. Never call again on
 the earlier instruction. The one exception is a call that came pre-approved with
@@ -134,15 +134,16 @@ the earlier instruction. The one exception is a call that came pre-approved with
 
 When the user's own spoken command ends with "please and thank you", that is
 the yes. For `answer_prompt(preapproved)`, `close_session(preapproved)` and
-`merge_pull_request(preapproved)`, the
+`merge_pull_request(preapproved)`, and for `create_issue`, `reopen_issue`, `create_milestone`,
+`create_label`, `comment_pull_request`, `approve_pull_request` and `set_pull_request_draft`, the
 voice chat passes `preapproved` true on the first call, the tool acts at once,
 and the answer is a receipt to read back to the user. Without the phrase, the
 read-back and the yes work as they always have.
 
 Some actions always get the two-step yes, phrase or not: running a command,
 dropping a held request, stopping a turn, closing a session that is busy,
-waiting on the user, or has background work running, closing an issue,
-replacing an issue's title or body, allowing a permission prompt, and adding an
+waiting on the user, has background work running or is blocked on a ledger, archiving sessions,
+closing an issue, editing an issue's title or body (appended text and section edits included), allowing a permission prompt, and adding an
 allow rule for a blocked call. A call that asks for one of them with the phrase
 is read back and waits for the yes.
 

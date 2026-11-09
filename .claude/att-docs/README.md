@@ -35,14 +35,30 @@ This repository is private and for my own use.
 | `att-docs` | `alm-mirror` | Copy an ALM requirements folder into a database table |
 | `att-docs` | `build-test-pack` | Build a test pack workbook for a change from its documents and rules, on the local model when the repository configures it |
 | `att-docs` | `validate-sir` | Reproduce a suspected defect and write the SIR text for the dev team or the design team |
+| `att-docs` | `manual-validation-walkthrough` | Walk the user through reproducing a validated SIR by hand and record what the check found |
 | `att-docs` | `raise-sir` | File one verified SIR record into ALM without opening the desktop client |
 | `att-docs` | `read-sir` | Read one SIR back out of ALM by number: status, owner, description, comments |
 | `att-docs` | `update-sir` | Change a SIR already in ALM: status, fields, comments, or a Draft's text |
 | `att-docs` | `retest-sir` | Retest a raised SIR against the application and report Retested or Failed Test |
+| `att-docs` | `skip-ledger` | Keep the ledger of every parked test and check that no skip lands or lifts without its row |
 | `general` | `implement` | Take an issue to a reviewed pull request, or run the backlog with `--loop` |
 | `general` | `create-issue` | File an issue under the repository's title convention with an area label and a kind label, and retitle old ones |
 | `general` | `oversee-development` | Work the issues labeled `ready-for-agent` oldest first, or the best next issue of one milestone ranked by dependents, priority and tracker order, skipping any with an open blocker or dependency, one `implement` run at a time, and never merge |
+| `general` | `debug-spec` | Diagnose and fix a failing or flaky spec issue-first, verify it with title-scoped runs, then open a linked pull request |
+| `general` | `manual-spec` | Turn one manual test row into an automated spec that prints each step's evidence as a block ready to paste under the row |
+| `general` | `new-branch` | Start a working branch from a freshly fetched default branch, in a worktree of its own, and check that the base is clean |
+| `general` | `wyatt-regression-issue` | File one full-regression issue per Playwright project of a suite from a saved template, for the run owner on the work side to run locally |
+| `general` | `wyatt-review-phase-1` | Review a junior engineer's pull request and leave mentoring comments with proven fixes, without touching their code |
+| `general` | `sweep-suite` | Run a whole suite spec by spec in a smoke wave and a rolling wave, triage the red runs against a baseline, file the new failures, and write up the result |
+| `general` | `sql-lookup` | Confirm real table and column names in the checked-in schema reference before writing SQL, then run the confirmed read-only query on a runner and read the rows back |
+| `general` | `sql-discovery-learning-log` | Keep one file per investigation that records what is settled and what is still open while test-data discovery or a failing spec is worked across run cycles |
+| `general` | `azdo-build-issue` | Draft an issue from a failed AZDO build with its failed tests, failed tasks, a log excerpt and the build link, and file it or append it to an open issue only when the user chooses |
+| `general` | `azdo-digest` | Read a digest of what needs a look on AZDO: pull requests waiting on you, unanswered review threads, failed builds and changed User Stories, writing nothing and safe to run on a loop |
+| `general` | `azdo-review` | Mirror the review threads of an AZDO pull request onto the paired pull request as comments and send replies back to AZDO, each write only when the user chooses |
+| `general` | `azdo-sync` | Push a branch to an AZDO feature branch or bring an AZDO branch back, approve and complete AZDO pull requests, keep branch and work-item pairs, check pipeline drift and watch a build, only when the user asks |
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
+| `general` | `wyatt-review-phase-2` | Fix every finding on a junior engineer's pull request on a pushed fix branch, one commit per fix, and write a wiki page that teaches what was wrong and why |
+| `general` | `azdo-stories` | Migrate named issues to AZDO User Stories, or named User Stories to issues, and follow a merged pull request through to its paired story, with every write the user's choice |
 | `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
 | `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
 
@@ -155,6 +171,15 @@ The `test-all` check in `.github/workflows/ci.yml` runs this same command on eve
 request and on each push to `main`. `shellcheck` also runs when it is installed, but
 its findings are advisory and never fail the run. The runners need `node`, `python3`,
 `jq` and `bash`.
+
+The same job runs `scripts/bridge-tools/drift.sh`, which compares `bridge-tools.json` with
+Baton's tool list at the main branch of the Code-Conductor repository. It clones that
+branch with a token that can read it, rebuilds the list with `refresh.sh` into a scratch
+file, and prints a warning that names each tool and argument that was added or removed. A
+difference never fails the job: it means `bridge-tools.json` is behind, so refresh it as
+above. A missing token, a failed clone, or a rebuild that fails prints a notice and skips
+the comparison. The script needs `gh`, `git`, `node`, `python3` and `timeout`. To run it
+by hand, use `GH_TOKEN=$(gh auth token) bash scripts/bridge-tools/drift.sh`.
 
 `.github/workflows/pack-compare.yml` is run by hand and compares two staged test packs on a
 desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files.

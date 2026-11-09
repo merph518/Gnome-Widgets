@@ -53,6 +53,16 @@ check "arguments are sorted" '["number","repo"]' "$(field 'd.tools.read_issue')"
 check "a tool with no schema has no arguments" '[]' "$(field 'd.tools.bare')"
 check "an empty schema has no arguments" '[]' "$(field 'd.tools.needs_attention')"
 
+# A third argument names the file to write, and the file beside the script is left alone.
+before="$(cat "$OUT")"
+echo "export const TOOLS = [{ name: 'only' }];" >"$CC/baton/voice-bridge-tools.mjs"
+git -C "$CC" commit -q -am elsewhere
+bash "$SCRIPT" "$CC" HEAD "$SANDBOX/elsewhere.json" >/dev/null 2>&1
+check "a refresh to another file exits 0" 0 $?
+check "the other file is written" '["only"]' "$(node -e 'console.log(JSON.stringify(Object.keys(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).tools)))' "$SANDBOX/elsewhere.json")"
+check "the file beside the script is untouched" "$before" "$(cat "$OUT")"
+git -C "$CC" reset -q --hard HEAD~1
+
 # The ref decides what is read, not the working tree.
 echo "export const TOOLS = [];" >"$CC/baton/voice-bridge-tools.mjs"
 bash "$SCRIPT" "$CC" HEAD >/dev/null 2>&1
