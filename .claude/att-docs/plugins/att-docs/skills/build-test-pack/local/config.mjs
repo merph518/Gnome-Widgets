@@ -33,8 +33,9 @@ export const REASONING_PHASES = ['phase1', 'phase3', 'phase4', 'phase5', 'phase9
  * The output budget of each thinking step, in tokens, keyed `<phase>.<step>`: the most
  * one call may produce, its thinking and its answer together, sent as `max_tokens`. A
  * step with an index or a repeat suffix is keyed without it, so `rules-3` is
- * `phase1.rules`. `model.reasoningOutputByStep` overrides these, and none passes
- * `model.reasoningOutput`. A step not listed here has no budget of its own.
+ * `phase1.rules`. A step that makes one call per part has a budget for each part, such as
+ * `phase9.revalidation-traceability`. `model.reasoningOutputByStep` overrides these, and none
+ * passes `model.reasoningOutput`. A step not listed here has no budget of its own.
  *
  * A thinking step cut at its output budget on two or more recorded runs gets thinking
  * off, which is why `phase1.understanding` is not listed: the cut call's answer is lost,
@@ -45,10 +46,13 @@ export const REASONING_STEPS = {
   'phase3.scope': 20480,
   'phase4.impact': 8192,
   'phase5.objectives': 12288,
-  'phase9.senior': 12288,
+  'phase9.senior-review': 12288,
+  'phase9.senior-notes': 12288,
   'phase9.confidence-steps': 12288,
   'phase9.confidence-overall': 8192,
-  'phase9.revalidation': 12288,
+  'phase9.revalidation-traceability': 12288,
+  'phase9.revalidation-resolution': 8192,
+  'phase9.revalidation-readiness': 8192,
 };
 
 /** A step's name without the index or repeat suffix its call adds. */
@@ -213,6 +217,11 @@ export function loadConfig(configPath) {
   if (raw.model?.retryOutput !== undefined && (!Number.isInteger(model.retryOutput)
     || model.retryOutput < 1024 || model.retryOutput > model.maxOutput)) {
     throw new Error('config model.retryOutput must be a whole number from 1024 to model.maxOutput');
+  }
+  // Minutes between the `progress` lines of a running call; the client's default applies when unset.
+  if (raw.model?.progressMinutes !== undefined
+    && (!Number.isInteger(model.progressMinutes) || model.progressMinutes < 1 || model.progressMinutes > 1440)) {
+    throw new Error('config model.progressMinutes must be a whole number of minutes from 1 to 1440');
   }
   if (raw.model?.reasoningOutputByPhase !== undefined) {
     const byPhase = model.reasoningOutputByPhase;

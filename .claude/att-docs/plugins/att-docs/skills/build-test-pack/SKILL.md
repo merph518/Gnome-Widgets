@@ -240,13 +240,22 @@ description, and each document by number with the reason code for its rules
 (`rules-ok`, `rules-derived`, `rules-stale`, `rules-not-extracted`,
 `rules-malformed`, `rule-export-failed`, or `document-file` for a document that
 is missing, is not a file, or is outside the repository root). The exit code is 0 when every input is present, 1
-when a required input is missing, and 3 when no `--doc` was given: the model
+when a required input is missing or a pause unit fails, and 3 when no `--doc` was given: the model
 chooses the documents at intake, so only the candidates are counted and the
 line `rules  unchecked  name-documents-with-doc` is printed. Pass the documents
 the request names so their rules are checked before the job waits for the
 night; a job with unchecked rules is queued only when the user chooses to.
 What `check` found wrong with an export is in `<job-id>.check/detail.log` in
 the pipeline's output folder, which a later run does not clear.
+
+When `pause.units` is set, the gates also print each pause unit that fails the
+setup check, as `pause  <unit>  fail  <code>`, for example
+`pause  <unit>  fail  sudoers-refused stop start` when sudoers will not let the
+run stop or start it (see "Freeing the machine for a job"). A passing unit
+prints nothing, and a failing one makes the exit code 1. The line is about the
+host, so the session reports it without asking for a document, and the job can
+still be run or queued; the unit is then not stopped, or not started when the
+run ends.
 
 With `--resume`, `check` reads the job's checkpoint and checks the documents the
 resumed run will use, not the ones `--doc` names. It prints
@@ -271,8 +280,9 @@ For every missing input, the session asks the user through `<ask-user>`:
 - offer to go ahead with limitations (`--allow-derived-rules` for a document
   with no extracted rules).
 
-The job is run or queued only when the gates pass, or when the user explicitly
-chooses to go ahead with limitations. The session never reads a document or a
+The job is run or queued only when the input gates pass (a `pause` line does
+not count, see above), or when the user explicitly chooses to go ahead with
+limitations. The session never reads a document or a
 rule to answer any of this. `queue add` for a job already queued merges
 `--allow-derived-rules`, `--doc`, `--now` and `--resume` into its row and says
 what it updated.
@@ -287,8 +297,9 @@ model's questions".
 Each model call leaves a file in the job's `work/calls` folder, named
 `<seq>-<step>-<attempt>.json`: the step, the attempt, whether thinking was on, the seed the
 call was sent with, a hash of the whole prompt, a hash of the reply schema, the prompt
-itself, the reply, the token counts and the timings. A call
-that failed is recorded with its error code and no reply, and a retry is a second file.
+itself, the reply as the model wrote it (an object whose fields depend on one another, such as a
+reason and its verdict, has them numbered: `01_why`, `02_verdict`), the token counts and the
+timings. A call that failed is recorded with its error code and no reply, and a retry is a second file.
 A job run again with `--resume` adds to the folder and never replaces a file. The files
 hold document and rule text, as `detail.log` does, so they stay on the machine and the
 session does not read them. A slice or a step can answer its calls from these files
@@ -316,9 +327,9 @@ phases left. Without `--resume` a job starts over from intake.
 
 Phase 9 runs as four steps, each saved when it passes: `phase9-checklist`
 (issues, coverage rows, assumptions, the fix rounds), `phase9-senior` (the senior review
-and tester notes), `phase9-confidence` (each field of the assessment, one call per field,
+and the tester notes, a call for each), `phase9-confidence` (each field of the assessment, one call per field,
 the assessment steps, and the overall level last), and
-`phase9-revalidate` (the rebuild, the revalidation and its one repair round, and a new
+`phase9-revalidate` (the rebuild, the revalidation in a call for each group of checks that read the same sheets, its one repair round, and a new
 rating when items stay open). The checklist calls, the
 first read and each read after a fix round, run with thinking off and an output
 budget of `model.maxOutput`. The five single-string confidence fields run the same way,
@@ -355,17 +366,23 @@ with `model:window-too-small`. The server's own request time-out must still be a
 least `model.timeoutMinutes`, or the server ends the reply early and the call
 fails with `no-reply`. Each call streams its reply, so when a call reaches
 `model.timeoutMinutes` or its run is stopped, the closed connection also stops
-the server generating the reply. A thinking reply cut off at its output budget is retried
+the server generating the reply. Each request to the model server opens a connection of
+its own, because Lemonade closes a streamed reply's connection a moment after the reply
+ends, and a request sent on it is reset. A thinking reply cut off at its output budget is retried
 once with thinking off and an output budget of `model.retryOutput` (8192 by
 default); a second cut fails the job as `model:runaway`. A cut with thinking off
-is not retried and fails as `model:length`. Any other failure of a thinking call
+is not retried and fails as `model:length`, except in the break-only scenario call
+of Phase 6, which ends its pass instead. Any other failure of a thinking call
 (no reply, network, a reply that does not parse) is retried once with thinking
 off at `model.maxOutput`.
 
 Each thinking step also has an output budget of its own, so one step cannot run for an hour.
 The built-in budgets are `phase1.rules` and `phase3.scope` 20,480, `phase5.objectives`,
-`phase9.senior`, `phase9.confidence-steps` and `phase9.revalidation` 12,288, `phase4.impact`
-and `phase9.confidence-overall` 8,192. A step with an index or a
+`phase9.senior-review`, `phase9.senior-notes`, `phase9.confidence-steps` and
+`phase9.revalidation-traceability` 12,288, `phase4.impact`,
+`phase9.confidence-overall`, `phase9.revalidation-resolution` and
+`phase9.revalidation-readiness` 8,192. The senior review and the revalidation walk make one
+call per part or group, each under its own budget. A step with an index or a
 repeat, such as `rules-3`, uses its name without it. `model.reasoningOutputByStep` changes
 them, for example `{ "phase4.impact": 4096 }`; each value is a whole number from 1024 to
 `model.reasoningOutput`, and its keys are the steps listed here. A call takes the first
@@ -378,7 +395,7 @@ A larger budget does not help: the cut call's thinking and answer are lost, and 
 with thinking off answers anyway, so the thinking attempt adds its run time and nothing to
 the pack. Phase 1's understanding call runs with thinking off by this rule: its answer is
 about 540 tokens, and with thinking on it spends its whole budget thinking and never reaches
-the answer. A step with one recorded cut, such as `phase9.senior`, keeps thinking and is
+the answer. A step with one recorded cut, such as `phase9.senior-notes`, keeps thinking and is
 checked again on the next `repeated-cut` line or report.
 
 `model.reasoningOutputByPhase` lowers the output budget for single phases, for
@@ -402,6 +419,21 @@ cut on two or more runs of the job in a row, with its budget, as the rule above 
 a thinking call, space
 for the prompt is budgeted against the larger of `model.reasoningOutput` and
 `model.maxOutput`, never against a per-phase or per-step budget.
+
+`status.log` also says more about each call. A `call`, `retry` or `call-fail` line has
+`promptMs`, `genMs` and `cachedTokens` when the server returns them, and `reasoningTokens`
+and `answerTokens` when it says how the output split. A cut call has both counts when the
+split is known (a call with thinking off counts all of its output as answer),
+and the last 2,000 characters of its thinking go to `detail.log` under
+`<phase> <step> reasoning tail`; the status line never holds them. A `retry` or `call-fail`
+line whose `reason` is `network` also has `cause`: the connection's error code, such as
+`ECONNRESET` or `ECONNREFUSED`, `timeout` when the call reached `model.timeoutMinutes`, or
+`unknown`. A failure replayed from a recording has no `cause`. While a call runs, a
+`progress` line gives every `model.progressMinutes` minutes (a whole number from 1 to 1440, 5 by default)
+the step, the `reasoningTokens` and `answerTokens` so far, and `elapsedMs`. The counts so far
+are the reply's stream chunks, about one per token. On a `fail` line, `ms` and `calls` are
+those of the phase that stopped (left out when a failed revalidation stops a job resumed after
+that phase passed), and `jobMs` and `jobCalls` are the whole job's.
 
 A server-wide thinking budget is an opt-in alternative that nothing in the
 pipeline sets. Lemonade runs the model with the llama.cpp build it bundles for
@@ -535,8 +567,9 @@ the phase now running and how long it has run, or the phase and reason code a
 stopped job ended with (and, for a gate stop, the count and numbers of the documents
 it names), the time each finished phase took, the count of `retry`
 and `call-fail` lines by reason, and a `cut` line for every `length` or
-`runaway` hit with its phase and step. Last comes a `repeated-cut` line, such as
-`repeated-cut step=phase9.senior budget=12288 runs=2`, for each thinking step cut at its
+`runaway` hit with its phase and step. Then a `last-check` line and a `last-repair` line
+show the last `check` and `repair` line the job wrote. Last comes a `repeated-cut` line, such as
+`repeated-cut step=phase9.senior-notes budget=12288 runs=2`, for each thinking step cut at its
 output budget on two or more of the job's queue runs in a row. Without `--job` it lists every row in
 the queue with its status, phase, reason code and last update, so a job that
 stopped or can resume shows even when its ID is not remembered:
@@ -733,14 +766,25 @@ with `--restore <unit> is not on pause.units`. Patterns match the way `systemctl
 command runs, and the command prints the units it marked. A unit systemd has
 not loaded does not show up there; name it with `--restore`.
 
+With scope `system`, the run starts a marked unit through `sudo -n`, so the
+command reads `sudo -n -l` once and does not mark a unit that sudoers will not
+let it start. It prints `restore  <unit>  refused  sudoers-refused start; not
+marked` for each, marks the others, and still exits 0. Start a refused unit by
+hand when the run ends, or add its sudoers rule first.
+
 The marks ride on the job's row until the run takes the job, then move into the
-`.paused` file, which holds `{"stopped": [...], "restore": [...]}`. A file that
+`.paused` file, which holds `{"stopped": [...], "restore": [...], "failedStart": [...]}`.
+`failedStart` names the units of the other two lists whose last start failed,
+and the file leaves it out when it is empty. A file that
 is a bare list of unit names counts as the stopped units. The marked units start
 when the run ends through a normal finish, a failure, the cutoff, a signal or
 `queue cancel`, and on a running job `--restore` writes to the file directly. A
 run that reaches the cutoff before it takes the job leaves the marks on the row
 for the next run. `queue status` lists the units waiting as
-`restore pending <units>`. To start them by hand and clear the record:
+`restore pending <units>`, and a unit whose start failed apart from those, as
+`restore start-failed <units>`, with the next step: start it by hand with
+`sudo systemctl start` (`systemctl --user start` for scope `user`), then remove
+its name from the `.paused` file. To try the start again and clear the record:
 
 ```bash
 <pipeline> queue restore --config <pipeline-config>
@@ -748,9 +792,10 @@ for the next run. `queue status` lists the units waiting as
 
 It exits 0 when every unit started, and 1 when one did not start or the queue is
 running, since the running run restores its own units. A unit that does not start
-stays recorded for the next run or `queue restore`. To drop the record of a unit
-that can never start, such as a masked or misnamed one, remove its name from the
-`.paused` file beside the queue file.
+stays recorded for the next run or `queue restore`, which fails again until the
+cause is fixed, such as a missing sudoers rule for scope `system`. To drop the record of a unit
+that can never start, such as a masked or misnamed one, or one started by hand,
+remove its name from the `.paused` file beside the queue file.
 
 ### Stopping a job
 
@@ -855,7 +900,7 @@ queue row and workbook are only read.
 | `draft` | The Draft workbook: the builder command on the pack, writing it to `work/review` | no |
 | `build` | The Phase 8 build on the pack in memory, with no repair and no Draft workbook (`draft` writes that), with the review sheets left out of the failures until the confidence assessment | no |
 | `checklist` | The checklist reads and the fix rounds | yes |
-| `walk [--check <names>]` | One revalidation walk, or the named checks only, comma-separated, each an exact name or the start of one | yes |
+| `walk [--check <names>]` | One revalidation walk, a call for each group of checks that read the same sheets, or the named checks only, comma-separated, each an exact name or the start of one | yes |
 | `repair --finding <n>` | One repair round for finding `<n>` of the last walk, counted from 0 as the walk prints them | yes |
 | `confidence [--field <name>]` | One confidence field (`coverage`, `remainingRisks`, `assumptions`, `regressionScope`, `breakItScope`, `manualReview`), or the overall level when no field is named | yes |
 
@@ -1046,6 +1091,10 @@ which reads `sudo -n -l` and passes a unit only when both commands sit under
 `NOPASSWD:`. `sudo -n -l /usr/bin/systemctl stop <unit>.service` alone also
 succeeds for a command that still asks for a password, so it proves nothing.
 
+`queue add` and `queue start` read the same listing before they mark a unit for
+`--restore`, and the input gate in "Before a job is run or queued" prints a
+pause unit that fails it.
+
 A `*` in a sudoers argument also matches spaces, so a pattern there can allow
 more than the unit it was meant for. Listing the units is safer. With scope
 `user`, no sudo is involved.
@@ -1115,8 +1164,9 @@ and config fields only. No value from the env file is printed. The check covers:
 
 The exit code is 0 when every check passes and 1 when any fails, 2 for a config
 that does not load. `check` with `--issue` is the input gate described under
-"Before a job is run or queued", and with neither `--issue` nor `--suite` it is
-this check. `build-pack-check.service` runs it after the queue check each day,
+"Before a job is run or queued", which adds the pause units that fail this
+check, and with neither `--issue` nor `--suite` it is this check.
+`build-pack-check.service` runs it after the queue check each day,
 so a host that drifts shows as a failed unit; on a day the queue check itself
 exits 1, the setup check is skipped.
 
@@ -1462,7 +1512,7 @@ the phase that fills them:
 | `executiveSummary` | 4 | `{ scope, modules, sourceDocuments, strategy, execution, risks, confidence }` |
 | `impacts` | 4 | `{ windows, businessFunctions, upstream, downstream, data, security, batch, notices, reports, interfaces }`, each a list of short lines; an area the change does not reach is `[]` |
 | `objectives` | 5 | `{ objective, applicable, reason }` for each of `<workbook-standard>`'s `<objective-count>` |
-| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, steps[] }`; `focus[]` lists the tester's actions in order, one item per step, and the builder writes it as numbered steps; derivation is `Requirement` or `Quality`; each step is `{ description, expected, rules[] }`; a card holds no scenario kind |
+| `testCards` | 6 | `{ id, title, module, sourceDocument, mission, focus[], expected, rules[], objectives[], derivation, kind, steps[] }`; `focus[]` lists the tester's actions in order, one item per step, and the builder writes it as numbered steps; derivation is `Requirement` or `Quality`; `kind` is the kind of the scenario the card was written for, one of the scenario kinds, `decision` for a card a Phase 9 repair adds, and `null` for a card with no scenario; each step is `{ description, expected, rules[] }`; a card holds no scenario ID or `breakIt` flag |
 | `testSets` | 7 | `{ number, name, objective, scope, ruleSummary[], cards[] }` |
 | `coverage` | 9 | `{ ruleId, status, strength, gap, recommendation }`, only where a rule is not plainly Covered |
 | `assumptions` | 9 | `{ assumption, why, impact, clarification }` |
@@ -1631,7 +1681,9 @@ written again.
 Design scenarios first, then cards. For each Included document, list the
 distinct scenarios its impacted rules call for before any card is written. A
 scenario is one population, one action and its expected outcome, and names the
-rules it checks. The list has to include, wherever the document supports them:
+rules it checks. In a reply, a scenario's rule list holds at most as many items as the call
+has rules, and its population, action and outcome are at most 674 characters each. The
+list has to include, wherever the document supports them:
 
 - a control, a population the change must not affect: the same action with no
   blocking condition, the plain save, and the adjacent paths the screen keeps,
@@ -1678,7 +1730,9 @@ more; if it is still open, an assumption names it, and any of its rules with no
 card get a `Missing` coverage row. A rule only an existing test covers gets a
 `Missing` row whose gap names that test and says to confirm and reuse it.
 
-A scenario's kind is used inside Phase 6 only. It decides which scenarios, and which cards written for them, are the same (same kind, rules, population and action), which kinds the document's assumption on empty kinds names, and which cards are break cards. A Phase 6 card holds its scenario's ID and a `breakIt` flag, which is true when the scenario is a break scenario and not every rule it names is retired; in an issue pack with a `<break-objective>` set, the flag puts the card in that set. Before the cards are checked, a card that only answers a message or resets joins the card that raises the message, and a card that repeats another is dropped. A card the flag puts in the `<break-objective>` set is joined to, or dropped as a repeat of, only another such card, so a break card and a plain card that read alike both stay, each in its own sets. Where no `<break-objective>` set is in play, a flagged card is treated like any other. The pack's `testCards` carry no kind, scenario ID or `breakIt` flag, so no sheet of the workbook shows a card's kind. A reviewer sees the break cards in the `<break-objective>` set, and the kinds with no scenario in the document's assumption on empty kinds.
+A scenario's kind decides which scenarios, and which cards written for them, are the same (same kind, rules, population and action), which kinds the document's assumption on empty kinds names, and which cards are break cards. A Phase 6 card holds its scenario's ID and a `breakIt` flag, which is true when the scenario is a break scenario and not every rule it names is retired; in an issue pack with a `<break-objective>` set, the flag puts the card in that set. Before the cards are checked, a card that only answers a message or resets joins the card that raises the message, and a card that repeats another is dropped. A card the flag puts in the `<break-objective>` set is joined to, or dropped as a repeat of, only another such card, so a break card and a plain card that read alike both stay, each in its own sets. Where no `<break-objective>` set is in play, a flagged card is treated like any other.
+
+Phase 7 copies each issue-pack card's scenario kind onto the card in the pack's `testCards` as `kind`, and a suite's cards reach `<suite-merge>` with it; the scenario ID and the `breakIt` flag go no further. A card carries only its own scenario's kind: a card another card was joined to, or dropped into as a repeat, keeps its own kind and does not take the kind of the card folded into it or dropped. A scenario code adds for a rule no scenario names is a `decision`, so its card is too; the cards of the break pass are `break`. A card a Phase 9 repair adds has no scenario and is a `decision` too, since it exists to give a rule a card. A card with no scenario otherwise has the kind `null`; Phase 6 leaves none, so the job goes on if one turns up. A `break` card is outside the `<break-objective>` set when every rule its scenario names is retired, in a suite pack, and in an issue pack with no such set. Whether a sheet of the workbook shows the kind is up to the builder. A reviewer sees the break cards in the `<break-objective>` set, and the kinds with no scenario in the document's assumption on empty kinds.
 
 A retired rule Phase 3 classified Direct Change is marked in the scenario and
 card prompts as removed: its card verifies the behavior is gone, and the
@@ -1729,6 +1783,18 @@ shown the cards written and names those that serve it; the objective is added to
 them, no card is written, and the objective is marked not applicable if none is
 named. For `<break-objective>`, a break-only inventory adds new break scenarios,
 each with one card; the objective is marked not applicable if there are none.
+The break-only reply may list no scenario, which ends the pass with no card call.
+The break-only call lists one kind of scenario, so the schema allows it one kind's
+share of the scenarios a full reply holds: `model.maxOutput` divided by 150 tokens
+and by the number of scenario kinds (12), which is 9 by default. Its output budget is
+twice the tokens of those scenarios, 2700 by default, because a scenario takes 190 to
+230 tokens in the replies seen. A reply cut off at that budget does not fail the
+job and is not retried; any other failure of the call is retried once at the same
+budget. A cut stops the pass, the status log gets a `warn` line with the
+reason `break-pass-cut` after the call's `call-fail` line, and the document gets an
+assumption that the break scenario list was cut off. Break scenarios an earlier
+batch of rules listed are kept, and the objective is marked not applicable when
+none was listed.
 Once that inventory lists a break scenario, break leaves the document's
 assumption on empty kinds, even when an existing test covers the scenario and no
 card is written. `<full-coverage-objective>` needs no pass, since it holds every
@@ -1778,7 +1844,7 @@ its rule ID. A design step that names no rules traces the card's rules no other
 step names. Before each build the pipeline also compares every card's Expected
 Result with its final step's expected result, and reports a mismatch as a failed
 `Test Card Expected Results` sheet beside the builder's own. The repair call
-sees the card in full, and the problem tells it to keep the card's Expected
+sees the card in full but for its kind, and the problem tells it to keep the card's Expected
 Result and change the final step's expected result to say the same. A repair
 that changes a card's Expected Result is checked against the rules again with
 the same verification call; if the card does not follow, the change is undone,
@@ -1827,7 +1893,17 @@ no other sheet failed, and the pack is built again. A status line with the event
 `draft` says whether the workbook was written and how many sheets failed. When the
 last try still leaves no Draft workbook, or the command writes none and names no
 failed sheet, the job stops with `gate:builder-fail`, and the command's output is in
-`detail.log`. Phase 8 does not pass without a Draft workbook on disk.
+`detail.log`. Phase 8 does not pass without a Draft workbook on disk. A refused draft
+puts `failedSheets` on the `draft` line and on the stop's `fail` line: the names of the sheets
+the builder failed, joined with `+`. Both also carry `problem`, the first line of the notes of
+the first failed sheet whose first note line leaves anything (the sheet's `populated:` line is
+skipped).
+Only plain words stay in it (a short fixed list such as `has`, `no`, `row`, `card`, `covered`);
+each quoted span, every other word, a capitalized word that does not start a sentence (unless
+it is a sheet or status word such as `Coverage` or `Missing`), and the rest of a line after a
+quote that never closes becomes `_`; each word that holds a digit or has a `-` or `.` between
+letters becomes `ID`; text after `said:` and punctuation are dropped. The line is cut at a
+word to 80 characters, and the builder's own text stays in `detail.log`.
 
 **Phase 9, Quality Review.** Write the Draft workbook again from the pack as it
 stands, read it back as text (every card, step and Expected Result, and the other
@@ -1846,7 +1922,7 @@ through the Phase 8 repair, which returns corrected cards, coverage rows, limita
 and, for a finding about assumptions, assumptions. Only this fix section lets the repair
 add cards; the repair of a Phase 8 builder failure takes none. Here it also accepts `newCards`,
 at most 3, each covering only a rule a finding names; the card is numbered and added to
-its test sets by code. A new card's Expected Result is checked against its rules like a
+its test sets by code, with the kind `decision`. A new card's Expected Result is checked against its rules like a
 repaired card's, and a card that does not follow is dropped and clears nothing. A kept
 new card replaces a Missing or Not Applicable coverage row for each rule it covers, even
 when the reply returns such a row. A suite pack refuses new cards, since its cards come
@@ -1854,6 +1930,15 @@ from the suite files. When a finding asks for a new card and a rule it names is 
 without one, `status.log` gets a `repair-not-applied` event with the reason `no-card`,
 or `new-card-refused-suite` for a suite pack, and a revalidation item that remains ends
 with "(repair produced no card)" ("(a suite pack takes no new card)" for a suite pack).
+Each finding of a fix round also gets a `repair` line: its number (counted from 1, so
+`--finding 0` is finding 1), what it asked for
+(`asked`: `new-card`, `card`, `coverage`, `assumption` or `sheet`), what the repair returned
+for it (`cards`, `newCards`, `coverageRows`, `limitations`, `assumptions`) and the `result`:
+`applied`, `undone` when the checks reverted all of it (a corrected card's Expected Result
+and last step put back, a new card dropped), or `empty` when nothing came back for it.
+A repair line from the revalidation also names the `check`. When the rebuild or the
+second walk after a revalidation repair stops on a gate and the pack goes back to what it was,
+a `repair-undone` line with the gate's reason follows the repair lines.
 A coverage row changes only for a rule
 a finding names (every rule when it names the Coverage Matrix), and a limitation only for
 a sheet it names; a row whose status contradicts the cards is not kept. Every other row
@@ -1875,7 +1960,14 @@ the revalidation leaves items open, the overall level is rated again with them i
 rebuilt workbook, review sheets and `<validation-sheet>` included, with one verdict for each
 of its seven checks. A failed check whose fix names a card, rule or sheet gets one repair
 round and one more revalidation; a repair the builder cannot build is undone and the first
-verdicts stand. Fill `seniorReview`, `testerNotes`, `confidence` and `coverage` before
+verdicts stand. Each walk of the checks writes a `check` line for every check: `walk`
+(`revalidation`, or `revalidation-again` after the repair round), `check`, `verdict`,
+`thinking` (true when every call that judged the check ran with thinking on) and
+`fixGiven`. Each rating of the overall level writes a `confidence` line: `overall`, `asked`
+(the level the call gave), `cappedBy` (`untested-objectives` when an applicable objective
+with no test card held the level below the highest, else `none`) and the counts it was
+rated from: `stepsWeak`, `stepsPartial`, `openItems`, `checklistIssues` and `untested`.
+Fill `seniorReview`, `testerNotes`, `confidence` and `coverage` before
 the final build. `<procedure>` stops on Low confidence at the Project Understanding Gate,
 before anything is built. A Low rating here is allowed, but only with a
 `limitations` entry for `<confidence-sheet>` saying what holds it down, and

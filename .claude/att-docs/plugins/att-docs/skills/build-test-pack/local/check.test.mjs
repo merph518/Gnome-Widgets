@@ -220,7 +220,8 @@ test('check without --issue runs the setup check and exits 1 on a bare host', (t
 });
 
 test('check with --issue still runs the input gate', (t) => {
-  const h = host(t);
+  // No pause units, so the job check reads nothing from the machine running the test.
+  const h = host(t, { pause: { units: [], scope: 'system' } });
   const result = spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), 'check', '--config',
     path.join(h.dir, 'pipeline.json'), '--issue', '999'], { encoding: 'utf8' });
   assert.match(result.stdout, /issue-number {2}present/);

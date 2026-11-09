@@ -29,14 +29,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setupCheck } from './check.mjs';
+import { pauseFailures, setupCheck, sudoListing, sudoersRefused } from './check.mjs';
 import { runCompare, UsageError } from './compare.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
 import { countedTries, fill, globFiles, heldRow, HOLD_REASONS, loadConfig, MAX_MEMORY_STOPS, MAX_TRIES, MEMORY_STOP,
   memoryStops, rootRelative, worktreeRefusal } from './config.mjs';
 import { modelClient } from './model.mjs';
 import { createAppCloser } from './close-apps.mjs';
-import { createPauser, downUnits, markRestoreFile, onPauseList, pendingRestore } from './pause.mjs';
+import { createPauser, downUnits, failedStartUnits, markRestoreFile, onPauseList, pendingRestore } from './pause.mjs';
 import { documentRules, phase2Verdict, USABLE_RULE_CODES } from './phases.mjs';
 import { createReleaser } from './release.mjs';
 import { replayModel, replaySource } from './replay.mjs';
@@ -68,7 +68,7 @@ const USAGE = `usage:
   build-pack.mjs queue summary --config <file>
   build-pack.mjs report --config <file> [--period day|week|auto] [--seed <n>]
   build-pack.mjs compare --reference <xlsx> --pack <xlsx> --rules <export> --doc <md> [--out <dir>] [--standard <md>] [--config <file> [--no-model]]
-exit codes of check and queue check: 0 every input present, 1 an input missing (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
+exit codes of check and queue check: 0 every input present, 1 an input missing or, for check, a pause unit that fails the setup check (or, for queue check, the queue stayed held, a source could not be read, or a check or the pre-check failed), 3 documents not named, so their rules are unchecked
 exit codes of run --job: 0 the slice passed, 1 it stopped (a replayed call the recording could not answer stops it unless --replay-miss live) or the queue is running, 2 bad arguments, a job with no folder, a missing snapshot, or a replay source with no recorded calls
 exit codes of step: 0 the step ran and its build passed, 1 it stopped, its build failed a sheet, or the queue is running, 2 bad arguments, a job with no folder, a missing snapshot or step state, or a replay source with no recorded calls
 exit codes of queue restore: 0 every unit started, 1 a unit did not start, or the queue is running
@@ -205,6 +205,18 @@ export function checkJob(config, job) {
   return { lines: lines.map((line) => line.text), ok: lines.every((line) => line.present), unchecked };
 }
 
+/**
+ * The input gates of `checkJob` plus the pause units that fail the setup
+ * check, as the same `pause  <unit>  fail  <code>` lines. A unit the run could
+ * not stop or start leaves the machine as it was, so a check that ran only
+ * this is where that shows up before the job is queued.
+ */
+export function checkJobAndHost(config, job, { exec } = {}) {
+  const checked = checkJob(config, job);
+  const pause = pauseFailures(config, { exec });
+  return { ...checked, lines: [...checked.lines, ...pause], ok: checked.ok && !pause.length };
+}
+
 // How long a stopped run has to end its own cleanup before the process exits anyway.
 const STOP_GRACE_MS = 120000;
 
@@ -280,6 +292,20 @@ export function restoreUnits(config, args, { exec } = {}) {
 }
 
 /**
+ * The units a command line asks to restore, less those sudoers will not let
+ * the run start. The system scope starts them through `sudo -n`, so a refused
+ * unit would be marked and then fail when the run ends. Returns the units to
+ * mark and the ones refused.
+ */
+export function restoreRequest(config, args, { exec } = {}) {
+  const wanted = restoreUnits(config, args, { exec });
+  if (!wanted.length || config.pause.scope === 'user') return { units: wanted, refused: [] };
+  const listing = sudoListing(exec);
+  const refused = wanted.filter((unit) => sudoersRefused(listing, unit, ['start']).length);
+  return { units: wanted.filter((unit) => !refused.includes(unit)), refused };
+}
+
+/**
  * Marks units to start when the job's run ends. A waiting row carries them
  * until the run takes it; for a row that is running, the run already holds the
  * queue, so they go to the state file its pauser reads when it ends. Returns
@@ -299,13 +325,45 @@ export function markRestore(config, id, units) {
   return true;
 }
 
-/** The units waiting to be started: those the state file holds and those a waiting row carries. */
+/**
+ * Marks the units of a request on the job and says what it did: the units the
+ * run will start when it ends, and each refused unit, which is not marked.
+ * Returns false when the job is neither waiting nor running.
+ */
+export function markRestoreRequest(config, id, { units, refused }, log = console.log) {
+  // An empty mark list needs no row, so a request refused in full looks for the job itself.
+  const open = readQueue(config).jobs.some((row) => row.id === id && ['queued', 'running'].includes(row.status));
+  if (!open && (units.length || refused.length)) return false;
+  if (!markRestore(config, id, units)) return false;
+  if (units.length) log(`${id} restores ${units.join(' ')} when it ends`);
+  for (const unit of refused) {
+    log(`restore  ${unit}  refused  sudoers-refused start; not marked. `
+      + 'Start it by hand when the run ends, or allow it in sudoers first');
+  }
+  return true;
+}
+
+/**
+ * The units waiting to be started: those the state file holds and those a
+ * waiting row carries. A unit whose last start failed is listed apart, with
+ * the next step.
+ */
 export function restoreLines(config) {
+  const failed = failedStartUnits(config);
   const units = new Set(pendingRestore(config));
   for (const row of readQueue(config).jobs) {
     if (row.status === 'queued') (row.restore ?? []).forEach((unit) => units.add(unit));
   }
-  return units.size ? [`restore pending ${[...units].join(' ')}`] : [];
+  failed.forEach((unit) => units.delete(unit));
+  const user = config.pause.scope === 'user';
+  const cause = user ? '' : ' once the cause is fixed, such as a missing sudoers rule';
+  return [
+    ...(units.size ? [`restore pending ${[...units].join(' ')}`] : []),
+    ...(failed.length ? [`restore start-failed ${failed.join(' ')}; start each by hand with `
+      + `${user ? 'systemctl --user start' : 'sudo systemctl start'}, `
+      + 'then remove its name from the .paused file beside the queue file. '
+      + `queue restore tries the start again${cause}`] : []),
+  ];
 }
 
 /**
@@ -917,7 +975,8 @@ function tally(entries, keys) {
  * the phase now running and how long it has run, where a job that is not
  * running stopped, how long each finished phase took, and how many `retry` and
  * `call-fail` lines the job wrote by reason, with the phase and step of every
- * `length` and `runaway` cut. Last, every thinking step cut at its output budget
+ * `length` and `runaway` cut. Then the last `check` and `repair` line the job
+ * wrote. Last, every thinking step cut at its output budget
  * on two or more runs in a row, read from all of the job's rows, with its budget.
  * `clock` supplies the current time.
  */
@@ -1004,6 +1063,14 @@ export function jobStatus(config, id, { clock = () => new Date() } = {}) {
     && ['length', 'runaway'].includes(entry.reason));
   for (const { fields, count } of tally(cuts, ['event', 'phase', 'step', 'reason'])) {
     lines.push(fieldText('cut', { ...fields, count }));
+  }
+  // The last verdict and the last repair the job logged, beside the phase timings.
+  for (const [event, label] of [['check', 'last-check'], ['repair', 'last-repair']]) {
+    const hit = own.findLast((entry) => entry.event === event);
+    if (hit) {
+      const { at, job, event: kind, ...fields } = hit;
+      lines.push(fieldText(label, fields));
+    }
   }
   for (const { step, budget, runs } of repeatedCuts(recordedRuns(readQueue(config), id))) {
     lines.push(fieldText('repeated-cut', { step, budget: budget ?? '-', runs }));
@@ -1353,15 +1420,15 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
   if (command === 'check') {
     const job = jobHere(args, config);
     if (job.suite) throw new Error('check takes an issue job');
-    const { lines, ok, unchecked } = checkJob(config, job);
+    const { lines, ok, unchecked } = checkJobAndHost(config, job);
     for (const line of lines) console.log(line);
     return !ok ? 1 : unchecked ? 3 : 0;
   }
   if (command === 'queue' && sub === 'add') {
-    const units = restoreUnits(config, args);
+    const request = restoreRequest(config, args);
     const { id, added, marked, merged, running } = addJob(config,
       { ...jobHere(args, config), ...(args.now ? { now: true } : {}) });
-    if (markRestore(config, id, units) && units.length) console.log(`${id} restores ${units.join(' ')} when it ends`);
+    markRestoreRequest(config, id, request);
     if (added) console.log(`queued ${id}`);
     else if (marked || merged?.length) {
       if (marked) console.log(`${id} is marked to start now`);
@@ -1410,9 +1477,8 @@ async function dispatch(args, command, sub, config, track, trackRelease, control
   }
   if (command === 'queue' && sub === 'start') {
     if (!args.job) throw new Error('--job takes a job ID');
-    const units = restoreUnits(config, args);
-    if (!markRestore(config, args.job, units)) throw new Error(`${args.job} is not queued or running`);
-    if (units.length) console.log(`${args.job} restores ${units.join(' ')} when it ends`);
+    const request = restoreRequest(config, args);
+    if (!markRestoreRequest(config, args.job, request)) throw new Error(`${args.job} is not queued or running`);
     let busy = false;
     control.abort = new AbortController();
     // The cutoff is the configured one unless the command line gives another;
