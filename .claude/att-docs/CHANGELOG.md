@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.36](https://github.com/merph518/Overmind/compare/v0.31.35...v0.31.36) (2026-11-13)
+
+
+### Bug Fixes
+
+* **convert-docs:** drop Word hidden text, write letter and roman list labels, keep a leading o ([#681](https://github.com/merph518/Overmind/issues/681)) ([#684](https://github.com/merph518/Overmind/issues/684)) ([339674b](https://github.com/merph518/Overmind/commit/339674bc53ac1c9b167747b5929310c8557cf09f))
+* **convert-docs:** keep the list number check from wrapping onto an earlier item ([#677](https://github.com/merph518/Overmind/issues/677)) ([2fb0abb](https://github.com/merph518/Overmind/commit/2fb0abb338b662c16af5227bd18ab690f3597f9d))
+
 ## [0.31.35](https://github.com/merph518/Overmind/compare/v0.31.34...v0.31.35) (2026-11-13)
 
 

@@ -126,29 +126,57 @@ def text_export(source: pathlib.Path) -> str:
 def compare(markdown: str, export: str):
     """Returns the items that disagree, as (line, number, label, text), and the
     counts of items found and not found in the export."""
-    items = list(export_items(export))
-    cursor = found = missing = 0
+    entries = [(line_number, number, text[:PREFIX], text)
+               for line_number, number, text in markdown_items(markdown)
+               if len(text[:PREFIX]) >= SHORTEST]
+    items = [(label, text[:PREFIX]) for label, text in export_items(export)]
+    # Both sides hold the items in the source's order. An export item is a copy
+    # of a Markdown item when it opens with the item's first line (cut to
+    # PREFIX). The copies are the pairing, kept in that order, that pairs the
+    # most items; among pairings of the same size, the one whose labels agree
+    # most wins. An item whose opening repeats is so placed by the items around it.
+    starts = {key[:SHORTEST] for _, _, key, _ in entries}
+    pool = [item for item in items if item[1][:SHORTEST] in starts]
+    rows, cols = len(entries), len(pool)
+    pair = rows + 1  # one more pair outweighs any count of agreeing labels
+    best = [[0] * (cols + 1) for _ in range(rows + 1)]
+
+    def gain(i, j):
+        return pair + (entries[i][1] in label_values(pool[j][0]))
+
+    for i in range(rows - 1, -1, -1):
+        row, below = best[i], best[i + 1]
+        for j in range(cols - 1, -1, -1):
+            score = max(below[j], row[j + 1])
+            if pool[j][1].startswith(entries[i][2]):
+                score = max(score, below[j + 1] + gain(i, j))
+            row[j] = score
     differ = []
-    for line_number, number, text in markdown_items(markdown):
-        prefix = text[:PREFIX]
-        if len(prefix) < SHORTEST:
-            continue
-        # The items come in the order the source holds them, so the search
-        # starts after the last one found. Two items can open with the same
-        # words; the next one in order is the one meant, unless a later one
-        # carries the item's number.
-        order = list(range(cursor, len(items))) + list(range(cursor))
-        matches = [i for i in order if items[i][1].startswith(prefix)]
-        if not matches:
+    unpaired = []
+    found = i = j = 0
+    while i < rows:
+        line_number, number, key, text = entries[i]
+        if (j < cols and pool[j][1].startswith(key)
+                and best[i][j] == best[i + 1][j + 1] + gain(i, j)):
+            found += 1
+            if number not in label_values(pool[j][0]):
+                differ.append((line_number, number, pool[j][0], text))
+            i += 1
+            j += 1
+        elif j == cols or best[i][j] == best[i + 1][j]:
+            unpaired.append(entries[i])
+            i += 1
+        else:
+            j += 1
+    # An item left out of the pairing, such as one the Markdown moved, counts as
+    # found when some item opening alike carries its number. Otherwise its own
+    # copy is not in the export as a labelled item (a table cell, for one).
+    missing = 0
+    for _, number, key, _ in unpaired:
+        if any(item[1].startswith(key) and number in label_values(item[0]) for item in items):
+            found += 1
+        else:
             missing += 1
-            continue
-        agreeing = [i for i in matches if i >= cursor and number in label_values(items[i][0])]
-        index = (agreeing or matches)[0]
-        found += 1
-        cursor = index + 1
-        label = items[index][0]
-        if number not in label_values(label):
-            differ.append((line_number, number, label, text))
     return differ, found, missing
 
 

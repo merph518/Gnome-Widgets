@@ -121,6 +121,11 @@ log() { printf '%s\n' "$*"; }
 # falls back to a raw HTML table whenever a cell holds a list, a second
 # paragraph, a line break, or a row or column span, and every one of those is
 # ordinary in the control tables these documents are built from.
+#
+# The writer numbers every list with digits, so a list Word letters a, b, c
+# would arrive as 1, 2, 3. The last filter writes Word's letter or roman numeral
+# into the item instead. It runs after the table filter, which has already
+# turned a cell's list into text.
 PANDOC_TO='gfm-raw_html-raw_attribute'
 
 run_pandoc() {
@@ -129,11 +134,15 @@ run_pandoc() {
     # The HTML reader keeps a div or a span as a structural node unless it is
     # told not to, and those are what the writer then has to render.
     html) from='html-native_divs-native_spans' ;;
-    # Pandoc counts and nests a Word list differently from Word, so the
-    # numbering is rewritten into a form it draws the way Word does. A file the
-    # rewrite cannot read, such as an RTF file tried here first, goes to Pandoc
-    # as it is.
+    # Word never prints its hidden text, and Pandoc writes it as any other
+    # text, so the hidden runs come out first. Then, since Pandoc counts and
+    # nests a Word list differently from Word, the numbering is rewritten into
+    # a form it draws the way Word does. A file a step cannot read, such as an
+    # RTF file tried here first, goes on as it is.
     docx)
+      if python3 "$HERE/hidden-text.py" "$input" "$WORK/visible.docx" 2>/dev/null; then
+        input="$WORK/visible.docx"
+      fi
       if python3 "$HERE/list-numbers.py" "$input" "$WORK/numbered.docx" 2>/dev/null; then
         input="$WORK/numbered.docx"
       fi
@@ -143,6 +152,7 @@ run_pandoc() {
     --columns=100 --wrap=auto \
     --lua-filter="$HERE/drop-images.lua" \
     --lua-filter="$HERE/flatten-tables.lua" \
+    --lua-filter="$HERE/list-markers.lua" \
     "$input" -o "$output" 2>>"$WORK/pandoc.err"
 }
 
