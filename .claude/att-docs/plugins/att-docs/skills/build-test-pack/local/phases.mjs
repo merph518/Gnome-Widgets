@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { estimateTokens, ModelError } from './model.mjs';
+import { USAGE_EXTRAS } from './calls.mjs';
+import { noteCode, sheetsField } from './status.mjs';
 import { fill, globFiles, REASONING_STEPS, RULE_SHAPE, rootRelative, stepKey } from './config.mjs';
 import * as S from './schemas.mjs';
 import { revisedDate, rulesStale, shapeProblems, uncitedStruck } from './rules.mjs';
@@ -141,26 +143,40 @@ export async function readWindow(ctx, phase) {
   }
 }
 
+/** The usage figures a status line carries when the server gave them: thinking and timing. */
+const usageFields = (usage) => Object.fromEntries(USAGE_EXTRAS
+  .filter((key) => usage?.[key] !== undefined).map((key) => [key, usage[key]]));
+
 /**
  * The pipeline's one way to call the model. Checks the token count first and
  * throws `too-big` rather than truncating, retries a failed call once with
  * thinking off (a thinking call cut off at its output budget gets the smaller `retryOutput`,
  * and a second cut is `runaway`), and logs only counts and timings. Each call that
  * reaches the model, failed ones too, also gets its prompt, reply and timings written
- * to work/calls.
+ * to work/calls. While a call runs, a `progress` line says how much of its reply has
+ * come every few minutes. A call cut off at its output limit logs its thinking and
+ * answer tokens apart and keeps the end of its thinking text in detail.log. A
+ * `question` rides last, after every input, so calls that share their
+ * inputs and differ only in what they ask also share the start of their prompt.
+ * `outcome`, when given, receives `thinking`: whether the call that answered ran
+ * with thinking on. `limit`, when given, is the output budget of a call with thinking off,
+ * for the first call and any retry, in place of `model.maxOutput`.
  */
-export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task }) {
+export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, schema, task, question, outcome,
+  limit }) {
   const system = [SYSTEM, ...refs.filter(Boolean).map((text, i) => section(`Reference ${i + 1}`, text))]
     .join('\n');
   const user = [section('Task', task), ...inputs.filter(([, text]) => !blank(text))
-    .map(([label, text]) => section(label, text))].join('\n');
+    .map(([label, text]) => section(label, text)),
+  ...(question ? [section('Question', question)] : [])].join('\n');
   await readWindow(ctx, phase);
   const promptTokens = await ctx.model.countTokens(`${system}\n${user}`);
-  const firstCap = outputCap(ctx, phase, reasoning, step);
+  const firstCap = !reasoning && limit !== undefined ? limit : outputCap(ctx, phase, reasoning, step);
   // A retry can ask for more than the first call: the plain cap after a failed thinking
   // call, or the retry cap after a cut. The prompt must leave room for the largest.
   const { maxOutput, retryOutput } = ctx.config.model;
-  const widestCap = reasoning ? Math.max(firstCap, maxOutput, retryOutput) : firstCap;
+  const plain = limit ?? maxOutput;
+  const widestCap = reasoning ? Math.max(firstCap, plain, retryOutput) : firstCap;
   if (promptTokens + widestCap + 512 > budgetWindow(ctx)) {
     throw Object.assign(new ModelError('too-big', 'prompt does not fit the context'),
       { promptTokens });
@@ -175,16 +191,21 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
     const recorded = { step: schemaName, attempt, thinking: think, maxTokens, system, user, schema,
       startedAt };
     try {
+      const thinking = think;
       const { value, usage, seed } = await ctx.model.json({
         system, user, schema, schemaName, attempt, reasoning: think, maxTokens,
+        onProgress: (progress) => ctx.logs.status({ job: ctx.job.id, phase, step, event: 'progress',
+          attempt, reasoning: thinking, ...progress }),
       });
       ctx.logs.call({ ...recorded, seed, reply: value, usage, endedAt: new Date() });
       ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call', attempt, reasoning: think,
-        promptTokens: usage.promptTokens, outputTokens: usage.outputTokens, ms: usage.ms });
+        promptTokens: usage.promptTokens, outputTokens: usage.outputTokens, ms: usage.ms,
+        ...usageFields(usage) });
       ctx.logs.detail(`${phase} ${step} reply`, value);
       ctx.tokens.prompt += usage.promptTokens;
       ctx.tokens.output += usage.outputTokens;
-      return S.unkey(schema, value);
+      if (outcome) outcome.thinking = think;
+      return S.fromWire(schema, value);
     } catch (caught) {
       if (!(caught instanceof ModelError)) throw caught;
       // A reply cut off at its output budget with thinking off would be cut off again.
@@ -195,22 +216,28 @@ export async function ask(ctx, { phase, step, reasoning, refs = [], inputs, sche
           { usage: caught.usage });
       }
       ctx.logs.call({ ...recorded, seed: caught.seed, errorCode: error.code, usage: error.usage,
-        endedAt: new Date() });
+        reasoningTail: caught.reasoningTail, endedAt: new Date() });
+      if (caught.reasoningTail) ctx.logs.detail(`${phase} ${step} reasoning tail`, caught.reasoningTail);
+      // A cut call says how its output split between thinking and answer, when that is known.
+      const split = error.usage?.reasoningTokens !== undefined || !think;
+      const failed = { reasoning: think, maxTokens, reason: error.code,
+        // What a failed connection was, such as ECONNRESET, when the client knows.
+        ...(error.causeCode ? { cause: error.causeCode } : {}),
+        outputTokens: error.usage?.outputTokens ?? 0, ms: error.usage?.ms ?? 0, ...usageFields(error.usage),
+        ...(['length', 'runaway'].includes(error.code) && split ? {
+          reasoningTokens: error.usage?.reasoningTokens ?? 0,
+          answerTokens: error.usage?.answerTokens ?? error.usage?.outputTokens ?? 0 } : {}) };
       if (attempt === 2 || (cut && !think)) {
-        ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call-fail', attempt, reasoning: think,
-          maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,
-          ms: error.usage?.ms ?? 0 });
+        ctx.logs.status({ job: ctx.job.id, phase, step, event: 'call-fail', attempt, ...failed });
         throw error;
       }
-      ctx.logs.status({ job: ctx.job.id, phase, step, event: 'retry', attempt, reasoning: think,
-        maxTokens, reason: error.code, outputTokens: error.usage?.outputTokens ?? 0,
-        ms: error.usage?.ms ?? 0 });
+      ctx.logs.status({ job: ctx.job.id, phase, step, event: 'retry', attempt, ...failed });
       // A call that failed while thinking most often thought too long. One that ran
       // out the output budget is retried with a small cap, so a model that keeps
       // going after thinking is off fails fast; any other failure answers at the
       // plain cap.
       cutThinking = cut && think;
-      maxTokens = cutThinking ? ctx.config.model.retryOutput : ctx.config.model.maxOutput;
+      maxTokens = cutThinking ? ctx.config.model.retryOutput : plain;
       think = false;
     }
   }
@@ -1611,6 +1638,9 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 export const scenarioKey = (s) => [s.kind, [...new Set(s.rules)].sort().join(','), norm(s.population),
   norm(s.action)].join('|');
 
+/** The kind of the scenario `id` names; null for a card with no scenario, which Phase 6 never leaves. */
+const scenarioKind = (scenarios, id) => scenarios.find((s) => s.id === id)?.kind ?? null;
+
 /**
  * The scenario ID after the highest of S1, S2 and so on that `scenarios` hold,
  * `ahead` more places on. A merge leaves gaps in the numbering.
@@ -1648,19 +1678,29 @@ const breakItCard = (ctx, card) => card.breakIt === true && breakItOn(ctx);
 // Rules go to the inventory a quarter of the room at a time; a reply lists at most one scenario per 150 tokens.
 const INVENTORY_SHARE = 4;
 const SCENARIO_TOKENS = 150;
+// A scenario takes 190 to 230 tokens in the replies seen, against the 150 above, so the
+// break-only call gets twice the tokens of the scenarios it may list.
+const BREAK_ROOM = 2;
 
 /**
  * The distinct scenarios a document's impacted rules call for. Rules that do
  * not fit one call go in batches, each shown the scenarios listed so far. Code
  * numbers the scenarios and drops any that repeats another's kind, rules,
- * population and action. With `only`, just that kind is asked for, and
- * `known` are the scenarios already listed. `empty` holds each required kind
- * with no scenario, and the reply's reason for it.
+ * population and action. With `only`, just that kind is asked for, `known` are the
+ * scenarios already listed, and the call has an output limit of its own: one cut off at it
+ * ends the pass with a `warn` line and an assumption, and the job goes on. With `only`
+ * the reply may list no scenario.
+ * `empty` holds each required kind with no scenario, and the reply's reason for it.
  */
 async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
   const refs = [...ctx.ref.core, ...ctx.ref.chapters('6')];
   const required = only ? [] : [...S.REQUIRED_SCENARIO_KINDS, ...(breakItOn(ctx) ? ['break'] : [])];
-  const maxItems = Math.max(1, Math.floor(ctx.config.model.maxOutput / SCENARIO_TOKENS));
+  // A break-only reply lists one scenario kind, so it holds one kind's share of the scenarios
+  // a full reply holds, and the call gets BREAK_ROOM times the tokens that many scenarios take.
+  const { maxOutput } = ctx.config.model;
+  const kindShare = Math.max(SCENARIO_TOKENS, Math.floor(maxOutput / S.SCENARIO_KINDS.length));
+  const maxItems = Math.max(1, Math.floor((only ? kindShare : maxOutput) / SCENARIO_TOKENS));
+  const output = only ? Math.min(maxOutput, maxItems * SCENARIO_TOKENS * BREAK_ROOM) : maxOutput;
   const line = (rule) => `${ruleLine(rule)} | ${rule.impact} | risk ${rule.risk}`;
   const groups = batches(rules, line, Math.max(1000, Math.floor(room(ctx, false, refs) / INVENTORY_SHARE)));
   const seen = new Set(known.map(scenarioKey));
@@ -1669,12 +1709,13 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
   const checks = new Map();
   let dropped = 0;
   let capped = false;
+  let cutOff = false;
   for (const [i, group] of groups.entries()) {
     const lines = asLines(group.map(line));
     const listed = asLines([...known, ...scenarios].map(scenarioLine));
     const [impactLabel, impactText] = impactsInput(ctx, ctx.pack, false, refs);
     const answer = await ask(ctx, {
-      phase: 'phase6', reasoning: false, refs,
+      phase: 'phase6', reasoning: false, refs, limit: only ? output : undefined,
       step: only ? `scenarios-d${doc.number}-${only}` : groups.length > 1
         ? `scenarios-d${doc.number}-${i + 1}` : `scenarios-d${doc.number}`,
       task: (only ? `List only the ${only} scenarios these rules and the document call for.`
@@ -1701,7 +1742,7 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
           + ' navigation is leaving mid-task (back, cancel, timeout) and returning; re-entry is'
           + ' processing the same record again'
           + (required.includes('break') ? '; break tries to break the change with bad'
-          + ' input, a wrong order, a boundary or a repeated action' : '') + '. Under kindChecks,'
+          + ' input, a wrong order, a boundary or a repeated action' : '') + '. In the kind checks,'
           + ' say for each of those kinds what its scenario tests, or why the document supports'
           + ' none.') + (group.some(removedBehavior) ? REMOVED_SCENARIO : '')
         + ' Never list a scenario already listed.',
@@ -1709,8 +1750,19 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
         ['Scenarios listed so far', listed], [impactLabel, impactText],
         ['Document text', await documentText(ctx, doc, refs, lines + listed + impactText)]],
       schema: S.scenarioInventorySchema({ ids: group.map((rule) => rule.id), maxItems, required,
-        kinds: only ? [only] : S.SCENARIO_KINDS }),
+        // A break-only pass may find no scenario to add.
+        minItems: only ? 0 : 1, kinds: only ? [only] : S.SCENARIO_KINDS }),
+    }).catch((error) => {
+      // A break-only reply is optional: a cut ends the pass and the job goes on.
+      if (!only || error.code !== 'length') throw error;
+      return null;
     });
+    if (!answer) {
+      cutOff = true;
+      ctx.logs.status({ job: ctx.job.id, phase: 'phase6', step: `scenarios-d${doc.number}-${only}`,
+        event: 'warn', reason: 'break-pass-cut', maxTokens: output });
+      break;
+    }
     if (answer.scenarios.length >= maxItems) capped = true;
     for (const row of answer.scenarios) {
       const key = scenarioKey(row);
@@ -1733,6 +1785,13 @@ async function scenarioInventory(ctx, doc, rules, { only, known = [] } = {}) {
     notes.push({ assumption: `${doc.name}: the scenario list reached its limit of ${maxItems}.`,
       why: 'One reply holds only so many scenarios.', impact: 'Some scenarios may be missing.',
       clarification: 'Check the list against the document by hand.' });
+  }
+  if (cutOff) {
+    notes.push({ assumption: `${doc.name}: the break scenario list was cut off at its output limit.`,
+      why: 'The model\'s reply ran to its output limit without finishing.',
+      impact: 'Break scenarios for this document may be missing, so '
+        + `${ctx.breakItObjective} may have fewer cards or none.`,
+      clarification: 'Write the break scenarios by hand.' });
   }
   return { scenarios, notes, dropped, empty };
 }
@@ -1851,12 +1910,84 @@ export function setsOf(ctx, card) {
   return [...new Set(sets)];
 }
 
+/** How a retired rule reads in a pack, as Phase 3 classes it and Phase 6 cards it. */
+const RETIRED_RULE = 'A rule whose summary starts with "Retired:" was removed from the master and'
+  + ' stays a retired rule whatever its class: its own Status, where the workbook shows one, reads'
+  + ' Retired, and its coverage status is a separate column. It is a Direct Change when the change'
+  + ' description concerns that removal, and the card for it verifies the behavior is gone, with an'
+  + ' expected result that says the behavior is absent. A retired rule that is classed Direct Change'
+  + ' and has a card whose expected result says the behavior is absent is consistent as it stands.';
+
+/**
+ * The rules the pipeline builds an issue pack by, as sentences a review or repair call is
+ * given as fact, so no call faults the pack for following one: which cards the Full
+ * Coverage set holds, where a BREAK IT card sits, how an objective no card serves reads,
+ * and how a retired rule reads. The objective names come from the context. Each is stated
+ * only when it holds for this pack: a set rule, or the clause of one, is left out when the
+ * pack's sets do not follow it, as when a repair left a set its last card.
+ * A suite pack takes its sets from the suite merge, so none is stated for it.
+ */
+export function designRules(ctx, pack) {
+  if (ctx.job.suite) return [];
+  const { fullCoverageObjective: full, breakItObjective: brk, coreObjective: core } = ctx;
+  const applicable = cardObjectives(ctx);
+  const hasFull = full != null && applicable.includes(full);
+  const breakIt = breakItOn(ctx);
+  const exclusive = breakIt && ctx.config.exclusiveSets === true;
+  const held = (objective) => {
+    const ids = list(list(pack.testSets).find((set) => set.objective === objective)?.cards);
+    return list(pack.testCards).filter((card) => ids.includes(card.id));
+  };
+  const breakCards = breakIt ? held(brk) : [];
+  const holdsBreakCard = (objective) => held(objective).some((card) => breakCards.includes(card));
+  const rules = [];
+  const inFull = hasFull ? held(full) : [];
+  const fullAsRuled = list(pack.testCards).every((card) => (card.derivation === 'Quality'
+    ? !inFull.includes(card) : inFull.includes(card) || (exclusive && breakCards.includes(card))));
+  // With no ordinary objective, a quality-derived card no other set takes lands in Full Coverage.
+  if (hasFull && applicable.some((o) => o !== full && o !== brk) && fullAsRuled) {
+    rules.push(`The ${full} set, and the cards listed for the ${full} objective, hold only`
+      + ` requirement-derived cards: every one of them${exclusive ? ` outside the ${brk} set` : ''}.`
+      + ' A quality-derived card is left out of both by rule, so its absence there is correct.');
+  }
+  if (breakIt) {
+    const alone = !list(pack.testSets).some((set) => set.objective !== brk && holdsBreakCard(set.objective));
+    const others = exclusive
+      ? (alone ? ` Such a card sits in no other set${hasFull ? `, the ${full} set included` : ''}.` : '')
+      : applicable.includes(core) && core !== brk && !holdsBreakCard(core)
+        ? ` Such a card stays out of the ${core} set.` : '';
+    rules.push(`The ${brk} set holds only the cards written for break scenarios.${others}`);
+  }
+  const untested = untestedObjectives(ctx, pack);
+  if (untested.length) {
+    rules.push(`No test card serves ${untested.join(', ')}, so`
+      + ` ${untested.length > 1 ? 'those objectives read' : 'that objective reads'} Not Applicable, with`
+      + ' a reason that says no test card serves it. That row is how the pack records the gap, by rule:'
+      + ' such an objective applies to the change, no card tests it, a repair cannot change the row,'
+      + ' and the workbook need not show a limitation for it.');
+  }
+  if (list(pack.rules).some(isRetired)) rules.push(RETIRED_RULE);
+  return rules;
+}
+
+/** The input a call reads the design rules under. */
+const DESIGN_RULES_LABEL = 'How this pack is built';
+
+/** The design rules as an input of a call, under `lead`; blank, so left out, when the pack has none. */
+const designRulesInput = (ctx, pack, lead) => {
+  const rules = designRules(ctx, pack);
+  return [DESIGN_RULES_LABEL, rules.length ? `${lead}\n${asLines(rules.map((rule) => `- ${rule}`))}` : ''];
+};
+
 // The reason a dropped objective carries. It replaces the reason that argued for testing it, and it
 // stays clear of the phrases the quality check reads as "this could be tested".
 const DROPPED = 'Not tested in this pack: no test card serves it. The gap is recorded under Limitations.';
 
 /** The objectives dropped for want of a card. A checkpoint from an older run holds a count instead. */
 const droppedList = (ctx) => (Array.isArray(ctx.droppedObjectives) ? ctx.droppedObjectives : []);
+/** The dropped objectives the pack shows as not applicable: each is applicable, and no card tests it. */
+const untestedObjectives = (ctx, pack) => droppedList(ctx).filter((name) => list(pack.objectives)
+  .some((row) => row.objective === name && !row.applicable));
 const noStop = (text) => String(text).replace(/[.\s]+$/, '');
 
 const docRules = (ctx, doc) => ctx.pack.rules.filter((rule) => rule.sourceDocument === doc.name
@@ -2054,9 +2185,10 @@ const cardView = (card) => [`Title: ${card.title}`, `Derivation: ${card.derivati
  * room. A batch that is too big is split; a card too big alone is asked again
  * with rule summaries only, and if that is too big too it is left unverified.
  * Returns `failed` (the reason for each card that does not follow, by card)
- * and `unverified` (the cards no call could hold).
+ * and `unverified` (the cards no call could hold). `extra` is a sentence added to
+ * what every call of this check is asked.
  */
-async function verifyCards(ctx, cards, step) {
+async function verifyCards(ctx, cards, step, extra = '') {
   const failed = new Map();
   const unverified = [];
   if (!cards.length) return { failed, unverified };
@@ -2078,7 +2210,7 @@ async function verifyCards(ctx, cards, step) {
           + ' or states what no cited rule supports; say in the reason what the rules require instead.'
           + ' A rule marked removed was taken out: a card citing it follows when its Expected Result'
           + ' states the behavior is absent, and does not follow when it expects the behavior.'
-          + (group.some((card) => card.derivation === 'Quality') ? QUALITY_VERIFY : ''),
+          + (group.some((card) => card.derivation === 'Quality') ? QUALITY_VERIFY : '') + extra,
         inputs: [['Cards', labeled.map(({ card, label }) => `### ${label}\n${cardView(card)}`).join('\n\n')],
           ['Rules and their source wording',
             asLines([...new Set(group.flatMap((card) => wording(card, short)))])]],
@@ -2581,7 +2713,8 @@ export async function phase7(ctx) {
   const answer = await ask(ctx, {
     phase: 'phase7', step: 'sets', reasoning: false, refs,
     task: 'Write the scope of the test set for each objective: what it runs and why, in at'
-      + ' most four sentences.'
+      + ' most four sentences. Give no count of cards or rules in a scope; each set\'s rule'
+      + ' summary carries the counts.'
       + `${regression.length ? ` For ${regression.join(' and ')}, give the execution scope: how its`
         + ' run is grouped, which cards run together and in what order, and which existing tests'
         + ' run again beside them.' : ''}`
@@ -2612,7 +2745,8 @@ export async function phase7(ctx) {
         id: `TC-${doc.abbreviation}-${job.issue}-${String(n).padStart(3, '0')}`,
         title: card.title, module: doc.module, sourceDocument: doc.name, mission: card.mission,
         focus: card.focus, expected: card.expected, rules: card.rules,
-        objectives: card.objectives, derivation: card.derivation, steps: card.steps,
+        objectives: card.objectives, derivation: card.derivation,
+        kind: scenarioKind(designed.scenarios, card.scenario), steps: card.steps,
       });
     }
     coverage.push(...designed.uncovered.map((row) => ({ ruleId: row.ruleId, status: row.status,
@@ -2643,9 +2777,10 @@ export function mergeSuite(ctx) {
       ?? 'approved business rules held in the master',
     modules: Object.fromEntries(ctx.documents.map((doc) => [doc.key, [doc.module, doc.abbreviation]])),
   };
-  // The merge reads cards as the builder knows them, without the design pass's marks.
+  // The merge reads cards as the builder knows them: each with its scenario's kind, without the design pass's marks.
   const designed = Object.fromEntries(Object.entries(ctx.designed).map(([key, d]) => [key,
-    { ...d, cards: d.cards.map(({ scenario, breakIt, key, ...card }) => card) }]));
+    { ...d, cards: d.cards.map(({ scenario, breakIt, key, ...card }) =>
+      ({ ...card, kind: scenarioKind(d.scenarios, scenario) })) }]));
   const merged = ctx.suiteMerge.mergeSuitePack({ exportJson: ctx.exportJson, designed, narrative });
   // The merge need not carry the impact analysis; Phase 9 reads it from the pack.
   if (pack.impacts) merged.impacts ??= pack.impacts;
@@ -2782,9 +2917,10 @@ export function tidyAssumptions(ctx, pack) {
 /**
  * Settles what code can settle before the builder looks: coverage rows that
  * disagree with the cards, assumptions citing rules or counts the pack does not
- * hold, a blank assumptions sheet, Direct Change rules no card covers.
+ * hold, a blank assumptions sheet, Direct Change rules no card covers, and an
+ * overall confidence above the confidence ceiling, whose status line `log: false` leaves out.
  */
-export function reconcile(ctx, pack) {
+export function reconcile(ctx, pack, { log = true } = {}) {
   dropUnfoundedAssumptions(ctx, pack);
   tidyAssumptions(ctx, pack);
   const covered = new Map();
@@ -2837,6 +2973,8 @@ export function reconcile(ctx, pack) {
     pack.coverage.push({ ruleId: rule.id, status: 'Missing', strength: 'None',
       gap: 'No test card covers this rule.', recommendation: 'Design a card for this rule.' });
   }
+  // The Coverage field is a count of the Coverage Matrix, so once written it follows the rows.
+  if (!blank(pack.confidence?.coverage)) pack.confidence.coverage = coverageText(ctx, pack);
   const uncoveredDirect = list(pack.rules).filter((rule) => rule.impact === 'Direct Change'
     && !covered.has(rule.id)).map((rule) => rule.id);
   pack.limitations ??= {};
@@ -2845,8 +2983,7 @@ export function reconcile(ctx, pack) {
   }
   // A dropped objective is a coverage gap. Written from the context every time, so a repair
   // answer that rewrites the limitations cannot lose it.
-  const untested = droppedList(ctx).filter((name) => list(pack.objectives)
-    .some((row) => row.objective === name && !row.applicable));
+  const untested = untestedObjectives(ctx, pack);
   if (untested.length) {
     pack.limitations['Objective Matrix'] = 'Applicable but untested: no test card serves'
       + ` ${untested.join(', ')}. ${untested.length > 1 ? 'These objectives are' : 'This objective is'}`
@@ -2857,6 +2994,7 @@ export function reconcile(ctx, pack) {
   if (!list(pack.assumptions).length && blank(pack.limitations.Assumptions)) {
     pack.limitations.Assumptions = 'No assumptions were needed to build this pack.';
   }
+  holdToCeiling(ctx, pack, { log });
   const overall = pack.confidence?.overall;
   if (overall && pack.executiveSummary) {
     const reason = String(pack.confidence?.reason ?? '').trim();
@@ -2906,6 +3044,15 @@ export function buildRound(ctx, pack, label = 'build', attempt = 0, deferred = [
 }
 
 /**
+ * Why a build was refused, for a status line: the sheets that failed and the first line
+ * of the notes of the first failed sheet that has any, reduced to plain words.
+ */
+function failureWhy(failed) {
+  return { failedSheets: sheetsField(failed.map(([sheet]) => sheet)),
+    problem: failed.map(([, , , , notes]) => noteCode(notes)).find(Boolean) ?? '' };
+}
+
+/**
  * Phase 8: builds the pack, sends what fails to the repair, and ends by writing the
  * Draft workbook to work/review with the repository's builder command. The sheets in
  * `deferred` are left out of the in-memory failures only: the Draft workbook shows
@@ -2919,13 +3066,14 @@ export async function phase8(ctx, pack, label = 'build', deferred = []) {
     if (!built.failed.length) {
       const draft = draftWorkbook(ctx, pack, `${label} ${attempt}`);
       ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: label, event: 'draft', attempt,
-        written: Boolean(draft.workbook), failed: draft.failed.length });
+        written: Boolean(draft.workbook), failed: draft.failed.length,
+        ...(draft.workbook ? {} : failureWhy(draft.failed)) });
       if (draft.workbook) return pack;
       if (!draft.failed.length) throw new GateError('phase8', 'builder-fail', { sheets: 0 });
       built = { ...built, failed: draft.failed };
     }
     if (attempt >= ctx.config.builder.retries) {
-      throw new GateError('phase8', 'builder-fail', { sheets: built.failed.length });
+      throw new GateError('phase8', 'builder-fail', { sheets: built.failed.length, ...failureWhy(built.failed) });
     }
     await repair(ctx, pack, built, `${label}-${attempt + 1}`);
   }
@@ -2985,33 +3133,126 @@ function addRepairCard(ctx, pack, fresh, named) {
   const card = { id: `${prefix}${String(last + 1).padStart(3, '0')}`, title: tidy.title,
     module: doc.module, sourceDocument: doc.name, mission: tidy.mission, focus: tidy.focus,
     expected: tidy.expected, rules: tidy.rules, objectives: tidy.objectives,
-    derivation: tidy.derivation, steps: tidy.steps };
-  card.objectives = setsOf(ctx, card);
+    derivation: tidy.derivation, kind: 'decision', steps: tidy.steps };
   pack.testCards.push(card);
-  for (const set of list(pack.testSets)) {
-    if (!card.objectives.includes(set.objective)) continue;
-    set.cards = [...list(set.cards), card.id];
-    set.ruleSummary = setSummary(pack.testCards.filter((c) => set.cards.includes(c.id)));
-  }
+  placeCard(ctx, pack, card);
+  summarizeSets(pack);
   return card;
+}
+
+/**
+ * Puts a card of an issue pack in the sets `setsOf` gives it and takes it out of every
+ * other set, so its objectives and the sets agree as they do when Phase 7 builds them.
+ * `breakIt` says the card is a BREAK IT card. A set never loses its last card this way:
+ * the card stays in it and keeps that objective.
+ */
+function placeCard(ctx, pack, card, breakIt = false) {
+  card.objectives = setsOf(ctx, { ...card, breakIt });
+  for (const set of list(pack.testSets)) {
+    const held = list(set.cards).includes(card.id);
+    const wanted = card.objectives.includes(set.objective);
+    if (wanted && !held) set.cards = [...list(set.cards), card.id];
+    else if (held && !wanted && set.cards.length > 1) set.cards = set.cards.filter((id) => id !== card.id);
+    else if (held && !wanted) card.objectives.push(set.objective);
+  }
+}
+
+/** Writes each set's rule summary from the cards the set holds. */
+function summarizeSets(pack) {
+  for (const set of list(pack.testSets)) {
+    set.ruleSummary = setSummary(pack.testCards.filter((card) => list(set.cards).includes(card.id)));
+  }
 }
 
 /** Takes a repair's new card back out of the pack and its sets. */
 function dropRepairCard(pack, card) {
   pack.testCards = pack.testCards.filter((c) => c.id !== card.id);
-  for (const set of list(pack.testSets)) {
-    set.cards = list(set.cards).filter((id) => id !== card.id);
-    set.ruleSummary = setSummary(pack.testCards.filter((c) => set.cards.includes(c.id)));
+  for (const set of list(pack.testSets)) set.cards = list(set.cards).filter((id) => id !== card.id);
+  summarizeSets(pack);
+}
+
+/** True when the BREAK IT set holds the card, which is how a card of the pack shows it is one. */
+const inBreakIt = (ctx, pack, card) => list(pack.testSets).some((set) =>
+  set.objective === ctx.breakItObjective && list(set.cards).includes(card.id));
+
+/** What a repair call is told about the rules of a new card when the pack holds a retired rule. */
+const ACTIVE_RULES_CARD = 'A new card for behavior that still happens cites the active rules its'
+  + ' expected result exercises, never only rules whose summary starts with "Retired:"; a card that'
+  + ' cites only retired rules checks that their behavior is gone.';
+
+/** What the recheck of a new card is told when one cites retired rules alone. */
+const RETIRED_ONLY_VERIFY = ' A card whose every cited rule is marked removed checks that the removed'
+  + ' behavior is gone and nothing else, whatever its derivation: it does not follow when its'
+  + ' Expected Result describes behavior that still happens, which no rule it cites supports; say'
+  + ' in the reason that the card needs the active rules for that behavior.';
+
+/** The card text a repair call sees: every field but `kind`, which code writes and no repair changes. */
+const repairCardText = ({ kind, ...card }) => JSON.stringify(card);
+
+/** What a repair call that sent nothing returned. */
+const NOTHING_RETURNED = { cards: [], newCards: [], keptNewCards: [], coverage: [], limitations: [],
+  assumptions: 0, undone: [] };
+
+/** The cards of the pack whose ID a repair's problem text holds: the cards that call is given. */
+const namedCards = (pack, text) => list(pack.testCards).filter((card) => text.includes(card.id));
+
+/** Tokens one corrected card takes in a repair reply, steps included. */
+const REPAIR_CARD_TOKENS = 2500;
+
+/**
+ * The most cards one fix-round repair call is given. Every card comes back in full, so the
+ * cards of one call are held to half of the reply's output budget; the rest is room for
+ * coverage rows, limitations, new cards and cards longer than most.
+ */
+export const repairCardsMax = (ctx) => Math.max(1,
+  Math.floor(ctx.config.model.maxOutput / 2 / REPAIR_CARD_TOKENS));
+
+/**
+ * How many whole objects the list under `key` holds in a JSON reply that was cut off: the
+ * items the model finished before its output budget ran out.
+ */
+export function wholeItems(text, key) {
+  const reply = String(text ?? '');
+  const at = reply.indexOf(`"${key}"`);
+  const from = at < 0 ? -1 : reply.indexOf('[', at);
+  if (from < 0) return 0;
+  let depth = 0;
+  let quoted = false;
+  let count = 0;
+  for (let i = from + 1; i < reply.length; i += 1) {
+    const ch = reply[i];
+    if (quoted) {
+      if (ch === '\\') i += 1;
+      else if (ch === '"') quoted = false;
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === '{' || ch === '[') {
+      depth += 1;
+    } else if (ch === '}' || ch === ']') {
+      if (depth === 0) break;
+      depth -= 1;
+      if (depth === 0 && ch === '}') count += 1;
+    }
   }
+  return count;
 }
 
 /**
  * One repair call: the builder's FAIL text, the cards and rules it names, and their fixes.
+ * The call is given the design rules, and each card it corrects goes back through the set
+ * rules, so its objectives and its sets agree whatever the reply names. Returns what came
+ * back, for the caller to report: the IDs of the cards it corrected, the new cards it offered
+ * and the ones kept, the rules of its coverage rows, the sheets of its limitations, how many
+ * assumptions it added, and the corrected cards whose change was undone.
+ * `only`, when given, lists the named cards this call corrects; the other named cards belong
+ * to calls of their own. With `cutOk`, a reply cut off at its output budget changes nothing
+ * and comes back as `cut`, the error, in place of failing the caller.
  */
-async function repair(ctx, pack, built, step, { assumptions = false, newCards = false } = {}) {
+async function repair(ctx, pack, built, step, { assumptions = false, newCards = false, only = null,
+  cutOk = false } = {}) {
   const text = statedReasons(pack, built.failed);
-  if (!text) return;
-  const cards = list(pack.testCards).filter((card) => text.includes(card.id));
+  if (!text) return NOTHING_RETURNED;
+  const cards = namedCards(pack, text).filter((card) => !only || only.includes(card.id));
   const ruleIds = list(pack.rules).map((rule) => rule.id);
   const named = list(pack.rules).filter((rule) => text.includes(rule.id)
     || cards.some((card) => card.rules.includes(rule.id)));
@@ -3023,13 +3264,15 @@ async function repair(ctx, pack, built, step, { assumptions = false, newCards = 
   // only a named card cites. A suite pack takes no new card: its cards come from the suite files.
   const newIds = !newCards || ctx.job.suite ? []
     : named.filter((rule) => citesId(text, rule.id)).map((rule) => rule.id);
-  const answer = await ask(ctx, {
+  const retired = new Set(list(pack.rules).filter(isRetired).map((rule) => rule.id));
+  const request = {
     phase: 'phase8', step: `repair-${step}`, reasoning: false, refs: [ctx.ref.docs.workbookStandard],
     task: 'The workbook builder failed these sheets. Fix each problem: return every named card'
       + ' corrected in full, a coverage row for each rule whose coverage is wrong, and a'
       + ' limitation for a sheet that cannot be completed, saying why.'
       + (newIds.length ? ' When a problem asks for a card that does not exist, return it under'
-        + ' newCards, covering only a rule the problem names; the card is numbered for you.' : '')
+        + ' newCards, covering only a rule the problem names; the card is numbered for you.'
+        + (retired.size ? ` ${ACTIVE_RULES_CARD}` : '') : '')
       + ' A reason comes from the'
       + ' change description, the existing and new behavior, or the rules. Do not call a feature'
       + ' or window new unless the new behavior says so; behavior that exists already is what'
@@ -3037,12 +3280,25 @@ async function repair(ctx, pack, built, step, { assumptions = false, newCards = 
     inputs: [['Change description', ctx.description],
       ['Existing behavior', ctx.summary?.existingBehavior], ['New behavior', ctx.summary?.newBehavior],
       ['Builder problems', text],
-      ['Cards named', cards.map((card) => JSON.stringify(card)).join('\n')],
+      designRulesInput(ctx, pack, 'The pipeline builds every pack by these rules and applies them again to'
+        + ' what you return. Never change a card or a coverage row to break one, even when a problem'
+        + ' asks for it.'),
+      ['Cards for this call', only ? 'The problems name more cards than one reply holds. Correct only'
+        + ' these cards in this reply; the other named cards are corrected in calls of their own:'
+        + ` ${only.join(', ')}` : ''],
+      ['Cards named', cards.map(repairCardText).join('\n')],
       ['Rules named', asLines(named.map(ruleLine))]],
     schema: S.repairSchema({ cardIds: cards.map((card) => card.id), ids: ruleIds, objectives,
       derivations: ctx.builder.DERIVATIONS, statuses: ctx.builder.COVERAGE_STATUSES, sheets,
       assumptions, newIds }),
-  });
+  };
+  let answer;
+  try {
+    answer = await ask(ctx, request);
+  } catch (error) {
+    if (!cutOk || !(error instanceof ModelError) || error.code !== 'length') throw error;
+    return { ...NOTHING_RETURNED, cut: error };
+  }
   const fresh = new Set(newIds);
   const added = [];
   for (const card of list(answer.newCards).slice(0, S.NEW_CARDS_MAX)) {
@@ -3050,18 +3306,27 @@ async function repair(ctx, pack, built, step, { assumptions = false, newCards = 
     if (made) added.push(made);
   }
   // A new card's Expected Result follows from its rules, as a repaired card's does; one that
-  // does not is left out.
-  const { failed: unsound } = await verifyCards(ctx, added, `recheck-new-${step}`);
+  // does not is left out. A card on retired rules alone is checked as an absence check.
+  const { failed: unsound } = await verifyCards(ctx, added, `recheck-new-${step}`,
+    added.some((card) => card.rules.every((id) => retired.has(id))) ? RETIRED_ONLY_VERIFY : '');
   for (const card of unsound.keys()) dropRepairCard(pack, card);
+  const corrected = [];
   const before = new Map(cards.map((card) => [card.id, card.expected]));
   for (const fixed of answer.cards) {
     const card = pack.testCards.find((c) => c.id === fixed.id);
     if (!card) continue;
     const tidy = tidyCard(fixed, new Set(ruleIds.filter((id) => pack.rules
       .find((rule) => rule.id === id)?.module === card.module)));
-    if (tidy.rules.length) Object.assign(card, { ...tidy, id: card.id, module: card.module,
-      sourceDocument: card.sourceDocument });
+    if (!tidy.rules.length) continue;
+    const { objectives } = card;
+    Object.assign(card, { ...tidy, id: card.id, module: card.module, sourceDocument: card.sourceDocument });
+    // A suite pack's sets come from the suite merge, so its card keeps the objectives the merge gave it.
+    if (ctx.job.suite) card.objectives = objectives;
+    else corrected.push(card);
   }
+  // A corrected card goes back through the set rules, and every set says what it holds now.
+  for (const card of corrected) placeCard(ctx, pack, card, inBreakIt(ctx, pack, card));
+  if (corrected.length) summarizeSets(pack);
   // A repair that changed a card's Expected Result is checked against the rules again; one
   // that does not follow is undone, final step included.
   const changed = cards.filter((card) => card.expected !== before.get(card.id));
@@ -3092,7 +3357,17 @@ async function repair(ctx, pack, built, step, { assumptions = false, newCards = 
     pack.assumptions = [...list(pack.assumptions), ...withoutPipelineTerms(ctx, answer.assumptions)
       .filter((row) => !seen.has(row.assumption) && seen.add(row.assumption))];
   }
+  const offered = list(answer.newCards).slice(0, S.NEW_CARDS_MAX);
   ctx.repairs += 1;
+  return {
+    cards: answer.cards.map((card) => card.id),
+    newCards: offered,
+    keptNewCards: added.filter((card) => !unsound.has(card)),
+    coverage: answer.coverage.map((row) => row.ruleId),
+    limitations: answer.limitations.filter(({ text: why }) => !blank(why)).map(({ sheet }) => sheet),
+    assumptions: assumptions ? list(answer.assumptions).length : 0,
+    undone: [...failed.keys()].map((card) => card.id),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -3128,7 +3403,7 @@ const REVIEW_SHEET = 'Quality Review';
  * pack supports. A rated pack keeps its rating.
  */
 function draftPack(ctx, pack) {
-  const draft = reconcile(ctx, structuredClone(pack));
+  const draft = reconcile(ctx, structuredClone(pack), { log: false });
   delete draft.revalidation;
   // A field the review has not written is blank, or an empty object a suite merge leaves.
   const standIn = (current, schema, over = {}) => ({
@@ -3136,12 +3411,13 @@ function draftPack(ctx, pack) {
     ...Object.fromEntries(Object.entries(current ?? {}).filter(([, value]) => !blank(value))),
     ...over });
   draft.seniorReview = standIn(draft.seniorReview, S.seniorReviewSchema.properties.seniorReview);
-  draft.testerNotes = standIn(draft.testerNotes, S.seniorReviewSchema.properties.testerNotes);
+  draft.testerNotes = standIn(draft.testerNotes, S.testerNotesSchema.properties.testerNotes);
   const rated = ctx.builder.CONFIDENCE_LEVELS.includes(draft.confidence?.overall);
   draft.confidence = standIn(draft.confidence,
     { properties: Object.fromEntries(['overall', ...CONFIDENCE_FIELDS.map(([field]) => field)].map((key) => [key, 0])) },
     rated ? {} : { overall: 'Low' });
-  // A rated pack's summary already carries the rating: reconcile writes it.
+  // A rated pack's summary already carries the rating: reconcile writes it, held to the
+  // confidence ceiling. The status line for a lowered rating comes from the build of the pack itself.
   if (!rated && draft.executiveSummary) draft.executiveSummary.confidence = 'Low';
   // A Low rating needs a limitation saying why, or the draft fails the builder's own check.
   if (draft.confidence.overall === 'Low') {
@@ -3199,7 +3475,9 @@ export function draftWorkbook(ctx, pack, label) {
 /** The Draft workbook the builder writes for the pack as it stands, read back as sheets. */
 function builtSheets(ctx, pack) {
   const draft = draftWorkbook(ctx, pack, 'review');
-  if (!draft.workbook) throw new GateError('phase9', 'builder-fail', { sheets: draft.failed.length });
+  if (!draft.workbook) {
+    throw new GateError('phase9', 'builder-fail', { sheets: draft.failed.length, ...failureWhy(draft.failed) });
+  }
   return readXlsx(draft.workbook).map(readSheet);
 }
 
@@ -3297,11 +3575,15 @@ const issueText = (ctx) => list(ctx.reviewFindings)
  * thinks through the whole review. The first runs the checklist over the built
  * workbook with thinking off, in parts when it is long: issues, the coverage
  * rows for rules not plainly Covered, and assumptions. `again` is a check after
- * a fix round, which replaces the issues and keeps the rest.
+ * a fix round, which replaces the issues and keeps the rest. Every call is given
+ * the design rules as facts it lists no issue on.
  */
 export async function phase9Checklist(ctx, pack, { again = false } = {}) {
   const refs = [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')];
-  const extra = [impactsInput(ctx, pack, false, refs)];
+  const extra = [impactsInput(ctx, pack, false, refs),
+    designRulesInput(ctx, pack, 'The pipeline builds every pack by these rules. They are facts about this'
+      + ' pack, not issues: never list an issue because the pack follows one, and never give a fix'
+      + ' that would break one.')];
   const views = reviewViews(ctx, pack, refs, extra);
   // Rules taken from document text leave the checklist no matrix export to check them against.
   const limited = ctx.derived > 0;
@@ -3435,6 +3717,39 @@ function fixableFindings(ctx, pack, rows) {
 }
 
 /**
+ * Logs one `repair` line for each finding of a repair call: what the finding asked for
+ * (`new-card`, `card`, `coverage`, `assumption` or `sheet`), what the repair returned for
+ * it (corrected `cards`, offered `newCards`, `coverageRows` and `limitations`), and
+ * whether that was `applied`, `undone` (everything returned was taken back out) or `empty`
+ * (nothing came back for it). A finding is matched to the reply by the cards, rules and
+ * sheets it names. `check` names the Revalidation check of a finding from the revalidation.
+ * `split` holds the `part` and `parts` of a finding split across calls, which gets a line
+ * for each part.
+ */
+function noteRepairs(ctx, group, step, label, returned, firstFinding, split = {}) {
+  for (const [i, { row, to, text }] of group.entries()) {
+    const asks = to.rules.length > 0 && !to.cards.length && ASKS_NEW_CARD.test(text);
+    const ownsRule = (id) => to.rules.includes(id) || to.sheets.includes('Coverage Matrix');
+    const cards = returned.cards.filter((id) => to.cards.includes(id));
+    const offered = returned.newCards.filter((card) => asks && list(card.rules).some((id) => to.rules.includes(id)));
+    const keptNew = returned.keptNewCards.filter((card) => asks && card.rules.some((id) => to.rules.includes(id)));
+    const coverageRows = returned.coverage.filter(ownsRule).length;
+    const limitations = returned.limitations.filter((sheet) => to.sheets.includes(sheet)).length;
+    const undone = returned.undone.filter((id) => to.cards.includes(id)).length;
+    const assumptions = to.assumptions ? returned.assumptions : 0;
+    const came = cards.length + offered.length + coverageRows + limitations + assumptions;
+    const taken = undone + (offered.length - keptNew.length);
+    ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: `repair-${step}`, event: 'repair',
+      finding: firstFinding + i + 1, ...split, ...(label === 'revalidation' ? { check: row.section } : {}),
+      asked: asks ? 'new-card' : to.cards.length ? 'card' : to.rules.length || to.sheets.includes('Coverage Matrix')
+        ? 'coverage' : to.assumptions ? 'assumption' : 'sheet',
+      cards: cards.length, newCards: offered.length, coverageRows, limitations, assumptions,
+      result: !came ? 'empty' : taken >= cards.length + offered.length && !coverageRows && !limitations && !assumptions
+        ? 'undone' : 'applied' });
+  }
+}
+
+/**
  * Records, for each finding that asks for a new card, whether a rule it names is still
  * without one. The status log says so, and the finding stays open with the reason.
  */
@@ -3453,14 +3768,24 @@ function noteUnapplied(ctx, pack, group, step) {
   }
 }
 
+/** What remains of a finding says this when a repair reply for it was cut off. */
+const CUT_REASON = 'a repair reply was cut off at its output budget';
+
 /**
- * One repair of findings: the repair call, the pack's edits that came from the
+ * One repair of findings: the repair calls, the pack's edits that came from the
  * review kept, the rebuild, and the findings noted as attempted. A coverage row
  * or limitation changes only for a rule or sheet a finding names; every other
  * one stays as the pack had it, so a false finding cannot downgrade a rule or
  * add a limitation.
+ *
+ * `fixCalls` sets what each call is given, and a `repair-call` line says so before the
+ * call: the first finding it holds, how many findings, how many cards, and which part of
+ * a finding split across calls. In the revalidation round a reply cut off at its output
+ * budget leaves its finding open and logs a `repair-cut` line with the length of the cut
+ * reply and the whole cards it held, and the other findings' repairs stand; when no call
+ * of the round answered, the cut fails the round. A cut in a checklist round fails it.
  */
-async function fixRound(ctx, pack, findings, label, deferred) {
+async function fixRound(ctx, pack, findings, label, deferred, firstFinding = 0) {
   const kept = structuredClone({ coverage: pack.coverage, limitations: pack.limitations });
   const allow = { rules: new Set(), sheets: new Set() };
   for (const { to } of findings) {
@@ -3468,17 +3793,42 @@ async function fixRound(ctx, pack, findings, label, deferred) {
     to.sheets.forEach((sheet) => allow.sheets.add(sheet));
     if (to.sheets.includes('Coverage Matrix')) list(pack.rules).forEach((rule) => allow.rules.add(rule.id));
   }
-  for (const [n, group] of fixGroups(ctx, pack, findings).entries()) {
-    await repair(ctx, pack, { failed: [failedSheet(REVIEW_SHEET,
-      group.map((item) => item.text).join('\n'))], validation: [] }, `${label}-g${n + 1}`,
-    { assumptions: group.some((item) => item.to.assumptions), newCards: true });
-    noteUnapplied(ctx, pack, group, `${label}-g${n + 1}`);
+  const single = label === 'revalidation';
+  const answered = new Set();
+  const cut = new Map();
+  for (const [n, { items, only, cards, part, parts }] of fixCalls(ctx, pack, findings, single).entries()) {
+    const step = `${label}-g${n + 1}`;
+    const first = firstFinding + findings.indexOf(items[0]);
+    const line = { job: ctx.job.id, phase: 'phase8', step: `repair-${step}`, finding: first + 1, cards, part, parts };
+    ctx.logs.status({ ...line, event: 'repair-call', findings: items.length });
+    // A finding split across calls takes new cards and assumptions in its first call only.
+    const returned = await repair(ctx, pack, { failed: [failedSheet(REVIEW_SHEET,
+      items.map((item) => item.text).join('\n'))], validation: [] }, step,
+    { assumptions: part === 1 && items.some((item) => item.to.assumptions), newCards: part === 1, only,
+      cutOk: single });
+    if (returned.cut) {
+      for (const item of items) cut.set(item, returned.cut);
+      const reply = returned.cut.partial;
+      ctx.logs.status({ ...line, event: 'repair-cut', ...(typeof reply === 'string'
+        ? { replyChars: reply.length, wholeCards: wholeItems(reply, 'cards') } : {}) });
+      continue;
+    }
+    items.forEach((item) => answered.add(item));
+    noteRepairs(ctx, items, step, label, returned, first, parts > 1 ? { part, parts } : {});
+    // A finding with a cut part keeps the cut as its reason, whatever its other parts returned.
+    if (part === parts && !items.some((item) => cut.has(item))) noteUnapplied(ctx, pack, items, step);
   }
+  if (cut.size && !answered.size) throw cut.values().next().value;
+  ctx.unapplied ??= {};
+  for (const { row } of cut.keys()) ctx.unapplied[row.section] = CUT_REASON;
+  // The review's prose was written before these repairs, and the pack says so where a person reads it.
+  if (single && answered.size) noteNarrativeAge(pack);
   keepReviewEdits(pack, kept, allow);
   await phase8(ctx, pack, label, deferred);
   ctx.appliedFixes ??= [];
-  for (const { row } of findings) {
-    const line = `- ${row.issue} (fix: ${row.fix})`;
+  for (const item of findings) {
+    if (!answered.has(item)) continue;
+    const line = `- ${item.row.issue} (fix: ${item.row.fix})`;
     if (!ctx.appliedFixes.includes(line)) ctx.appliedFixes.push(line);
   }
 }
@@ -3510,24 +3860,46 @@ function keepReviewEdits(pack, kept, allow) {
   pack.limitations = limitations;
 }
 
-/** The findings in groups whose named cards fit one repair call. */
-function fixGroups(ctx, pack, findings) {
+/**
+ * The repair calls of a fix round, in order: the findings each is given (`items`), how many
+ * cards those name (`cards`), and for a finding split across calls the cards of this call
+ * (`only`) and which `part` of how many `parts` it is. No call is given more cards than
+ * `repairCardsMax`, so its reply fits the output budget: a finding that names more is split
+ * into calls of its own. With `single` every finding gets a call of its own, as the
+ * revalidation round asks; otherwise findings share a call while their named cards fit
+ * the prompt and stay within that count.
+ */
+function fixCalls(ctx, pack, findings, single) {
   const budget = Math.max(1000, room(ctx, false, [ctx.ref.docs.workbookStandard]) - 3000);
-  const cost = (item) => estimateTokens(item.text) + list(pack.testCards)
-    .filter((card) => item.text.includes(card.id))
-    .reduce((n, card) => n + estimateTokens(JSON.stringify(card)) + estimateTokens(asLines(
+  const max = repairCardsMax(ctx);
+  const cost = (item, named) => estimateTokens(item.text) + named
+    .reduce((n, card) => n + estimateTokens(repairCardText(card)) + estimateTokens(asLines(
       list(pack.rules).filter((rule) => list(card.rules).includes(rule.id)).map(ruleLine))), 0);
-  const groups = [];
-  let size = 0;
+  const calls = [];
+  let open = null;
   for (const item of findings) {
-    if (!groups.length || size + cost(item) > budget) {
-      groups.push([]);
-      size = 0;
+    const named = namedCards(pack, item.text);
+    const ids = named.map((card) => card.id);
+    if (ids.length > max) {
+      const parts = Math.ceil(ids.length / max);
+      for (let part = 1; part <= parts; part += 1) {
+        const only = ids.slice((part - 1) * max, part * max);
+        calls.push({ items: [item], only, cards: only.length, part, parts });
+      }
+      open = null;
+      continue;
     }
-    groups.at(-1).push(item);
-    size += cost(item);
+    const size = cost(item, named);
+    if (single || !open || open.size + size > budget || new Set([...open.ids, ...ids]).size > max) {
+      open = { items: [], ids: new Set(), size: 0 };
+      calls.push(open);
+    }
+    open.items.push(item);
+    ids.forEach((id) => open.ids.add(id));
+    open.size += size;
   }
-  return groups;
+  return calls.map((call) => (call.only ? call
+    : { items: call.items, only: null, cards: call.ids.size, part: 1, parts: 1 }));
 }
 
 /**
@@ -3600,7 +3972,8 @@ async function writeConfidenceField(ctx, pack, field, task, extra) {
     const answer = await ask(ctx, {
       phase: 'phase9', step: `confidence-${field}`, reasoning: false,
       ...input,
-      task: `${task}${refusal}`,
+      task: `${task} Give no count of cards, rules or coverage statuses; the Coverage field carries`
+        + ` the counts.${refusal}`,
       schema: S.confidenceFieldSchema(field),
     });
     const problem = confidenceFieldProblem(pack, answer[field], earlier, { needsId });
@@ -3620,7 +3993,7 @@ const CONFIDENCE_FIELDS = [
 ];
 
 const COVERED = 'Covered';
-const coverageRows = (ctx, pack) => (ctx.builder.ruleCoverage
+const coverageRows = (ctx, pack) => (ctx.builder?.ruleCoverage
   ? ctx.builder.ruleCoverage(pack).map((row) => ({ id: row.rule.id, status: row.status }))
   : list(pack.coverage).map((row) => ({ id: row.ruleId, status: row.status })));
 
@@ -3646,6 +4019,10 @@ function coverageVerdict(ctx, pack) {
   if (!open.length) return 'strong';
   return open.some((row) => row.status === 'Missing') ? 'weak' : 'partial';
 }
+
+/** An assessment step as it stands: the coverage step takes its verdict and evidence from the counts. */
+const coverageStep = (ctx, pack, row) => (row.step === 'coverage'
+  ? { ...row, verdict: coverageVerdict(ctx, pack), evidence: coverageText(ctx, pack) } : row);
 
 /** Every card with the rules it cites, one line each, so a field can name them by ID. */
 const cardsText = (pack) => asLines(list(pack.testCards)
@@ -3677,8 +4054,7 @@ async function walkConfidenceSteps(ctx, pack, extra) {
       + ' Coverage Matrix, so give it a short placeholder.',
     schema: S.confidenceStepsSchema,
   });
-  const rows = list(answer.steps).map((row) => (row.step === 'coverage'
-    ? { ...row, verdict: coverageVerdict(ctx, pack), evidence: coverageText(ctx, pack) } : row));
+  const rows = list(answer.steps).map((row) => coverageStep(ctx, pack, row));
   ctx.private('phase9-confidence.json', { steps: rows });
   return rows;
 }
@@ -3687,12 +4063,18 @@ async function walkConfidenceSteps(ctx, pack, extra) {
  * Rates `overall` last, from the steps, the checklist, the senior review and any
  * revalidation items still open. Every level carries its reason, which opens the
  * Executive Summary's confidence after the level; a Low rating also writes the limitation.
+ * The call is told the confidence ceiling and offered only the levels at or under it, and a
+ * level above it is lowered to it in code. A `confidence` line logs what set the level: the
+ * level the call gave, what held it lower (untested objectives or the confidence ceiling),
+ * and the counts of weak and partial steps, open revalidation items, checklist issues and
+ * untested objectives it was rated from. `again` marks the rating after the revalidation repair.
  */
-async function rateOverall(ctx, pack, extra, steps) {
+async function rateOverall(ctx, pack, extra, steps, again = false) {
+  const ceiling = confidenceCeiling(ctx, pack);
   let refusal = '';
   let overall;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    overall = await askOverall(ctx, pack, extra, steps, refusal);
+    overall = await askOverall(ctx, pack, extra, steps, refusal, ceiling);
     const [wrong] = otherLevels(overall);
     if (!wrong) break;
     refusal = ` Your last reason was refused: it states "confidence is ${wrong[1]}" and the rating`
@@ -3701,14 +4083,27 @@ async function rateOverall(ctx, pack, extra, steps) {
   // An objective left untested caps the rating below the highest level, whatever the call says.
   const untested = droppedList(ctx);
   const [highest, next] = ctx.builder.CONFIDENCE_LEVELS;
-  if (untested.length && overall.overall === highest && next) {
+  const asked = overall.overall;
+  const capped = untested.length > 0 && asked === highest && Boolean(next);
+  if (capped) {
     overall.overall = next;
     overall.reason = `${overall.reason} No test card serves ${untested.join(', ')}, so the pack leaves`
       + ` ${untested.length > 1 ? 'those objectives' : 'that objective'} untested.`;
   }
-  // A reason that still states another level after the second try, or after the cap, loses those phrases.
-  const wrong = otherLevels(overall).map((match) => match[0]);
-  for (const phrase of wrong) overall.reason = String(overall.reason).replace(phrase, 'confidence');
+  const held = overCeiling(ctx, ceiling, overall.overall);
+  if (held) {
+    overall.overall = ceiling.level;
+    overall.reason = `${overall.reason} ${ceilingNote(ceiling)}`;
+  }
+  const cappedBy = held ? CEILING_CODE : capped ? 'untested-objectives' : 'none';
+  const verdicts = (verdict) => list(steps).filter((row) => row.verdict === verdict).length;
+  ctx.logs.status({ job: ctx.job.id, phase: 'phase9', step: `confidence-overall${again ? '-again' : ''}`,
+    event: 'confidence', overall: overall.overall, asked, cappedBy,
+    stepsWeak: verdicts('weak'), stepsPartial: verdicts('partial'),
+    openItems: list(pack.revalidation?.remaining).length, checklistIssues: ctx.reviewIssues ?? 0,
+    untested: untested.length });
+  // A reason that still states another level after the second try, or after a lowering, loses those phrases.
+  overall.reason = ownLevelOnly(overall);
   return applyRating(pack, overall);
 }
 
@@ -3718,7 +4113,15 @@ const STATED_LEVEL = /\bconfidence\s+(?:level\s+)?(?:is|:)\s*(medium[\s-]high|lo
 const otherLevels = ({ reason, overall }) => [...String(reason).matchAll(STATED_LEVEL)]
   .filter((match) => match[1].toLowerCase() !== String(overall).toLowerCase());
 
-function askOverall(ctx, pack, extra, steps, refusal) {
+/** The reason with each such phrase cut to "confidence", so the text states no level but the rating's. */
+const ownLevelOnly = ({ reason, overall }) => otherLevels({ reason, overall })
+  .reduce((text, match) => text.replace(match[0], 'confidence'), String(reason));
+
+function askOverall(ctx, pack, extra, steps, refusal, ceiling) {
+  const [highest] = ctx.builder.CONFIDENCE_LEVELS;
+  const limit = ceiling.level === highest ? ''
+    : ` The highest level this pack supports is ${ceiling.level}`
+      + `${ceiling.reasons.length ? `, because ${ceiling.reasons.join('; ')}` : ''}. Do not rate it higher.`;
   return ask(ctx, {
     phase: 'phase9', step: 'confidence-overall', reasoning: true,
     ...reviewInputs(ctx, pack, [...extra,
@@ -3728,10 +4131,64 @@ function askOverall(ctx, pack, extra, steps, refusal) {
       + ' revalidation items. Give the reason for the rating at every level, in sentences that'
       + ' name the rule or card IDs behind it, and list the criteria of the level you chose that'
       + ' the pack meets. An objective listed as applicable but untested is a coverage gap and rules'
-      + ' out the highest level. Do not state a confidence level in the reason; the rating field holds it.' + refusal,
-    schema: S.confidenceOverallSchema({ confidence: ctx.builder.CONFIDENCE_LEVELS }),
+      + ` out the highest level.${limit} Do not state a confidence level in the reason; the rating field holds it.` + refusal,
+    schema: S.confidenceOverallSchema({ confidence: ceiling.allowed }),
   });
 }
+
+/** The reason code a status line gives when the confidence ceiling set the level. */
+const CEILING_CODE = 'confidence-ceiling';
+
+/**
+ * The confidence ceiling: the highest overall level the builder accepts for the pack as it
+ * stands (`level`), the levels at or under it (`allowed`), and what the builder says holds
+ * it there (`reasons`). The builder's optional `confidenceCeiling(pack)` export gives
+ * `{ level, reasons }`. A builder without it, or one that names a level outside its own
+ * list, sets no ceiling: every level is allowed.
+ */
+export function confidenceCeiling(ctx, pack) {
+  const levels = list(ctx.builder?.CONFIDENCE_LEVELS);
+  const found = ctx.builder?.confidenceCeiling?.(pack);
+  const at = Math.max(levels.indexOf(found?.level), 0);
+  return { level: levels[at], allowed: levels.slice(at),
+    reasons: at > 0 ? list(found.reasons).map((reason) => String(reason).trim()).filter(Boolean) : [] };
+}
+
+/** True for a level of the builder's list that sits above the ceiling. */
+const overCeiling = (ctx, ceiling, level) => list(ctx.builder?.CONFIDENCE_LEVELS).includes(level)
+  && !ceiling.allowed.includes(level);
+
+const CEILING_NOTE = 'The rating was lowered to what the pack supports';
+
+/** The sentence a lowered rating's reason ends with, naming what the builder says holds the level down. */
+const ceilingNote = (ceiling) => (ceiling.reasons.length
+  ? `${CEILING_NOTE}: ${ceiling.reasons.map(noStop).join('; ')}.` : `${CEILING_NOTE}.`);
+
+/**
+ * Holds a rated pack to its confidence ceiling without a model call. A level above the
+ * ceiling becomes the ceiling, the reason ends with one sentence naming what holds it
+ * there, and the Executive Summary and the Low limitation follow. A `confidence-lowered`
+ * status line gives the level the pack had (`asked`), the level applied (`overall`) and the
+ * reason code; `log: false` leaves it out. An unrated pack, or one at or under its
+ * ceiling, is left as it is.
+ */
+export function holdToCeiling(ctx, pack, { log = true } = {}) {
+  const asked = pack.confidence?.overall;
+  const ceiling = confidenceCeiling(ctx, pack);
+  if (!overCeiling(ctx, ceiling, asked)) return;
+  // A reason lowered before keeps one such sentence, the one for the ceiling it sits at, and
+  // the reason a rating with none was given names the level it had, so it goes.
+  const before = String(pack.confidence.reason ?? '').split(CEILING_NOTE)[0].trim();
+  const said = before === plainReason(asked) ? '' : ownLevelOnly({ reason: before, overall: ceiling.level });
+  applyRating(pack, { overall: ceiling.level, reason: [said, ceilingNote(ceiling)].filter(Boolean).join(' ') });
+  if (log) {
+    ctx.logs?.status({ job: ctx.job?.id, phase: 'phase9', step: 'confidence-ceiling', event: 'confidence-lowered',
+      overall: ceiling.level, asked, reason: CEILING_CODE });
+  }
+}
+
+/** The reason a rating carries when it was given none. */
+const plainReason = (level) => `Overall confidence is ${level}.`;
 
 /** The rating and its reason on the pack: the Executive Summary line, and the limitation for Low. */
 function applyRating(pack, overall) {
@@ -3773,47 +4230,76 @@ export async function phase9Confidence(ctx, pack) {
   return { confidence: level };
 }
 
-/** Rates again when revalidation leaves items open; the fields and the senior review stand. */
+/**
+ * Rates again when revalidation leaves items open; the fields and the senior review stand.
+ * The coverage step is counted again first, so the rating reads the Coverage Matrix as the
+ * repairs left it.
+ */
 export async function reRateConfidence(ctx, pack) {
-  return rateOverall(ctx, pack, confidenceExtra(ctx, pack), list(ctx.confidenceSteps));
+  ctx.confidenceSteps = list(ctx.confidenceSteps).map((row) => coverageStep(ctx, pack, row));
+  return rateOverall(ctx, pack, confidenceExtra(ctx, pack), ctx.confidenceSteps, true);
 }
 
+/** The two parts of the senior review, each asked in a call of its own. */
+const SENIOR_PARTS = [
+  { step: 'senior-review', sheet: 'Senior Tester Review', key: 'seniorReview', schema: S.seniorReviewSchema },
+  { step: 'senior-notes', sheet: 'Tester Notes', key: 'testerNotes', schema: S.testerNotesSchema },
+];
+
 /**
- * The senior review questions and the tester notes, written before the confidence
- * assessment, which reads them, with the checklist's issues in view. An answer with a field that repeats another
- * or cites a card or rule the workbook lacks is asked for once more with what was wrong.
+ * One part of the senior review. The fields of the parts before it ride in the input, so the
+ * part does not restate them. An answer with a field that repeats another or cites a card or
+ * rule the workbook lacks is asked for once more with what was wrong; the accepted fields join
+ * `earlier` only when the whole part is accepted.
  */
-export async function phase9SeniorReview(ctx, pack) {
-  const input = reviewInputs(ctx, pack, [['Checklist issues', issueText(ctx)],
-    impactsInput(ctx, pack, true, [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')])]);
+async function askSeniorPart(ctx, pack, part, shared, earlier) {
+  const input = reviewInputs(ctx, pack, [...shared, ...(earlier.length
+    ? [['Fields already written', asLines(earlier.map((row) => `- ${row.name}: ${row.text}`))]] : [])]);
+  const fieldNames = Object.keys(part.schema.properties[part.key].properties).join(', ');
   let refusal = '';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const answer = await ask(ctx, {
-      phase: 'phase9', step: 'senior', reasoning: true, ...input,
-      task: `Answer the senior review questions for this pack and write the tester notes. Each`
-        + ` field says something of its own and names only cards and rules in the workbook.${refusal}`,
-      schema: S.seniorReviewSchema,
+      phase: 'phase9', step: part.step, reasoning: true, ...input,
+      task: 'Answer the senior review questions for this pack and write the tester notes. Each'
+        + ' field says something of its own and names only cards and rules in the workbook.',
+      question: `Write the ${part.sheet} fields: ${fieldNames}.${refusal}`,
+      schema: part.schema,
     });
-    const earlier = [];
-    const fields = [...Object.entries(answer.seniorReview).map(([f, t]) => [`Senior Tester Review ${f}`, t]),
-      ...Object.entries(answer.testerNotes).map(([f, t]) => [`Tester Notes ${f}`, t])];
+    const accepted = [...earlier];
     const problems = [];
-    for (const [name, text] of fields) {
-      const problem = fieldProblem(pack, Array.isArray(text) ? text.join(' ') : text, earlier);
+    for (const [field, text] of Object.entries(answer[part.key])) {
+      const name = `${part.sheet} ${field}`;
+      const flat = Array.isArray(text) ? text.join(' ') : text;
+      const problem = fieldProblem(pack, flat, accepted);
       if (problem) problems.push(`${name}: ${problem}`);
-      else earlier.push({ name, text: String(Array.isArray(text) ? text.join(' ') : text).trim() });
+      else accepted.push({ name, text: String(flat).trim() });
     }
     if (!problems.length) {
-      pack.seniorReview = answer.seniorReview;
-      pack.testerNotes = answer.testerNotes;
-      if (ctx.reuse.length) {
-        pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
-      }
-      return {};
+      earlier.push(...accepted.slice(earlier.length));
+      return answer[part.key];
     }
     refusal = ` Your last answer was refused: ${problems.join('; ')}.`;
   }
   throw new GateError('phase9', 'review-field-unsupported');
+}
+
+/**
+ * The senior review questions and the tester notes, written before the confidence
+ * assessment, which reads them, with the checklist's issues in view. Each part is a call
+ * of its own, so no one call thinks through both; the pack is written once both are accepted.
+ */
+export async function phase9SeniorReview(ctx, pack) {
+  const shared = [['Checklist issues', issueText(ctx)],
+    impactsInput(ctx, pack, true, [...ctx.ref.core, ctx.ref.docs.validation, ...ctx.ref.chapters('9')])];
+  const earlier = [];
+  const written = {};
+  for (const part of SENIOR_PARTS) written[part.key] = await askSeniorPart(ctx, pack, part, shared, earlier);
+  pack.seniorReview = written.seniorReview;
+  pack.testerNotes = written.testerNotes;
+  if (ctx.reuse.length) {
+    pack.testerNotes.execution = [...list(pack.testerNotes.execution), ...ctx.reuse];
+  }
+  return {};
 }
 
 /**
@@ -3836,47 +4322,115 @@ export function mergeChecks(answers, names = S.REVALIDATION_CHECKS) {
   return { passed: !remaining.length, checks, remaining };
 }
 
+/** The input a walk reads the open checklist findings under. */
+const OPEN_FINDINGS_LABEL = 'Checklist findings still open after the last check';
+
+/** The sheets whose prose the review writes once, before the revalidation. */
+const NARRATIVE_SHEETS = [...SENIOR_PARTS.map((part) => part.sheet), 'Confidence Assessment'];
+
+/**
+ * The note the pack carries, in its manual review field, once a revalidation repair has
+ * changed it after the review's prose was written.
+ */
+const REPAIRED_NOTE = `The ${NARRATIVE_SHEETS.slice(0, -1).join(', the ')}, the written fields of`
+  + ' this assessment, the scope of each test set and the assumptions the pack already held were'
+  + ' written before the last corrections to the pack. Check what they say of a card, a rule or a'
+  + ' count against the test cards and the Coverage Matrix as they now stand.';
+
+/** True when the pack says a revalidation repair changed it after its prose was written. */
+const narrativeAged = (pack) => String(pack.confidence?.manualReview ?? '').includes(REPAIRED_NOTE);
+
+/** Adds that note to the manual review field, once, when the field is written. */
+function noteNarrativeAge(pack) {
+  if (blank(pack.confidence?.manualReview) || narrativeAged(pack)) return;
+  pack.confidence.manualReview = `${String(pack.confidence.manualReview).trim()} ${REPAIRED_NOTE}`;
+}
+
+/** What a walk after a repair round is told about the text that round did not write again. */
+const AGED_TEXT = 'These were written before the repair round and describe the pack as it stood'
+  + ` then: the ${NARRATIVE_SHEETS.slice(0, -1).join(', the ')}, the written fields of the`
+  + ` ${NARRATIVE_SHEETS.at(-1)}, the assumptions the pack held before the round, the scope text of`
+  + ` each test set, and the findings under "${OPEN_FINDINGS_LABEL}". A card they call missing,`
+  + ' vague or wrong, or a count of cards or coverage they give, is not evidence that a finding is'
+  + ' still open. Judge the state of the pack from what the repairs can change, as the workbook'
+  + ' shows it now: the cards, the rule and coverage matrices, the objectives and the test sets'
+  + ' with the cards each holds, and the upload sheet. A gap that an assumption or a limitation'
+  + ' documents is still documented, whenever it was written. Never fail a check, or give a fix,'
+  + ' only because one of those earlier texts no longer matches the pack.';
+
 /**
  * One walk of the Revalidation checks named in `names` (all seven by default) over the
- * finished workbook, in parts when it is long.
+ * finished workbook, in parts when it is long. Each group of checks that read the same
+ * sheets is a call of its own under its own reasoning budget (`revalidation-<group>`, and
+ * `-again` after the repair round). Every call of a part carries the same prompt up to its
+ * question, which names the group, so the server reads the workbook once for the groups.
+ * Every call is given the design rules as facts it fails no check on. A walk after a
+ * repair round, `again` or over a pack that carries the repair's note, is also told which
+ * text was written before that round and is no evidence of an open finding.
+ * Each check's merged verdict is logged as a `check` line, with whether every call that
+ * judged it ran with thinking on and whether the verdict came with a fix. With `earlier`,
+ * the verdicts of the walk before the repair round, a failed check's line also says
+ * whether that walk failed it too (`repeat`).
  */
-async function walkChecks(ctx, pack, step, names = S.REVALIDATION_CHECKS) {
+async function walkChecks(ctx, pack, { again = false, names = S.REVALIDATION_CHECKS, earlier = null } = {}) {
   const refs = [...ctx.ref.core, ctx.ref.docs.revalidation];
   const extra = [['Fixes the review attempted (judge the workbook, not the attempt)',
     list(ctx.appliedFixes).join('\n')],
-  ['Checklist findings still open after the last check', openText(ctx) || 'None.']];
+  [OPEN_FINDINGS_LABEL, openText(ctx) || 'None.'],
+  designRulesInput(ctx, pack, 'The pipeline builds every pack by these rules. They are facts about this'
+    + ' pack, not findings: never fail a check because the pack follows one, and never give a fix'
+    + ' that would break one.'),
+  ['Text written before the repair round', again || narrativeAged(pack) ? AGED_TEXT : '']];
   const views = reviewViews(ctx, pack, refs, extra, { review: true });
+  const groups = S.REVALIDATION_GROUPS
+    .map((group) => ({ ...group, checks: group.checks.filter((check) => names.includes(check)) }))
+    .filter((group) => group.checks.length);
   const answers = [];
+  const thinking = new Map();
   for (const view of views) {
-    answers.push(await ask(ctx, {
-      phase: 'phase9', step, reasoning: true, refs,
-      task: 'Revalidate the pack after the review\'s fixes. Give a verdict for '
-        + (names.length === S.REVALIDATION_CHECKS.length ? 'each of the seven Revalidation checks'
-          : `only the Revalidation check${names.length === 1 ? '' : 's'} in the schema`)
-        + ', with the reason first. For a check that fails, give the fix: the'
-        + ' card, rule or sheet to change and what to change it to; leave it blank when no change'
-        + ' to the pack can settle it.'
-        + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
-          + ` shows, answer "${S.NOT_SHOWN}" for a check it does not show, and judge a rule's`
-          + ' coverage from the cards the rules index lists for it.' : ''),
-      inputs: [['Change description', ctx.description], ...extra, ...view],
-      schema: S.revalidationSchema({ checks: names, verdicts: views.length > 1 ? ['pass', 'fail', S.NOT_SHOWN]
-        : ['pass', 'fail'] }),
-    }));
+    for (const group of groups) {
+      const outcome = {};
+      answers.push(await ask(ctx, {
+        phase: 'phase9', step: `revalidation-${group.key}${again ? '-again' : ''}`, reasoning: true, refs, outcome,
+        task: 'Revalidate the pack after the review\'s fixes. Give a verdict for each Revalidation'
+          + ' check the question names, with the reason first. For a check that fails, give the fix: the'
+          + ' card, rule or sheet to change and what to change it to; leave it blank when no change'
+          + ' to the pack can settle it.'
+          + (views.length > 1 ? ` The workbook comes in ${views.length} parts; judge what this part`
+            + ` shows, answer "${S.NOT_SHOWN}" for a check it does not show, and judge a rule's`
+            + ' coverage from the cards the rules index lists for it.' : ''),
+        inputs: [['Change description', ctx.description], ...extra, ...view],
+        question: `Judge ${group.checks.length === 1 ? 'this Revalidation check' : 'these Revalidation checks'},`
+          + ` which read mainly ${group.reads}:\n${group.checks.map((check) => `- ${check}`).join('\n')}`,
+        schema: S.revalidationSchema({ checks: group.checks, verdicts: views.length > 1
+          ? ['pass', 'fail', S.NOT_SHOWN] : ['pass', 'fail'] }),
+      }));
+      for (const check of group.checks) thinking.set(check, (thinking.get(check) ?? true) && outcome.thinking);
+    }
   }
-  return mergeChecks(answers, names);
+  const merged = mergeChecks(answers, names);
+  const failedBefore = new Set(list(earlier).filter((row) => row.verdict === 'fail').map((row) => row.check));
+  for (const row of merged.checks) {
+    ctx.logs.status({ job: ctx.job.id, phase: 'phase9', event: 'check', walk: `revalidation${again ? '-again' : ''}`,
+      check: row.check, verdict: row.verdict, thinking: thinking.get(row.check) ?? false,
+      fixGiven: !blank(row.fix),
+      ...(earlier && row.verdict === 'fail' ? { repeat: failedBefore.has(row.check) } : {}) });
+  }
+  return merged;
 }
 
 /**
  * Revalidation over the rebuilt workbook, review sheets included: each of the seven
  * Revalidation checks gets a verdict. A failed check whose fix names a card, a rule or
- * a sheet gets one repair round, then the checks are walked once more; a repair the
- * builder cannot build is undone and the first verdicts stand. A pack that does not
- * pass carries `revalidation` with what remains, which the builder shows on its
- * validation sheet as FAIL.
+ * a sheet gets one repair round, a repair call for each such check, then the checks are
+ * walked once more, with each check that still fails marked as failed before or new; a
+ * repair the builder cannot build is undone and the first verdicts
+ * stand. A check whose repair reply was cut off stays open and says so in what remains.
+ * A pack that does not pass carries `revalidation` with what remains, which the builder
+ * shows on its validation sheet as FAIL.
  */
 export async function revalidate(ctx, pack) {
-  let result = await walkChecks(ctx, pack, 'revalidation');
+  let result = await walkChecks(ctx, pack);
   ctx.revalidationChecks = result.checks;
   let repaired = false;
   if (!result.passed) {
@@ -3887,9 +4441,9 @@ export async function revalidate(ctx, pack) {
       try {
         await fixRound(ctx, pack, findings, 'revalidation', []);
         repaired = true;
-        result = await walkChecks(ctx, pack, 'revalidation-again');
+        result = await walkChecks(ctx, pack, { again: true, earlier: result.checks });
         ctx.revalidationChecks = result.checks;
-        // A check whose repair built no card carries that reason after its finding.
+        // A check whose repair built no card, or was cut off, carries that reason after its finding.
         result.remaining = result.remaining.map((line) => {
           const check = Object.keys(ctx.unapplied ?? {}).find((name) => line.startsWith(`${name}: `));
           return check ? `${line} (${ctx.unapplied[check]})` : line;
@@ -3899,6 +4453,8 @@ export async function revalidate(ctx, pack) {
         ctx.appliedFixes = appliedFixes;
         for (const key of Object.keys(pack)) delete pack[key];
         Object.assign(pack, before);
+        ctx.logs.status({ job: ctx.job.id, phase: 'phase8', step: 'repair-revalidation', event: 'repair-undone',
+          reason: error.code, findings: findings.length });
         repaired = false;
       }
     }
@@ -3933,7 +4489,7 @@ export async function walkSelected(ctx, pack, names = S.REVALIDATION_CHECKS) {
   if (names.length < known.length && !ctx.revalidationChecks && pack.revalidation) {
     throw new StepInputError('this state holds no verdicts for the other checks; walk all seven first');
   }
-  const result = await walkChecks(ctx, pack, 'revalidation', names);
+  const result = await walkChecks(ctx, pack, { names });
   const checks = known.flatMap((check) => result.checks.find((row) => row.check === check)
     ?? list(ctx.revalidationChecks).filter((row) => row.check === check));
   ctx.revalidationChecks = checks;
@@ -3949,7 +4505,9 @@ export async function walkSelected(ctx, pack, names = S.REVALIDATION_CHECKS) {
 /**
  * One repair round for finding `n` of `revalidationFindings`, then the rebuild. The
  * pack's revalidation result is cleared first, as the revalidation phase clears it
- * before its rebuild, so the builder does not read it as a failing sheet.
+ * before its rebuild, so the builder does not read it as a failing sheet. The round
+ * is one repair call, or one for each part of a finding that names more cards than a
+ * reply holds.
  */
 export async function repairFinding(ctx, pack, n) {
   if (!ctx.revalidationChecks) {
@@ -3960,7 +4518,7 @@ export async function repairFinding(ctx, pack, n) {
     throw new StepInputError(`--finding ${n} is not one of the ${findings.length} findings a repair can act on`);
   }
   delete pack.revalidation;
-  await fixRound(ctx, pack, [findings[n]], 'revalidation', []);
+  await fixRound(ctx, pack, [findings[n]], 'revalidation', [], n);
   return { check: findings[n].row.section };
 }
 
@@ -3978,8 +4536,11 @@ export async function confidenceField(ctx, pack, field) {
   }
   const entry = CONFIDENCE_FIELDS.find(([name]) => name === field);
   if (!entry) throw new StepInputError(`--field takes one of: ${CONFIDENCE_STEP_FIELDS.join(', ')}`);
+  const aged = narrativeAged(pack);
   pack.confidence = { ...pack.confidence, [field]: '' };
   pack.confidence[field] = await writeConfidenceField(ctx, pack, field, entry[1], confidenceExtra(ctx, pack));
+  // The rest of the review's prose is still older than the repairs, so the pack goes on saying so.
+  if (aged) noteNarrativeAge(pack);
 }
 
 /** The overall confidence level rated again from the assessment steps the state holds. */

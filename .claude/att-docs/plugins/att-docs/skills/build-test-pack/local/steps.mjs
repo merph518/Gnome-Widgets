@@ -3,6 +3,7 @@
 // by the phase 6 design and the comparison's model pass.
 
 import { controlsIn } from './design-tidy.mjs';
+import { ordered } from './schemas.mjs';
 
 const list = (value) => (Array.isArray(value) ? value
   : value === undefined || value === null || value === '' ? [] : [value]);
@@ -18,12 +19,12 @@ const UNCHANGED = /\b(?:unchanged|without (?:changing|selecting|editing)|no chan
 
 /**
  * One reply row per card, by label; each lists its steps by number with
- * whether the step is possible and why. Written here so the shared schema
- * module stays as it is.
+ * whether the step is possible and why. A step row is `ordered`, so the step's
+ * number comes before the decision about it, whatever order a server hands the
+ * properties to the model in.
  */
 export function stepSchema(labels) {
-  const row = { type: 'object', additionalProperties: false, required: ['step', 'possible', 'why'],
-    properties: { step: { type: 'integer' }, possible: { type: 'boolean' }, why: { type: 'string' } } };
+  const row = ordered({ step: { type: 'integer' }, possible: { type: 'boolean' }, why: { type: 'string' } });
   const card = { type: 'object', additionalProperties: false, required: ['card', 'steps'],
     properties: { card: { enum: labels }, steps: { type: 'array', minItems: 1, items: row } } };
   return { type: 'object', additionalProperties: false, required: ['cards'],

@@ -38,7 +38,7 @@ export GIT_TERMINAL_PROMPT=0
 
 filter="$(git -C "$dir" config --get remote.origin.partialclonefilter || true)"
 
-# usage: restore_mark; puts the partial clone mark back.
+# usage: restore_mark; puts the partial clone mark back. Safe to run twice.
 restore_mark() {
   # A second signal must not cut the restore short.
   trap '' INT TERM HUP
@@ -50,12 +50,17 @@ restore_mark() {
 # filter the clone was made with, which would leave the same objects missing. A fetch
 # that fails or is interrupted puts the mark back, so a later run still sees a partial
 # clone and tries again.
+#
+# Each signal handler restores the mark itself, then exits. A signal can land while the
+# exit trap is restoring, before restore_mark has ignored signals. Its handler then runs
+# inside the trap, and the handler's exit ends the trap, so the handler has to restore
+# the mark before it exits.
 trap 'restore_mark' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'restore_mark; exit 130' INT
+trap 'restore_mark; exit 143' TERM
+trap 'restore_mark; exit 129' HUP
 git -C "$dir" config --unset remote.origin.partialclonefilter || true
 git -C "$dir" config --unset remote.origin.promisor
 git -C "$dir" fetch --quiet --refetch --no-tags origin
-trap - EXIT
+trap - EXIT INT TERM HUP
 echo "completed: fetched every object"

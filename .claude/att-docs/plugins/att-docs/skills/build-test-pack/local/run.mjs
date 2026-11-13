@@ -190,6 +190,12 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
   };
 
   let phase = 'intake';
+  // When the running phase began, in time and in calls, so a stop reports the phase's own
+  // figures; `ownStats` holds them for a stop that is named for a phase already finished,
+  // and is empty when that phase passed in an earlier run.
+  let began = { t: started, calls: 0 };
+  let ownStats = null;
+  const passedStats = new Map();
   let warned = false;
   // Before a phase starts, the work so far is checkpointed, so this is where a stop loses nothing.
   const checkMemory = async (name) => {
@@ -213,12 +219,16 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     phase = name;
     if (PHASES.indexOf(name) <= done || (until && PHASES.indexOf(name) > PHASES.indexOf(until))) return {};
     // A stop between phases loses nothing: the last phase that passed is checkpointed.
+    began = { t: now(), calls: ctx.calls };
     if (signal?.aborted) throw new Cancelled();
     await checkMemory(name);
     const t = now();
+    began = { t, calls: ctx.calls };
     logs.status({ job: id, phase: name, event: 'start' });
     const counts = await fn();
-    logs.status({ job: id, phase: name, event: 'pass', ms: now() - t, ...counts });
+    const ms = now() - t;
+    logs.status({ job: id, phase: name, event: 'pass', ms, ...counts });
+    passedStats.set(name, { ms, calls: ctx.calls - began.calls });
     checkpoint(name);
     return counts;
   };
@@ -254,7 +264,8 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
     await step('phase9-confidence', () => P.phase9Confidence(ctx, pack));
     await step('phase9-revalidate', async () => {
       delete pack.revalidation;
-      // The rebuild writes the Draft workbook again, with the rating the review gave.
+      // The rebuild writes the Draft workbook again, with the rating the review gave, held to
+      // the confidence ceiling of the pack as it now stands.
       await P.phase8(ctx, pack, 'rebuild');
       const again = await P.revalidate(ctx, pack);
       // Items still open lower what the pack can claim, so the rating is made again with them in view.
@@ -276,6 +287,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
 
     // The final write goes through the repository's own builder command, as the skill runs it.
     phase = 'phase8';
+    began = { t: now(), calls: ctx.calls };
     const argv = config.builder.command.map((part) => fill(part, { pack: packPath, out: outDir }));
     const result = spawnSync(argv[0], argv.slice(1), { cwd: config.root, encoding: 'utf8' });
     logs.detail('builder final', `${result.stdout}\n${result.stderr}`);
@@ -295,6 +307,7 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
       if (workbook && !onlyValidation) fs.rmSync(path.join(outDir, workbook));
       else if (workbook) written = path.join(outDir, workbook);
       phase = 'phase9-revalidate';
+      ownStats = passedStats.get(phase) ?? {};
       throw new P.GateError('phase9', 'revalidation-failed', { remaining: pack.revalidation.remaining.length });
     }
     const summary = { job: id, phase: 'done', event: 'pass', ms: now() - started,
@@ -310,8 +323,9 @@ export async function runJob(config, job, { model, echo = true, now = Date.now, 
           : error instanceof MemoryLow ? `memory:${error.code}` : 'error';
     logs.detail('stopped', error.stack ?? String(error));
     const counts = error instanceof P.GateError || error instanceof MemoryLow ? error.counts : {};
-    logs.status({ job: id, phase, event: 'fail', reason, ms: now() - started, calls: ctx.calls,
-      ...fitCounts(counts) });
+    const own = ownStats ?? { ms: now() - began.t, calls: ctx.calls - began.calls };
+    logs.status({ job: id, phase, event: 'fail', reason, ...own,
+      jobMs: now() - started, jobCalls: ctx.calls, ...fitCounts(counts) });
     if (Object.keys(ctx.pack).length) {
       fs.writeFileSync(path.join(outDir, 'work', 'partial-pack.json'),
         `${JSON.stringify(ctx.pack, null, 1)}\n`);

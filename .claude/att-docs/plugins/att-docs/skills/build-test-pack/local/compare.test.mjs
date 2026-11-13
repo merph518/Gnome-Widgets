@@ -1078,8 +1078,9 @@ test('the model pass flags a step a rule forbids, including a rule the card does
   const client = { json: async (request) => {
     prompts.push(request);
     if (request.schemaName !== 'steps') return { value: { follows: true, reason: 'ok', same: true } };
-    return { value: { cards: [{ card: 'C1', steps: [{ step: 1, possible: true, why: 'fine' },
-      { step: 2, possible: false, why: 'VS-032 keeps Save disabled until a change' }] }] } };
+    // The reply as the server sends it: a step row's properties carry their numbers.
+    return { value: { cards: [{ card: 'C1', steps: [{ '01_step': 1, '02_possible': true, '03_why': 'fine' },
+      { '01_step': 2, '02_possible': false, '03_why': 'VS-032 keeps Save disabled until a change' }] }] } };
   } };
   const truth = { cardRules: new Map([['TC-001', { ids: ['VS-030'] }]]) };
   const out = await modelPass({ client, rules, unmatched: [], controls: ['Save'],
@@ -1088,6 +1089,8 @@ test('the model pass flags a step a rule forbids, including a rule the card does
     [['pack', 'TC-001', [{ step: 2, why: 'VS-032 keeps Save disabled until a change' }]]]);
   const asked = prompts.find((p) => p.schemaName === 'steps');
   assert.match(asked.user, /VS-032: The Save button is enabled only after/);
+  assert.deepEqual(Object.keys(asked.schema.properties.cards.items.properties.steps.items.properties).sort(),
+    ['01_step', '02_possible', '03_why']);
   assert.equal(out.errors, 0);
 });
 

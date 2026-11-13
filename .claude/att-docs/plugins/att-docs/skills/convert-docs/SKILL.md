@@ -34,7 +34,8 @@ none, ask the user rather than guessing.
 | `<stub-names>` | The file names a failed download leaves behind |
 
 The scripts and both filters ship in this folder: `convert.sh`, `stamp.py`,
-`pages.py`, `doc_paths.py`, `check-shifted-text.py`, `build-words.py`,
+`pages.py`, `doc_paths.py`, `list-numbers.py`, `check-list-numbers.py`,
+`check-shifted-text.py`, `build-words.py`,
 `check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`, and the
 config reader `convert_config.py`. A script that needs a root, a host, or a data
 file reads it from `<config>`, given as `--config <file>`, and stops with exit 64
@@ -309,6 +310,35 @@ A PDF carries no heading structure, so the only signal left is layout: a short
 line standing alone that does not read as a sentence becomes a heading, and
 anything less certain stays a paragraph. Running headers and footers are
 dropped by finding the lines that repeat on more than half the pages.
+
+## List numbers
+
+A rule written from a converted document cites the document's list numbers, so
+a converted list has to count the way Word draws it. Pandoc's docx reader does
+not always: it keeps one count per numbering instance where Word keeps one per
+definition, it starts an item at 1 where Word counts the unused levels above it
+as already used, and it nests by level where Word nests by indentation. Left
+alone, a list restarts at 1 partway through and a sub-list lands at the margin.
+
+`list-numbers.py` sits in front of Pandoc on every route that reads a `docx`,
+`doc` and `dot` included, and rewrites the numbering into a form Pandoc draws
+the way Word does. Lists inside tables and numbered headings are left as they
+are. A file it cannot read goes to Pandoc unchanged.
+
+After a Word document is stamped, `check-list-numbers.py` compares each
+numbered item at the margin of the Markdown with the label LibreOffice's text
+export gives the same item in the source. A document whose numbers differ is
+still written, and the run lists the items and counts the document under
+`with list numbers off the source`. Correct those numbers in the Markdown
+before rules are written from it. The check runs on its own too, against a
+Word file or a text export of one:
+
+```bash
+python3 check-list-numbers.py <apps-root>/<group>/<page>.md SOURCE.doc
+```
+
+It exits 0 when every item agrees, 2 when one differs, and 1 when the source
+cannot be read.
 
 ## Text in a font the conversion could not map
 

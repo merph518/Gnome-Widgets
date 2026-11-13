@@ -13,20 +13,22 @@ import { getEventListeners } from 'node:events';
 import http from 'node:http';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { addJob, cancelJob, checkJob, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine, jobStatus, lockHeld, rerunJob,
-  markRestore, parseArgs, queueLines, readQueue, removeJob, restoreLines, restorePaused, restoreUnits,
-  summaryLines, stepJob }
+import { addJob, cancelJob, checkJob, checkJobAndHost, claimStale, cutoffAfter, drainQueue, fillQueue, jobFrom, jobFromLine,
+  jobStatus, lockHeld,
+  markRestore, markRestoreRequest, parseArgs, queueLines, readQueue, removeJob, rerunJob, restoreLines, restorePaused,
+  restoreRequest, restoreUnits, summaryLines, stepJob }
   from './build-pack.mjs';
 import { countedTries, HOLD_REASONS, loadConfig, MAX_MEMORY_STOPS, mainCheckout, memoryStops, RULE_SHAPE, rootRelative,
   worktreeRefusal } from './config.mjs';
 import { rulesStale, shapeProblems, struckSpans, uncitedStruck } from './rules.mjs';
 import { createAppCloser } from './close-apps.mjs';
 import { createPauser, markRestoreFile, onPauseList, pausedPath, readPaused } from './pause.mjs';
-import { Cancelled, DEFAULT_SEED, ModelError, localEndpoint, modelClient } from './model.mjs';
+import { Cancelled, DEFAULT_SEED, ModelError, REASONING_TAIL_CHARS, localEndpoint, modelClient } from './model.mjs';
 import * as S from './schemas.mjs';
 import { estimateTokens } from './model.mjs';
+import { stepSchema } from './steps.mjs';
 import { almDescriptions, batches, candidateLine, documentInputs, documentRules, dropUnfoundedAssumptions, expectedProblems, impactsText, phase5,
-  citesId, resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
+  citesId, designRules, resultsAgree, setsOf, splitText, tidyDocument } from './phases.mjs';
 import { jobId, PHASES, readCheckpoint, runJob } from './run.mjs';
 import { compareSnapshots, readStep } from './rerun.mjs';
 import { checkStep, runStep } from './step-job.mjs';
@@ -35,7 +37,8 @@ import { renderReport, reportData, seededRandom, spotChecks, writeReports } from
 import { createReleaser } from './release.mjs';
 import { sleepUnlessAborted } from './abort.mjs';
 import { callFileName, promptHash, schemaHash } from './calls.mjs';
-import { FIELD_MAX, fitCounts, jobLogs, readStatusLog, repeatedCuts, runCuts, statusFields } from './status.mjs';
+import { FIELD_MAX, fitCounts, jobLogs, noteCode, readStatusLog, repeatedCuts, runCuts, sheetsField,
+  statusFields } from './status.mjs';
 import { replayModel, replaySource } from './replay.mjs';
 import { readPack } from './pack.mjs';
 import { answersPath, heartbeatPath, touchHeartbeat } from './supervisor.mjs';
@@ -83,8 +86,30 @@ function sample(schema, key = 'text') {
     if (item.enum) return [...item.enum];
     return Array.from({ length: Math.max(1, schema.minItems ?? 1) }, () => sample(item, key));
   }
-  return Object.fromEntries(Object.entries(schema.properties).map(([k, p]) => [k, sample(p, k)]));
+  return Object.fromEntries(Object.entries(schema.properties)
+    .map(([k, p]) => [k, sample(p, plainKey(k))]));
 }
+
+/** A property's name without the number an ordered object's properties carry (`01_why`). */
+const plainKey = (key) => key.replace(/^\d\d_/, '');
+
+/** The value with each numbered property under its plain name, or the other way round. */
+function rename(schema, value, toWire) {
+  if (!schema || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => rename(schema.items, item, toWire));
+  if (!schema.properties) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    const own = toWire ? Object.keys(schema.properties).find((k) => plainKey(k) === key) ?? key : key;
+    return [toWire ? own : plainKey(key), rename(schema.properties[own], item, toWire)];
+  }));
+}
+/** A reply written by the plain names, renamed the way the model writes it. */
+const wireNames = (schema, value) => rename(schema, value, true);
+/** A reply as the model writes it, renamed to the plain names the pipeline reads. */
+const plainNames = (schema, value) => rename(schema, value, false);
+
+/** The scenario ids a card schema offers. */
+const scenarioEnum = (schema) => S.propOf(S.propOf(schema, 'cards').items, 'scenario').enum;
 
 /**
  * A model that answers from each call's schema. `answers` overrides a reply by
@@ -98,7 +123,7 @@ function fakeModel(answers = {}) {
     countTokens: async (text) => Math.ceil(text.length / 3),
     async json(request) {
       calls.push(request);
-      let value = sample(request.schema);
+      let value = plainNames(request.schema, sample(request.schema));
       // Two empty lists keep the gates quiet: no conflicts, nothing missing.
       if ('conflicts' in value) value.conflicts = [];
       if ('missing' in value) value.missing = [];
@@ -120,8 +145,7 @@ function fakeModel(answers = {}) {
         value[field] = `The ${field} is covered by ${id} and the cards around it in this pack.`;
       }
       // A card call gets one card for each scenario it is offered.
-      const offered = value.cards?.[0]?.scenario !== undefined
-        && request.schema.properties.cards.items.properties.scenario.enum;
+      const offered = value.cards?.[0]?.scenario !== undefined && scenarioEnum(request.schema);
       if (offered) {
         value.cards = offered.map((id) => ({ ...value.cards[0], scenario: id, title: `title ${id}`,
           mission: `mission ${id}`, focus: [`focus ${id}`] }));
@@ -129,6 +153,7 @@ function fakeModel(answers = {}) {
       const [, override] = Object.entries(answers)
         .find(([prefix]) => request.schemaName.startsWith(prefix)) ?? [];
       if (override) value = typeof override === 'function' ? override(value, calls) : override;
+      value = wireNames(request.schema, value);
       return { value, usage: { promptTokens: 10, outputTokens: 5, ms: 1 } };
     },
   };
@@ -369,8 +394,7 @@ test('the scenario inventory is asked first and its scenarios and earlier cards 
   assert.ok(!cardCalls[0].user.includes('Case S1'));
   assert.match(cardCalls[1].user, /Cards written so far[^]*Case S1 \| S1 \| rules /);
   // A card names a scenario that is still open, and no other.
-  assert.deepEqual(cardCalls[1].schema.properties.cards.items.properties.scenario.enum,
-    ['S3', 'S4', 'S5']);
+  assert.deepEqual(scenarioEnum(cardCalls[1].schema), ['S3', 'S4', 'S5']);
   const pack = JSON.parse(read(result.packPath));
   assert.deepEqual(pack.testCards.map((c) => c.title).sort(), ['Case S1', 'Case S2', 'Case S3',
     'Case S4', 'Case S5']);
@@ -386,12 +410,13 @@ test('the inventory asks for control, isolation, combined, persistence and break
   const call = run.model.calls.find((c) => c.schemaName === 'phase6_scenarios_d1');
   const kinds = ['control', 'isolation', 'combined', 'persistence', 'negative', 'role',
     'state-change', 'manual-batch', 'navigation', 're-entry'];
-  const props = call.schema.properties;
-  assert.ok([...kinds, 'break'].every((k) => props.scenarios.items.properties.kind.enum.includes(k)));
-  assert.deepEqual([...props.kindChecks.required].sort(), [...kinds, 'break'].sort());
-  assert.deepEqual(Object.keys(props.kindChecks.properties).sort(), [...kinds, 'break'].sort());
+  const scenarios = S.propOf(call.schema, 'scenarios');
+  const checks = S.propOf(call.schema, 'kindChecks');
+  assert.ok([...kinds, 'break'].every((k) => S.propOf(scenarios.items, 'kind').enum.includes(k)));
+  assert.deepEqual([...checks.required].sort(), [...kinds, 'break'].sort());
+  assert.deepEqual(Object.keys(checks.properties).sort(), [...kinds, 'break'].sort());
   for (const kind of [...kinds, 'break']) assert.ok(call.user.includes(kind), `the task names ${kind}`);
-  assert.ok(props.scenarios.maxItems >= 1);
+  assert.ok(scenarios.maxItems >= 1);
   assert.match(call.user, /no blocking condition/);
   assert.match(call.user, /Reset restoring/);
   assert.match(call.user, /selected one only/);
@@ -437,6 +462,35 @@ test('the same population and action under another kind is a different scenario'
   assert.equal(phase6Pass(result.outDir).scenarios, 3);
 });
 
+test('each card carries the kind of the scenario it was written for', async () => {
+  // S1 and S2 come from the inventory; BR-LIB.UC01-005 is left out, so code adds S3 for it; the break pass adds S4.
+  const rule = (n) => `BR-LIB.UC01-00${n}`;
+  const run = lib({
+    phase6_scenarios_d1_break: inventory([{ ...BREAK, population: 'junk input', action: 'enter junk', rule: 0 }]),
+    phase6_scenarios: (value) => ({ ...value, scenarios: [
+      { kind: 'control', population: 'p0', action: 'a0', outcome: 'o', rules: [rule(1), rule(2)] },
+      { kind: 'isolation', population: 'p1', action: 'a1', outcome: 'o', rules: [rule(3), rule(4)] }] }),
+    phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testCards.map((c) => [c.title, c.kind]).sort(), [['Case S1', 'control'],
+    ['Case S2', 'isolation'], ['Case S3', 'decision'], ['Case S4', 'break']]);
+});
+
+test('a suite pack\'s cards reach the merge with their scenario\'s kind and none of the design pass\'s marks', async () => {
+  const model = fakeModel({ phase6_scenarios: inventory([{ kind: 'isolation' }, { kind: 'role' }]),
+    phase6_cards: titled });
+  const result = await runJob(fixtureConfig(), { suite: 'LIB' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const { testCards } = JSON.parse(read(result.packPath));
+  assert.ok(testCards.length >= 4);
+  assert.ok(testCards.every((card) => !('scenario' in card) && !('breakIt' in card) && !('key' in card)));
+  assert.deepEqual([...new Set(testCards.map((card) => `${card.title}: ${card.kind}`))].sort(),
+    ['Case S1: isolation', 'Case S2: role']);
+});
+
 test('a scenario no card covers is asked for once more, then recorded and its rule gets a gap row', async () => {
   const run = lib({
     phase6_scenarios: inventory([{}, {}, {}]),
@@ -446,7 +500,7 @@ test('a scenario no card covers is asked for once more, then recorded and its ru
   assert.equal(result.ok, true, JSON.stringify(result));
   const again = run.model.calls.filter((c) => c.schemaName.startsWith('phase6_cards_d1_1b'));
   assert.equal(again.length, 1);
-  assert.deepEqual(again[0].schema.properties.cards.items.properties.scenario.enum, ['S2', 'S3']);
+  assert.deepEqual(scenarioEnum(again[0].schema), ['S2', 'S3']);
   assert.match(again[0].user, /needs a card/);
   const pass = phase6Pass(result.outDir);
   assert.equal(pass.retried, 1);
@@ -472,7 +526,7 @@ test('a gap on a rule in one batch does not settle another scenario on that rule
   const result = await runLib(run);
   assert.equal(result.ok, true, JSON.stringify(result));
   const second = run.model.calls.find((c) => c.schemaName === 'phase6_cards_d1_2');
-  assert.ok(second.schema.properties.cards.items.properties.scenario.enum.includes('S3'));
+  assert.ok(scenarioEnum(second.schema).includes('S3'));
   const pack = JSON.parse(read(result.packPath));
   assert.ok(pack.testCards.some((c) => c.title === 'Case S3'));
   // S1 stayed open and a later call covered it; nothing is recorded as lost.
@@ -546,8 +600,8 @@ test('rules too large for one inventory call go in batches, each shown the scena
     assert.ok(!calls[0].user.includes('population value'));
     assert.match(calls[1].user, /Scenarios listed so far\s+- S1 \| control \| rules .* \| population value/);
     // Each call may name only the rules it was given.
-    const first = calls[0].schema.properties.scenarios.items.properties.rules.items.enum;
-    const second = calls[1].schema.properties.scenarios.items.properties.rules.items.enum;
+    const first = S.propOf(S.propOf(calls[0].schema, 'scenarios').items, 'rules').items.enum;
+    const second = S.propOf(S.propOf(calls[1].schema, 'scenarios').items, 'rules').items.enum;
     assert.ok(first.every((id) => !second.includes(id)));
   } finally {
     fs.rmSync(path.join(FIXTURES, name), { force: true });
@@ -620,8 +674,8 @@ test('with no break scenario listed, a targeted pass asks for break scenarios on
   const result = await runLib(run);
   assert.equal(result.ok, true, JSON.stringify(result));
   const pass = run.model.calls.find((c) => c.schemaName === 'phase6_scenarios_d1_break');
-  assert.deepEqual(pass.schema.properties.scenarios.items.properties.kind.enum, ['break']);
-  assert.ok(!('kindChecks' in pass.schema.properties));
+  assert.deepEqual(S.propOf(S.propOf(pass.schema, 'scenarios').items, 'kind').enum, ['break']);
+  assert.equal(S.propOf(pass.schema, 'kindChecks'), undefined);
   assert.match(pass.user, /Scenarios listed so far[^]*S1 \| decision/);
   const pack = JSON.parse(read(result.packPath));
   assert.deepEqual(setCards(pack, 'BREAK IT'), ['Case S3']);
@@ -638,6 +692,207 @@ test('with no break scenario at all, BREAK IT stops being applicable', async () 
   assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
   assert.deepEqual(setCards(pack, 'BREAK IT'), []);
   assert.match(emptyKindNotes(pack)[0].assumption, /for these kinds: .*\bbreak\b/);
+  // The revalidation walk is told how the dropped objective reads, and no rule of a set the pack lacks.
+  const [walk] = callsNamed(run, 'phase9_revalidation');
+  assert.match(walk.user, /\n- No test card serves BREAK IT, so that objective reads Not Applicable, with a reason that says no test card serves it\. That row is how the pack records the gap, by rule/);
+  assert.doesNotMatch(walk.user, /The BREAK IT set holds only/);
+});
+
+test('a break-only reply that lists no scenario ends the pass with no card call, and BREAK IT stops being applicable', async () => {
+  const run = lib({
+    phase6_scenarios_d1_break: (value) => ({ ...value, scenarios: [] }),
+    phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const names = run.model.calls.map((c) => c.schemaName);
+  assert.equal(names.filter((name) => name === 'phase6_scenarios_d1_break').length, 1);
+  assert.ok(!names.some((name) => name.startsWith('phase6_cards_d1_break')));
+  const lines = statusLines(result.outDir).filter((l) => l.step === 'scenarios-d1-break');
+  assert.deepEqual(lines.map((l) => l.event), ['call']);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  assert.deepEqual(setCards(pack, 'BREAK IT'), []);
+  assert.ok(!pack.assumptions.some((a) => /cut off/.test(a.assumption)));
+  assert.match(emptyKindNotes(pack)[0].assumption, /for these kinds: .*\bbreak\b/);
+});
+
+/** Every list and free text of a schema with no longest length, by its path. */
+function unbounded(schema, at = '', found = []) {
+  if (schema.type === 'array') {
+    if (!Number.isInteger(schema.maxItems)) found.push(`${at}[]`);
+    return unbounded(schema.items, `${at}[]`, found);
+  }
+  if (schema.type === 'string' && !schema.enum && !schema.pattern && !Number.isInteger(schema.maxLength)) found.push(at);
+  for (const [key, child] of Object.entries(schema.properties ?? {})) unbounded(child, `${at}.${plainKey(key)}`, found);
+  return found;
+}
+
+test('nothing in a break-only inventory reply can repeat without end, and the list may be empty', async () => {
+  const run = lib({
+    phase6_scenarios_d1_break: inventory([{ ...BREAK, population: 'junk input', action: 'enter junk', rule: 0 }]),
+    phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const pass = run.model.calls.find((c) => c.schemaName === 'phase6_scenarios_d1_break');
+  assert.deepEqual(unbounded(pass.schema), []);
+  const list = S.propOf(pass.schema, 'scenarios');
+  assert.equal(list.minItems, 0);
+  const rules = S.propOf(list.items, 'rules');
+  assert.deepEqual([rules.minItems, rules.maxItems], [1, rules.items.enum.length]);
+  for (const field of ['population', 'action', 'outcome']) {
+    assert.equal(S.propOf(list.items, field).maxLength, S.SCENARIO_TEXT_MAX, field);
+  }
+  // The main inventory has to list a scenario, and its scenarios have the same limits.
+  const main = run.model.calls.find((c) => c.schemaName === 'phase6_scenarios_d1');
+  const all = S.propOf(main.schema, 'scenarios');
+  assert.equal(all.minItems, 1);
+  assert.equal(S.propOf(all.items, 'rules').maxItems, S.propOf(all.items, 'rules').items.enum.length);
+  for (const field of ['population', 'action', 'outcome']) {
+    assert.equal(S.propOf(all.items, field).maxLength, S.SCENARIO_TEXT_MAX, field);
+  }
+  // The server's grammar refuses a repetition of 2000 or more.
+  assert.ok(S.SCENARIO_TEXT_MAX < 2000);
+});
+
+// A 16384-token reply holds 109 scenarios of 12 kinds, so one kind's share is 9 scenarios;
+// the break-only call gets twice the tokens of those: 9 * 150 * 2.
+const BREAK_LIMIT = 2700;
+
+test('a break-only reply cut off at its limit ends the pass with a note, and the job goes on', async () => {
+  const run = lib({
+    phase6_scenarios_d1_break: () => { throw new ModelError('length', 'cut off'); },
+    phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // One call at the limit, never retried, and its schema holds as many scenarios as the share allows.
+  const breakCalls = run.model.calls.filter((c) => c.schemaName === 'phase6_scenarios_d1_break');
+  assert.deepEqual(breakCalls.map((c) => c.maxTokens), [BREAK_LIMIT]);
+  assert.equal(S.propOf(breakCalls[0].schema, 'scenarios').maxItems, 9);
+  const lines = statusLines(result.outDir).filter((l) => l.step === 'scenarios-d1-break');
+  assert.deepEqual(lines.map((l) => [l.event, l.reason]),
+    [['call-fail', 'length'], ['warn', 'break-pass-cut']]);
+  assert.equal(lines[0].maxTokens, BREAK_LIMIT);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, false);
+  assert.deepEqual(setCards(pack, 'BREAK IT'), []);
+  assert.equal(pack.assumptions.filter((a) => /break scenario list was cut off/.test(a.assumption)).length, 1);
+  assertContentFree(JSON.stringify(lines));
+});
+
+test('a break-only call that fails without being cut off is retried at the same limit', async () => {
+  let tries = 0;
+  const run = lib({
+    phase6_scenarios_d1_break: (value) => {
+      tries += 1;
+      if (tries === 1) throw new ModelError('network', 'refused');
+      return inventory([{ ...BREAK, population: 'junk input', action: 'enter junk', rule: 0 }])(value);
+    },
+    phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const breakCalls = run.model.calls.filter((c) => c.schemaName === 'phase6_scenarios_d1_break');
+  assert.deepEqual(breakCalls.map((c) => c.maxTokens), [BREAK_LIMIT, BREAK_LIMIT]);
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(setCards(pack, 'BREAK IT'), ['Case S3']);
+  assert.ok(!pack.assumptions.some((a) => /cut off/.test(a.assumption)));
+});
+
+test('a break-only call that fails, then is cut off at the same limit, ends the pass', async () => {
+  let tries = 0;
+  const run = lib({
+    phase6_scenarios_d1_break: () => {
+      tries += 1;
+      throw new ModelError(tries === 1 ? 'network' : 'length', 'failed');
+    },
+    phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+  });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const breakCalls = run.model.calls.filter((c) => c.schemaName === 'phase6_scenarios_d1_break');
+  assert.deepEqual(breakCalls.map((c) => c.maxTokens), [BREAK_LIMIT, BREAK_LIMIT]);
+  const lines = statusLines(result.outDir).filter((l) => l.step === 'scenarios-d1-break');
+  assert.deepEqual(lines.map((l) => [l.event, l.reason]),
+    [['retry', 'network'], ['call-fail', 'length'], ['warn', 'break-pass-cut']]);
+});
+
+test('a cut in a later batch of the break-only pass keeps the scenarios an earlier batch listed', async () => {
+  const name = withMaster((row) => { row.rule_summary = `${row.rule_summary} ${'x'.repeat(30000)}`; });
+  try {
+    const inputs = { ...fixtureInputs(), ruleExport: ['node', 'export.mjs', '--doc', '{doc}', '--master', name] };
+    let tries = 0;
+    const run = lib({
+      phase6_scenarios_d1_break: (value) => {
+        tries += 1;
+        if (tries > 1) throw new ModelError('length', 'cut off');
+        return inventory([{ ...BREAK, population: 'junk input', action: 'enter junk', rule: 0 }])(value);
+      },
+      phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+    }, { inputs });
+    const result = await runLib(run);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // The first batch lists a break scenario, the second is cut, and no third batch is asked.
+    assert.equal(run.model.calls.filter((c) => c.schemaName === 'phase6_scenarios_d1_break').length, 2);
+    const pack = JSON.parse(read(result.packPath));
+    assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, true);
+    assert.equal(setCards(pack, 'BREAK IT').length, 1);
+    assert.equal(pack.assumptions.filter((a) => /break scenario list was cut off/.test(a.assumption)).length, 1);
+  } finally {
+    fs.rmSync(path.join(FIXTURES, name), { force: true });
+  }
+});
+
+test('a break-only batch that lists no scenario does not end the pass; the next batch is still asked', async () => {
+  const name = withMaster((row) => { row.rule_summary = `${row.rule_summary} ${'x'.repeat(30000)}`; });
+  try {
+    const inputs = { ...fixtureInputs(), ruleExport: ['node', 'export.mjs', '--doc', '{doc}', '--master', name] };
+    let tries = 0;
+    const run = lib({
+      phase6_scenarios_d1_break: (value) => {
+        tries += 1;
+        if (tries === 1) return { ...value, scenarios: [] };
+        return inventory([{ ...BREAK, population: `junk input ${tries}`, action: 'enter junk', rule: 0 }])(value);
+      },
+      phase6_scenarios: inventory([{}, {}]), phase6_cards: titled,
+    }, { inputs });
+    const result = await runLib(run);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    // The first batch lists nothing, and each of the two after it lists a break scenario.
+    assert.equal(run.model.calls.filter((c) => c.schemaName === 'phase6_scenarios_d1_break').length, 3);
+    const lines = statusLines(result.outDir).filter((l) => l.step?.startsWith('scenarios-d1-break'));
+    assert.ok(!lines.some((l) => l.event === 'warn'));
+    const pack = JSON.parse(read(result.packPath));
+    assert.equal(pack.objectives.find((r) => r.objective === 'BREAK IT').applicable, true);
+    assert.equal(setCards(pack, 'BREAK IT').length, 2);
+    assert.ok(!pack.assumptions.some((a) => /cut off/.test(a.assumption)));
+  } finally {
+    fs.rmSync(path.join(FIXTURES, name), { force: true });
+  }
+});
+
+test('a break-only reply that fills its list gets an assumption that the list reached its limit', async () => {
+  const nine = Array.from({ length: 9 }, (_, i) => ({ ...BREAK, population: `junk input ${i}`, action: `enter junk ${i}` }));
+  const limitNotes = (pack) => pack.assumptions.filter((a) => /the scenario list reached its limit of 9/.test(a.assumption));
+  const full = lib({ phase6_scenarios_d1_break: inventory(nine), phase6_scenarios: inventory([{}, {}]), phase6_cards: titled });
+  const result = await runLib(full);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(limitNotes(JSON.parse(read(result.packPath))).length, 1);
+  // One scenario short of the limit, the list is taken as whole.
+  const short = lib({ phase6_scenarios_d1_break: inventory(nine.slice(1)), phase6_scenarios: inventory([{}, {}]),
+    phase6_cards: titled });
+  const under = await runLib(short);
+  assert.equal(under.ok, true, JSON.stringify(under));
+  assert.equal(limitNotes(JSON.parse(read(under.packPath))).length, 0);
+});
+
+test('a reply cut off in the main inventory still fails the job', async () => {
+  const run = lib({ phase6_scenarios: () => { throw new ModelError('length', 'cut off'); } });
+  const result = await runLib(run);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'model:length');
 });
 
 // The break pass lists a break scenario that an existing test covers, so it writes no card.
@@ -646,7 +901,7 @@ const BREAK_REUSED = {
   phase6_cards: (value, calls) => {
     const call = calls.at(-1);
     if (!call.schemaName.startsWith('phase6_cards_d1_break')) return titled(value);
-    const [id] = call.schema.properties.cards.items.properties.scenario.enum;
+    const [id] = scenarioEnum(call.schema);
     return { ...value, cards: [], skipped: [{ scenario: id, how: 'reused', reason: 'An existing test covers it.' }] };
   },
 };
@@ -944,9 +1199,6 @@ test('phase 1 keeps the confidence reason and each source\'s information and dir
   }
   const summary = JSON.parse(read(path.join(result.outDir, 'work', 'phase1-summary.json')));
   assert.equal(typeof summary.confidenceReason, 'string');
-  const keys = Object.keys(model.calls.find((c) => c.schemaName.startsWith('phase1_understanding'))
-    .schema.properties.summary.properties);
-  assert.ok(keys.indexOf('confidenceReason') < keys.indexOf('confidence'));
 });
 
 test('rules too large for one Phase 1 call are read in batches and their findings stop the gate', async () => {
@@ -1161,6 +1413,7 @@ async function askOver(finish, { model = {}, phase = 'phase1', step = 's', reaso
     bodies.push(body);
     const how = finish(body, bodies.length);
     if (how === 'no-body') return { ok: true, text: async () => '' };
+    if (how === 'reset') throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
     return streamed({ finish: how, content: '{"ok":true}', usage: { completion_tokens: 7 } });
   };
   const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm', ...model } });
@@ -1192,6 +1445,18 @@ test('a thinking call that fails without being cut off is retried at the plain c
   assert.deepEqual(await run(), { ok: true });
   assert.deepEqual(bodies.map((body) => body.max_tokens), [40960, 16384]);
   assert.equal(bodies[1].chat_template_kwargs.enable_thinking, false);
+});
+
+test('the retry line of a call whose connection failed says what the failure was', async () => {
+  const { run, lines } = await askOver((body, n) => (n === 1 ? 'reset' : 'stop'));
+  assert.deepEqual(await run(), { ok: true });
+  const retry = lines.find((line) => line.event === 'retry');
+  assert.deepEqual([retry.reason, retry.cause], ['network', 'ECONNRESET']);
+  assert.doesNotThrow(() => statusFields(retry));
+  // A failure that is not a connection's has no cause to give.
+  const cut = await askOver((body) => (body.chat_template_kwargs.enable_thinking ? 'length' : 'stop'));
+  await cut.run();
+  assert.ok(!('cause' in cut.lines.find((line) => line.event === 'retry')));
 });
 
 test('a reply cut off with thinking off is not retried', async () => {
@@ -1282,12 +1547,24 @@ test('a built-in step cap applies, with the index of a repeated step left off', 
   await impact.run();
   const rules = await askOver(() => 'stop', { phase: 'phase1', step: 'rules-3' });
   await rules.run();
-  const again = await askOver(() => 'stop', { phase: 'phase9', step: 'revalidation-again' });
+  const again = await askOver(() => 'stop', { phase: 'phase9', step: 'revalidation-traceability-again' });
   await again.run();
   const unlisted = await askOver(() => 'stop', { phase: 'phase4', step: 'risk-1' });
   await unlisted.run();
   assert.deepEqual([impact, rules, again, unlisted].map((over) => over.bodies[0].max_tokens),
     [8192, 20480, 12288, 40960]);
+});
+
+test('each group of the revalidation walk and each part of the senior review has a step cap of its own', async () => {
+  const steps = ['revalidation-traceability', 'revalidation-resolution', 'revalidation-readiness',
+    'senior-review', 'senior-notes'];
+  const asked = [];
+  for (const step of steps) {
+    const over = await askOver(() => 'stop', { phase: 'phase9', step });
+    await over.run();
+    asked.push(over.bodies[0].max_tokens);
+  }
+  assert.deepEqual(asked, [12288, 8192, 8192, 12288, 12288]);
 });
 
 test('a step cap from the config beats a phase cap, a phase cap only lowers the built-in step cap, and reasoningOutput caps all', async () => {
@@ -1329,6 +1606,11 @@ test('config refuses a bad reasoningOutputByStep', () => {
     ...model } });
   assert.doesNotThrow(bad({ reasoningOutputByStep: { 'phase4.impact': 4096 } }));
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.risk': 4096 } }), /not a reasoning step/);
+  assert.doesNotThrow(bad({ reasoningOutputByStep: { 'phase9.revalidation-resolution': 4096,
+    'phase9.senior-notes': 4096 } }));
+  // Only each group and each part has a budget, not the whole walk or the whole senior review.
+  assert.throws(bad({ reasoningOutputByStep: { 'phase9.revalidation': 4096 } }), /not a reasoning step/);
+  assert.throws(bad({ reasoningOutputByStep: { 'phase9.senior': 4096 } }), /not a reasoning step/);
   // The understanding call does not think, so a budget for it would do nothing.
   assert.throws(bad({ reasoningOutputByStep: { 'phase1.understanding': 4096 } }), /not a reasoning step/);
   assert.throws(bad({ reasoningOutputByStep: { 'phase4.impact': 50000 } }), /1024 to model.reasoningOutput/);
@@ -1588,7 +1870,9 @@ test('queue status and the report name a thinking step cut at its output budget 
   assert.deepEqual(flagged(), ['repeated-cut step=phase1.understanding budget=12288 runs=2']);
   assert.deepEqual(report().repeatedCuts, [{ id: 'issue-9415', step: 'phase1.understanding', budget: 12288, runs: 2 }]);
   const text = renderReport(report());
-  assert.match(text, /- issue-9415: phase1\.understanding was cut at its output budget of 12288 tokens on its last 2 runs\./);
+  assert.ok(text.includes('- issue-9415: phase1.understanding was cut at its output budget of 12288 tokens'
+    + ' on its last 2 runs. With the server\'s thinking budget set, raise its output budget with'
+    + ' `model.reasoningOutputByStep`; without it, turn its thinking off.\n'), text);
   assertContentFree(text);
   // A run that asks the step and answers ends the streak.
   await drain([]);
@@ -1597,17 +1881,17 @@ test('queue status and the report name a thinking step cut at its output budget 
 });
 
 test('a run that never asks a step neither breaks nor extends its streak of cuts, and a cut with thinking off is none', () => {
-  const senior = { asked: ['phase9.senior'], cut: [{ step: 'phase9.senior', budget: 12288 }] };
+  const senior = { asked: ['phase9.senior-notes'], cut: [{ step: 'phase9.senior-notes', budget: 12288 }] };
   const resumedPast = { asked: ['phase1.rules'], cut: [] };
-  assert.deepEqual(repeatedCuts([senior, resumedPast, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 2 }]);
+  assert.deepEqual(repeatedCuts([senior, resumedPast, senior]), [{ step: 'phase9.senior-notes', budget: 12288, runs: 2 }]);
   assert.deepEqual(repeatedCuts([senior, resumedPast]), []);
-  assert.deepEqual(repeatedCuts([senior, senior, senior]), [{ step: 'phase9.senior', budget: 12288, runs: 3 }]);
+  assert.deepEqual(repeatedCuts([senior, senior, senior]), [{ step: 'phase9.senior-notes', budget: 12288, runs: 3 }]);
   const plain = { phase: 'phase9', step: 'checklist-1', event: 'call-fail', attempt: 1, reasoning: false,
     maxTokens: 8192, reason: 'length' };
-  const thinking = { phase: 'phase9', step: 'revalidation-again', event: 'retry', attempt: 1, reasoning: true,
-    maxTokens: 12288, reason: 'length' };
-  assert.deepEqual(runCuts([plain, thinking]),
-    { asked: ['phase9.revalidation'], cut: [{ step: 'phase9.revalidation', budget: 12288 }] });
+  const thinking = { phase: 'phase9', step: 'revalidation-traceability-again', event: 'retry', attempt: 1,
+    reasoning: true, maxTokens: 12288, reason: 'length' };
+  assert.deepEqual(runCuts([plain, thinking]), { asked: ['phase9.revalidation-traceability'],
+    cut: [{ step: 'phase9.revalidation-traceability', budget: 12288 }] });
 });
 
 test('a run releases only its own lock', async () => {
@@ -1830,13 +2114,161 @@ test('the client refuses redirects, so a prompt cannot be handed to another host
 });
 
 test('one row per key is asked for as an object, so no key repeats or goes missing', async () => {
-  const { understandingSchema, unkey } = await import('./schemas.mjs');
-  const schema = understandingSchema({ documents: ['A doc', 'B doc'], keys: ['UC01', 'UC02'],
+  const schema = S.understandingSchema({ documents: ['A doc', 'B doc'], keys: ['UC01', 'UC02'],
     inclusions: ['Included'], suite: false });
   assert.deepEqual(schema.properties.modules.required, ['UC01', 'UC02']);
-  const reply = unkey(schema, { modules: { UC01: { module: 'M', abbreviation: 'MA' },
-    UC02: { module: 'N', abbreviation: 'NA' } } });
-  assert.deepEqual(reply.modules.map((row) => row.document), ['UC01', 'UC02']);
+  const reply = S.fromWire(schema, { modules: wireNames(schema.properties.modules,
+    { UC01: { module: 'M', abbreviation: 'MA' }, UC02: { module: 'N', abbreviation: 'NA' } }) });
+  assert.deepEqual(reply.modules, [{ document: 'UC01', module: 'M', abbreviation: 'MA' },
+    { document: 'UC02', module: 'N', abbreviation: 'NA' }]);
+});
+
+// Schemas whose objects hold fields that depend on one another are asked for in the order
+// they are worked out, whatever order a server hands the properties to the model in.
+
+/** Arguments that build each schema factory, or null for a schema that is a constant. */
+const SCHEMA_ARGS = {
+  assumptionSchema: null, intakeSchema: null, digestSchema: null, impactSchema: null,
+  seniorReviewSchema: null, testerNotesSchema: null, confidenceStepsSchema: null, improvementSchema: null,
+  documentPickSchema: [['A doc']],
+  understandingSchema: [{ documents: ['A doc'], keys: ['UC01'], inclusions: ['Included'], suite: false }],
+  phase1RulesSchema: [['R1']],
+  derivedRulesSchema: [['High']],
+  ruleConflictSchema: [['R1', 'R2']],
+  scopeSchema: [['R1'], ['Direct']],
+  reviewTriageSchema: [['Q1']],
+  riskSchema: [['R1'], ['High']],
+  objectivesSchema: [['O1'], { evidence: ['R1'] }],
+  scenarioInventorySchema: [{ ids: ['R1'] }],
+  cardSchema: [{ ids: ['R1'], objectives: ['O1'], derivations: ['Requirement'], scenarios: ['S1'] }],
+  verificationSchema: [['C1']],
+  cardsSchema: [{ ids: ['R1'], objectives: ['O1'], derivations: ['Requirement'],
+    uncoveredStatuses: ['Missing'], scenarios: ['S1'] }],
+  objectiveCardsSchema: [['C1']],
+  setScopesSchema: [['O1']],
+  checklistSchema: [{ statuses: ['Covered'] }],
+  confidenceOverallSchema: [{ confidence: ['High'] }],
+  confidenceFieldSchema: ['rules'],
+  revalidationSchema: [{ checks: ['Traceability complete'] }],
+  repairSchema: [{ cardIds: ['TC-1'], ids: ['R1'], objectives: ['O1'], derivations: ['Requirement'],
+    statuses: ['Covered'], sheets: ['Coverage Matrix'], assumptions: true, newIds: ['R1'] }],
+  stepSchema: [['C1']],
+};
+// The step check's schema lives with the step check, and is held to the same order.
+const builtSchemas = () => Object.entries({ ...S, stepSchema }).filter(([name]) => name.endsWith('Schema'))
+  .map(([name, schema]) => [name, typeof schema === 'function' ? schema(...(SCHEMA_ARGS[name] ?? [])) : schema]);
+
+/** The order each ordered object is worked out in, by the object's path in its schema. */
+const CARD_ORDER = ['title', 'scenario', 'mission', 'focus', 'expected', 'rules', 'objectives', 'derivation', 'steps'];
+const COVERAGE_ORDER = ['ruleId', 'status', 'strength', 'gap', 'recommendation'];
+const WORKED_OUT = {
+  'understandingSchema:.summary': ['change', 'purpose', 'modules', 'existingBehavior', 'newBehavior',
+    'rulesIdentified', 'inScope', 'outOfScope', 'missingInformation', 'confidenceReason', 'confidence'],
+  'understandingSchema:.sourceDocuments.A doc': ['authority', 'informationObtained', 'directImpact',
+    'reason', 'inclusion'],
+  'understandingSchema:.modules.UC01': ['module', 'abbreviation'],
+  'derivedRulesSchema:.rules[]': ['statement', 'sourcePage', 'summary', 'risk'],
+  'ruleConflictSchema:.conflicts[]': ['rules', 'conflict'],
+  'scenarioInventorySchema:': ['scenarios', 'kindChecks'],
+  'scenarioInventorySchema:.scenarios[]': ['rules', 'kind', 'population', 'action', 'outcome'],
+  'cardSchema:': CARD_ORDER,
+  'cardsSchema:.cards[]': CARD_ORDER,
+  'stepSchema:.cards[].steps[]': ['step', 'possible', 'why'],
+  'cardsSchema:.uncovered[]': ['ruleId', 'status', 'gap', 'recommendation'],
+  'cardsSchema:.skipped[]': ['scenario', 'how', 'reason'],
+  'verificationSchema:.cards.C1': ['why', 'verdict'],
+  'checklistSchema:.issues[]': ['section', 'issue', 'fix'],
+  'checklistSchema:.coverage[]': COVERAGE_ORDER,
+  'confidenceOverallSchema:': ['overall', 'reason', 'criteria'],
+  'revalidationSchema:.checks.Traceability complete': ['why', 'verdict', 'fix'],
+  'repairSchema:.cards[]': ['id', ...CARD_ORDER.filter((name) => name !== 'scenario')],
+  'repairSchema:.newCards[]': CARD_ORDER.filter((name) => name !== 'scenario'),
+  'repairSchema:.coverage[]': COVERAGE_ORDER,
+};
+/** Objects listed in an order that is not their working order, with why it does not matter. */
+const ORDER_FREE = [
+  [/^assumptionSchema:$|:\.assumptions\[\]$/, 'one statement and independent sentences about it'],
+  [/^(cardsSchema|checklistSchema|repairSchema|scopeSchema):$/,
+    'each part is answered on its own; the assumptions are a by-product of the rest'],
+  ['phase1RulesSchema:', 'the notes and the lists are independent of the rule marks'],
+  ['understandingSchema:', 'each part stands on its own'],
+  ['intakeSchema:', 'four independent lists'],
+  ['objectivesSchema:', 'the evidence rows and the objective rows are independent'],
+  ['scenarioInventorySchema:.kindChecks', 'the keys are the scenario kinds, not fields'],
+  [/^confidenceStepsSchema:\.steps(\.\w+)?$/,
+    'the keys are the assessment steps; a row holds an evidence sentence and a verdict'],
+  ['impactSchema:.executiveSummary', 'independent prose fields'],
+  ['impactSchema:.impacts', 'independent lists, one per area'],
+  ['improvementSchema:.improvementNotes[]', 'independent sentences'],
+  ['seniorReviewSchema:.seniorReview', 'independent prose fields'],
+  ['testerNotesSchema:.testerNotes', 'independent prose fields'],
+];
+const orderFree = (id) => ORDER_FREE.some(([match]) => (match instanceof RegExp ? match.test(id) : match === id));
+
+/** Every object of a schema with at least two properties, by its path: `[]` for list items. */
+function objectsOf(schema, at = '', found = []) {
+  if (schema.type === 'array') return objectsOf(schema.items, `${at}[]`, found);
+  if (!schema.properties) return found;
+  if (Object.keys(schema.properties).length > 1) found.push([at, schema]);
+  for (const [key, child] of Object.entries(schema.properties)) {
+    objectsOf(child, `${at}.${plainKey(key)}`, found);
+  }
+  return found;
+}
+
+test('every ordered object reads in the order it is worked out once its properties are sorted', () => {
+  const seen = new Set();
+  const unlisted = [];
+  for (const [name, schema] of builtSchemas()) {
+    for (const [at, node] of objectsOf(schema)) {
+      const keys = Object.keys(node.properties);
+      const sorted = [...keys].sort();
+      const id = `${name}:${at}`;
+      seen.add(id);
+      if (keys.every((key) => plainKey(key) !== key)) {
+        assert.deepEqual(sorted.map(plainKey), WORKED_OUT[id], `${id} sorted`);
+      } else if (keys.join() !== sorted.join() && !orderFree(id)) {
+        unlisted.push(`${id}: ${keys.join(', ')}`);
+      }
+    }
+  }
+  // Ask for such an object in the order it is worked out, or say in ORDER_FREE why the order does not matter.
+  assert.deepEqual(unlisted, []);
+  for (const id of Object.keys(WORKED_OUT)) {
+    assert.ok(seen.has(id), `${id} is in WORKED_OUT but no schema has such an object`);
+  }
+  for (const [match] of ORDER_FREE) {
+    assert.ok([...seen].some((id) => (match instanceof RegExp ? match.test(id) : match === id)),
+      `${match} is in ORDER_FREE but no schema has such an object`);
+  }
+});
+
+test('every schema export is built here, so a new one cannot skip the order check', () => {
+  for (const [name, schema] of Object.entries(S).filter(([key]) => key.endsWith('Schema'))) {
+    assert.ok(name in SCHEMA_ARGS, `${name} is not in SCHEMA_ARGS`);
+    assert.equal(typeof schema === 'function', SCHEMA_ARGS[name] !== null, name);
+  }
+});
+
+test('a reply gives the same value whatever order the server returned its properties in', () => {
+  const sortedDeep = (value) => (Array.isArray(value) ? value.map(sortedDeep)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort()
+      .map((key) => [key, sortedDeep(value[key])])) : value);
+  for (const [name, schema] of builtSchemas()) {
+    const reply = sample(schema);
+    assert.equal(JSON.stringify(S.fromWire(schema, sortedDeep(reply))), JSON.stringify(S.fromWire(schema, reply)),
+      name);
+  }
+});
+
+test('a reply comes back under the plain names, a keyed object as its rows', () => {
+  const verify = S.verificationSchema(['C1', 'C2']);
+  const rows = S.fromWire(verify, wireNames(verify, { cards: {
+    C1: { why: 'It follows.', verdict: 'follows' },
+    C2: { why: 'No rule says so.', verdict: 'does not follow' } } }));
+  assert.deepEqual(rows, { cards: [{ card: 'C1', why: 'It follows.', verdict: 'follows' },
+    { card: 'C2', why: 'No rule says so.', verdict: 'does not follow' }] });
+  assert.deepEqual(Object.keys(rows.cards[0]), ['card', 'why', 'verdict']);
 });
 
 test('a reply that ends early is no-reply and quotes none of the body; parse and http stay apart', async () => {
@@ -2563,7 +2995,7 @@ const mergedRun = (live) => struckRun({ phase6_scenarios: (value, calls) => ({ .
     : [{ kind: 'decision', rules: [RETIRED], population: 'a loan', action: 'press Save', outcome: 'o' },
       { kind: 'decision', rules: [RETIRED], population: 'another loan', action: 'press Save again', outcome: 'o' },
       { kind: 'decision', rules: live, population: 'p', action: 'a', outcome: 'o' }] }) });
-const offered = (run, prefix) => callsNamed(run, prefix)[0].schema.properties.cards.items.properties.scenario.enum;
+const offered = (run, prefix) => scenarioEnum(callsNamed(run, prefix)[0].schema);
 const scenarioIds = (outDir) => Object.values(JSON.parse(read(path.join(outDir, 'work', 'checkpoints',
   'phase6.json'))).state.designed).flatMap((d) => d.scenarios.map((s) => s.id));
 
@@ -2739,7 +3171,7 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
     await t.test(job.suite ? 'suite' : 'issue', async () => {
       const config = fixtureConfig();
       const pick = { intake: (value) => ({ ...value, documents: ['docs/LIB/UC01-Card-Renewal.md'] }) };
-      const failing = fakeModel({ ...pick, phase9_senior: () => {
+      const failing = fakeModel({ ...pick, phase9_senior_review: () => {
         throw new ModelError('no-reply', 'model endpoint ended the reply early');
       } });
       const first = await runJob(config, job, { model: failing, echo: false });
@@ -2752,8 +3184,8 @@ test('a resumed job starts at the phase that stopped it and keeps what passed', 
       assert.equal(result.ok, true, JSON.stringify(result));
       // Only the checklist passed before the failure, so only the calls after them run again.
       const stepNames = [...new Set(model.calls.map((c) => c.schemaName))];
-      assert.equal(stepNames[0], 'phase9_senior');
-      assert.deepEqual(stepNames.slice(-2), ['phase9_revalidation', 'phase10_notes']);
+      assert.equal(stepNames[0], 'phase9_senior_review');
+      assert.deepEqual(stepNames.slice(-2), ['phase9_revalidation_readiness', 'phase10_notes']);
       assert.ok(stepNames.includes('phase9_confidence_overall'));
       const lines = statusLines(result.outDir);
       assert.ok(lines.some((l) => l.event === 'resume' && l.phase === 'phase9-senior'
@@ -3075,7 +3507,8 @@ test('a mark written while a pauser runs survives, and resume clears only what i
   const pauser = createPauser(config, { exec: sys.exec, log: () => {} });
   await pauser.pause();
   markRestoreFile(config, ['gpu-c.service']);
-  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: ['gpu-c.service'] });
+  assert.deepEqual(readPaused(pausedPath(config)),
+    { stopped: ['gpu-a.service'], restore: ['gpu-c.service'], failedStart: [] });
   assert.deepEqual(await pauser.resume(), []);
   assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')),
     ['stop gpu-a.service', 'start gpu-a.service', 'start gpu-c.service']);
@@ -3090,13 +3523,13 @@ test('a run without the queue leaves another run\'s marks alone', async () => {
   await pauser.pause();
   await pauser.resume();
   assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['stop gpu-a.service', 'start gpu-a.service']);
-  assert.deepEqual(readPaused(pausedPath(config)), { stopped: [], restore: ['gpu-c.service'] });
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: [], restore: ['gpu-c.service'], failedStart: [] });
 });
 
 test('the state file of an earlier version, a bare list, still counts as stopped units', () => {
   const config = pauseConfig();
   fs.writeFileSync(pausedPath(config), JSON.stringify(['gpu-a.service', 'bad name']));
-  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: [] });
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: [], failedStart: [] });
 });
 
 test('only a unit on the pause list can be marked', () => {
@@ -3158,8 +3591,200 @@ test('queue status lists the units waiting to be restored, and queue restore sta
   assert.deepEqual(failedStart, ['gpu-d.service']);
   assert.deepEqual(sys.verbs().map((c) => c.slice(-2).join(' ')), ['start gpu-d.service', 'start gpu-c.service']);
   // A unit that did not start stays recorded for the next try.
-  assert.deepEqual(restoreLines(config), ['restore pending gpu-d.service']);
+  assert.deepEqual(readPaused(pausedPath(config)),
+    { stopped: [], restore: ['gpu-d.service'], failedStart: ['gpu-d.service'] });
   assert.equal(readQueue(config).jobs[0].restore, undefined);
+});
+
+test('queue status says a start failed and what to do next, not just that a restore is pending', async () => {
+  const config = pauseConfig();
+  markRestoreFile(config, ['gpu-d.service']);
+  const sys = fakeSystemctl([], ['start gpu-d.service']);
+  await restorePaused(config, { pause: quiet(sys) });
+  // A later mark and a later stop keep the failure on record.
+  markRestoreFile(config, ['gpu-c.service']);
+  const lines = restoreLines(config);
+  assert.equal(lines[0], 'restore pending gpu-c.service');
+  assert.match(lines[1], /^restore start-failed gpu-d\.service; start each by hand/);
+  assert.match(lines[1], /remove its name from the \.paused file beside the queue file/);
+  assert.match(lines[1], /start each by hand with sudo systemctl start/);
+  assert.match(lines[1], /once the cause is fixed, such as a missing sudoers rule$/);
+  assert.equal(lines.length, 2);
+  // The unit starts the next time, and the record goes with it.
+  assert.deepEqual(await restorePaused(config, { pause: quiet(fakeSystemctl([])) }), []);
+  assert.deepEqual(restoreLines(config), []);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+});
+
+test('the next step for a failed start in the user scope names systemctl --user and no sudoers', async () => {
+  const config = pauseConfig({ scope: 'user' });
+  markRestoreFile(config, ['gpu-d.service']);
+  await restorePaused(config, { pause: quiet(fakeSystemctl([], ['start gpu-d.service'])) });
+  const [line] = restoreLines(config);
+  assert.match(line, /^restore start-failed gpu-d\.service; start each by hand with systemctl --user start, /);
+  assert.ok(!line.includes('sudo'));
+});
+
+test('a failed start of a unit the run stopped is recorded, and dropping its name from the file drops the record', async () => {
+  const config = pauseConfig();
+  const sys = fakeSystemctl(['gpu-a.service'], ['start gpu-a.service']);
+  const pauser = createPauser(config, { exec: sys.exec, log: () => {} });
+  await pauser.pause();
+  assert.deepEqual(await pauser.resume(), ['gpu-a.service']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(pausedPath(config), 'utf8')),
+    { stopped: ['gpu-a.service'], restore: [], failedStart: ['gpu-a.service'] });
+  // A name hand-edited out of the lists is not reported as failed.
+  fs.writeFileSync(pausedPath(config), JSON.stringify({ stopped: [], restore: ['gpu-b.service'],
+    failedStart: ['gpu-a.service', 'gpu-b.service', 'bad name', 7] }));
+  assert.deepEqual(readPaused(pausedPath(config)),
+    { stopped: [], restore: ['gpu-b.service'], failedStart: ['gpu-b.service'] });
+});
+
+test('a run without the queue keeps the failed starts on file and adds only its own', async () => {
+  const config = pauseConfig();
+  fs.writeFileSync(pausedPath(config), JSON.stringify({ stopped: [], restore: ['gpu-c.service'],
+    failedStart: ['gpu-c.service', 'gpu-c.service'] }));
+  const sys = fakeSystemctl(['gpu-a.service'], ['start gpu-a.service']);
+  const pauser = createPauser(config, { exec: sys.exec, log: () => {}, leftover: false });
+  await pauser.pause();
+  // The stop is recorded, and the other run's failure stays on file once.
+  assert.deepEqual(readPaused(pausedPath(config)),
+    { stopped: ['gpu-a.service'], restore: ['gpu-c.service'], failedStart: ['gpu-c.service'] });
+  assert.deepEqual(await pauser.resume(), ['gpu-a.service']);
+  assert.deepEqual(readPaused(pausedPath(config)), { stopped: ['gpu-a.service'], restore: ['gpu-c.service'],
+    failedStart: ['gpu-c.service', 'gpu-a.service'] });
+  // A mark of a unit that already failed to start stays one entry.
+  markRestoreFile(config, ['gpu-c.service']);
+  assert.deepEqual(readPaused(pausedPath(config)).failedStart, ['gpu-c.service', 'gpu-a.service']);
+});
+
+/**
+ * An exec stub for the system scope. `down` units answer every systemctl
+ * listing, and `sudo -n -l` prints the sudoers rule lines in `rules`.
+ */
+function fakeHost({ down = [], rules = [] } = {}) {
+  const calls = [];
+  const exec = (command, args) => {
+    calls.push([command, ...args]);
+    if (command === 'sudo') {
+      return { status: 0, stdout: `User me may run the following commands on host:\n${rules.join('\n')}\n` };
+    }
+    if (args.includes('list-units') || args.includes('list-unit-files')) {
+      return { status: 0, stdout: down.map((unit) => `${unit} loaded inactive dead Test\n`).join('') };
+    }
+    return { status: 0, stdout: '' };
+  };
+  return { calls, exec, sudoCalls: () => calls.filter((call) => call[0] === 'sudo') };
+}
+
+const sudoRule = (...commands) => `    (root) NOPASSWD: ${commands.map((c) => `/usr/bin/systemctl ${c}`).join(', ')}`;
+
+test('a restore request drops the units sudoers will not start, and asks sudo once', () => {
+  const config = pauseConfig();
+  const host = fakeHost({ down: ['gpu-a.service', 'gpu-b.service'],
+    rules: [sudoRule('stop gpu-a.service', 'start gpu-b.service')] });
+  const request = restoreRequest(config, { restore: ['gpu-c.service'], restorePaused: true }, { exec: host.exec });
+  assert.deepEqual(request, { units: ['gpu-b.service'], refused: ['gpu-c.service', 'gpu-a.service'] });
+  assert.deepEqual(host.sudoCalls(), [['sudo', '-n', '-l']]);
+  // A sudo that cannot list refuses every unit, as the setup check does.
+  const silent = { exec: (command) => ({ status: command === 'sudo' ? 1 : 0, stdout: '' }) };
+  assert.deepEqual(restoreRequest(config, { restore: ['gpu-a.service'] }, silent),
+    { units: [], refused: ['gpu-a.service'] });
+});
+
+test('a restore request asks sudo nothing for the user scope or for no units', () => {
+  const host = fakeHost({ down: ['gpu-a.service'] });
+  assert.deepEqual(restoreRequest(pauseConfig({ scope: 'user' }), { restorePaused: true }, { exec: host.exec }),
+    { units: ['gpu-a.service'], refused: [] });
+  assert.deepEqual(restoreRequest(pauseConfig(), {}, { exec: host.exec }), { units: [], refused: [] });
+  assert.deepEqual(host.sudoCalls(), []);
+  assert.throws(() => restoreRequest(pauseConfig(), { restore: ['sshd.service'] }, { exec: host.exec }),
+    /not on pause.units/);
+  assert.deepEqual(host.sudoCalls(), []);
+});
+
+test('a refused unit is named and not marked on the job; an allowed one still is', () => {
+  const config = pauseConfig();
+  addJob(config, { issue: '1' });
+  const said = [];
+  const log = (line) => said.push(line);
+  const none = { units: [], refused: ['gpu-a.service', 'gpu-b.service'] };
+  assert.ok(markRestoreRequest(config, 'issue-1', none, log));
+  assert.equal(said.length, 2);
+  assert.match(said[0], /^restore {2}gpu-a\.service {2}refused {2}sudoers-refused start; not marked/);
+  assert.ok(said.every((line) => !line.includes('restores')));
+  assert.equal(readQueue(config).jobs[0].restore, undefined);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+  said.length = 0;
+  assert.ok(markRestoreRequest(config, 'issue-1', { units: ['gpu-c.service'], refused: ['gpu-a.service'] }, log));
+  assert.equal(said[0], 'issue-1 restores gpu-c.service when it ends');
+  assert.match(said[1], /gpu-a\.service/);
+  assert.deepEqual(readQueue(config).jobs[0].restore, ['gpu-c.service']);
+  // A job that is not waiting or running says nothing about its units.
+  said.length = 0;
+  assert.equal(markRestoreRequest(config, 'issue-9', { units: ['gpu-c.service'], refused: ['gpu-a.service'] }, log), false);
+  // A request that was refused in full still needs a job to name.
+  assert.equal(markRestoreRequest(config, 'issue-9', { units: [], refused: ['gpu-a.service'] }, log), false);
+  assert.deepEqual(said, []);
+  assert.equal(markRestoreRequest(config, 'issue-9', { units: [], refused: [] }, log), true);
+});
+
+const UC01_JOB = { issue: '501', change: '7001', docs: ['docs/LIB/UC01-Card-Renewal.md'] };
+
+test('the job check prints a pause unit that sudoers refuses, and fails on it', () => {
+  const config = pauseConfig();
+  const refusing = fakeHost({ down: ['gpu-a.service'], rules: [sudoRule('stop gpu-a.service')] });
+  const result = checkJobAndHost(config, UC01_JOB, { exec: refusing.exec });
+  assert.deepEqual(result.lines, ['issue-number  present  issue', 'description  present  found',
+    'document-1  present  rules-ok', 'pause  gpu-a.service  fail  sudoers-refused start']);
+  assert.equal(result.ok, false);
+  // A unit that sudoers allows adds no line, and neither does a config with no pause units or the user scope.
+  const allowing = fakeHost({ down: ['gpu-a.service'], rules: [sudoRule('stop gpu-a.service', 'start gpu-a.service')] });
+  assert.deepEqual(checkJobAndHost(config, UC01_JOB, { exec: allowing.exec }).lines, checkJob(config, UC01_JOB).lines);
+  assert.equal(checkJobAndHost(config, UC01_JOB, { exec: allowing.exec }).ok, true);
+  const user = fakeHost({ down: ['gpu-a.service'] });
+  assert.equal(checkJobAndHost(pauseConfig({ scope: 'user' }), UC01_JOB, { exec: user.exec }).ok, true);
+  assert.deepEqual(user.sudoCalls(), []);
+  const none = fakeHost();
+  assert.equal(checkJobAndHost(fixtureConfig(), UC01_JOB, { exec: none.exec }).ok, true);
+  assert.deepEqual(none.calls, []);
+  // A pattern that names a unit twice prints it once.
+  const twice = fakeHost({ down: ['gpu-a.service'], rules: [] });
+  const both = pauseConfig({ units: ['gpu-*.service', 'gpu-a.service'] });
+  const lines = checkJobAndHost(both, UC01_JOB, { exec: twice.exec }).lines;
+  assert.equal(lines.filter((l) => l.startsWith('pause  ')).length, 1);
+});
+
+test('queue add refuses to promise a restore that sudoers will refuse, and the job check says so first', () => {
+  const config = pauseConfig();
+  const bin = scratch('build-pack-bin-');
+  // A sudo that lists a stop rule for one unit and a start rule for another, and a systemctl that lists one
+  // stopped unit.
+  fs.writeFileSync(path.join(bin, 'sudo'), '#!/bin/sh\nprintf "User me may run the following commands on host:\\n'
+    + '    (root) NOPASSWD: /usr/bin/systemctl stop gpu-a.service, /usr/bin/systemctl start gpu-b.service\\n"\n',
+  { mode: 0o755 });
+  fs.writeFileSync(path.join(bin, 'systemctl'), '#!/bin/sh\nprintf "gpu-a.service loaded inactive dead Test\\n"\n',
+    { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  const cli = (...args) => spawnSync(process.execPath, [path.join(HERE, 'build-pack.mjs'), ...args,
+    '--config', config.file], { encoding: 'utf8', env });
+  const checked = cli('check', '--issue', '501', '--change', '7001', '--doc', 'docs/LIB/UC01-Card-Renewal.md');
+  assert.equal(checked.status, 1, checked.stderr);
+  assert.match(checked.stdout, /^pause {2}gpu-a\.service {2}fail {2}sudoers-refused start$/m);
+  const added = cli('queue', 'add', '--issue', '100', '--restore-paused');
+  assert.equal(added.status, 0, added.stderr);
+  assert.match(added.stdout, /^restore {2}gpu-a\.service {2}refused {2}sudoers-refused start; not marked/m);
+  assert.match(added.stdout, /queued issue-100/);
+  assert.ok(!added.stdout.includes('restores'));
+  assert.equal(readQueue(config).jobs[0].restore, undefined);
+  assert.ok(!fs.existsSync(pausedPath(config)));
+  assert.deepEqual(cli('queue', 'status', '--job', 'issue-100').stdout.split('\n').filter((l) => l.startsWith('restore')), []);
+  // One unit refused and one allowed: only the allowed one is marked.
+  const mixed = cli('queue', 'add', '--issue', '101', '--restore', 'gpu-b.service', '--restore-paused');
+  assert.equal(mixed.status, 0, mixed.stderr);
+  assert.match(mixed.stdout, /^issue-101 restores gpu-b\.service when it ends$/m);
+  assert.match(mixed.stdout, /^restore {2}gpu-a\.service {2}refused {2}sudoers-refused start; not marked/m);
+  assert.deepEqual(readQueue(config).jobs[1].restore, ['gpu-b.service']);
 });
 
 test('pause config is validated', () => {
@@ -3875,7 +4500,7 @@ test('a card that agrees with its rules and its last step passes untouched, afte
   // Never an empty enum: one row per card in the call, two verdicts.
   const rows = verify[0].schema.properties.cards;
   assert.deepEqual(rows.required, ['C1', 'C2', 'C3', 'C4']);
-  assert.deepEqual(rows.properties.C1.properties.verdict.enum, ['follows', 'does not follow']);
+  assert.deepEqual(S.propOf(rows.properties.C1, 'verdict').enum, ['follows', 'does not follow']);
   // The call carries the card, the rules it cites and their wording, and says which rule wins.
   assert.match(verify[0].user, /Expected Result: The loan is refused with the message Account on hold/);
   assert.match(verify[0].user, /BR-LIB\.UC03-001 \|[^\n]*may borrow up to five items/);
@@ -3969,7 +4594,7 @@ test('a card whose Expected Result follows the allowance is redesigned once, tol
   assert.equal(result.ok, true, JSON.stringify(result));
   const redo = callsNamed(run, 'phase6_redo');
   assert.equal(redo.length, 1);
-  assert.deepEqual(redo[0].schema.properties.cards.items.properties.scenario.enum, ['S1']);
+  assert.deepEqual(scenarioEnum(redo[0].schema), ['S1']);
   assert.match(redo[0].user, /a block outranks the allowance for a current card/);
   assert.match(redo[0].user, /The loan goes ahead because the card is current/);
   assert.equal(callsNamed(run, 'phase6_reverify').length, 1);
@@ -4250,8 +4875,9 @@ const plantedChecklist = () => {
 const correctingRepair = (value) => ({ ...value, coverage: [], limitations: [],
   cards: value.cards.map((card) => ({ ...card,
     steps: card.steps.map((step, i) => (i ? step : { ...step, description: 'Corrected step' })) })) });
-const failCheck = (value, check, why, fix = '') => ({ ...value,
-  checks: { ...value.checks, [check]: { why, verdict: 'fail', fix } } });
+// A revalidation call holds only the checks of its group, so a check that is not in the reply is left alone.
+const failCheck = (value, check, why, fix = '') => (check in value.checks ? { ...value,
+  checks: { ...value.checks, [check]: { why, verdict: 'fail', fix } } } : value);
 const failsRevalidation = { phase9_revalidation: (value) =>
   failCheck(value, 'All issues resolved', 'Step 1 still reads wrong') };
 
@@ -4294,7 +4920,9 @@ test('the checklist calls run with thinking off; confidence, senior review and r
     assert.equal(call.reasoning, false);
     assert.equal(call.maxTokens, config.model.maxOutput);
   }
-  for (const name of ['phase9_confidence_overall', 'phase9_confidence_steps', 'phase9_senior', 'phase9_revalidation']) {
+  for (const name of ['phase9_confidence_overall', 'phase9_confidence_steps', 'phase9_senior_review',
+    'phase9_senior_notes', 'phase9_revalidation_traceability', 'phase9_revalidation_resolution',
+    'phase9_revalidation_readiness']) {
     const calls = checksFor(model, name);
     assert.ok(calls.length, name);
     assert.ok(calls.every((c) => c.reasoning === true), name);
@@ -4378,7 +5006,7 @@ test('a workbook too long for one review call is read in parts, and a failing pa
   };
   const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
   const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink, phase9_revalidation: (value, calls) =>
-    (calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length === 2
+    (/part 2 of/.test(calls.at(-1).user)
       ? failCheck(value, 'Traceability complete', 'A card lost its rule') : value) });
   const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
   const parts = checksFor(model, 'phase9_checklist');
@@ -4467,7 +5095,7 @@ test('the checklist asks each issue for its Validation section', async () => {
   const model = fakeModel(DOCS);
   await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   const [call] = checksFor(model, 'phase9_checklist');
-  assert.deepEqual(call.schema.properties.issues.items.properties.section.enum, [
+  assert.deepEqual(S.propOf(call.schema.properties.issues.items, 'section').enum, [
     'Requirements Matrix Integrity', 'Rule Integrity', 'Test Card Structure', 'Coverage Completeness',
     'Traceability', 'Consistency']);
 });
@@ -4488,11 +5116,13 @@ test('revalidation reads the review sheets and the validation sheet that the che
 test('revalidation answers one verdict for each Revalidation check, and a failed check is named in what remains', async () => {
   const model = fakeModel({ ...DOCS, ...failsRevalidation });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
-  const [call] = checksFor(model, 'phase9_revalidation');
-  assert.deepEqual(Object.keys(call.schema.properties.checks.properties), [
-    'All issues resolved', 'No regressions introduced', 'Requirement ID references preserved',
-    'Requirements Matrix integrity preserved', 'Traceability complete',
-    'No uncovered Requirement IDs remain unless explicitly documented', 'Test pack is ready for ALM execution']);
+  const calls = checksFor(model, 'phase9_revalidation');
+  const asked = calls.map((call) => Object.keys(call.schema.properties.checks.properties));
+  assert.deepEqual(asked, [
+    ['Requirement ID references preserved', 'Requirements Matrix integrity preserved', 'Traceability complete',
+      'No uncovered Requirement IDs remain unless explicitly documented'],
+    ['All issues resolved', 'No regressions introduced'],
+    ['Test pack is ready for ALM execution']]);
   assert.equal(result.reason, 'gate:revalidation-failed');
   assert.deepEqual(JSON.parse(read(result.packPath)).revalidation.remaining,
     ['All issues resolved: Step 1 still reads wrong']);
@@ -4500,14 +5130,97 @@ test('revalidation answers one verdict for each Revalidation check, and a failed
 
 test('a revalidation check that fails with a fix gets one repair round and one more revalidation', async () => {
   const model = fakeModel({ ...DOCS, phase8_repair: correctingRepair,
-    phase9_revalidation: (value, calls) => (calls.filter((c) => c.schemaName.startsWith('phase9_revalidation')).length === 1
+    phase9_revalidation: (value, calls) => (!calls.at(-1).schemaName.endsWith('_again')
       ? failCheck(value, 'Traceability complete', `${cardIdIn(calls.at(-1).user)} reads wrong`,
         `Change step 1 of ${cardIdIn(calls.at(-1).user)} to read Corrected step`) : value) });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(checksFor(model, 'phase8_repair_revalidation').length, 1);
-  assert.equal(checksFor(model, 'phase9_revalidation').length, 2);
+  // The fix a group's verdict carried is what the repair round is asked to apply.
+  assert.match(checksFor(model, 'phase8_repair_revalidation')[0].user,
+    /Section: Traceability complete\n {2}Fix: Change step 1 of TC-\S+ to read Corrected step/);
+  assert.deepEqual(checksFor(model, 'phase9_revalidation').map((call) => call.schemaName), [
+    'phase9_revalidation_traceability', 'phase9_revalidation_resolution', 'phase9_revalidation_readiness',
+    'phase9_revalidation_traceability_again', 'phase9_revalidation_resolution_again',
+    'phase9_revalidation_readiness_again']);
   assert.equal(JSON.parse(read(result.packPath)).revalidation, undefined);
+});
+
+test('the revalidation calls of one workbook share their prompt up to a last question that names the group, and each thinks under its own limit', async () => {
+  const config = fixtureConfig();
+  const model = fakeModel(DOCS);
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const calls = checksFor(model, 'phase9_revalidation');
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map((call) => call.maxTokens), [12288, 8192, 8192]);
+  const split = (call) => call.user.split('\n## Question\n');
+  const [shared] = split(calls[0]);
+  for (const call of calls) {
+    assert.equal(call.system, calls[0].system);
+    assert.equal(split(call).length, 2);
+    assert.equal(split(call)[0], shared);
+    assert.ok(split(call)[1].trim().split('\n').length >= 2, 'the question is the last section');
+  }
+  assert.match(split(calls[0])[1], /- Traceability complete/);
+  assert.match(split(calls[1])[1], /- All issues resolved\n- No regressions introduced/);
+  assert.match(split(calls[2])[1], /- Test pack is ready for ALM execution/);
+  assert.doesNotMatch(shared, /Traceability complete/);
+});
+
+test('a workbook read in parts is walked part by part, every group of a part before the next part', async () => {
+  const config = fixtureConfig();
+  const shrink = (value) => {
+    Object.assign(config.model, { context: 7700, reasoningOutput: 1000, maxOutput: 500, retryOutput: 500 });
+    return value;
+  };
+  const longer = (value) => ({ ...value, cards: value.cards.map((c) => ({ ...c, title: 'Long title '.repeat(150) })) });
+  const model = fakeModel({ ...DOCS, phase6_cards: longer, phase7: shrink });
+  await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const first = checksFor(model, 'phase9_revalidation').slice(0, 6);
+  assert.deepEqual(first.map((call) => /part (\d+) of/.exec(call.user)[1]), ['1', '1', '1', '2', '2', '2']);
+  assert.deepEqual(first.slice(0, 3).map((call) => call.schemaName), [
+    'phase9_revalidation_traceability', 'phase9_revalidation_resolution', 'phase9_revalidation_readiness']);
+  // A part the check is not shown in answers with the verdict that says so.
+  assert.ok(first.every((call) => S.propOf(call.schema.properties.checks.properties[Object.keys(
+    call.schema.properties.checks.properties)[0]], 'verdict').enum.includes('not shown in this part')));
+});
+
+test('a senior review is asked in two calls, the notes seeing the review fields already written', async () => {
+  const model = fakeModel(DOCS);
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [review, notes, ...more] = checksFor(model, 'phase9_senior');
+  assert.deepEqual(more, []);
+  assert.deepEqual([review.schemaName, notes.schemaName], ['phase9_senior_review', 'phase9_senior_notes']);
+  assert.deepEqual([review.maxTokens, notes.maxTokens], [12288, 12288]);
+  assert.deepEqual(Object.keys(review.schema.properties), ['seniorReview']);
+  assert.deepEqual(Object.keys(notes.schema.properties), ['testerNotes']);
+  assert.doesNotMatch(review.user, /Fields already written/);
+  assert.match(notes.user, /Fields already written[\s\S]*- Senior Tester Review missed: missed value/);
+  // The question comes last and names the part's fields.
+  assert.match(review.user, /## Question\n\nWrite the Senior Tester Review fields: missed, businessBehavior[^\n]*\n$/);
+  assert.match(notes.user, /## Question\n\nWrite the Tester Notes fields: testData, execution[^\n]*\n$/);
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.seniorReview.missed, 'missed value');
+  assert.equal(pack.testerNotes.testData, 'testData value');
+});
+
+test('a tester note that repeats a review field is asked for again, and a second refusal fails the senior step whole', async () => {
+  const twin = 'The renewal flow was exercised end to end and nothing was missed.';
+  const model = fakeModel({ ...DOCS,
+    phase9_senior_review: (value) => ({ ...value, seniorReview: { ...value.seniorReview, missed: twin } }),
+    phase9_senior_notes: (value) => ({ ...value, testerNotes: { ...value.testerNotes, testData: twin } }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'gate:review-field-unsupported');
+  assert.equal(checksFor(model, 'phase9_senior_review').length, 1);
+  const notes = checksFor(model, 'phase9_senior_notes');
+  assert.equal(notes.length, 2);
+  assert.match(notes[1].user, /Your last answer was refused: Tester Notes testData: it repeats the text of Senior Tester Review missed/);
+  // The part that passed is not kept on its own: the step fails whole and a resume asks both again.
+  assert.equal(result.phase, 'phase9-senior');
+  assert.ok(!statusLines(result.outDir).some((l) => l.event === 'pass' && l.phase === 'phase9-senior'));
 });
 
 /** A builder command that also refuses a confidence its assumptions do not support. */
@@ -4532,6 +5245,84 @@ test('a pack over the Medium assumption limit comes out of Phase 8 with a Draft 
     draft.limitations['Confidence Assessment']], ['Low', 'Low', 'Pending review.']);
   assert.match(checksFor(model, 'phase9_checklist')[0].user, /\[Test Cards Markdown row/);
   assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+/** The ceiling as a builder module too, so the pipeline can read the confidence ceiling from it. */
+const ceilingModule = { ...ceilingBuilder, module: 'builder-ceiling.mjs' };
+const manyAssumptions = { phase3_scope: (value) => ({ ...value,
+  assumptions: Array.from({ length: 12 }, (_, i) => ({ assumption: `Assumption ${i + 1} holds for this change`,
+    basis: 'The document says so' })) }) };
+const overallCalls = (model) => model.calls.filter((c) => c.schemaName === 'phase9_confidence_overall');
+
+test('a rating above the confidence ceiling is lowered to it in code, and the builder passes the pack', async () => {
+  const model = fakeModel({ ...DOCS, ...manyAssumptions,
+    phase9_confidence_overall: (value) => ({ ...value, overall: 'High', reason: 'BR-LIB.UC01-001 is fully covered.' }) });
+  const result = await runJob(fixtureConfig({ builder: ceilingModule }), { issue: '501', change: '7001' },
+    { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // The call is told the ceiling with the builder's reason, and offered only the levels under it.
+  const [call, ...more] = overallCalls(model);
+  assert.equal(more.length, 0);
+  assert.match(call.user,
+    /The highest level this pack supports is Low, because \d+ assumptions against a limit of 10\. Do not rate it higher\./);
+  assert.deepEqual(S.propOf(call.schema, 'overall').enum, ['Low']);
+  // The reply rated above it all the same, so code lowers it and says why on the sheet.
+  const lines = statusLines(result.outDir);
+  const [line, ...others] = lines.filter((l) => l.event === 'confidence');
+  assert.equal(others.length, 0);
+  assert.deepEqual([line.step, line.overall, line.asked, line.cappedBy],
+    ['confidence-overall', 'Low', 'High', 'confidence-ceiling']);
+  const pack = JSON.parse(read(result.packPath));
+  const lowered = /^BR-LIB\.UC01-001 is fully covered\. The rating was lowered to what the pack supports: \d+ assumptions against a limit of 10\.$/;
+  assert.equal(pack.confidence.overall, 'Low');
+  assert.match(pack.confidence.reason, lowered);
+  assert.match(pack.limitations['Confidence Assessment'], lowered);
+  assert.equal(pack.executiveSummary.confidence, `Low. ${pack.confidence.reason}`);
+  // The rebuild before revalidation passes on its first build, and nothing is lowered a second time.
+  assert.deepEqual(lines.filter((l) => l.step === 'rebuild' && l.event === 'builder').map((l) => [l.attempt, l.failed]),
+    [[0, 0]]);
+  assert.ok(!lines.some((l) => l.event === 'confidence-lowered' || l.event === 'fail'));
+  assert.ok(fs.existsSync(result.workbook));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a rating an untested objective and the ceiling both hold down takes the ceiling, and its line names the ceiling', async () => {
+  const run = lib({ ...DROP_RUN,
+    phase3_scope: (value) => manyAssumptions.phase3_scope(NOT_REMOVAL.phase3_scope(value)),
+    phase9_confidence_overall: (value) => ({ ...value, overall: 'High', reason: 'BR-1 is covered.' }) },
+  { builder: ceilingModule });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [line] = statusLines(result.outDir).filter((l) => l.event === 'confidence');
+  assert.deepEqual([line.overall, line.asked, line.cappedBy, line.untested], ['Low', 'High', 'confidence-ceiling', 1]);
+  const { confidence } = JSON.parse(read(result.packPath));
+  assert.match(confidence.reason, /^BR-1 is covered\. No test card serves .+ untested\. The rating was lowered to what the pack supports: \d+ assumptions against a limit of 10\.$/);
+});
+
+test('a builder module with no confidenceCeiling export is asked for any level, and its rating stands', async () => {
+  const model = fakeModel({ ...DOCS, ...manyAssumptions,
+    phase9_confidence_overall: (value) => ({ ...value, overall: 'High', reason: 'BR-LIB.UC01-001 is fully covered.' }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [call] = overallCalls(model);
+  assert.doesNotMatch(call.user, /highest level this pack supports/);
+  assert.match(call.user, /rules\s+out the highest level\. Do not state a confidence level in the reason/);
+  assert.deepEqual(S.propOf(call.schema, 'overall').enum, ['High', 'Medium', 'Low']);
+  const lines = statusLines(result.outDir);
+  assert.deepEqual(lines.filter((l) => l.event === 'confidence').map((l) => [l.overall, l.asked, l.cappedBy]),
+    [['High', 'High', 'none']]);
+  assert.ok(!lines.some((l) => l.event === 'confidence-lowered'));
+  assert.equal(JSON.parse(read(result.packPath)).confidence.overall, 'High');
+});
+
+test('a rating above the ceiling stops the review of a builder with no confidenceCeiling export', async () => {
+  const model = fakeModel({ ...DOCS, ...manyAssumptions,
+    phase9_confidence_overall: (value) => ({ ...value, overall: 'High', reason: 'BR-LIB.UC01-001 is fully covered.' }) });
+  const result = await runJob(fixtureConfig({ builder: ceilingBuilder }), { issue: '501', change: '7001' },
+    { model, echo: false });
+  assert.deepEqual([result.ok, result.phase, result.reason], [false, 'phase9-revalidate', 'gate:builder-fail']);
+  const fail = statusLines(result.outDir).findLast((l) => l.event === 'fail');
+  assert.equal(fail.failedSheets, 'Confidence Assessment');
 });
 
 test('a Draft workbook the builder refuses after every repair stops the job at Phase 8', async () => {
@@ -4690,7 +5481,7 @@ test('each Confidence Assessment field is written on its own after the senior re
   assert.equal(result.ok, true, JSON.stringify(result));
   const names = [...new Set(model.calls.map((call) => call.schemaName))]
     .filter((name) => /^phase9_(confidence|senior)/.test(name));
-  assert.deepEqual(names, ['phase9_senior', 'phase9_confidence_remainingRisks',
+  assert.deepEqual(names, ['phase9_senior_review', 'phase9_senior_notes', 'phase9_confidence_remainingRisks',
     'phase9_confidence_assumptions', 'phase9_confidence_regressionScope',
     'phase9_confidence_breakItScope', 'phase9_confidence_manualReview',
     'phase9_confidence_steps', 'phase9_confidence_overall']);
@@ -4701,8 +5492,9 @@ test('each Confidence Assessment field is written on its own after the senior re
   assert.match(second.user, /Cards and the rules they cite[\s\S]*TC-MOD-501-001/);
   assert.match(second.user, /\[Test Cards Markdown row \d+\]/);
   // The senior review no longer sees a confidence assessment; the assessment sees the review.
-  const senior = model.calls.find((call) => call.schemaName === 'phase9_senior');
-  assert.doesNotMatch(senior.user, /Confidence assessment/);
+  for (const part of ['phase9_senior_review', 'phase9_senior_notes']) {
+    assert.doesNotMatch(model.calls.find((call) => call.schemaName === part).user, /Confidence assessment/);
+  }
   assert.match(second.user, /Senior review/);
   const pack = JSON.parse(read(result.packPath));
   assert.match(pack.confidence.manualReview, /^The manualReview is covered by /);
@@ -4864,14 +5656,14 @@ test('a job saved at the confidence step before the senior review moved reruns b
 });
 
 test('a senior review answer with a repeated or unsupported field is asked for again', async () => {
-  const model = fakeModel({ ...DOCS, phase9_senior: (value, calls) => {
-    const tries = calls.filter((call) => call.schemaName === 'phase9_senior').length;
+  const model = fakeModel({ ...DOCS, phase9_senior_review: (value, calls) => {
+    const tries = calls.filter((call) => call.schemaName === 'phase9_senior_review').length;
     return tries === 1
       ? { ...value, seniorReview: { ...value.seniorReview, missed: 'See BR-LIB.UC01-099.' } } : value;
   } });
   const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
   assert.equal(result.ok, true, JSON.stringify(result));
-  const asks = model.calls.filter((call) => call.schemaName === 'phase9_senior');
+  const asks = model.calls.filter((call) => call.schemaName === 'phase9_senior_review');
   assert.equal(asks.length, 2);
   assert.match(asks[1].user, /Senior Tester Review missed: it cites BR-LIB\.UC01-099/);
   assert.equal(JSON.parse(read(result.packPath)).seniorReview.missed, 'missed value');
@@ -5872,7 +6664,10 @@ test('a pauser wait ends at once when the stop signal aborts', async () => {
   assert.ok(lines.includes('pause: waiting for x.service'));
 });
 
-/** A loopback server that hands each request to `handle(res)` once its body is read. */
+/**
+ * A loopback server that hands each request to `handle(res)` once its body is read.
+ * `close` settles when the server has stopped listening.
+ */
 async function chatServer(handle) {
   const server = http.createServer((req, res) => {
     req.resume();
@@ -5880,7 +6675,7 @@ async function chatServer(handle) {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return { endpoint: `http://127.0.0.1:${server.address().port}/v1`,
-    close: () => { server.closeAllConnections(); server.close(); } };
+    close: () => { server.closeAllConnections(); return new Promise((resolve) => { server.close(resolve); }); } };
 }
 
 const CHAT_CALL = { system: 's', user: 'u', schema: { type: 'object' }, schemaName: 'n', reasoning: false,
@@ -5925,7 +6720,7 @@ test('a streamed reply still running at the time-out fails as network, and the s
   const chat = await chatServer(stream.handle);
   try {
     const client = modelClient({ endpoint: chat.endpoint, name: 'm', timeoutMinutes: 0.001 });
-    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network');
+    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network' && error.causeCode === 'timeout');
     await stream.seen;
   } finally {
     chat.close();
@@ -5939,10 +6734,55 @@ test('a streamed reply whose connection resets partway through fails as network'
   });
   try {
     const client = modelClient({ endpoint: chat.endpoint, name: 'm' });
-    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network');
+    await assert.rejects(client.json(CHAT_CALL), (error) => error.code === 'network' && error.causeCode === 'ECONNRESET');
   } finally {
     chat.close();
   }
+});
+
+test('each model call opens a connection of its own, so one the server closed after a reply is never used again', async () => {
+  // The server answers once on a connection it says it keeps open, and resets a second request sent on it.
+  const answered = new Set();
+  const chat = await chatServer((res) => {
+    if (answered.has(res.socket)) {
+      res.socket.resetAndDestroy();
+      return;
+    }
+    answered.add(res.socket);
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(sse({ content: '{"ok":true}' }));
+  });
+  try {
+    const client = modelClient({ endpoint: chat.endpoint, name: 'm' });
+    for (let call = 1; call <= 3; call += 1) assert.deepEqual((await client.json(CHAT_CALL)).value, { ok: true });
+    assert.equal(answered.size, 3);
+  } finally {
+    chat.close();
+  }
+});
+
+test('a failed connection carries a short code for its cause and none of the error text', async () => {
+  const failing = (error) => modelClient({ endpoint: 'http://localhost:1/v1', name: 'm',
+    fetchImpl: async () => { throw error; } });
+  const cases = [
+    [Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }), 'ECONNRESET'],
+    // Node's own fetch wraps the failure and keeps its code on the cause.
+    [Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }) }),
+      'ECONNREFUSED'],
+    [Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 'ABORT_ERR',
+      cause: new DOMException('timed out', 'TimeoutError') }), 'timeout'],
+    [Object.assign(new Error('Renewal'), { code: 'Renewal is due' }), 'unknown'],
+    [new Error('Renewal'), 'unknown'],
+  ];
+  for (const [error, cause] of cases) {
+    await assert.rejects(failing(error).json(CHAT_CALL), (caught) => caught.code === 'network'
+      && caught.causeCode === cause && !/Renewal/.test(`${caught.message} ${caught.causeCode}`), cause);
+  }
+  // A port nothing listens on. The short time-out ends the call if another process has taken the port and stays silent.
+  const chat = await chatServer(() => {});
+  await chat.close();
+  await assert.rejects(modelClient({ endpoint: chat.endpoint, name: 'm', timeoutMinutes: 0.01 }).json(CHAT_CALL),
+    (caught) => caught.code === 'network' && caught.causeCode === 'ECONNREFUSED');
 });
 
 test('a streamed reply is put together from its content deltas, without the thinking, with its usage', async () => {
@@ -6410,6 +7250,57 @@ test('every stop in HOLD_REASONS leaves the row stopped for a person', async () 
     'gate:duplicate-rule-wording', 'gate:rule-conflict', 'gate:needs-user-review']);
 });
 
+const refusedPack = (phase) => async (_config, job) => ({ ok: false, id: job.id, phase,
+  reason: 'gate:builder-fail', ms: 1, counts: { sheets: 1, failedSheets: 'Confidence Assessment' } });
+
+test('a pack the builder refuses in a Phase 9 step leaves the row stopped, and one refused in Phase 8 is tried again', async () => {
+  const clock = () => new Date('2026-11-01T08:00:00');
+  for (const phase of ['phase9-checklist', 'phase9-senior', 'phase9-confidence', 'phase9-revalidate']) {
+    const config = fixtureConfig();
+    addJob(config, { issue: '3' });
+    await drainQueue(config, { cutoff: '07:00', clock, run: refusedPack(phase) });
+    const [row] = readQueue(config).jobs;
+    assert.deepEqual([row.status, row.resume, row.phase, row.reason, countedTries(row.failures)],
+      ['stopped', true, phase, 'gate:builder-fail', 1], phase);
+    // No later run takes the row, and the summary says who it waits for.
+    const ran = [];
+    await drainQueue(config, { cutoff: '07:00', clock, run: async (cfg, job) => { ran.push(job.id); return refusedPack(phase)(cfg, job); } });
+    assert.deepEqual(ran, [], phase);
+    assert.match(summaryLines(readQueue(config))[0],
+      new RegExp(`stopped at ${phase} \\(gate:builder-fail\\), waits for a person, resumable`));
+  }
+  const config = fixtureConfig();
+  addJob(config, { issue: '3' });
+  await drainQueue(config, { cutoff: '07:00', clock, run: refusedPack('phase8') });
+  assert.equal(readQueue(config).jobs[0].status, 'queued');
+});
+
+test('the report says what a row held on a refused Phase 9 pack waits for', () => {
+  const config = fixtureConfig();
+  const at = '2026-11-01T08:00:00.000Z';
+  const queue = { jobs: [{ id: 'issue-1', status: 'stopped', resume: true, phase: 'phase9-revalidate',
+    reason: 'gate:builder-fail', finished: at,
+    failures: [{ at, phase: 'phase9-revalidate', reason: 'gate:builder-fail', ms: 1 }] }] };
+  const text = renderReport(reportData(config, queue, { period: 'day', now: new Date('2026-11-01T09:00:00.000Z') }));
+  assert.match(text, /Stopped on a gate a retry cannot change, waiting for a person: 1/);
+  assert.match(text, /the builder refuses the pack the review left, so fix what its failed sheets name, then `queue add --resume`/);
+  assert.doesNotMatch(text, /fix the document or its rules/);
+});
+
+test('the report shows the level a build lowered the rating to, until a later rating step passes', () => {
+  const config = fixtureConfig();
+  const row = passedJob(config, 'issue-100', { hours: 5, confidence: 'High' });
+  const log = path.join(config.output, 'issue-100', 'status.log');
+  const add = (fields) => fs.appendFileSync(log, `\n${JSON.stringify({ at: hoursAgo(5), job: 'issue-100', ...fields })}`);
+  const shown = () => reportData(config, { jobs: [row] }, { period: 'day', now: NOW }).jobs[0].confidence;
+  assert.equal(shown(), 'High');
+  add({ phase: 'phase9', step: 'confidence-ceiling', event: 'confidence-lowered', overall: 'Medium', asked: 'High',
+    reason: 'confidence-ceiling' });
+  assert.equal(shown(), 'Medium');
+  add({ phase: 'phase9-revalidate', event: 'pass', confidence: 'Low' });
+  assert.equal(shown(), 'Low');
+});
+
 test('check without a document or checkpoint writes nothing under the output folder', () => {
   const config = fixtureConfig();
   checkJob(config, { issue: '501', change: '7001', resume: true });
@@ -6558,7 +7449,8 @@ test('the Phase 4 impact analysis is kept on the pack and given to the Phase 6 a
   assert.deepEqual(pack.impacts.upstream, ['Fines batch feeds the due date']);
   assert.deepEqual(pack.impacts.data, []);
   const section = /Impact analysis by area\s+Windows, pages and tabs: Renewal tab/;
-  for (const name of ['phase6_scenarios_d1', 'phase6_cards_d1_1', 'phase9_checklist', 'phase9_senior']) {
+  for (const name of ['phase6_scenarios_d1', 'phase6_cards_d1_1', 'phase9_checklist', 'phase9_senior_review',
+    'phase9_senior_notes']) {
     const call = callOf(run, name);
     assert.match(call.user, section, name);
     assert.match(call.user, /Upstream: Fines batch feeds the due date/, name);
@@ -7040,11 +7932,13 @@ test('a card still flagged after one redesign is kept, with an assumption naming
 test('a card that repeats another is dropped before verification and counted', async () => {
   const same = (value) => ({ ...value, cards: value.cards.map((card) => ({ ...card,
     title: 'Renewal of a card', mission: 'Renewal of a card', focus: ['Renewal of a card'] })) });
-  const run = lib({ phase6_scenarios: inventory([{}, {}]), phase6_cards: same });
+  const run = lib({ phase6_scenarios: inventory([{ kind: 'control' }, { kind: 'isolation' }]), phase6_cards: same });
   const result = await runLib(run);
   assert.equal(result.ok, true, JSON.stringify(result));
   const pack = JSON.parse(read(result.packPath));
   assert.equal(pack.testCards.length, 1);
+  // The card that stays carries its own scenario's kind, not the dropped card's.
+  assert.equal(pack.testCards[0].kind, 'control');
   assert.equal(phase6Pass(result.outDir).repeats, 1);
   assert.ok(pack.assumptions.some((a) => /dropped as a repeat/.test(a.assumption)));
 });
@@ -7081,7 +7975,7 @@ test('rules a card takes from a folded or dropped card join its scenario, so a r
     steps: [step('Select the role', 'The error message shows', ['R1'])] };
   const answers = { title: 'Ok', scenario: 'S2', rules: ['R1', 'R2'], objectives: ['Flow'], expected: 'The message closes',
     steps: [step('Select Ok', 'The message closes', ['R1', 'R2'])] };
-  const scenarios = [{ id: 'S1', rules: ['R1'] }, { id: 'S2', rules: ['R1', 'R2'] }];
+  const scenarios = [{ id: 'S1', kind: 'control', rules: ['R1'] }, { id: 'S2', kind: 'isolation', rules: ['R1', 'R2'] }];
   const ctx = { designed: { k: { cards: [raises, answers], scenarios, assumptions: [] } },
     pack: { rules: [rule('R1'), rule('R2')] } };
   const verified = new Set([raises, answers]);
@@ -7093,6 +7987,8 @@ test('rules a card takes from a folded or dropped card join its scenario, so a r
   assert.ok(!verified.has(raises) && !checked.has(raises));
   assert.deepEqual(ctx.designed.k.cards[0].rules, ['R1', 'R2']);
   assert.deepEqual(ctx.designed.k.cards[0].objectives, ['Core', 'Flow']);
+  // The card that stays is still written for its own scenario, so it keeps that scenario's kind.
+  assert.equal(scenarios.find((s) => s.id === ctx.designed.k.cards[0].scenario).kind, 'control');
 });
 
 test('a flagged break card is kept apart from a plain card only while the pack has a BREAK IT set', () => {
@@ -7602,6 +8498,13 @@ test('a repair step repairs one finding of the snapshot\'s revalidation in the s
   assert.equal(model.calls.filter((c) => c.schemaName.startsWith('phase8_repair')).length, 1);
   assert.ok(!JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json')))
     .state.pack.testCards.some((card) => card.steps[0].description === 'Repaired by the step'));
+  // A repaired card keeps the kind Phase 7 gave it, and the repair is not shown it.
+  const fixed = repaired.testCards.find((card) => card.steps[0].description === 'Repaired by the step');
+  const snapshot = savedPack(JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json'))));
+  assert.ok(fixed.kind);
+  assert.equal(fixed.kind, snapshot.testCards.find((card) => card.id === fixed.id).kind);
+  const asked = model.calls.find((c) => c.schemaName.startsWith('phase8_repair')).user;
+  assert.ok(asked.includes('"derivation"') && !asked.includes('"kind"'));
   assert.deepEqual(digest(failed.outDir), before);
   assertContentFree(done.result.lines.join('\n'));
 });
@@ -7610,10 +8513,11 @@ test('a repair step repairs one finding of the snapshot\'s revalidation in the s
 const asksNewCard = { phase9_revalidation: (value) => failCheck(value, 'Traceability complete',
   'BR-LIB.UC01-001 has no card', 'Create a new test card for BR-LIB.UC01-001') };
 const newCardFor = (value, calls) => {
-  const item = calls.at(-1).schema.properties.newCards.items.properties;
+  const item = S.propOf(calls.at(-1).schema, 'newCards').items;
   return { ...value, coverage: [], limitations: [], cards: [],
     newCards: [{ title: 'New card', mission: 'Cover the rule', focus: ['focus'], expected: 'expected value',
-      rules: ['BR-LIB.UC01-001'], objectives: [item.objectives.items.enum[0]], derivation: item.derivation.enum[0],
+      rules: ['BR-LIB.UC01-001'], objectives: [S.propOf(item, 'objectives').items.enum[0]],
+      derivation: S.propOf(item, 'derivation').enum[0],
       steps: [{ description: 'Do it', expected: 'expected value', rules: ['BR-LIB.UC01-001'] }] }] };
 };
 
@@ -7645,6 +8549,7 @@ test('a repair builds the new card a revalidation finding asks for, so the rule 
   assert.equal(added.length, 1);
   assert.match(added[0].id, /^TC-MOD-501-\d{3}$/);
   assert.deepEqual(added[0].rules, ['BR-LIB.UC01-001']);
+  assert.equal(added[0].kind, 'decision');
   assert.ok(pack.testSets.some((set) => set.cards.includes(added[0].id)));
   assert.ok(!pack.coverage.some((row) => row.ruleId === 'BR-LIB.UC01-001' && row.status === 'Missing'));
 });
@@ -7791,7 +8696,7 @@ test('the repair schema offers new cards only for named rules and never in a sui
     statuses: ['Covered'], sheets: ['Coverage Matrix'] };
   const open = repairSchema({ ...base, newIds: ['R1'] }).properties.newCards;
   assert.equal(open.maxItems, S.NEW_CARDS_MAX);
-  assert.deepEqual(open.items.properties.rules.items.enum, ['R1']);
+  assert.deepEqual(S.propOf(open.items, 'rules').items.enum, ['R1']);
   assert.equal(repairSchema(base).properties.newCards.maxItems, 0);
 });
 
@@ -8222,4 +9127,1024 @@ test('the command line replays a slice with no model and no queue, prints what w
   assert.match(changed.stdout, /^replay: prompt changed for phase9_confidence_overall \(1 line differs; the diff is in detail\.log\)$/m);
   assert.match(changed.stdout, /"event":"fail".*"reason":"replay:prompt-changed"/);
   assertContentFree(changed.stdout);
+});
+
+// ---- status.log: call progress and usage, check verdicts, repairs, confidence, builder failures ----
+
+/** A clock for the model client that moves only when a test advances it, with its interval timers. */
+function fakeClock() {
+  let now = 0;
+  let next = 1;
+  const timers = new Map();
+  return {
+    now: () => now,
+    setInterval: (fn, ms) => { timers.set(next, { fn, ms, due: now + ms }); next += 1; return next - 1; },
+    clearInterval: (id) => timers.delete(id),
+    timers,
+    advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        const [, timer] = [...timers].filter(([, t]) => t.due <= end).sort((a, b) => a[1].due - b[1].due)[0] ?? [];
+        if (!timer) break;
+        now = timer.due;
+        timer.due += timer.ms;
+        timer.fn();
+      }
+      now = end;
+    },
+  };
+}
+
+/** An ask context over `fetchImpl` that keeps the status lines, the detail entries and the call records. */
+async function askLogged({ fetchImpl, clock, progressMinutes, phase = 'phase9', step = 'walk', reasoning = true }) {
+  const { ask } = await import('./phases.mjs');
+  const lines = [];
+  const details = [];
+  const records = [];
+  const config = fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm' } });
+  const ctx = { config, calls: 0, tokens: { prompt: 0, output: 0 }, job: { id: 'j' },
+    logs: { status: (fields) => lines.push(fields), detail: (label, value) => details.push([label, value]),
+      call: (record) => records.push(record) },
+    model: { ...modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl,
+      ...(clock ? { clock } : {}), ...(progressMinutes ? { progressMinutes } : {}) }),
+    countTokens: async () => 10, contextWindow: async () => null } };
+  const run = () => ask(ctx, { phase, step, reasoning, inputs: [], schema: { type: 'object' }, task: 't' });
+  return { run, lines, details, records };
+}
+
+/** A fetch that streams the start of a reply and waits for `release()` before it ends it, or resets. */
+function slowReply({ fail = false } = {}) {
+  const events = sse({ reasoning: 'thinking', content: '{"ok":true}' }).split('\n\n');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let began;
+  const begun = new Promise((resolve) => { began = resolve; });
+  const fetchImpl = async (url, options) => {
+    // The role chunk, one thinking delta and the first half of the answer.
+    options.onData(`${events.slice(0, 3).join('\n\n')}\n\n`);
+    began();
+    await gate;
+    if (fail) throw new Error('connection reset');
+    options.onData(events.slice(3).join('\n\n'));
+    return { ok: true, status: 200, text: async () => '' };
+  };
+  return { fetchImpl, begun, release };
+}
+
+const progressLines = (over) => over.lines.filter((line) => line.event === 'progress');
+
+test('a call running past five minutes writes a progress line every five minutes until it ends', async () => {
+  const clock = fakeClock();
+  const slow = slowReply();
+  const over = await askLogged({ fetchImpl: slow.fetchImpl, clock });
+  const done = over.run();
+  await slow.begun;
+  clock.advance(299999);
+  assert.deepEqual(progressLines(over), []);
+  clock.advance(1);
+  assert.deepEqual(progressLines(over), [{ job: 'j', phase: 'phase9', step: 'walk', event: 'progress', attempt: 1,
+    reasoning: true, reasoningTokens: 1, answerTokens: 1, elapsedMs: 300000 }]);
+  clock.advance(300000);
+  assert.deepEqual(progressLines(over).map((line) => line.elapsedMs), [300000, 600000]);
+  slow.release();
+  assert.deepEqual(await done, { ok: true });
+  assert.equal(clock.timers.size, 0);
+  clock.advance(900000);
+  assert.equal(progressLines(over).length, 2);
+  assert.equal(over.lines.find((line) => line.event === 'call').ms, 600000);
+  assertContentFree(JSON.stringify(over.lines));
+});
+
+test('a call that ends before five minutes writes no progress line, and the interval is configurable', async () => {
+  const quick = await askLogged({ fetchImpl: async () => streamed({ content: '{"ok":true}' }) });
+  await quick.run();
+  assert.deepEqual(progressLines(quick), []);
+  const clock = fakeClock();
+  const slow = slowReply();
+  const over = await askLogged({ fetchImpl: slow.fetchImpl, clock, progressMinutes: 1 });
+  const done = over.run();
+  await slow.begun;
+  clock.advance(60000);
+  assert.deepEqual(progressLines(over).map((line) => line.elapsedMs), [60000]);
+  slow.release();
+  await done;
+});
+
+test('the progress timer is cleared when the call fails, and a report that cannot be written does not stop the call', async () => {
+  const clock = fakeClock();
+  const slow = slowReply({ fail: true });
+  const over = await askLogged({ fetchImpl: slow.fetchImpl, clock });
+  const done = over.run();
+  await slow.begun;
+  clock.advance(300000);
+  slow.release();
+  await assert.rejects(done, (error) => error.code === 'network');
+  assert.equal(clock.timers.size, 0);
+  // A callback that throws is ignored.
+  const again = fakeClock();
+  const reply = slowReply();
+  const client = modelClient({ endpoint: 'http://localhost:1/v1', name: 'm', fetchImpl: reply.fetchImpl, clock: again });
+  const call = client.json({ ...CHAT_CALL, onProgress: () => { throw new Error('disk full'); } });
+  await reply.begun;
+  again.advance(300000);
+  reply.release();
+  assert.deepEqual((await call).value, { ok: true });
+  assert.equal(again.timers.size, 0);
+});
+
+test('a streamed reply reaches the progress report in pieces over a real connection', { timeout: 10000 }, async () => {
+  const events = sse({ reasoning: 'thinking', content: '{"ok":true}' }).split('\n\n');
+  // The server holds the reply open until a report has counted its first pieces, so the
+  // report comes before the reply ends on a busy machine too. It gives up after 5 seconds.
+  let counted;
+  let release;
+  const reported = new Promise((resolve) => { release = resolve; });
+  const chat = await chatServer(async (res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`${events.slice(0, 3).join('\n\n')}\n\n`);
+    const giveUp = setTimeout(release, 5000);
+    await reported;
+    clearTimeout(giveUp);
+    res.end(events.slice(3).join('\n\n'));
+  });
+  try {
+    const client = modelClient({ endpoint: chat.endpoint, name: 'm', progressMinutes: 0.0005 });
+    const { value } = await client.json({ ...CHAT_CALL, onProgress: (report) => {
+      if (counted || report.reasoningTokens !== 1 || report.answerTokens !== 1) return;
+      counted = report;
+      release();
+    } });
+    assert.deepEqual(value, { ok: true });
+    assert.deepEqual([counted?.reasoningTokens, counted?.answerTokens], [1, 1]);
+  } finally {
+    chat.close();
+  }
+});
+
+test('config takes model.progressMinutes as whole minutes from 1 to 1440', () => {
+  const make = (progressMinutes) => () => fixtureConfig({ model: { endpoint: 'http://localhost:1/v1', name: 'm',
+    progressMinutes } });
+  assert.doesNotThrow(make(2));
+  assert.doesNotThrow(make(1440));
+  for (const bad of [0, 1.5, '5', -1, 1441]) assert.throws(make(bad), /progressMinutes/);
+});
+
+test('a call cut at its limit logs thinking and answer tokens apart, and detail.log keeps the end of the thinking', async () => {
+  const thinking = `${'x'.repeat(5000)}the last thought`;
+  const fetchImpl = async () => streamed({ finish: 'length', content: '{"a":', reasoning: thinking,
+    usage: { prompt_tokens: 30, completion_tokens: 90, completion_tokens_details: { reasoning_tokens: 80 } } });
+  const over = await askLogged({ fetchImpl });
+  await assert.rejects(over.run(), (error) => error.code === 'runaway');
+  const [retry, fail] = over.lines.filter((line) => ['retry', 'call-fail'].includes(line.event));
+  assert.deepEqual([retry.event, retry.reason, retry.reasoningTokens, retry.answerTokens, retry.outputTokens],
+    ['retry', 'length', 80, 10, 90]);
+  assert.deepEqual([fail.event, fail.reason, fail.reasoningTokens, fail.answerTokens, fail.outputTokens],
+    ['call-fail', 'runaway', 80, 10, 90]);
+  const tails = over.details.filter(([label]) => label === 'phase9 walk reasoning tail');
+  assert.equal(tails.length, 2);
+  assert.equal(tails[0][1].length, REASONING_TAIL_CHARS);
+  assert.ok(tails[0][1].endsWith('the last thought'));
+  assert.equal(over.records[0].reasoningTail, tails[0][1]);
+  // The thinking itself never reaches the status lines.
+  assert.ok(!JSON.stringify(over.lines).includes('the last thought'));
+  assertContentFree(JSON.stringify(over.lines));
+});
+
+test('a call cut with no thinking counts all of its output as answer', async () => {
+  const over = await askLogged({ reasoning: false,
+    fetchImpl: async () => streamed({ finish: 'length', content: '{"a":', usage: { completion_tokens: 12 } }) });
+  await assert.rejects(over.run(), (error) => error.code === 'length');
+  const fail = over.lines.find((line) => line.event === 'call-fail');
+  assert.deepEqual([fail.reasoningTokens, fail.answerTokens], [0, 12]);
+  assert.equal(over.details.filter(([label]) => label.endsWith('reasoning tail')).length, 0);
+});
+
+test('a thinking call cut with no known token split leaves the split out of its lines', async () => {
+  const over = await askLogged({
+    fetchImpl: async () => streamed({ finish: 'length', content: '{"a":', usage: { completion_tokens: 12 } }) });
+  await assert.rejects(over.run(), (error) => error.code === 'runaway');
+  const [retry] = over.lines.filter((line) => line.event === 'retry');
+  assert.equal(retry.outputTokens, 12);
+  assert.ok(!('reasoningTokens' in retry) && !('answerTokens' in retry), JSON.stringify(retry));
+});
+
+test('a call logs promptMs, genMs and cachedTokens when the server returns them, and leaves them out when it does not', async () => {
+  const timed = await askLogged({ fetchImpl: async () => streamed({ content: '{"ok":true}',
+    usage: { prompt_tokens: 30, completion_tokens: 7 },
+    timings: { prompt_ms: 120.4, predicted_ms: 900.6, cache_n: 12 } }) });
+  await timed.run();
+  const call = timed.lines.find((line) => line.event === 'call');
+  assert.deepEqual([call.promptMs, call.genMs, call.cachedTokens], [120, 901, 12]);
+  assert.deepEqual([timed.records[0].usage.promptMs, timed.records[0].usage.genMs, timed.records[0].usage.cachedTokens],
+    [120, 901, 12]);
+  // A server that reports cached tokens in the usage block only.
+  const cached = await askLogged({ fetchImpl: async () => streamed({ content: '{"ok":true}',
+    usage: { prompt_tokens: 30, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 5 } } }) });
+  await cached.run();
+  const partial = cached.lines.find((line) => line.event === 'call');
+  assert.equal(partial.cachedTokens, 5);
+  assert.ok(!('promptMs' in partial) && !('genMs' in partial));
+  const bare = await askLogged({ fetchImpl: async () => streamed({ content: '{"ok":true}',
+    usage: { prompt_tokens: 30, completion_tokens: 7 } }) });
+  await bare.run();
+  const none = bare.lines.find((line) => line.event === 'call');
+  assert.deepEqual(Object.keys(none).filter((key) => ['promptMs', 'genMs', 'cachedTokens', 'reasoningTokens',
+    'answerTokens'].includes(key)), []);
+});
+
+test('status fields from a builder note: only plain words survive and the line fits a field', () => {
+  assert.equal(noteCode('BR-LIB.UC01-001 covered by "Patron renewal" at row 12.\nsecond line'),
+    'ID covered by _ at row ID');
+  assert.equal(noteCode('\n  \nCoverage Matrix has no row'), 'Coverage Matrix has no row');
+  assert.equal(noteCode(undefined), '');
+  // The builder's populated line is skipped.
+  assert.equal(noteCode('populated: Yes\nBR-1 has no coverage'), 'ID has no coverage');
+  assert.equal(noteCode('populated: No'), '');
+  // A name from a document is hidden whether or not it sits in quotes.
+  assert.equal(noteCode('Patron Services has no reason for its inclusion'), '_ has no reason for its inclusion');
+  assert.equal(noteCode('module Patron Services already uses abbreviation LIB'), '_ already _');
+  // A title made only of plain words is hidden past its first word, and a stray dash does not split a run.
+  assert.equal(noteCode('source document Card Limits appears more than once'), '_ appears more than once');
+  assert.equal(noteCode('Card Status Rules has no reason for its inclusion'), 'Card _ has no reason for its inclusion');
+  assert.equal(noteCode('Foo - Bar has no row'), '_ has no row');
+  // An apostrophe inside a quoted span does not end it, and a word's apostrophe opens nothing.
+  assert.equal(noteCode('Expected Result "The customer\'s balance shows Overdraft Protection" does not match'),
+    'Expected Result _ does not match');
+  assert.equal(noteCode('Title \'Wire Transfer\' is missing, and the card\'s steps are short'),
+    'Title _ is missing and the _ steps are short');
+  // A quote inside a quoted value pairs wrongly, and the words between the pairs are still hidden.
+  assert.ok(!noteCode('Expected Result "The system shows "Card renewed" on screen." does not agree').includes('renewed'));
+  // A quote that never closes hides the rest of the line, and a reviewer's words are dropped.
+  assert.equal(noteCode('Row 3 shows "Wire transfer limit'), 'Row ID shows _');
+  assert.equal(noteCode('BR-ACC-01 reads Missing, but a test card covers it. The review said: Wire Transfer Limits apply'),
+    'ID reads Missing but a test card covers it The review said');
+  const long = noteCode('has '.repeat(60));
+  assert.ok(long.length <= FIELD_MAX && long.startsWith('has has'));
+  // Whatever a note holds, the result is a status field.
+  for (const note of ['\u00e9\u4e2d\u6587 \u0000 tab\there', '"unclosed quote', 'a'.repeat(300), '%%% ### $$$']) {
+    assert.doesNotThrow(() => statusFields({ problem: noteCode(note) }), note);
+  }
+  assert.equal(sheetsField(['Coverage Matrix', 'Impact Analysis (ALM)', '']), 'Coverage Matrix+Impact Analysis ALM');
+  const wide = sheetsField(['a'.repeat(50), 'b'.repeat(50)]);
+  assert.equal(wide, 'a'.repeat(50));
+  assert.doesNotThrow(() => statusFields({ failedSheets: sheetsField(['x+y', 'z%']) }));
+});
+
+const REVALIDATION_NAMES = S.REVALIDATION_CHECKS;
+const checkLines = (lines, walk) => lines.filter((line) => line.event === 'check' && line.walk === walk);
+
+test('each revalidation verdict is a check line with its walk, thinking and whether a fix came with it', async () => {
+  const traceability = S.REVALIDATION_GROUPS.find((group) => group.key === 'traceability').checks;
+  let cut = false;
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair,
+    phase9_revalidation: (value, calls) => {
+      // The first traceability call fails and is asked again with thinking off.
+      if (!cut && calls.at(-1).schemaName === 'phase9_revalidation_traceability') {
+        cut = true;
+        throw new ModelError('parse', 'not JSON');
+      }
+      return walkFailsOnCard.phase9_revalidation(value, calls);
+    } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.reason, 'gate:revalidation-failed');
+  const lines = statusLines(result.outDir);
+  const first = checkLines(lines, 'revalidation');
+  assert.deepEqual(first.map((line) => line.check), REVALIDATION_NAMES);
+  assert.deepEqual(first.map((line) => [line.check, line.verdict, line.fixGiven]).filter(([, verdict]) => verdict === 'fail'),
+    [['Traceability complete', 'fail', true]]);
+  assert.ok(first.filter((line) => line.verdict === 'pass').every((line) => line.fixGiven === false));
+  // Only the checks the retried call judged ran without thinking.
+  assert.deepEqual(first.filter((line) => !line.thinking).map((line) => line.check), traceability);
+  assert.ok(first.every((line) => line.phase === 'phase9' && line.job === result.id));
+  const again = checkLines(lines, 'revalidation-again');
+  assert.deepEqual(again.map((line) => line.check), REVALIDATION_NAMES);
+  assert.ok(again.every((line) => line.thinking === true));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('each finding of a fix round is a repair line with what it asked for, what came back and what became of it', async () => {
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair,
+    ...walkFailsOnCard });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  const repairs = statusLines(result.outDir).filter((line) => line.event === 'repair');
+  const review = repairs.find((line) => line.check === undefined);
+  assert.deepEqual([review.phase, review.step, review.finding, review.asked, review.cards, review.newCards,
+    review.coverageRows, review.limitations, review.result],
+  ['phase8', 'repair-review-1-g1', 1, 'card', 1, 0, 0, 0, 'applied']);
+  const revalidation = repairs.find((line) => line.check === 'Traceability complete');
+  assert.deepEqual([revalidation.step, revalidation.finding, revalidation.asked, revalidation.cards, revalidation.result],
+    ['repair-revalidation-g1', 1, 'card', 1, 'applied']);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a repair line says new-card, empty or undone for a finding that asks for a card', async () => {
+  const outcome = async (label, reply) => {
+    const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+    addJob(setup.config, { issue: '501', change: '7001' });
+    const failed = await runLib(setup);
+    uncover(failed.outDir, 'BR-LIB.UC01-001');
+    const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label },
+      { model: fakeModel(reply) });
+    // The sandbox's log starts with the source job's lines, so its own repair line is the last.
+    const line = statusLines(path.join(setup.config.output, done.id)).filter((l) => l.event === 'repair').at(-1);
+    return line;
+  };
+  const applied = await outcome('applied', { phase8_repair: newCardFor });
+  assert.deepEqual([applied.step, applied.check, applied.finding, applied.asked, applied.cards, applied.newCards,
+    applied.coverageRows, applied.limitations, applied.result],
+  ['repair-revalidation-g1', 'Traceability complete', 1, 'new-card', 0, 1, 0, 0, 'applied']);
+  const undone = await outcome('undone', { phase8_repair: newCardFor, phase6_recheck: rejectsAll });
+  assert.deepEqual([undone.asked, undone.newCards, undone.result], ['new-card', 1, 'undone']);
+  const empty = await outcome('empty', { phase8_repair: (value) => ({ ...value, cards: [], coverage: [],
+    limitations: [], newCards: [] }) });
+  assert.deepEqual([empty.asked, empty.newCards, empty.cards, empty.result], ['new-card', 0, 0, 'empty']);
+  assertContentFree(JSON.stringify([applied, undone, empty]));
+});
+
+test('a Draft workbook the builder refuses in Phase 8 logs the failed sheets and the first reason', async () => {
+  const refuse = 'console.log(["FAIL                   Coverage Matrix", "    populated: Yes", "    BR-LIB.UC01-001 covered by nothing",'
+    + ' "FAIL                   Workbook Validation", "    1 worksheet fails"].join("\\n")); process.exit(1)';
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 1, command: ['node', '-e', refuse] } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model: fakeModel(DOCS), echo: false });
+  assert.equal(result.reason, 'gate:builder-fail');
+  const lines = statusLines(result.outDir);
+  const draft = lines.findLast((line) => line.event === 'draft');
+  assert.deepEqual([draft.written, draft.failedSheets, draft.problem],
+    [false, 'Coverage Matrix', 'ID covered by nothing']);
+  const fail = lines.findLast((line) => line.event === 'fail');
+  assert.deepEqual([fail.reason, fail.sheets, fail.failedSheets, fail.problem],
+    ['gate:builder-fail', 1, 'Coverage Matrix', 'ID covered by nothing']);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a Draft workbook the builder refuses in Phase 9 logs the failed sheet and the first reason', async () => {
+  const refuseAfterSenior = 'const fs = require("fs"); const [p, , o] = process.argv.slice(1);'
+    + ' if (JSON.parse(fs.readFileSync(p, "utf8")).seniorReview.missed !== "Pending review.") {'
+    + ' console.log("FAIL                   Senior Tester Review\\n    a card has no steps"); process.exit(1); }'
+    + ' process.exit(require("child_process").spawnSync(process.execPath, ["builder-stub.mjs", p, "--out", o],'
+    + ' { stdio: "inherit" }).status);';
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
+    command: ['node', '-e', refuseAfterSenior, '{pack}', '--out', '{out}'] } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model: fakeModel(DOCS), echo: false });
+  assert.deepEqual([result.phase, result.reason], ['phase9-confidence', 'gate:builder-fail']);
+  const fail = statusLines(result.outDir).findLast((line) => line.event === 'fail');
+  assert.deepEqual([fail.sheets, fail.failedSheets, fail.problem], [1, 'Senior Tester Review', 'a card has no steps']);
+});
+
+test('the overall rating logs what set it: the level asked, the cap, and the counts it was rated from', async () => {
+  const capped = lib({ ...DROP_RUN,
+    phase9_confidence_overall: (value) => ({ ...value, overall: 'High', reason: 'BR-1 is covered.' }) });
+  const result = await runLib(capped);
+  const [line] = statusLines(result.outDir).filter((l) => l.event === 'confidence');
+  assert.deepEqual([line.phase, line.step, line.overall, line.asked, line.cappedBy, line.untested],
+    ['phase9', 'confidence-overall', 'Medium', 'High', 'untested-objectives', 1]);
+  for (const key of ['stepsWeak', 'stepsPartial', 'openItems', 'checklistIssues']) {
+    assert.equal(typeof line[key], 'number', key);
+  }
+  const plain = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { echo: false,
+    model: fakeModel({ ...DOCS, phase9_confidence_overall: (value) => ({ ...value, overall: 'Medium',
+      reason: 'BR-LIB.UC01-002 meets the Medium criteria with two cards.' }) }) });
+  const [uncapped] = statusLines(plain.outDir).filter((l) => l.event === 'confidence');
+  assert.deepEqual([uncapped.overall, uncapped.asked, uncapped.cappedBy, uncapped.untested],
+    ['Medium', 'Medium', 'none', 0]);
+  assertContentFree(read(path.join(plain.outDir, 'status.log')));
+});
+
+test('a rating made again after a failed revalidation logs the open items', async () => {
+  const model = fakeModel({ ...DOCS,
+    phase9_revalidation: (value) => failCheck(value, 'Traceability complete', 'A card lost its rule'),
+    phase9_confidence_overall: (value, calls) => (calls.filter((c) => c.schemaName === 'phase9_confidence_overall').length === 1
+      ? { ...value, overall: 'High', reason: 'BR-LIB.UC01-001 is fully covered.' }
+      : { ...value, overall: 'Low', reason: 'Revalidation left Traceability open on BR-LIB.UC01-001.' }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  const lines = statusLines(result.outDir).filter((l) => l.event === 'confidence');
+  assert.deepEqual(lines.map((l) => [l.step, l.overall, l.openItems]),
+    [['confidence-overall', 'High', 0], ['confidence-overall-again', 'Low', 1]]);
+});
+
+test('a stop logs the failing phase\'s own time and calls, and the whole job\'s under jobMs and jobCalls', async () => {
+  let tick = 0;
+  const now = () => { tick += 1000; return tick; };
+  const model = fakeModel({ ...DOCS, phase1_understanding: () => { throw new ModelError('network', 'down'); } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false, now });
+  assert.equal(result.reason, 'model:network');
+  const lines = statusLines(result.outDir);
+  const fail = lines.findLast((line) => line.event === 'fail');
+  const attempts = (phase) => lines.filter((line) => line.phase === phase
+    && ['call', 'retry', 'call-fail'].includes(line.event)).length;
+  assert.equal(fail.phase, 'phase1');
+  assert.equal(fail.calls, attempts('phase1'));
+  assert.equal(fail.jobCalls, attempts('intake') + attempts('phase1'));
+  assert.ok(fail.jobCalls > fail.calls);
+  const intake = lines.find((line) => line.event === 'pass' && line.phase === 'intake');
+  assert.ok(fail.jobMs >= fail.ms + intake.ms, JSON.stringify([fail, intake]));
+  assert.ok(result.ms >= fail.jobMs);
+});
+
+test('job status shows the last check and the last repair beside the phase timings', () => {
+  const config = fixtureConfig();
+  seedJob(config, { status: 'failed', phase: 'phase9', reason: 'gate:revalidation-failed',
+    added: '2026-11-02T08:00:00.000Z', finished: '2026-11-02T09:00:00.000Z' }, [
+    logLine('2026-11-01T08:00:01.000Z', { phase: 'phase8', event: 'pass', ms: 1000 }),
+    logLine('2026-11-01T08:10:00.000Z', { phase: 'phase9', event: 'check', walk: 'revalidation',
+      check: 'Traceability complete', verdict: 'fail', thinking: true, fixGiven: true }),
+    logLine('2026-11-01T08:11:00.000Z', { phase: 'phase8', event: 'repair', step: 'repair-revalidation-g1', finding: 1,
+      check: 'Traceability complete', asked: 'card', cards: 1, newCards: 0, coverageRows: 0, limitations: 0,
+      result: 'applied' }),
+    logLine('2026-11-01T08:12:00.000Z', { phase: 'phase9', event: 'check', walk: 'revalidation-again',
+      check: 'Traceability complete', verdict: 'pass', thinking: true, fixGiven: false }),
+    logLine('2026-11-01T08:13:00.000Z', { phase: 'phase9', step: 'walk', event: 'progress', attempt: 1,
+      reasoning: true, reasoningTokens: 5, answerTokens: 1, elapsedMs: 300000 }),
+  ]);
+  assert.deepEqual(jobStatus(config, 'issue-9415'), [
+    'issue-9415  failed  queue free',
+    'stopped phase=phase9 reason=gate:revalidation-failed',
+    'done phase=phase8 ms=1000',
+    'last-check phase=phase9 walk=revalidation-again check=Traceability complete verdict=pass thinking=true fixGiven=false',
+    'last-repair phase=phase8 step=repair-revalidation-g1 finding=1 check=Traceability complete asked=card cards=1'
+      + ' newCards=0 coverageRows=0 limitations=0 result=applied',
+  ]);
+});
+
+test('a finding that asks for an assumption logs the assumptions the repair added', async () => {
+  const model = fakeModel({ ...DOCS,
+    phase9_checklist: finding('The pack does not say which accounts are in scope',
+      'Add an assumption that only active accounts are in scope'),
+    phase8_repair: (value) => ({ ...value, coverage: [], limitations: [],
+      ...(value.assumptions ? { assumptions: [{ assumption: 'Only active accounts are in scope.',
+        why: 'The review asked.', impact: 'Inactive accounts are not tested.', clarification: 'Confirm.' }] } : {}) }) });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  const [line] = statusLines(result.outDir).filter((l) => l.event === 'repair');
+  assert.deepEqual([line.asked, line.assumptions, line.result], ['assumption', 1, 'applied']);
+  // A finding that names no card is a call given none.
+  const [call] = statusLines(result.outDir).filter((l) => l.event === 'repair-call');
+  assert.deepEqual([call.step, call.finding, call.findings, call.cards, call.part, call.parts],
+    ['repair-review-1-g1', 1, 1, 0, 1, 1]);
+});
+
+test('a repair step for one finding logs that finding\'s own number', async () => {
+  const wrong = (why) => (value) => failCheck(failCheck(value, 'Traceability complete', why,
+    'Change step 1 of the cards that cite BR-LIB.UC01-001 to read Corrected step'),
+  'All issues resolved', why, 'Change step 1 of the cards that cite BR-LIB.UC01-001 to read Corrected step');
+  const setup = lib({ phase9_revalidation: wrong('BR-LIB.UC01-001 reads wrong'), phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  await runLib(setup);
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '1', label: 'second' },
+    { model: fakeModel({ phase8_repair: correctingRepair }) });
+  const line = statusLines(path.join(setup.config.output, done.id)).filter((l) => l.event === 'repair').at(-1);
+  assert.equal(line.finding, 2);
+});
+
+const cardIdsIn = (text) => [...new Set(text.match(/TC-[A-Z0-9]+-501-\d{3}/g))];
+/** A walk that fails three checks, each with a reason of its own and a fix that names the first card. */
+const failsThree = { phase9_revalidation: (value, calls) => {
+  const id = cardIdIn(calls.at(-1).user);
+  return ['All issues resolved', 'Traceability complete', 'Test pack is ready for ALM execution']
+    .reduce((reply, check) => failCheck(reply, check, `${id} reads wrong (${check})`,
+      `Change step 1 of ${id} to read Corrected step`), value);
+} };
+const repairCalls = (outDir) => statusLines(outDir).filter((line) => line.event === 'repair-call')
+  .map((line) => [line.step, line.finding, line.findings, line.cards, line.part, line.parts]);
+
+test('a revalidation repair round makes one repair call for each finding', async () => {
+  const model = fakeModel({ ...DOCS, ...failsThree, phase8_repair: correctingRepair });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.reason, 'gate:revalidation-failed', JSON.stringify(result));
+  const repairs = checksFor(model, 'phase8_repair_revalidation');
+  assert.deepEqual(repairs.map((call) => call.schemaName), ['phase8_repair_revalidation_g1',
+    'phase8_repair_revalidation_g2', 'phase8_repair_revalidation_g3']);
+  assert.deepEqual(repairs.map((call) => call.user.match(/ {2}Section: [^\n]+/g)), [
+    ['  Section: All issues resolved'], ['  Section: Traceability complete'],
+    ['  Section: Test pack is ready for ALM execution']]);
+  // A card several findings name is read as the call before left it.
+  assert.match(repairs[1].user, /## Cards named\n\n[^\n]*Corrected step/);
+  assert.deepEqual(repairCalls(result.outDir), [['repair-revalidation-g1', 1, 1, 1, 1, 1],
+    ['repair-revalidation-g2', 2, 1, 1, 1, 1], ['repair-revalidation-g3', 3, 1, 1, 1, 1]]);
+  assert.deepEqual(statusLines(result.outDir).filter((line) => line.event === 'repair')
+    .map((line) => [line.step, line.finding, line.check, line.result]), [
+    ['repair-revalidation-g1', 1, 'All issues resolved', 'applied'],
+    ['repair-revalidation-g2', 2, 'Traceability complete', 'applied'],
+    ['repair-revalidation-g3', 3, 'Test pack is ready for ALM execution', 'applied']]);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a finding that names more cards than one reply holds is split across repair calls', async () => {
+  const config = fixtureConfig();
+  // An output budget this size holds one corrected card in a repair reply.
+  config.model.maxOutput = 5000;
+  const { repairCardsMax } = await import('./phases.mjs');
+  assert.equal(repairCardsMax({ config }), 1);
+  assert.equal(repairCardsMax({ config: { model: { maxOutput: 16384 } } }), 3);
+  let named = [];
+  const model = fakeModel({ ...DOCS,
+    phase8_repair: (value) => ({ ...correctingRepair(value), ...(value.assumptions ? { assumptions: [] } : {}) }),
+    phase9_revalidation: (value, calls) => {
+      if (calls.at(-1).schemaName.endsWith('_again') || !('Traceability complete' in value.checks)) return value;
+      named = cardIdsIn(calls.at(-1).user).slice(0, 2);
+      // The fix cites a rule and asks for an assumption, so the first call may add a card and an assumption.
+      return failCheck(value, 'Traceability complete', `${named.join(' and ')} read wrong`,
+        `Change step 1 of ${named.join(' and ')} to read Corrected step, with an assumption for BR-LIB.UC01-001`);
+    } });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(named.length, 2);
+  const repairs = checksFor(model, 'phase8_repair_revalidation');
+  // Each call takes one card: every card the fix names, and any the rule's cards line adds.
+  const given = repairs.map((call) => S.propOf(S.propOf(call.schema, 'cards').items, 'id').enum);
+  assert.ok(given.length >= 2 && given.every((ids) => ids.length === 1), JSON.stringify(given));
+  assert.ok(named.every((id) => given.flat().includes(id)), JSON.stringify(given));
+  assert.equal(new Set(given.flat()).size, given.length);
+  for (const [i, call] of repairs.entries()) {
+    assert.match(call.user, new RegExp(`## Cards for this call\\n\\n[^\\n]+calls of their own: ${given[i][0]}\\n`));
+  }
+  // Only the first call of a split finding may add a card or an assumption.
+  assert.deepEqual(repairs.map((call) => S.propOf(call.schema, 'newCards').maxItems),
+    [S.NEW_CARDS_MAX, ...given.slice(1).map(() => 0)]);
+  assert.deepEqual(repairs.map((call) => 'assumptions' in call.schema.properties),
+    [true, ...given.slice(1).map(() => false)]);
+  assert.deepEqual(repairCalls(result.outDir),
+    given.map((ids, i) => [`repair-revalidation-g${i + 1}`, 1, 1, 1, i + 1, given.length]));
+  assert.deepEqual(statusLines(result.outDir).filter((line) => line.event === 'repair')
+    .map((line) => [line.finding, line.part, line.parts]), given.map((ids, i) => [1, i + 1, given.length]));
+  const pack = JSON.parse(read(result.packPath));
+  for (const id of named) {
+    assert.equal(pack.testCards.find((card) => card.id === id).steps[0].description, 'Corrected step', id);
+  }
+});
+
+test('checklist findings share a repair call only while their cards fit one reply', async () => {
+  const calls = async (maxOutput) => {
+    const config = fixtureConfig();
+    config.model.maxOutput = maxOutput;
+    let planted = false;
+    const model = fakeModel({ ...DOCS, phase8_repair: correctingRepair,
+      phase9_checklist: (value, asked) => {
+        if (planted) return { ...value, issues: [] };
+        planted = true;
+        return { ...value, issues: cardIdsIn(asked.at(-1).user).slice(0, 2).map((id) => ({
+          section: 'Coverage Completeness', issue: `${id} has a step that reads wrong`,
+          fix: `Change step 1 of ${id} to read Corrected step` })) };
+      } });
+    const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    return repairCalls(result.outDir);
+  };
+  // Two findings of one card each share a call that holds three cards, and not one that holds one.
+  assert.deepEqual(await calls(16384), [['repair-review-1-g1', 1, 2, 2, 1, 1]]);
+  assert.deepEqual(await calls(5000), [['repair-review-1-g1', 1, 1, 1, 1, 1],
+    ['repair-review-1-g2', 2, 1, 1, 1, 1]]);
+});
+
+test('a revalidation repair cut off at its output budget leaves its finding open and the others applied', async () => {
+  const partial = '{"cards":[{"id":"a","steps":[{"expected":"reads } and ]"}]},{"id":"b","steps":[';
+  const model = fakeModel({ ...DOCS, ...failsThree,
+    phase8_repair: (value, calls) => {
+      if (calls.at(-1).schemaName === 'phase8_repair_revalidation_g2') {
+        throw Object.assign(new ModelError('length', 'cut off'), { partial });
+      }
+      return correctingRepair(value);
+    } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.reason, 'gate:revalidation-failed', JSON.stringify(result));
+  assert.equal(checksFor(model, 'phase8_repair_revalidation').length, 3);
+  const lines = statusLines(result.outDir);
+  assert.deepEqual(lines.filter((line) => line.event === 'repair-cut')
+    .map((line) => [line.step, line.finding, line.cards, line.part, line.parts, line.replyChars, line.wholeCards]),
+  [['repair-revalidation-g2', 2, 1, 1, 1, partial.length, 1]]);
+  assert.deepEqual(lines.filter((line) => line.event === 'repair').map((line) => [line.finding, line.result]),
+    [[1, 'applied'], [3, 'applied']]);
+  // The round goes on: the rebuild, then the second walk, which is told only of the fixes that were applied.
+  const again = checksFor(model, 'phase9_revalidation').filter((call) => call.schemaName.endsWith('_again'));
+  assert.equal(again.length, 3);
+  const attempted = again[0].user.split('## Fixes the review attempted')[1].split('\n## ')[0];
+  assert.deepEqual(['All issues resolved', 'Traceability complete', 'Test pack is ready for ALM execution']
+    .map((check) => attempted.includes(`reads wrong (${check})`)), [true, false, true]);
+  const pack = JSON.parse(read(result.packPath));
+  assert.ok(pack.testCards.some((card) => card.steps[0].description === 'Corrected step'));
+  assert.deepEqual(pack.revalidation.remaining.map((line) => line.endsWith('(a repair reply was cut off at its output budget)')),
+    [false, true, false]);
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('a revalidation repair round whose every call is cut off stops the job as a cut reply', async () => {
+  const model = fakeModel({ ...DOCS, ...walkFailsOnCard,
+    phase8_repair: () => { throw new ModelError('length', 'cut off'); } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.deepEqual([result.ok, result.reason], [false, 'model:length']);
+  const [cut] = statusLines(result.outDir).filter((line) => line.event === 'repair-cut');
+  assert.deepEqual([cut.step, cut.finding, cut.cards, 'replyChars' in cut], ['repair-revalidation-g1', 1, 1, false]);
+});
+
+test('a cut in a checklist fix round stops the job as a cut reply', async () => {
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(),
+    phase8_repair: () => { throw new ModelError('length', 'cut off'); } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.deepEqual([result.ok, result.reason], [false, 'model:length']);
+});
+
+test('the whole cards of a cut repair reply are counted without reading past the list', async () => {
+  const { wholeItems } = await import('./phases.mjs');
+  assert.equal(wholeItems('{"cards":[{"id":"a","steps":[{"x":"}]\\""}]},{"id":"b"},{"id":"c","st', 'cards'), 2);
+  assert.equal(wholeItems('{"cards":[{"id":"a"}],"newCards":[{"id":"n"},{"id":"m"}],"cov', 'cards'), 1);
+  assert.equal(wholeItems('{"cards":[],"coverage":[{"ruleId":"r"}]}', 'cards'), 0);
+  assert.equal(wholeItems('{"cov', 'cards'), 0);
+  assert.equal(wholeItems(undefined, 'cards'), 0);
+});
+
+test('a revalidation repair that the builder cannot build is logged as undone', async () => {
+  const refuseRepaired = 'const fs = require("fs"); const [p, , o] = process.argv.slice(1);'
+    + ' if (fs.readFileSync(p, "utf8").includes("Corrected step")) {'
+    + ' console.log("FAIL                   Coverage Matrix\\n    planted"); process.exit(1); }'
+    + ' process.exit(require("child_process").spawnSync(process.execPath, ["builder-stub.mjs", p, "--out", o],'
+    + ' { stdio: "inherit" }).status);';
+  const config = fixtureConfig({ builder: { module: 'builder-stub.mjs', retries: 2,
+    command: ['node', '-e', refuseRepaired, '{pack}', '--out', '{out}'] } });
+  const model = fakeModel({ ...DOCS, ...walkFailsOnCard, phase8_repair: correctingRepair });
+  const result = await runJob(config, { issue: '501', change: '7001' }, { model, echo: false });
+  const undone = statusLines(result.outDir).filter((l) => l.event === 'repair-undone');
+  assert.equal(undone.length, 1, JSON.stringify(result));
+  assert.deepEqual([undone[0].step, undone[0].reason, undone[0].findings],
+    ['repair-revalidation', 'builder-fail', 1]);
+  // The pack goes back to what it was, so it carries no note that a repair changed it.
+  const pack = JSON.parse(read(result.packPath));
+  assert.doesNotMatch(pack.confidence.manualReview, new RegExp(AGED_NOTE));
+  assert.ok(!pack.testCards.some((card) => card.steps[0].description === 'Corrected step'));
+});
+
+test('a stop for a failed revalidation reports that phase\'s own time and calls', async () => {
+  let tick = 0;
+  const now = () => { tick += 1000; return tick; };
+  const model = fakeModel({ ...DOCS, ...failsRevalidation });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false, now });
+  assert.equal(result.reason, 'gate:revalidation-failed');
+  const lines = statusLines(result.outDir);
+  const fail = lines.findLast((line) => line.event === 'fail');
+  const passed = lines.find((line) => line.event === 'pass' && line.phase === 'phase9-revalidate');
+  assert.deepEqual([fail.phase, fail.ms], ['phase9-revalidate', passed.ms]);
+  assert.ok(fail.calls > 0 && fail.jobCalls > fail.calls);
+  assert.ok(fail.jobMs > fail.ms);
+});
+
+test('a stop between phases reports no calls of the phase that ended before it', async () => {
+  let tick = 0;
+  const now = () => { tick += 1000; return tick; };
+  const stop = new AbortController();
+  const model = fakeModel({ ...DOCS, phase1_understanding: (value) => { stop.abort(); return value; } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' },
+    { model, echo: false, now, signal: stop.signal });
+  assert.equal(result.reason, 'cancelled');
+  const lines = statusLines(result.outDir);
+  const fail = lines.findLast((line) => line.event === 'fail');
+  assert.ok(lines.some((line) => line.event === 'pass' && line.phase === 'phase1'));
+  assert.notEqual(fail.phase, 'phase1');
+  assert.equal(fail.calls, 0);
+});
+
+// ---- The design rules, a repaired card's sets, and the walk after the repair round ----
+
+const FULL = 'Full Coverage Required Run';
+const AGED_NOTE = 'were written before the last corrections to the pack';
+
+test('the design rules a review or repair call is given come from the context\'s objectives', () => {
+  const objectives = (...names) => names.map((objective) => ({ objective, applicable: true }));
+  const ctx = (names, extra = {}) => ({ job: { suite: false }, config: {}, coreObjective: 'Core',
+    fullCoverageObjective: 'Full', breakItObjective: 'Break', pack: { objectives: objectives(...names) }, ...extra });
+  const live = { rules: [{ id: 'R2', summary: 'A live rule.' }] };
+  const retired = { rules: [...live.rules, { id: 'R1', summary: 'Retired: this rule was removed from the master.' }] };
+  const [full, breakIt, removed, ...rest] = designRules(ctx(['Core', 'Flow', 'Full', 'Break']), retired);
+  assert.equal(rest.length, 0);
+  assert.equal(full, 'The Full set, and the cards listed for the Full objective, hold only requirement-derived cards:'
+    + ' every one of them. A quality-derived card is left out of both by rule, so its absence there is correct.');
+  assert.equal(breakIt, 'The Break set holds only the cards written for break scenarios. Such a card stays out of'
+    + ' the Core set.');
+  assert.match(removed, /summary starts with "Retired:".*stays a retired rule whatever its class: its own Status, where the workbook shows one, reads Retired, and its coverage status is a separate column\..*Direct Change.*verifies the behavior is gone.*a card whose expected result says the behavior is absent is consistent as it stands\.$/);
+  // With exclusiveSets a break card sits in the BREAK IT set alone, so Full Coverage leaves it out too.
+  const exclusive = designRules(ctx(['Core', 'Flow', 'Full', 'Break'], { config: { exclusiveSets: true } }), live);
+  assert.equal(exclusive.length, 2);
+  assert.match(exclusive[0], /every one of them outside the Break set\. /);
+  assert.match(exclusive[1], /Such a card sits in no other set, the Full set included\.$/);
+  // A rule is stated only when it holds: no BREAK IT set, no retired rule, no ordinary objective.
+  assert.deepEqual(designRules(ctx(['Core', 'Full']), live), [full]);
+  assert.deepEqual(designRules(ctx(['Full', 'Break']), live), ['The Break set holds only the cards written for break scenarios.']);
+  assert.deepEqual(designRules(ctx(['Core']), live), []);
+  // An objective dropped for want of a card reads Not Applicable with that reason, by rule.
+  const dropped = { rules: [], objectives: [{ objective: 'Flow', applicable: false }, { objective: 'Core', applicable: true }] };
+  assert.deepEqual(designRules(ctx(['Core'], { droppedObjectives: ['Flow', 'Core'] }), dropped),
+    ['No test card serves Flow, so that objective reads Not Applicable, with a reason that says no test card'
+      + ' serves it. That row is how the pack records the gap, by rule: such an objective applies to the change,'
+      + ' no card tests it, a repair cannot change the row, and the workbook need not show a limitation for it.']);
+  // An objective that was never applicable is no gap; two dropped ones are named together.
+  const neither = { rules: [], objectives: dropped.objectives.map((row) => ({ ...row, applicable: false })) };
+  assert.deepEqual(designRules(ctx([]), neither), []);
+  assert.match(designRules(ctx([], { droppedObjectives: ['Flow', 'Core'] }), neither)[0],
+    /^No test card serves Flow, Core, so those objectives read Not Applicable, with a reason /);
+  // A set rule is stated only while the pack's sets follow it: a repair can leave a set its last card.
+  const sets = (cards) => ({ rules: [], testCards: [{ id: 'Q', derivation: 'Quality' }, { id: 'R', derivation: 'Requirement' },
+    { id: 'B', derivation: 'Requirement' }], testSets: Object.entries(cards).map(([objective, ids]) => ({ objective, cards: ids })) });
+  const every = ctx(['Core', 'Flow', 'Full', 'Break']);
+  assert.deepEqual(designRules(every, sets({ Core: ['Q', 'R'], Full: ['R', 'B'], Break: ['B'] })), [full, breakIt]);
+  assert.deepEqual(designRules(every, sets({ Core: ['R'], Full: ['R', 'B', 'Q'], Break: ['B'] })), [breakIt]);
+  assert.deepEqual(designRules(every, sets({ Core: ['R'], Full: ['B'], Break: ['B'] })), [breakIt]);
+  assert.deepEqual(designRules(every, sets({ Core: ['R', 'B'], Full: ['R', 'B'], Break: ['B'] })),
+    [full, 'The Break set holds only the cards written for break scenarios.']);
+  const only = ctx(['Core', 'Flow', 'Full', 'Break'], { config: { exclusiveSets: true } });
+  assert.deepEqual(designRules(only, sets({ Core: ['R'], Full: ['R'], Break: ['B'] })), exclusive);
+  assert.deepEqual(designRules(only, sets({ Core: ['R'], Flow: ['B'], Full: ['R'], Break: ['B'] })),
+    [exclusive[0], 'The Break set holds only the cards written for break scenarios.']);
+  // A suite pack takes its sets from the suite merge.
+  assert.deepEqual(designRules(ctx(['Core', 'Flow', 'Full', 'Break'], { job: { suite: 'LIB' } }), retired), []);
+  // No rule names a Revalidation check, so the walk's calls can share it ahead of their question.
+  const text = [full, breakIt, removed].join(' ');
+  assert.ok(S.REVALIDATION_CHECKS.every((check) => !text.includes(check)));
+});
+
+test('both walks and the repair between them carry the design rules, and the second walk is told which text is older than the repairs', async () => {
+  const model = fakeModel({ ...DOCS, phase8_repair: correctingRepair,
+    phase9_revalidation: (value, calls) => {
+      const { schemaName, user } = calls.at(-1);
+      const id = cardIdIn(user);
+      const reply = failCheck(value, 'Traceability complete', `${id} reads wrong`,
+        `Change step 1 of ${id} to read Corrected step`);
+      // The second walk fails the same check again and one the first walk passed.
+      return schemaName.endsWith('_again') ? failCheck(reply, 'No regressions introduced', `${id} lost a step`) : reply;
+    } });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.reason, 'gate:revalidation-failed', JSON.stringify(result));
+  const walks = checksFor(model, 'phase9_revalidation');
+  assert.equal(walks.length, 6);
+  const rules = new RegExp(`## How this pack is built\\n\\n[^\\n]*never fail a check because the pack follows one[^\\n]*\\n`
+    + `- The ${FULL} set, and the cards listed for the ${FULL} objective, hold only requirement-derived cards[^\\n]*\\n`
+    + '(?:- The BREAK IT set holds only[^\\n]*\\n)?(?:- No test card serves[^\\n]*\\n)?'
+    + '- A rule whose summary starts with "Retired:"[^\\n]*consistent as it stands\\.\\n');
+  for (const call of walks) assert.match(call.user, rules, call.schemaName);
+  const [repair] = checksFor(model, 'phase8_repair_revalidation');
+  assert.match(repair.user, new RegExp(`## How this pack is built\\n\\n[^\\n]*applies them again to what you return[^\\n]*\\n- The ${FULL} set, `));
+  assert.match(repair.user, /- A rule whose summary starts with "Retired:"/);
+  // Only the walk after the repair round is told the review's prose is older than the pack.
+  const aged = /## Text written before the repair round\n\n[^\n]*the Senior Tester Review, the Tester Notes, the written fields of the Confidence Assessment, the assumptions the pack held before the round, the scope text of each test set, and the findings under "Checklist findings still open after the last check"[^\n]*is not evidence that a finding is still open[^\n]*the upload sheet\. A gap that an assumption or a limitation documents is still documented/;
+  for (const call of walks.slice(0, 3)) assert.doesNotMatch(call.user, /Text written before the repair round/, call.schemaName);
+  for (const call of walks.slice(3)) assert.match(call.user, aged, call.schemaName);
+  // The pack says so once, in a field the builder shows, and the second walk reads it there.
+  const pack = JSON.parse(read(result.packPath));
+  assert.equal(pack.confidence.manualReview.split(AGED_NOTE).length, 2);
+  assert.match(walks[3].user, new RegExp(`\\[Confidence Assessment row \\d+\\] Field: manualReview \\| Value: [^\\n]*${AGED_NOTE}`));
+  assert.doesNotMatch(walks[0].user, new RegExp(AGED_NOTE));
+  // A check the second walk fails says whether the first walk failed it too.
+  const lines = statusLines(result.outDir);
+  assert.ok(checkLines(lines, 'revalidation').every((line) => !('repeat' in line)));
+  const again = checkLines(lines, 'revalidation-again');
+  assert.deepEqual(again.filter((line) => line.verdict === 'fail').map((line) => [line.check, line.repeat]),
+    [['No regressions introduced', false], ['Traceability complete', true]]);
+  assert.ok(again.filter((line) => line.verdict === 'pass').every((line) => !('repeat' in line)));
+  assertContentFree(read(path.join(result.outDir, 'status.log')));
+});
+
+test('the set scopes and the written confidence fields are asked for no counts', async () => {
+  const model = fakeModel(DOCS);
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.match(checksFor(model, 'phase7_sets')[0].user, /Give no count of cards or rules in a scope; each set's rule\s+summary carries the counts\./);
+  for (const field of ['remainingRisks', 'assumptions', 'regressionScope', 'breakItScope', 'manualReview']) {
+    assert.match(checksFor(model, `phase9_confidence_${field}`)[0].user,
+      /Give no count of cards, rules or coverage statuses; the Coverage field carries\s+the counts\./, field);
+  }
+  // No repair ran after the review wrote its prose, so the pack carries no note about it.
+  assert.doesNotMatch(JSON.parse(read(result.packPath)).confidence.manualReview, new RegExp(AGED_NOTE));
+});
+
+/** The ID of the card titled `title`, read from a prompt that shows the built workbook. */
+const idOfCase = (user, title) => new RegExp(`Test Case ID: (TC-\\S+) \\| Test Case Title: ${title} \\|`).exec(user)[1];
+/** A walk whose first pass fails Traceability with a fix that names the card titled `title`. */
+const walkNames = (title) => ({ phase9_revalidation: (value, calls) => {
+  const { schemaName, user } = calls.at(-1);
+  if (schemaName.endsWith('_again')) return value;
+  const id = idOfCase(user, title);
+  return failCheck(value, 'Traceability complete', `${id} sits in the wrong sets`, `Move ${id} to the sets it belongs in`);
+} });
+/** A repair that returns each named card as the call showed it, but for `change`. */
+const reworked = (change) => (value, calls) => {
+  const shown = calls.at(-1).user.split('## Cards named\n\n')[1].split('\n\n## ')[0].trim().split('\n')
+    .map((line) => JSON.parse(line));
+  return { ...value, coverage: [], limitations: [],
+    cards: shown.map(({ module, sourceDocument, ...card }) => ({ ...card, ...change(card) })) };
+};
+const cardTitled = (pack, title) => pack.testCards.find((card) => card.title === title);
+const setsHolding = (pack, card) => pack.testSets.filter((set) => set.cards.includes(card.id))
+  .map((set) => set.objective).sort();
+const repairBuilds = (outDir) => statusLines(outDir)
+  .filter((line) => line.event === 'builder' && line.step === 'revalidation').map((line) => [line.attempt, line.failed]);
+
+test('a repair that gives a quality-derived card the Full Coverage objective ends with the objective gone and the Objective Matrix passing', async () => {
+  const run = lib({ phase6_scenarios: inventory([{}, BREAK, {}]), phase6_cards: SETS, ...walkNames('Case S3'),
+    phase8_repair: reworked((card) => ({ objectives: [...card.objectives, FULL] })) });
+  const result = await runLib(run);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // The one repair call named the objective on the quality-derived card.
+  assert.equal(callsNamed(run, 'phase8_repair').length, 1);
+  const pack = JSON.parse(read(result.packPath));
+  const card = cardTitled(pack, 'Case S3');
+  assert.equal(card.derivation, 'Quality');
+  assert.ok(!card.objectives.includes(FULL));
+  assert.deepEqual(setCards(pack, FULL), ['Case S1', 'Case S2']);
+  assert.deepEqual([...card.objectives].sort(), setsHolding(pack, card));
+  // The rebuild after the repair passes at its first build: no builder repair had to take the objective off.
+  assert.deepEqual(repairBuilds(result.outDir), [[0, 0]]);
+  const validation = readPack(result.workbook).sheet('Workbook Validation');
+  assert.notEqual(validation.rows.find((row) => row.cells.Sheet === 'Objective Matrix').cells.Status, 'FAIL');
+});
+
+test('a repaired BREAK IT card stays in the BREAK IT set and out of the core set, and each set counts its cards again', async () => {
+  const repaired = async (overrides) => {
+    const run = lib({ phase6_scenarios: inventory([{}, BREAK, {}]), phase6_cards: SETS, ...walkNames('Case S2'),
+      phase8_repair: reworked(() => ({ objectives: ['Core Change Validation', 'Workflow Validation'] })) }, overrides);
+    const result = await runLib(run);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(repairBuilds(result.outDir), [[0, 0]]);
+    return JSON.parse(read(result.packPath));
+  };
+  const pack = await repaired({});
+  const card = cardTitled(pack, 'Case S2');
+  assert.deepEqual([...card.objectives].sort(), ['BREAK IT', FULL, 'Workflow Validation']);
+  assert.deepEqual(setsHolding(pack, card), ['BREAK IT', FULL, 'Workflow Validation']);
+  assert.deepEqual(setCards(pack, 'Core Change Validation'), ['Case S1', 'Case S3']);
+  // The sets the card left hold two cards, and their rule summaries say so.
+  for (const objective of ['Negative / Exclusion', 'Regression Testing']) {
+    assert.deepEqual(setCards(pack, objective), ['Case S1', 'Case S3']);
+    assert.match(pack.testSets.find((set) => set.objective === objective).ruleSummary.join(' '), / on 2 card\(s\)$/);
+  }
+  const alone = await repaired({ exclusiveSets: true });
+  assert.deepEqual(cardTitled(alone, 'Case S2').objectives, ['BREAK IT']);
+  assert.deepEqual(setsHolding(alone, cardTitled(alone, 'Case S2')), ['BREAK IT']);
+});
+
+test('a repair never takes the last card out of a set: the card stays and keeps that objective', async () => {
+  const setup = lib({ ...walkFailsOnCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  assert.equal(failed.reason, 'gate:revalidation-failed');
+  const file = path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json');
+  const named = cardIdIn(JSON.parse(slurp(file)).state.revalidationChecks.find((row) => row.verdict === 'fail').fix);
+  // The Workflow set holds the named card alone; the Regression set holds it with another card.
+  editSnapshot(failed.outDir, 'phase9-revalidate', (saved) => {
+    const pack = savedPack(saved);
+    const other = pack.testCards.find((card) => card.id !== named).id;
+    pack.testSets.find((set) => set.objective === 'Workflow Validation').cards = [named];
+    pack.testSets.find((set) => set.objective === 'Regression Testing').cards = [named, other];
+  });
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'last' },
+    { model: fakeModel({ phase8_repair: reworked(() => ({ objectives: ['Core Change Validation'] })) }) });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  const card = pack.testCards.find((one) => one.id === named);
+  assert.deepEqual(pack.testSets.find((set) => set.objective === 'Workflow Validation').cards, [named]);
+  assert.ok(card.objectives.includes('Workflow Validation') && card.objectives.includes('Core Change Validation'));
+  assert.ok(!pack.testSets.find((set) => set.objective === 'Regression Testing').cards.includes(named));
+  assert.ok(!card.objectives.includes('Regression Testing'));
+  assert.deepEqual([...card.objectives].sort(), setsHolding(pack, card));
+});
+
+test('a repair in a suite pack leaves the sets the suite merge wrote, and the card keeps its objectives', async () => {
+  // A suite's cards are numbered under the suite's name.
+  const suiteCard = (text) => /TC-[A-Z0-9]+-LIB-\d{3}/.exec(text)[0];
+  const model = fakeModel({ ...INTAKE, ...NOT_REMOVAL, phase8_repair: correctingRepair,
+    phase9_revalidation: (value, calls) => {
+      const { schemaName, user } = calls.at(-1);
+      return schemaName.endsWith('_again') ? value : failCheck(value, 'Traceability complete',
+        `${suiteCard(user)} reads wrong`, `Change step 1 of ${suiteCard(user)} to read Corrected step`);
+    } });
+  const result = await runJob(fixtureConfig(), { suite: 'LIB' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const [repair] = checksFor(model, 'phase8_repair_revalidation');
+  const named = suiteCard(repair.user.split('## Builder problems')[1]);
+  const before = savedPack(JSON.parse(slurp(path.join(result.outDir, 'work', 'checkpoints', 'phase9-confidence.json'))));
+  const pack = JSON.parse(read(result.packPath));
+  assert.deepEqual(pack.testSets, before.testSets);
+  const card = (from) => from.testCards.find((one) => one.id === named);
+  assert.equal(card(pack).steps[0].description, 'Corrected step');
+  assert.deepEqual(card(pack).objectives, card(before).objectives);
+  // A suite pack is given no design rule: its sets are the merge's.
+  assert.doesNotMatch(repair.user, /How this pack is built/);
+  assert.ok(checksFor(model, 'phase9_revalidation').every((call) => !/How this pack is built/.test(call.user)));
+});
+
+test('the checklist reads and the repair between them carry the design rules, and a suite pack\'s checklist carries none', async () => {
+  const model = fakeModel({ ...DOCS, phase9_checklist: plantedChecklist(), phase8_repair: correctingRepair });
+  const result = await runJob(fixtureConfig(), { issue: '501', change: '7001' }, { model, echo: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const reads = checksFor(model, 'phase9_checklist');
+  assert.deepEqual(reads.map((call) => call.schemaName), ['phase9_checklist', 'phase9_checklist_again']);
+  const rules = new RegExp('## How this pack is built\\n\\n[^\\n]*never list an issue because the pack follows one,'
+    + ' and never give a fix that would break one\\.\\n'
+    + `- The ${FULL} set, and the cards listed for the ${FULL} objective, hold only requirement-derived cards[^\\n]*\\n`
+    + '(?:- The BREAK IT set holds only[^\\n]*\\n)?(?:- No test card serves[^\\n]*\\n)?'
+    + '- A rule whose summary starts with "Retired:"[^\\n]*consistent as it stands\\.\\n');
+  for (const call of reads) assert.match(call.user, rules, call.schemaName);
+  // The fix round's repair goes through the call every repair shares, so it carries them too.
+  const [repair] = checksFor(model, 'phase8_repair_review_1');
+  assert.match(repair.user, new RegExp(`## How this pack is built\\n\\n[^\\n]*applies them again to what you return[^\\n]*\\n- The ${FULL} set, `));
+  // A suite pack is given no design rule: its sets are the merge's.
+  const suite = fakeModel({ ...INTAKE, ...NOT_REMOVAL });
+  const merged = await runJob(fixtureConfig(), { suite: 'LIB' }, { model: suite, echo: false });
+  assert.equal(merged.ok, true, JSON.stringify(merged));
+  const suiteReads = checksFor(suite, 'phase9_checklist');
+  assert.ok(suiteReads.length > 0);
+  for (const call of suiteReads) assert.doesNotMatch(call.user, /How this pack is built/, call.schemaName);
+});
+
+test('the Coverage field is counted again when a repair changes the Coverage Matrix', async () => {
+  const setup = lib({ ...asksNewCard, phase8_repair: correctingRepair });
+  addJob(setup.config, { issue: '501', change: '7001' });
+  const failed = await runLib(setup);
+  uncover(failed.outDir, 'BR-LIB.UC01-001');
+  const stale = 'Of 6 rule(s) in the Coverage Matrix: 5 Covered; 1 Missing (BR-LIB.UC01-001).';
+  editSnapshot(failed.outDir, 'phase9-revalidate', (saved) => { savedPack(saved).confidence.coverage = stale; });
+  const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label: 'count' },
+    { model: fakeModel({ phase8_repair: newCardFor }) });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+  assert.match(pack.confidence.coverage, /^Of \d+ rule\(s\) in the Coverage Matrix: /);
+  assert.doesNotMatch(pack.confidence.coverage, /Missing/);
+  // A walk step over the repaired pack is told its prose is older than the repair, under its first-walk step name.
+  const model = fakeModel();
+  const walked = await step(setup.config, { at: done.id, step: 'walk', label: 'walk' }, { model });
+  assert.equal(walked.result.ok, true, JSON.stringify(walked.result));
+  const calls = checksFor(model, 'phase9_revalidation');
+  assert.deepEqual(calls.map((call) => call.schemaName), ['phase9_revalidation_traceability',
+    'phase9_revalidation_resolution', 'phase9_revalidation_readiness']);
+  for (const call of calls) assert.match(call.user, /## Text written before the repair round\n/, call.schemaName);
+  // A second repair step adds no second note.
+  const twice = await step(setup.config, { at: done.id, step: 'repair', finding: '0', label: 'twice' },
+    { model: fakeModel({ phase8_repair: correctingRepair }) });
+  assert.equal(twice.result.ok, true, JSON.stringify(twice.result));
+  assert.equal(savedPack(readStep(path.join(setup.config.output, twice.id))).confidence.manualReview
+    .split(AGED_NOTE).length, 2);
+  // The manual review field written again still says the rest of the prose is older than the repair.
+  const again = await step(setup.config, { at: done.id, step: 'confidence', field: 'manualReview', label: 'field' },
+    { model: fakeModel() });
+  assert.equal(again.result.ok, true, JSON.stringify(again.result));
+  const rewritten = savedPack(readStep(path.join(setup.config.output, again.id))).confidence.manualReview;
+  assert.match(rewritten, /^The manualReview is covered by /);
+  assert.equal(rewritten.split(AGED_NOTE).length, 2);
+});
+
+test('a new repair card that cites only a retired rule is rechecked as an absence check, and dropped when it expects live behavior', async () => {
+  const RETIRED_RULE = 'BR-LIB.UC01-006';
+  const asks = (rule) => ({ phase9_revalidation: (value) => failCheck(value, 'Traceability complete',
+    `${rule} has no card`, `Create a new test card for ${rule}`) });
+  const cardFor = (rule) => (value, calls) => {
+    const reply = newCardFor(value, calls);
+    return { ...reply, newCards: reply.newCards.map((card) => ({ ...card, rules: [rule],
+      expected: 'The renewed card is saved', steps: card.steps.map((one) => ({ ...one, rules: [rule] })) })) };
+  };
+  const offered = async (rule, label, edit = () => {}) => {
+    const setup = lib({ ...asks(rule), phase8_repair: correctingRepair });
+    addJob(setup.config, { issue: '501', change: '7001' });
+    const failed = await runLib(setup);
+    uncover(failed.outDir, rule);
+    editSnapshot(failed.outDir, 'phase9-revalidate', (saved) => edit(savedPack(saved)));
+    const before = savedPack(JSON.parse(slurp(path.join(failed.outDir, 'work', 'checkpoints', 'phase9-revalidate.json'))));
+    const model = fakeModel({ phase8_repair: cardFor(rule), phase6_recheck: rejectsAll });
+    const done = await step(setup.config, { at: 'phase9-revalidate', step: 'repair', finding: '0', label }, { model });
+    const pack = savedPack(readStep(path.join(setup.config.output, done.id)));
+    return { model, done, added: pack.testCards.filter((card) => !before.testCards.some((old) => old.id === card.id)) };
+  };
+  const retired = await offered(RETIRED_RULE, 'retired');
+  const [repair] = checksFor(retired.model, 'phase8_repair');
+  assert.match(repair.user, /A new card for behavior that still happens cites the active rules its\s+expected result exercises, never only rules whose summary starts with "Retired:"/);
+  const [recheck] = checksFor(retired.model, 'phase6_recheck_new');
+  assert.match(recheck.user, /A card whose every cited rule is marked removed checks that the removed\s+behavior is gone and nothing else, whatever its derivation/);
+  assert.match(recheck.user, new RegExp(`- ${RETIRED_RULE.replace(/\./g, '\\.')} [^\\n]*removed: the card must show this no longer happens`));
+  // The recheck answered that the card does not follow, so it is left out and the line says undone.
+  assert.equal(retired.added.length, 0);
+  const line = retired.done.result.lines.map((text) => JSON.parse(text)).find((one) => one.event === 'repair');
+  assert.deepEqual([line.asked, line.newCards, line.result], ['new-card', 1, 'undone']);
+  // A new card on an active rule is rechecked without that instruction.
+  const active = await offered('BR-LIB.UC01-001', 'active');
+  assert.doesNotMatch(checksFor(active.model, 'phase6_recheck_new')[0].user, /every cited rule is marked removed/);
+  // The repair is still told which rules a new card cites, because the pack holds a retired rule.
+  assert.match(checksFor(active.model, 'phase8_repair')[0].user, /never only rules whose summary starts with "Retired:"/);
+  // A pack with no retired rule is told nothing about retired rules.
+  const none = await offered('BR-LIB.UC01-001', 'none', (pack) => {
+    pack.rules.find((one) => one.id === RETIRED_RULE).summary = 'A card expires after a year.';
+  });
+  const [plain] = checksFor(none.model, 'phase8_repair');
+  assert.match(plain.user, /## How this pack is built\n/);
+  assert.doesNotMatch(plain.user, /Retired:/);
+});
+
+test('the rating made again counts the coverage step again from the Coverage Matrix', async () => {
+  const { config, result } = await finishedJob();
+  // The state holds a coverage step counted before a repair changed the matrix.
+  editSnapshot(result.outDir, 'phase9-revalidate', (saved) => {
+    saved.state.confidenceSteps = saved.state.confidenceSteps.map((row) => (row.step === 'coverage'
+      ? { ...row, verdict: 'weak', evidence: 'Of 9 rule(s) in the Coverage Matrix: 9 Missing.' } : row));
+  });
+  const model = fakeModel();
+  const done = await step(config, { at: 'phase9-revalidate', step: 'confidence', label: 'rate' }, { model });
+  assert.equal(done.result.ok, true, JSON.stringify(done.result));
+  const [call] = overallCalls(model);
+  assert.match(call.user, /- coverage: strong\. Of \d+ rule\(s\) in the Coverage Matrix: /);
+  assert.doesNotMatch(call.user, /9 Missing/);
+  const saved = readStep(path.join(config.output, done.id));
+  assert.equal(saved.state.confidenceSteps.find((row) => row.step === 'coverage').verdict, 'strong');
 });

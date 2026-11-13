@@ -103,6 +103,7 @@ skipped=0
 held=0
 quarantined=0
 unmapped=0
+renumbered=0
 
 log() { printf '%s\n' "$*"; }
 
@@ -124,10 +125,19 @@ PANDOC_TO='gfm-raw_html-raw_attribute'
 
 run_pandoc() {
   local from="$1" input="$2" output="$3"
-  # The HTML reader keeps a div or a span as a structural node unless it is told
-  # not to, and those are what the writer then has to render.
   case "$from" in
+    # The HTML reader keeps a div or a span as a structural node unless it is
+    # told not to, and those are what the writer then has to render.
     html) from='html-native_divs-native_spans' ;;
+    # Pandoc counts and nests a Word list differently from Word, so the
+    # numbering is rewritten into a form it draws the way Word does. A file the
+    # rewrite cannot read, such as an RTF file tried here first, goes to Pandoc
+    # as it is.
+    docx)
+      if python3 "$HERE/list-numbers.py" "$input" "$WORK/numbered.docx" 2>/dev/null; then
+        input="$WORK/numbered.docx"
+      fi
+      ;;
   esac
   pandoc -f "$from" -t "$PANDOC_TO" \
     --columns=100 --wrap=auto \
@@ -595,6 +605,24 @@ for suite_dir in "${suites[@]}"; do
       continue
     fi
 
+    # A rule cites the source's list numbers, so a converted list that counts
+    # differently is reported. The document is still written: the numbers are a
+    # thing to correct in the Markdown, not a reason to doubt the rest of it.
+    case "$(printf '%s' "${primary##*.}" | tr '[:upper:]' '[:lower:]')" in
+      docx|docm|doc|dot)
+        status=0
+        listed="$(python3 "$HERE/check-list-numbers.py" "$OUT/$suite/$page.md" "$primary" \
+          2>&1)" || status=$?
+        if [ "$status" -eq 2 ]; then
+          printf '%s\n' "$listed" | sed 's/^/     /'
+          log "     list numbers differ from the source"
+          renumbered=$((renumbered + 1))
+        elif [ "$status" -ne 0 ]; then
+          printf '%s\n' "$listed" | sed 's/^/     /'
+        fi
+        ;;
+    esac
+
     if [ "$KEEP_SOURCES" -eq 0 ]; then
       mkdir -p "$DONE_ROOT/$suite"
       for path in "${sources[@]}"; do
@@ -621,6 +649,7 @@ done
 
 log ""
 log "converted $converted, staged for merge $held, skipped $skipped," \
-    "quarantined $quarantined, in an unmapped font $unmapped"
+    "quarantined $quarantined, in an unmapped font $unmapped," \
+    "with list numbers off the source $renumbered"
 [ -s "$WORK/pandoc.err" ] && log "pandoc reported warnings, see the run output"
 exit 0

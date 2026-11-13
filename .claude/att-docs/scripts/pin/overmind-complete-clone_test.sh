@@ -127,22 +127,45 @@ check "$(missing "$SANDBOX/partial-fail")" 0 "a later run fetches every object"
 
 # A fetch cut short, as a cancelled or timed out job is, also leaves the mark in place.
 # A git that waits in fetch stands in for a slow download.
-make_partial "$SANDBOX/partial-cut"
 REAL_GIT="$(command -v git)"
 mkdir -p "$SANDBOX/slowbin"
 printf '#!/usr/bin/env bash\nfor a in "$@"; do\n  if [ "$a" = fetch ]; then touch "%s/fetching"; exec sleep 60; fi\ndone\nexec "%s" "$@"\n' "$SANDBOX" "$REAL_GIT" > "$SANDBOX/slowbin/git"
 chmod +x "$SANDBOX/slowbin/git"
-PATH="$SANDBOX/slowbin:$PATH" bash "$HERE/overmind-complete-clone.sh" "$SANDBOX/partial-cut" > /dev/null 2>&1 &
-pid=$!
-for _ in $(seq 1 100); do [ -f "$SANDBOX/fetching" ] && break; sleep 0.1; done
-check "$([ -f "$SANDBOX/fetching" ] && echo yes)" yes "the slow fetch started"
-# bash runs a trap after its foreground command ends, so the fetch is signaled with it,
-# as a runner signals the whole process tree.
-pkill -TERM -P "$pid" 2> /dev/null
-kill -TERM "$pid" 2> /dev/null
-wait "$pid" 2> /dev/null
+# usage: cut_fetch <dir> [slow]; starts the script on a partial clone, waits for its fetch,
+# then kills the fetch and signals the script, as a runner signals the whole process tree.
+# bash runs a trap after its foreground command ends, so the script's own signal handler
+# runs after the fetch is gone. With "slow" the script is sourced into a traced shell that
+# sets its own PS4, since bash run as root does not take PS4 from the environment. Once the
+# fetch has started every traced command waits 0.2 s first. A short pause after the fetch
+# is killed lets the script enter its exit trap, and the signal then lands while that trap
+# is still restoring. The function returns the script's exit status.
+cut_fetch() {
+  local pid
+  rm -f "$SANDBOX/fetching"
+  if [ "${2:-}" = slow ]; then
+    PATH="$SANDBOX/slowbin:$PATH" bash -c 'PS4="$1"; set -x; shift; . "$@"' bash \
+      "\$([ -f '$SANDBOX/fetching' ] && sleep 0.2)+ " "$HERE/overmind-complete-clone.sh" "$1" > /dev/null 2>&1 &
+  else
+    PATH="$SANDBOX/slowbin:$PATH" bash "$HERE/overmind-complete-clone.sh" "$1" > /dev/null 2>&1 &
+  fi
+  pid=$!
+  for _ in $(seq 1 100); do [ -f "$SANDBOX/fetching" ] && break; sleep 0.1; done
+  check "$([ -f "$SANDBOX/fetching" ] && echo yes)" yes "the slow fetch started"
+  pkill -TERM -P "$pid" 2> /dev/null
+  if [ "${2:-}" = slow ]; then sleep 0.05; fi
+  kill -TERM "$pid" 2> /dev/null
+  wait "$pid" 2> /dev/null
+}
+make_partial "$SANDBOX/partial-cut"
+cut_fetch "$SANDBOX/partial-cut"
+check "$?" 143 "an interrupted run exits with the status of SIGTERM"
 check "$(git -C "$SANDBOX/partial-cut" config --get remote.origin.promisor)" true "an interrupted fetch keeps the partial clone mark"
 check "$(git -C "$SANDBOX/partial-cut" config --get remote.origin.partialclonefilter)" blob:none "an interrupted fetch keeps the clone's filter"
+make_partial "$SANDBOX/partial-cut-slow"
+cut_fetch "$SANDBOX/partial-cut-slow" slow
+check "$?" 143 "a run signaled during the restore exits with the status of SIGTERM"
+check "$(git -C "$SANDBOX/partial-cut-slow" config --get remote.origin.promisor)" true "a signal during the restore keeps the partial clone mark"
+check "$(git -C "$SANDBOX/partial-cut-slow" config --get remote.origin.partialclonefilter)" blob:none "a signal during the restore keeps the clone's filter"
 
 # More than one directory is a bad call.
 out="$(run_complete "$PARTIAL" "$FULL" 2>&1)"

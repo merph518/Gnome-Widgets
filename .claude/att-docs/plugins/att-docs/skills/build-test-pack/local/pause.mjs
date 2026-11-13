@@ -21,33 +21,43 @@ export const UNIT_NAME = /^[A-Za-z0-9][A-Za-z0-9@_.:\\-]*$/;
 /** The state file lives beside the queue file, so a later run that takes the queue finds it. */
 export const pausedPath = (config) => `${config.at(config.queue.file)}.paused`;
 
+/** The names of `list`, once each, that `stopped` or `restore` still holds. */
+const stillHeld = (list, stopped, restore) => [...new Set(list)]
+  .filter((u) => stopped.includes(u) || restore.includes(u));
+
 /**
- * The state file holds `{"stopped": [...], "restore": [...]}`: the units a run
- * stopped, and the units marked to start when a build ends even though they
- * were not running when it began. A file that is a bare list of names counts
- * as the stopped units.
+ * The state file holds `{"stopped": [...], "restore": [...], "failedStart": [...]}`:
+ * the units a run stopped, the units marked to start when a build ends even
+ * though they were not running when it began, and those of the two whose last
+ * start failed. `failedStart` is left out of the file when it is empty, and
+ * only a name still in `stopped` or `restore` counts. A file that is a bare
+ * list of names counts as the stopped units.
  */
 export function readPaused(file) {
   const clean = (list) => (Array.isArray(list)
     ? list.filter((u) => typeof u === 'string' && UNIT_NAME.test(u)) : []);
+  const held = (stopped, restore, failedStart) => ({ stopped, restore,
+    failedStart: stillHeld(failedStart, stopped, restore) });
   try {
     const state = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (Array.isArray(state)) return { stopped: clean(state), restore: [] };
-    return { stopped: clean(state?.stopped), restore: clean(state?.restore) };
+    if (Array.isArray(state)) return held(clean(state), [], []);
+    return held(clean(state?.stopped), clean(state?.restore), clean(state?.failedStart));
   } catch {
-    return { stopped: [], restore: [] };
+    return held([], [], []);
   }
 }
 
 /** Writes the state in one step, and removes the file when nothing is left in it. */
-function writePaused(file, { stopped, restore }) {
+function writePaused(file, { stopped, restore, failedStart = [] }) {
   if (!stopped.length && !restore.length) {
     fs.rmSync(file, { force: true });
     return;
   }
+  const failed = stillHeld(failedStart, stopped, restore);
+  const state = { stopped, restore, ...(failed.length ? { failedStart: failed } : {}) };
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify({ stopped, restore })}\n`);
+  fs.writeFileSync(temp, `${JSON.stringify(state)}\n`);
   fs.renameSync(temp, file);
 }
 
@@ -55,13 +65,18 @@ function writePaused(file, { stopped, restore }) {
 export function markRestoreFile(config, units) {
   const file = pausedPath(config);
   const state = readPaused(file);
-  writePaused(file, { stopped: state.stopped, restore: [...new Set([...state.restore, ...units])] });
+  writePaused(file, { ...state, restore: [...new Set([...state.restore, ...units])] });
 }
 
 /** The units the state file still holds to start, stopped or marked. */
 export function pendingRestore(config) {
   const state = readPaused(pausedPath(config));
   return [...new Set([...state.stopped, ...state.restore])];
+}
+
+/** The held units whose last start failed. */
+export function failedStartUnits(config) {
+  return readPaused(pausedPath(config)).failedStart;
 }
 
 /** A shell-style pattern as a regular expression: `*`, `?`, and `[...]` classes, with `[!...]` or `[^...]` negating. */
@@ -164,7 +179,7 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
   const record = () => {
     const state = readPaused(file);
     writePaused(file, { stopped: [...new Set([...state.stopped, ...stopped])],
-      restore: [...new Set([...state.restore, ...marked])] });
+      restore: [...new Set([...state.restore, ...marked])], failedStart: state.failedStart });
   };
 
   const stopOne = (unit) => {
@@ -242,7 +257,8 @@ export function createPauser(config, { exec = defaultExec, log = console.log, pr
         // A unit that did not start stays recorded, so a later run or `queue restore` tries it again.
         const done = (u) => targets.has(u) && !failedStart.includes(u);
         writePaused(file, { stopped: left.stopped.filter((u) => !done(u)),
-          restore: left.restore.filter((u) => !done(u)) });
+          restore: left.restore.filter((u) => !done(u)),
+          failedStart: [...left.failedStart.filter((u) => !targets.has(u)), ...failedStart] });
       }
       return failedStart;
     },
