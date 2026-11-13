@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.31.35](https://github.com/merph518/Overmind/compare/v0.31.34...v0.31.35) (2026-11-13)
+
+
+### Bug Fixes
+
+* **convert-docs:** draw Word list numbers and nesting through Pandoc ([#675](https://github.com/merph518/Overmind/issues/675)) ([0dad792](https://github.com/merph518/Overmind/commit/0dad792b5792684652b2dec9a1f394c4c1b83e0a))
+* gate every local model run in build-test-pack on the user's yes ([#665](https://github.com/merph518/Overmind/issues/665)) ([#666](https://github.com/merph518/Overmind/issues/666)) ([5dd5621](https://github.com/merph518/Overmind/commit/5dd56214409409b4ca27e294e8b13bf42513412c))
+* give each revalidation finding a repair call of its own, sized by cards ([#656](https://github.com/merph518/Overmind/issues/656)) ([#657](https://github.com/merph518/Overmind/issues/657)) ([0fb4b06](https://github.com/merph518/Overmind/commit/0fb4b06299cc916399e6b141b0eb31a5f22bf393))
+* hold the overall confidence to the builder's confidence ceiling ([#650](https://github.com/merph518/Overmind/issues/650)) ([#652](https://github.com/merph518/Overmind/issues/652)) ([dd97b0c](https://github.com/merph518/Overmind/commit/dd97b0ceeab1c23f206229dcfff5d69ea14134f0))
+* name both hosts in the report's advice for a repeatedly cut step ([#653](https://github.com/merph518/Overmind/issues/653)) ([#663](https://github.com/merph518/Overmind/issues/663)) ([7e7970e](https://github.com/merph518/Overmind/commit/7e7970e281a0f88f826fe6fb54c61660fc1c6501))
+* recommend a server thinking budget and warn in the setup check when it is missing ([#651](https://github.com/merph518/Overmind/issues/651)) ([#654](https://github.com/merph518/Overmind/issues/654)) ([9ac186b](https://github.com/merph518/Overmind/commit/9ac186b111429ce63dd374d24263b0514ef18232))
+* state the design rules to the checklist reads ([#661](https://github.com/merph518/Overmind/issues/661)) ([#664](https://github.com/merph518/Overmind/issues/664)) ([f97b76b](https://github.com/merph518/Overmind/commit/f97b76b0b6edc13e407f6a271d10a4d0391397c5))
+* state the design rules to the revalidation walk and put repaired cards back through the sets ([#659](https://github.com/merph518/Overmind/issues/659)) ([#660](https://github.com/merph518/Overmind/issues/660)) ([abeb642](https://github.com/merph518/Overmind/commit/abeb6427b11b10e18c85f4611af5690e3ac93100))
+
+## [0.31.34](https://github.com/merph518/Overmind/compare/v0.31.33...v0.31.34) (2026-11-09)
+
+
+### Bug Fixes
+
+* keep the partial clone mark when a signal lands during the restore ([#645](https://github.com/merph518/Overmind/issues/645)) ([#648](https://github.com/merph518/Overmind/issues/648)) ([e3829f3](https://github.com/merph518/Overmind/commit/e3829f3040027658f596ce05b6187ff9ec3cc808))
+
+## [0.31.33](https://github.com/merph518/Overmind/compare/v0.31.32...v0.31.33) (2026-11-09)
+
+
+### Bug Fixes
+
+* ask build-test-pack reply fields in the order they are worked out ([#545](https://github.com/merph518/Overmind/issues/545)) ([#640](https://github.com/merph518/Overmind/issues/640)) ([0a85974](https://github.com/merph518/Overmind/commit/0a85974fb5d466cfca40ba40335adef30ef52458))
+* carry each card's scenario kind on pack.testCards ([#563](https://github.com/merph518/Overmind/issues/563)) ([#644](https://github.com/merph518/Overmind/issues/644)) ([10bcf62](https://github.com/merph518/Overmind/commit/10bcf6241c4574fbdb0f72b26a073d3960ed8dfa))
+* end the build-test-pack break-only pass when its reply is cut off ([#557](https://github.com/merph518/Overmind/issues/557)) ([#641](https://github.com/merph518/Overmind/issues/641)) ([7608e33](https://github.com/merph518/Overmind/commit/7608e33c6f086bffb23374ff615ce7241bdbad71))
+* stop build-test-pack model calls reusing a closed connection, bound the inventory reply, and order step rows ([#639](https://github.com/merph518/Overmind/issues/639), [#642](https://github.com/merph518/Overmind/issues/642), [#643](https://github.com/merph518/Overmind/issues/643)) ([#647](https://github.com/merph518/Overmind/issues/647)) ([0484125](https://github.com/merph518/Overmind/commit/04841253235ddd64af38b5142cbbb3841f55d63a))
+* stop queue add promising a restore that sudoers will refuse ([#539](https://github.com/merph518/Overmind/issues/539)) ([#637](https://github.com/merph518/Overmind/issues/637)) ([dff268c](https://github.com/merph518/Overmind/commit/dff268ca94442b85119778742783fb850e34071f))
+
+## [0.31.32](https://github.com/merph518/Overmind/compare/v0.31.31...v0.31.32) (2026-11-09)
+
+
+### Features
+
+* log check verdicts, repairs, progress and call usage to status.log ([#635](https://github.com/merph518/Overmind/issues/635)) ([39ed3e3](https://github.com/merph518/Overmind/commit/39ed3e3e23ca2e3fe21b9c2ad1c1d7221fee3457))
+
+## [0.31.31](https://github.com/merph518/Overmind/compare/v0.31.30...v0.31.31) (2026-11-09)
+
+
+### Features
+
+* split the revalidation walk and the senior review into one call per group or part ([#488](https://github.com/merph518/Overmind/issues/488)) ([#632](https://github.com/merph518/Overmind/issues/632)) ([3631a30](https://github.com/merph518/Overmind/commit/3631a30ecf27129f6becf0fe555a0472b514a49e))
+
+
+### Bug Fixes
+
+* fail acronym verify when a cited source file is missing ([#631](https://github.com/merph518/Overmind/issues/631)) ([de8bb3b](https://github.com/merph518/Overmind/commit/de8bb3b468be0e2e7287ed39b4383622735161b3))
+
 ## [0.31.30](https://github.com/merph518/Overmind/compare/v0.31.29...v0.31.30) (2026-11-09)
 
 

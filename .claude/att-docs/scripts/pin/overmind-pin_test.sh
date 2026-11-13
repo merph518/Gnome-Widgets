@@ -28,6 +28,20 @@ check() {
     echo "FAIL $3: got [$1], wanted [$2]"; fails=$((fails + 1)); fi
 }
 
+# usage: has <text> <needle> <name>; passes when the text holds the needle. On a failure
+# the text follows, each line marked FAIL, so output filtered down to its FAIL lines still
+# shows the text the needle was looked for in.
+has() {
+  case "$1" in
+    *"$2"*) echo "ok   $3" ;;
+    *)
+      echo "FAIL $3: [$2] is not in:"
+      printf '%s\n' "$1" | sed 's/^/FAIL   /'
+      fails=$((fails + 1))
+      ;;
+  esac
+}
+
 # The upstream carries the scripts under test and a changelog, as the real repository does.
 UP="$SANDBOX/upstream"
 git init -q "$UP"
@@ -242,14 +256,18 @@ cp "$REPO_ROOT/scripts/consumer/overmind-check.sh" "$UP/scripts/consumer/overmin
 check "$rc" 1 "a consumer whose check fails fails"
 case "$(cat "$SANDBOX/out")" in *"iota: att-docs: untracked files under"*"iota: att-docs: forced failure"*"iota: overmind-check.sh failed: att-docs: untracked files"*) r=yes ;; *) r=no ;; esac
 check "$r" yes "the log carries the check's diagnostic"
-case "$(cat "$GITHUB_STEP_SUMMARY")" in *"iota: failed: overmind-check.sh failed: att-docs: untracked files under .claude/att-docs att-docs: forced failure"*) r=yes ;; *) r=no ;; esac
-check "$r" yes "the summary line carries the whole diagnostic"
+has "$(cat "$GITHUB_STEP_SUMMARY")" "iota: failed: overmind-check.sh failed: att-docs: untracked files under .claude/att-docs att-docs: forced failure" "the summary line carries the whole diagnostic"
 check "$(remote iota branch --list | wc -l)" 1 "a failed check pushes nothing"
 
 # A checkout that is a partial clone cannot serve the history it lacks, so the consumer
-# fails with the git error in its summary line and nothing is pushed. Completing the
-# checkout lets the same pin succeed, and a rerun adds no second pull request. The
-# server must allow filtered clones, or the clone comes out complete and proves nothing.
+# fails with the git error in its log and nothing is pushed. The fetch, its relay of the
+# server's messages, and the server each write lines of that error to the same stream,
+# so their order varies from run to run, and the summary line keeps only the first 300
+# characters. The checks hold for every order: the line that names the cause is looked
+# for in the log, which has every line, and the summary line must open with whichever
+# line came first. Completing the checkout lets the same pin succeed, and a rerun adds
+# no second pull request. The server must allow filtered clones, or the clone comes out
+# complete and proves nothing.
 git -C "$UP" config uploadpack.allowFilter true
 git -C "$UP" config uploadpack.allowAnySHA1InWant true
 UPP="$SANDBOX/upstream-partial"
@@ -260,8 +278,10 @@ make_consumer lambda v0.1.0
 : > "$GH_LOG"
 OVERMIND_DIR="$UPP" pin v0.2.0 lambda > "$SANDBOX/out" 2>&1
 check "$?" 1 "a pin from a partial checkout fails"
-case "$(cat "$GITHUB_STEP_SUMMARY")" in *"lambda: failed: overmind-sync.sh failed:"*"promisor remote"*) r=yes ;; *) r=no ;; esac
-check "$r" yes "the summary line carries the git error"
+LOG="$(cat "$SANDBOX/out")"
+has "$LOG" "promisor remote" "the log carries the git error"
+FIRST="$(printf '%s\n' "$LOG" | sed -n -e '1s/^lambda: //' -e '1s/[[:space:]]*$//p')"
+has "$(cat "$GITHUB_STEP_SUMMARY")" "- lambda: failed: overmind-sync.sh failed: $FIRST" "the summary line opens with the first line of the git error"
 check "$(remote lambda branch --list | wc -l)" 1 "a pin from a partial checkout pushes nothing"
 bash "$HERE/overmind-complete-clone.sh" "$UPP" > /dev/null 2>&1
 check "$?" 0 "the partial checkout is completed"
@@ -282,8 +302,7 @@ make_consumer kappa v0.1.0
 : > "$GITHUB_STEP_SUMMARY"
 pin v0.2.1 kappa > "$SANDBOX/out" 2>&1
 check "$?" 1 "a tag with no changelog fails"
-case "$(cat "$GITHUB_STEP_SUMMARY")" in *"kappa: failed: could not read CHANGELOG.md at v0.2.1"*) r=yes ;; *) r=no ;; esac
-check "$r" yes "the summary says the changelog could not be read"
+has "$(cat "$GITHUB_STEP_SUMMARY")" "kappa: failed: could not read CHANGELOG.md at v0.2.1" "the summary says the changelog could not be read"
 check "$(remote kappa branch --list | wc -l)" 1 "a missing changelog pushes nothing"
 
 if [ "$fails" -gt 0 ]; then echo "$fails failed"; exit 1; fi

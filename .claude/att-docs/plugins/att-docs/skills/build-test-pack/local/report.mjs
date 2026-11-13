@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { countedTries, heldRow, MAX_MEMORY_STOPS, MAX_TRIES, memoryStops } from './config.mjs';
+import { BUILDER_FAIL, countedTries, heldRow, MAX_MEMORY_STOPS, MAX_TRIES, memoryStops } from './config.mjs';
 import { readStatusLog, recordedRuns, repeatedCuts } from './status.mjs';
 
 const DAY = 86400000;
@@ -49,8 +49,10 @@ function jobEntry(config, row) {
   const done = entries.findLast((e) => e.phase === 'done' && e.event === 'pass');
   // The release line is written after the job settles and says nothing about its sheets.
   const failed = entries.findLast((e) => e.event === 'fail' && e.phase !== 'release');
-  const confidence = entries.findLast((e) => ['phase9-confidence', 'phase9-revalidate'].includes(e.phase)
-    && e.event === 'pass' && e.confidence)?.confidence;
+  // The level a rating step passed with, or the level a later build lowered it to.
+  const rated = entries.findLast((e) => e.event === 'confidence-lowered'
+    || (['phase9-confidence', 'phase9-revalidate'].includes(e.phase) && e.event === 'pass' && e.confidence));
+  const confidence = rated?.event === 'confidence-lowered' ? rated.overall : rated?.confidence;
   const last = failures.at(-1);
   const sheets = passed ? { pass: done?.sheetsPass ?? 0, limited: done?.sheetsLimited ?? 0, fail: 0 }
     : { pass: null, limited: null, fail: failed?.sheets ?? null };
@@ -122,6 +124,13 @@ export function reportData(config, queue, { period = 'day', now = new Date(), ra
 const minutes = (ms) => (ms ? `${Math.max(1, Math.round(ms / 60000))} min` : '-');
 const cell = (value) => (value === null || value === undefined ? '-' : code(String(value)));
 
+/**
+ * What to do about a thinking step cut at its output budget on its last runs. The report
+ * does not read the server, so the line names both hosts.
+ */
+const CUT_ADVICE = 'With the server\'s thinking budget set, raise its output budget with'
+  + ' `model.reasoningOutputByStep`; without it, turn its thinking off.';
+
 /** The report as Markdown. */
 export function renderReport(data) {
   const { counts } = data;
@@ -182,8 +191,9 @@ export function renderReport(data) {
       ? `- ${code(job.id)}: failed ${job.reasons.length} times, last ${where}. Dropped from the queue; `
         + 'it needs a person.'
       : job.state === 'HELD'
-      ? `- ${code(job.id)}: stopped ${where}. A retry cannot change it; fix the document or its rules, then `
-        + '`queue add --resume`.'
+      ? `- ${code(job.id)}: stopped ${where}. A retry cannot change it; ${job.reason === BUILDER_FAIL
+        ? 'the builder refuses the pack the review left, so fix what its failed sheets name'
+        : 'fix the document or its rules'}, then \`queue add --resume\`.`
       : job.state === 'RETRY' ? `- ${code(job.id)}: failed ${where}. Retries on its next run.`
         : `- ${code(job.id)}: failed ${where}. Not retried.`);
   }
@@ -192,7 +202,7 @@ export function renderReport(data) {
   if (!data.repeatedCuts.length) lines.push('None.', '');
   for (const step of data.repeatedCuts) {
     lines.push(`- ${code(step.id)}: ${code(step.step)} was cut at its output budget of ${cell(step.budget)}`
-      + ` tokens on its last ${cell(step.runs)} runs. Turn its thinking off.`);
+      + ` tokens on its last ${cell(step.runs)} runs. ${CUT_ADVICE}`);
   }
   if (data.repeatedCuts.length) lines.push('');
   lines.push('## Spot check', '');

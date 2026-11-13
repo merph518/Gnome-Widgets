@@ -1,13 +1,17 @@
 // A record of every model call a job makes: the prompt that went out, the reply that
 // came back, the token counts and the timings. One file per call, in work/calls, named
 // `<seq>-<step>-<attempt>.json`. The files hold document, rule and description text,
-// as detail.log does, so they are never echoed to the console or to status.log.
+// as detail.log does, so they are never echoed to the console or to status.log. A call
+// cut off at its output limit also keeps the end of its thinking text.
 
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 export const CALLS_VERSION = 1;
+
+/** The usage figures a call holds only when the server gave them. */
+export const USAGE_EXTRAS = ['reasoningTokens', 'answerTokens', 'promptMs', 'genMs', 'cachedTokens'];
 
 /**
  * A hash of the whole prompt, so two calls with the same text hash alike on any
@@ -51,7 +55,7 @@ export function callRecorder(dir) {
   return {
     /** Writes one call, adding its sequence number, and returns the file's path. */
     record({ step, attempt, thinking, maxTokens, seed = null, system, user, schema, reply = null,
-      errorCode = null, usage = null, startedAt, endedAt }) {
+      errorCode = null, usage = null, reasoningTail = null, startedAt, endedAt }) {
       fs.mkdirSync(dir, { recursive: true });
       seq ??= lastSeq(dir);
       seq += 1;
@@ -71,7 +75,11 @@ export function callRecorder(dir) {
         prompt: { system, user },
         reply,
         error: errorCode ? { code: errorCode } : null,
-        usage: { promptTokens: usage?.promptTokens ?? 0, outputTokens: usage?.outputTokens ?? 0 },
+        // The thinking and timing figures are kept only when the server gave them.
+        usage: { promptTokens: usage?.promptTokens ?? 0, outputTokens: usage?.outputTokens ?? 0,
+          ...Object.fromEntries(USAGE_EXTRAS.filter((key) => usage?.[key] !== undefined)
+            .map((key) => [key, usage[key]])) },
+        ...(reasoningTail ? { reasoningTail } : {}),
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
         ms: usage?.ms ?? endedAt - startedAt,

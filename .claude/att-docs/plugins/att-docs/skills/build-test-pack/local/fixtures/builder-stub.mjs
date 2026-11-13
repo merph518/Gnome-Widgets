@@ -4,9 +4,10 @@
 //   node builder-stub.mjs <pack.json> --out <dir>
 //
 // It checks enough to exercise the pipeline's gates and repairs: card IDs and
-// rules, objectives against sets, coverage against cards, and blank review
-// sheets. A card titled REJECT fails, so a test can drive a repair. It writes a
-// small workbook of the sheets a review reads. A pack whose revalidation.passed
+// rules, objectives against sets, each card's objectives against the sets that
+// hold it, coverage against cards, and blank review sheets. A card titled
+// REJECT fails, so a test can drive a repair. It writes a small workbook of
+// the sheets a review reads. A pack whose revalidation.passed
 // is false shows Workbook Validation as FAIL with what remains, and the
 // workbook is written all the same.
 
@@ -60,8 +61,12 @@ export function buildPack(pack) {
     if (!pattern.test(card.id)) add('Test Cards Markdown', `${card.id} is off the pattern`);
     if (card.title === 'REJECT') add('Test Cards Markdown', `${card.id} has a rejected title`);
     for (const id of list(card.rules)) if (!ruleIds.has(id)) add('Test Cards Markdown', `${card.id} names ${id}`);
-    if (!list(pack.testSets).some((s) => list(s.cards).includes(card.id))) {
-      add('Test Lab Markdown', `${card.id} is in no set`);
+    const held = list(pack.testSets).filter((s) => list(s.cards).includes(card.id));
+    if (!held.length) add('Test Lab Markdown', `${card.id} is in no set`);
+    for (const objective of list(card.objectives)) {
+      if (OBJECTIVES.includes(objective) && !held.some((s) => s.objective === objective)) {
+        add('Objective Matrix', `${card.id} lists ${objective}, but no set holding it runs that`);
+      }
     }
   }
   for (const objective of OBJECTIVES) {

@@ -10,15 +10,20 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fixTargets, GateError, mergeChecks, phase8, reconcile, REVIEW_SHEETS, tidyCard } from './phases.mjs';
+import { confidenceCeiling, draftWorkbook, fixTargets, GateError, holdToCeiling, mergeChecks, phase8, reconcile, REVIEW_SHEETS,
+  tidyCard } from './phases.mjs';
 import { almStyle } from './compare.mjs';
 import { checkPack, derivedSheets } from './pack-checks.mjs';
 import { readPack, readSheet } from './pack.mjs';
+import { REVALIDATION_CHECKS, REVALIDATION_GROUPS } from './schemas.mjs';
+import { statusFields } from './status.mjs';
 import { readXlsx } from './xlsx.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(HERE, 'fixtures');
 const stub = await import(pathToFileURL(path.join(FIXTURES, 'builder-stub.mjs')).href);
+// The stub with a `confidenceCeiling` export and a build that fails a rating above it.
+const ceilingBuilder = await import(pathToFileURL(path.join(FIXTURES, 'builder-ceiling.mjs')).href);
 // Every Draft workbook lands under one root, removed when this file's tests finish.
 const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-checks-test-'));
 after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
@@ -361,6 +366,110 @@ test('Phase 8 writes an unrated pack past every assumption limit as a Low Draft 
     [{}, 'Medium', undefined]);
 });
 
+/** A pack rated `overall` that carries `count` assumptions. */
+function ratedPack(overall, count) {
+  const pack = goodPack();
+  pack.assumptions = assumptions(count);
+  pack.limitations = {};
+  pack.confidence = { overall, reason: 'Two cards cover the change.' };
+  pack.executiveSummary = { confidence: `${overall}. Two cards cover the change.` };
+  return pack;
+}
+const LOWERED = 'Two cards cover the change. The rating was lowered to what the pack supports:';
+
+test('the rebuild lowers a rating above the confidence ceiling in code, and the builder passes the pack', async () => {
+  const pack = ratedPack('Medium', 12);
+  const { ctx, calls } = context(pack, { reply: nothing, builder: ceilingBuilder, command: CEILING_COMMAND });
+  const lines = [];
+  ctx.logs.status = (line) => lines.push(statusFields(line));
+  await phase8(ctx, pack, 'rebuild');
+  assert.equal(calls.length, 0);
+  const reason = `${LOWERED} 12 assumptions against a limit of 10.`;
+  assert.deepEqual([pack.confidence.overall, pack.confidence.reason, pack.limitations['Confidence Assessment'],
+    pack.executiveSummary.confidence], ['Low', reason, reason, `Low. ${reason}`]);
+  // One line, with the two levels and the reason code and nothing the builder said.
+  assert.deepEqual(lines.filter((line) => line.event === 'confidence-lowered'), [{ job: 'job', phase: 'phase9',
+    step: 'confidence-ceiling', event: 'confidence-lowered', overall: 'Low', asked: 'Medium', reason: 'confidence-ceiling' }]);
+  assert.deepEqual(lines.filter((line) => line.event === 'builder').map((line) => [line.attempt, line.failed]), [[0, 0]]);
+  assert.deepEqual(ceilingBuilder.buildPack(pack).failed, []);
+  assert.equal(draftFields(ctx, 'Confidence Assessment').overall, 'Low');
+  assert.equal(draftFields(ctx, 'Dashboard')['Overall Confidence'], 'Low');
+});
+
+test('a builder with no confidenceCeiling export leaves a rating above the ceiling to the builder, which refuses it', async () => {
+  const pack = ratedPack('Medium', 12);
+  const { ctx, calls } = context(pack, { reply: nothing, retries: 1, command: CEILING_COMMAND });
+  const lines = [];
+  ctx.logs.status = (line) => lines.push(line);
+  await assert.rejects(phase8(ctx, pack, 'rebuild'), (error) => error instanceof GateError && error.code === 'builder-fail');
+  assert.equal(calls.length, 1);
+  assert.equal(pack.confidence.overall, 'Medium');
+  assert.ok(!lines.some((line) => line.event === 'confidence-lowered'));
+  assert.deepEqual(confidenceCeiling(ctx, pack), { level: 'High', allowed: ['High', 'Medium', 'Low'], reasons: [] });
+});
+
+test('the confidence ceiling reads the builder\'s level and reasons, and a level the builder does not list sets none', () => {
+  const ctx = { builder: ceilingBuilder };
+  assert.deepEqual(confidenceCeiling(ctx, ratedPack('High', 5)),
+    { level: 'Medium', allowed: ['Medium', 'Low'], reasons: ['5 assumptions against a limit of 3'] });
+  assert.deepEqual(confidenceCeiling(ctx, ratedPack('High', 2)),
+    { level: 'High', allowed: ['High', 'Medium', 'Low'], reasons: [] });
+  const odd = { builder: { ...stub, confidenceCeiling: () => ({ level: 'Moderate', reasons: ['a reason'] }) } };
+  assert.deepEqual(confidenceCeiling(odd, ratedPack('High', 5)),
+    { level: 'High', allowed: ['High', 'Medium', 'Low'], reasons: [] });
+});
+
+test('a rating is lowered only when it is above the ceiling, and a second lowering keeps one sentence for it', () => {
+  const ctx = { builder: ceilingBuilder };
+  const pack = ratedPack('High', 5);
+  holdToCeiling(ctx, pack);
+  assert.deepEqual([pack.confidence.overall, pack.confidence.reason, pack.limitations['Confidence Assessment']],
+    ['Medium', `${LOWERED} 5 assumptions against a limit of 3.`, undefined]);
+  // At its ceiling the pack is left alone.
+  const settled = structuredClone(pack);
+  holdToCeiling(ctx, pack);
+  assert.deepEqual(pack, settled);
+  // More assumptions lower the ceiling again; the reason names the ceiling the pack now sits at.
+  pack.assumptions = assumptions(12);
+  holdToCeiling(ctx, pack);
+  assert.deepEqual([pack.confidence.overall, pack.confidence.reason],
+    ['Low', `${LOWERED} 12 assumptions against a limit of 10.`]);
+  assert.equal(pack.limitations['Confidence Assessment'], pack.confidence.reason);
+  // An unrated pack has no level to lower, and a context with no builder sets no ceiling.
+  const unrated = { ...ratedPack('High', 12), confidence: {} };
+  holdToCeiling(ctx, unrated);
+  assert.deepEqual(unrated.confidence, {});
+  const bare = ratedPack('High', 12);
+  reconcile({}, bare);
+  assert.equal(bare.confidence.overall, 'High');
+});
+
+test('a lowered reason states no level but the ceiling\'s, and a rating with no reason of its own takes the lowering sentence', () => {
+  const ctx = { builder: ceilingBuilder };
+  const stated = ratedPack('High', 5);
+  stated.confidence.reason = 'Confidence is High for BR-1.';
+  holdToCeiling(ctx, stated);
+  assert.equal(stated.executiveSummary.confidence,
+    'Medium. confidence for BR-1. The rating was lowered to what the pack supports: 5 assumptions against a limit of 3.');
+  const plain = ratedPack('High', 5);
+  plain.confidence = { overall: 'High', reason: 'Overall confidence is High.' };
+  holdToCeiling(ctx, plain);
+  assert.equal(plain.confidence.reason, 'The rating was lowered to what the pack supports: 5 assumptions against a limit of 3.');
+});
+
+test('the Draft workbook of a pack rated above its ceiling reads the ceiling, with no status line and the pack left as it was', () => {
+  const pack = ratedPack('Medium', 12);
+  const { ctx } = context(pack, { reply: nothing, builder: ceilingBuilder, command: CEILING_COMMAND });
+  const lines = [];
+  ctx.logs.status = (line) => lines.push(line);
+  const before = structuredClone(pack);
+  const draft = draftWorkbook(ctx, pack, 'review');
+  assert.ok(draft.workbook, draft.text);
+  assert.equal(draftJson(ctx).confidence.overall, 'Low');
+  assert.deepEqual(lines, []);
+  assert.deepEqual(pack, before);
+});
+
 test('Phase 8 sends a failed check to repair, and the repaired pack passes', async () => {
   const pack = goodPack();
   pack.rules[2].risk = 'High';
@@ -542,4 +651,22 @@ test('mergeChecks fails a check one part fails, passes one a part shows passing,
   const none = mergeChecks([two]);
   assert.equal(none.remaining.length, 7);
   assert.match(none.remaining[0], /Not evidenced/);
+});
+
+test('the groups of checks the revalidation walk asks together hold each check once, and their answers merge to one verdict per check', () => {
+  const grouped = REVALIDATION_GROUPS.flatMap((group) => group.checks);
+  assert.deepEqual([...grouped].sort(), [...REVALIDATION_CHECKS].sort());
+  const answer = (group, fail) => ({ checks: group.checks.map((check) => (check === fail
+    ? { check, verdict: 'fail', why: 'Lost', fix: 'Add a card for it' } : { check, verdict: 'pass', why: '', fix: '' })) });
+  const merged = mergeChecks(REVALIDATION_GROUPS.map((group) => answer(group)));
+  assert.equal(merged.passed, true);
+  assert.deepEqual(merged.checks.map((row) => row.check), REVALIDATION_CHECKS);
+  // One group's failed check fails the pack and keeps its fix for the repair round.
+  const failed = mergeChecks(REVALIDATION_GROUPS.map((group) => answer(group, 'Traceability complete')));
+  assert.equal(failed.passed, false);
+  assert.deepEqual(failed.checks.find((row) => row.check === 'Traceability complete'),
+    { check: 'Traceability complete', verdict: 'fail', why: 'Lost', fix: 'Add a card for it' });
+  assert.deepEqual(failed.remaining, ['Traceability complete: Lost']);
+  // A group left out of the walk leaves its checks unevidenced.
+  assert.equal(mergeChecks(REVALIDATION_GROUPS.slice(1).map((group) => answer(group))).remaining.length, 4);
 });

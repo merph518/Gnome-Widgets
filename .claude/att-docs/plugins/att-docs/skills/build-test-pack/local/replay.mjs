@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CALLS_VERSION, promptHash, schemaHash } from './calls.mjs';
+import { CALLS_VERSION, promptHash, schemaHash, USAGE_EXTRAS } from './calls.mjs';
 import { estimateTokens, ModelError } from './model.mjs';
 
 /** Why a call was not answered from the recording. */
@@ -231,13 +231,15 @@ export function replayModel({ dir, miss = 'fail', live = null }) {
         return liveModel().json(request);
       }
       const usage = { promptTokens: record.usage.promptTokens, outputTokens: record.usage.outputTokens,
-        ms: record.ms };
+        ms: record.ms,
+        ...Object.fromEntries(USAGE_EXTRAS.filter((key) => record.usage[key] !== undefined)
+          .map((key) => [key, record.usage[key]])) };
       // The seed is not matched: the recording fixes the reply whatever seed the run would send.
       const seed = record.seed ?? null;
       report.served += 1;
       if (record.error) {
         throw Object.assign(new ModelError(record.error.code, `recorded call failed: ${record.error.code}`),
-          { usage, seed });
+          { usage, seed, reasoningTail: record.reasoningTail ?? '' });
       }
       return { value: record.reply, usage, seed };
     },

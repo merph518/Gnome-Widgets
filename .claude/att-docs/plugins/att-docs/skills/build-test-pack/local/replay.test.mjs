@@ -57,6 +57,20 @@ test('the recorded counts and timings come back with the reply', async () => {
   assert.deepEqual((await model.json(request('phase6_cards'))).usage, { promptTokens: 321, outputTokens: 12, ms: 987 });
 });
 
+test('recorded thinking and timing figures come back with the reply, and a cut call keeps the end of its thinking', async () => {
+  const extras = { reasoningTokens: 80, answerTokens: 10, promptMs: 12, genMs: 50, cachedTokens: 4 };
+  const model = replayModel({ dir: recording([
+    { step: 'phase6_cards', reply: { text: 'x' }, usage: { promptTokens: 40, outputTokens: 4, ms: 5, ...extras } },
+    { step: 'phase1_understanding', thinking: true, errorCode: 'length',
+      usage: { promptTokens: 40, outputTokens: 90, ms: 5, ...extras }, reasoningTail: 'the last thought' },
+  ]) });
+  assert.deepEqual((await model.json(request('phase6_cards'))).usage,
+    { promptTokens: 40, outputTokens: 4, ms: 5, ...extras });
+  await assert.rejects(model.json(request('phase1_understanding', { reasoning: true })),
+    (error) => error.code === 'length' && error.reasoningTail === 'the last thought'
+      && error.usage.reasoningTokens === 80 && error.usage.promptMs === 12);
+});
+
 test('a call the recording lacks is a miss with its own code, and by default stops the run', async () => {
   const model = replayModel({ dir: recording([{ step: 'phase6_cards', reply: { text: 'x' } }]) });
   await model.json(request('phase6_cards'));

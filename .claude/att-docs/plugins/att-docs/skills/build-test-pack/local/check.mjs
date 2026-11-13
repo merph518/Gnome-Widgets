@@ -1,17 +1,19 @@
 // The setup check: says whether this host is ready to build test packs, so a
 // missing unit or an unreachable model shows up before a job needs it. It reads
 // the installed units, the env file, the pause targets, the model server and
-// the release command. Every line is `<area>  <name>  pass|fail  <code>` and
-// names units, variables and config fields only; no value from the env file is
-// ever printed.
+// the release command. Every line is `<area>  <name>  pass|fail|warn  <code>` and
+// names units, variables, config fields and thinking steps only; no value from
+// the env file is ever printed. A `warn` line is advice and never fails the check.
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { REASONING_STEPS } from './config.mjs';
 import { localEndpoint, localFetch } from './model.mjs';
 import { UNIT_NAME } from './pause.mjs';
+import { outputCap } from './phases.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REQUIRED_ENV = ['BUILD_PACK_SCRIPT', 'BUILD_PACK_CONFIG'];
@@ -141,10 +143,25 @@ function checkEnv({ home }, out) {
   return env.get('PATH') ?? null;
 }
 
+/** What `sudo -n -l` prints for this user; empty when sudo cannot list. */
+export function sudoListing(exec = defaultExec) {
+  return exec('sudo', ['-n', '-l']).stdout;
+}
+
+/** The verbs of `verbs` that `listing` does not let the user run on `unit` with no password. */
+export function sudoersRefused(listing, unit, verbs) {
+  return verbs.filter((verb) => !sudoersAllows(listing, `/usr/bin/systemctl ${verb} ${unit}`));
+}
+
+/** The verdict a line shows; a `warn` verdict is advice and passes. */
+const WARN = 'warn';
+
+const checkLine = (area, name, pass, code) => `${area}  ${name}  ${pass === WARN ? WARN : pass ? 'pass' : 'fail'}  ${code}`;
+
 function checkPause({ exec }, config, out) {
   const { units: patterns, scope } = config.pause;
   const user = scope === 'user';
-  let sudoListing;
+  let listing;
   for (const pattern of patterns) {
     // A unit that other units refer to but that is not installed lists as `not-found`.
     const names = (result) => [...new Set(result.stdout.split('\n').map((l) => l.trim().split(/\s+/))
@@ -162,18 +179,31 @@ function checkPause({ exec }, config, out) {
       out('pause', pattern, false, `missing; scope ${scope}`);
       continue;
     }
-    sudoListing ??= user ? '' : exec('sudo', ['-n', '-l']).stdout;
+    listing ??= user ? '' : sudoListing(exec);
     for (const unit of units) {
       if (user) {
         out('pause', unit, true, 'found; scope user');
         continue;
       }
-      const refused = ['stop', 'start']
-        .filter((verb) => !sudoersAllows(sudoListing, `/usr/bin/systemctl ${verb} ${unit}`));
+      const refused = sudoersRefused(listing, unit, ['stop', 'start']);
       out('pause', unit, !refused.length,
         refused.length ? `sudoers-refused ${refused.join(' ')}` : 'found; sudoers allows stop and start');
     }
   }
+}
+
+/**
+ * The lines of the setup check's pause section that fail, for a check that
+ * runs before a job. A host with no `pause.units` reads nothing, and the user
+ * scope never calls sudo.
+ */
+export function pauseFailures(config, { exec = defaultExec } = {}) {
+  const lines = [];
+  checkPause({ exec }, config, (area, name, pass, code) => {
+    if (!pass) lines.push(checkLine(area, name, pass, code));
+  });
+  // Two patterns can name one unit.
+  return [...new Set(lines)];
 }
 
 async function checkModel({ fetchImpl }, config, out) {
@@ -197,7 +227,72 @@ async function checkModel({ fetchImpl }, config, out) {
     out('model', endpoint, false, 'no-model-list');
     return;
   }
-  out('model', name, listed.includes(name), listed.includes(name) ? 'listed' : 'not-listed');
+  const found = listed.includes(name);
+  out('model', name, found, found ? 'listed' : 'not-listed');
+  if (found) await checkThinkingBudget({ fetchImpl }, config, out);
+}
+
+/**
+ * The least room, in tokens, a thinking step's output budget keeps above the thinking
+ * budget for its answer before the setup check warns. The largest answer seen after a
+ * call used its whole thinking budget was about 2,230 tokens.
+ */
+export const ANSWER_ROOM = 2300;
+
+/**
+ * The server-wide thinking budget in a model's `llamacpp_args`: the value of the last
+ * `--reasoning-budget N` or `--reasoning-budget=N`, as the server reads a repeated flag.
+ * Quoted text, such as the budget's message, is never read as a flag. Null when the flag
+ * is absent or its value is not above zero, since 0 turns thinking off and -1 sets no limit.
+ */
+export function thinkingBudget(args) {
+  const bare = String(args ?? '').replace(/"[^"]*"|'[^']*'/g, ' ');
+  const flags = [...bare.matchAll(/(?:^|\s)--reasoning-budget(?:\s+|=)(-?\d+)(?=\s|$)/g)];
+  const value = flags.length ? Number(flags.at(-1)[1]) : 0;
+  return value > 0 ? value : null;
+}
+
+/**
+ * Each thinking step whose output budget keeps less than ANSWER_ROOM tokens above
+ * `budget`, the thinking budget, as `{ step, outputBudget, room }`. A step's output
+ * budget is the one its calls are sent with.
+ */
+export function shortThinkingSteps(config, budget) {
+  return Object.keys(REASONING_STEPS).map((key) => {
+    const [phase, step] = key.split('.');
+    const outputBudget = outputCap({ config }, phase, true, step);
+    return { step: key, outputBudget, room: outputBudget - budget };
+  }).filter((entry) => entry.room < ANSWER_ROOM);
+}
+
+/**
+ * Reads the thinking budget saved for the model and warns when none is set, when it
+ * cannot be read, and for each thinking step it leaves too little room to answer.
+ * Every line here passes or warns: a host runs without the budget, only slower.
+ */
+async function checkThinkingBudget({ fetchImpl }, config, out) {
+  const { endpoint, name } = config.model;
+  let options;
+  try {
+    const reply = await fetchImpl(`${localEndpoint(endpoint)}/models/${encodeURIComponent(name)}`,
+      { redirect: 'error', signal: AbortSignal.timeout(5000) });
+    options = reply.ok ? (await reply.json())?.recipe_options : null;
+  } catch {
+    options = null;
+  }
+  if (!options || typeof options !== 'object') {
+    out('thinking-budget', name, WARN, 'not-read');
+    return;
+  }
+  const budget = thinkingBudget(options.llamacpp_args);
+  if (!budget) {
+    out('thinking-budget', name, WARN, 'not-set');
+    return;
+  }
+  out('thinking-budget', name, true, `set ${budget}`);
+  for (const { step, outputBudget, room } of shortThinkingSteps(config, budget)) {
+    out('thinking-budget', step, WARN, `answer-room ${room}; output budget ${outputBudget}, needs ${budget + ANSWER_ROOM}`);
+  }
 }
 
 function checkRelease(config, envPath, out) {
@@ -212,17 +307,17 @@ function checkRelease(config, envPath, out) {
 }
 
 /**
- * Checks this host. Returns the lines and whether every check passed. The
- * release command is looked up, never run: running it would unload a model
- * another job may be using.
+ * Checks this host. Returns the lines and whether every check passed; a `warn`
+ * line leaves that true. The release command is looked up, never run: running
+ * it would unload a model another job may be using.
  */
 export async function setupCheck(config, { exec = defaultExec, fetchImpl = localFetch,
   home = os.homedir(), unitsDir = path.join(HERE, 'systemd') } = {}) {
   const lines = [];
   let ok = true;
   const out = (area, name, pass, code) => {
-    ok &&= pass;
-    lines.push(`${area}  ${name}  ${pass ? 'pass' : 'fail'}  ${code}`);
+    ok &&= Boolean(pass);
+    lines.push(checkLine(area, name, pass, code));
   };
   checkUnits({ unitsDir, home, exec }, out);
   const envPath = checkEnv({ home }, out);

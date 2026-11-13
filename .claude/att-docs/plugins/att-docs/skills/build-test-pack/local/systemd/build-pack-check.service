@@ -13,8 +13,9 @@
 # the file. Rows whose rules went unchecked (exit 3) do not fail it.
 #
 # The second command is the setup check: units, env file, pause units, model
-# server and release command. It runs after the queue check, so a day the queue
-# check fails skips it.
+# server, the server's thinking budget and release command. A `warn` line, such
+# as a thinking budget that is not set, does not fail the unit. It runs after
+# the queue check, so a day the queue check fails skips it.
 #
 # Install beside build-pack.service, which owns the env file:
 #   cp build-pack-check.service build-pack-check.timer ~/.config/systemd/user/
