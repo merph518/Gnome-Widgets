@@ -33,10 +33,11 @@ none, ask the user rather than guessing.
 | `<words-builder>` | The script that rebuilds the word list |
 | `<stub-names>` | The file names a failed download leaves behind |
 
-The scripts and both filters ship in this folder: `convert.sh`, `stamp.py`,
-`pages.py`, `doc_paths.py`, `list-numbers.py`, `check-list-numbers.py`,
-`check-shifted-text.py`, `build-words.py`,
-`check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`, and the
+The scripts and the filters ship in this folder: `convert.sh`, `stamp.py`,
+`pages.py`, `doc_paths.py`, `hidden-text.py`, `list-numbers.py`,
+`check-list-numbers.py`, `check-shifted-text.py`, `build-words.py`,
+`check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`,
+`list-markers.lua`, and the
 config reader `convert_config.py`. A script that needs a root, a host, or a data
 file reads it from `<config>`, given as `--config <file>`, and stops with exit 64
 without one. A path in the file is relative to the git toplevel of the file's
@@ -57,8 +58,9 @@ when it is not normal.
 `<converter-script>` walks the batch and routes each document by format. It
 calls `<stamp-script>` for the cleanup, the provenance block, and the page
 markers, which `<stamp-script>` gets from `<pages-script>`. Pandoc runs with
-two Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry, and
-`<flatten-tables-filter>` for the ones that would force a table into raw HTML.
+three Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry,
+`<flatten-tables-filter>` for the ones that would force a table into raw HTML,
+and `list-markers.lua` for list labels Markdown cannot draw.
 
 ## What the batch looks like
 
@@ -320,10 +322,27 @@ definition, it starts an item at 1 where Word counts the unused levels above it
 as already used, and it nests by level where Word nests by indentation. Left
 alone, a list restarts at 1 partway through and a sub-list lands at the margin.
 
+Word never prints its hidden text, runs whose properties set `w:vanish`
+directly, through their character or paragraph style, or through the document
+defaults, and Pandoc writes it as any other text. `hidden-text.py` removes
+those runs from every route that reads a `docx`, `doc` and `dot` included,
+before `list-numbers.py` sees the file. A character style and a paragraph
+style that both hide a run cancel each other, as Word treats the setting as a
+toggle. A run holding a field code stays, since Word still reads a field whose
+code is hidden. A file it cannot read goes on unchanged.
+
 `list-numbers.py` sits in front of Pandoc on every route that reads a `docx`,
 `doc` and `dot` included, and rewrites the numbering into a form Pandoc draws
 the way Word does. Lists inside tables and numbered headings are left as they
 are. A file it cannot read goes to Pandoc unchanged.
+
+Markdown numbers an ordered list with digits only, so Pandoc writes a list Word
+letters `a.`, `b.` or numbers `i.`, `ii.` as `1.`, `2.`, and a rule citing
+item 2.a finds no such item. `list-markers.lua` runs last on every route and
+turns each item of a letter or roman list outside a table into a paragraph
+that opens with Word's label, such as `a\.` or `(ii)`. What else the item
+holds follows that paragraph in order, and a list Word numbers with digits is
+left as a list.
 
 After a Word document is stamped, `check-list-numbers.py` compares each
 numbered item at the margin of the Markdown with the label LibreOffice's text

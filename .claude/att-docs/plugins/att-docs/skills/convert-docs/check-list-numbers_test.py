@@ -94,6 +94,75 @@ class CompareTest(unittest.TestCase):
         self.assertEqual([(n, label) for _, n, label, _ in differ], [(1, "3")])
         self.assertEqual(found, 3)
 
+    def test_an_item_with_no_labelled_copy_ahead_is_not_found(self):
+        # Item 3's copy in the export carries no label, as a table cell's would.
+        export = (
+            "    1. (Build 4 2026) When the user has selected the allegation, the window opens.\n"
+            "    2. The Cancel pushbutton closes the window without saving.\n"
+            "(Build 4 2026) When the user has selected the allegation, a tab opens.\n"
+            "    4. The Cancel pushbutton closes the window without saving.\n"
+        )
+        markdown = (
+            "2.  The Cancel pushbutton closes the window without saving.\n\n"
+            "3.  (Build 4 2026) When the user has selected the allegation, a tab opens.\n\n"
+            "4.  The Cancel pushbutton closes the window without saving.\n"
+        )
+        self.assertEqual(CHECK.compare(markdown, export), ([], 2, 1))
+
+    def test_an_earlier_item_opening_alike_with_the_same_number_is_found(self):
+        export = ("    1. The Save pushbutton will be enabled when the page loads.\n"
+                  "    2. The Cancel pushbutton closes the window without saving.\n")
+        markdown = ("2.  The Cancel pushbutton closes the window without saving.\n\n"
+                    "1.  The Save pushbutton will be enabled when the page loads.\n")
+        self.assertEqual(CHECK.compare(markdown, export), ([], 2, 0))
+
+    def test_a_later_copy_with_the_number_does_not_hide_a_shifted_list(self):
+        # The second list repeats the first item's opening under number 2; the
+        # first list, numbered one high throughout, still differs on every item.
+        export = ("    1. The window will display the case name and number.\n"
+                  "    2. The Cancel pushbutton closes the window without saving.\n"
+                  "    1. Zeta item text here for list two.\n"
+                  "    2. The window will display the case name and number.\n"
+                  "    3. Last item text in list two goes here.\n")
+        markdown = ("2.  The window will display the case name and number.\n\n"
+                    "3.  The Cancel pushbutton closes the window without saving.\n\n"
+                    "4.  Zeta item text here for list two.\n")
+        differ, found, missing = CHECK.compare(markdown, export)
+        self.assertEqual([(n, label) for _, n, label, _ in differ],
+                         [(2, "1"), (3, "2"), (4, "1")])
+        self.assertEqual((found, missing), (3, 0))
+
+    def test_an_unpaired_opening_far_ahead_does_not_reopen_earlier_items(self):
+        # The first item pairs with the second "Intro" copy, leaving the first
+        # one unpaired; item 3's own copy still carries no label.
+        export = (
+            "    1. Intro text that repeats later in the document.\n"
+            "    1. Some other heading list item text.\n"
+            "    2. Intro text that repeats later in the document.\n"
+            "    1. (Build 4 2026) When the user has selected the allegation, the window opens.\n"
+            "    2. The Cancel pushbutton closes the window without saving.\n"
+            "(Build 4 2026) When the user has selected the allegation, a tab opens.\n"
+            "    4. The Cancel pushbutton closes the window without saving.\n"
+        )
+        markdown = (
+            "2.  Intro text that repeats later in the document.\n\n"
+            "2.  The Cancel pushbutton closes the window without saving.\n\n"
+            "3.  (Build 4 2026) When the user has selected the allegation, a tab opens.\n\n"
+            "4.  The Cancel pushbutton closes the window without saving.\n"
+        )
+        self.assertEqual(CHECK.compare(markdown, export), ([], 3, 1))
+
+    def test_an_item_whose_first_line_is_short_pairs_with_its_longer_copy(self):
+        export = ("    1. The window shows the value from https://example.org/very/long/path/"
+                  "to/page and more.\n"
+                  "    2. Second item text that is long enough here.\n")
+        markdown = ("5.  The window shows the value from\n"
+                    "    <https://example.org/very/long/path/to/page> and more.\n\n"
+                    "6.  Second item text that is long enough here.\n")
+        differ, found, missing = CHECK.compare(markdown, export)
+        self.assertEqual([(n, label) for _, n, label, _ in differ], [(5, "1"), (6, "2")])
+        self.assertEqual((found, missing), (2, 0))
+
     def test_short_items_and_fenced_code_are_skipped(self):
         markdown = ("1.  Yes\n\n```\n"
                     "9.  The window will display the case name and the case number.\n```\n")
