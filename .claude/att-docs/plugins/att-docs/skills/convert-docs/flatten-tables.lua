@@ -10,6 +10,12 @@
 -- pipe syntax cannot hold, so it is flattened to one line of text. A cell
 -- spanning rows or columns has no pipe equivalent, so it is expanded into the
 -- individual cells it covers, keeping the grid rectangular.
+--
+-- A table nested inside a cell is flattened the same way, one line of the
+-- cell per row of the inner table. The lines are separated by a <br>, which
+-- GitHub and the common Markdown viewers draw as a line break inside a pipe
+-- table cell, and the cells of each row are joined by a semicolon in Word's
+-- order.
 
 local List = require 'pandoc.List'
 
@@ -30,6 +36,77 @@ local function ends_open(inlines)
 end
 
 local flatten_blocks
+
+-- A pipe table row is one line, so a line break inside a cell is what a Word
+-- author pressed shift and enter for and pipe syntax cannot hold. Left in
+-- place it forces the writer to fall back to HTML for the whole table.
+local function strip_breaks(inlines)
+  -- Walked as a block rather than looped over, so a break nested inside emphasis
+  -- or a link is reached too.
+  local plain = pandoc.walk_block(pandoc.Plain(inlines), {
+    LineBreak = function(_) return pandoc.Space() end,
+    SoftBreak = function(_) return pandoc.Space() end,
+  })
+  return plain.content
+end
+
+-- The one line break a flattened cell keeps. It is written as raw Markdown, so
+-- the writer neither escapes it nor treats it as a reason to fall back to HTML.
+local function line_break()
+  return pandoc.RawInline('markdown', '<br>')
+end
+
+-- Starts the addition on a line of its own within the cell.
+local function join_line(target, addition)
+  if #addition == 0 then
+    return target
+  end
+  if #target > 0 then
+    target:insert(line_break())
+  end
+  target:extend(addition)
+  return target
+end
+
+local function is_blank(inlines)
+  return pandoc.utils.stringify(pandoc.Plain(inlines)):match('%S') == nil
+end
+
+-- One row of a nested table as one line: its cells in Word's order, joined by
+-- a semicolon. A cell Word merges down several rows is held only by the first
+-- row it spans, so the rows beneath it simply have one cell fewer; the empty
+-- cells a span leaves once the table is expanded are dropped for the same
+-- reason.
+local function flatten_row(row)
+  local out = List:new{}
+  for _, cell in ipairs(row.cells) do
+    local text = strip_breaks(flatten_blocks(cell.contents))
+    if not is_blank(text) then
+      if #out > 0 then
+        out:insert(pandoc.Str(';'))
+        out:insert(pandoc.Space())
+      end
+      out:extend(text)
+    end
+  end
+  return out
+end
+
+-- Every row of a nested table, head first and foot last, one line each.
+local function flatten_table(tbl)
+  local rows = List:new{}
+  rows:extend(tbl.head.rows)
+  for _, body in ipairs(tbl.bodies) do
+    rows:extend(body.head)
+    rows:extend(body.body)
+  end
+  rows:extend(tbl.foot.rows)
+  local out = List:new{}
+  for _, row in ipairs(rows) do
+    out = join_line(out, flatten_row(row))
+  end
+  return out
+end
 
 local function join(target, addition)
   if #addition == 0 then
@@ -56,12 +133,20 @@ end
 -- Reduces a list of blocks to a single line of inlines, keeping every boundary
 -- the reader needs: the items of a list stay separated, which is what makes
 -- this worth writing rather than calling blocks_to_inlines, since that runs the
--- items of a list together into one word.
+-- items of a list together into one word. A nested table, and whatever follows
+-- it, starts on a line of its own.
 flatten_blocks = function(blocks)
   local out = List:new{}
-  for _, block in ipairs(blocks) do
+  for index, block in ipairs(blocks) do
     local t = block.t
-    if t == 'Para' or t == 'Plain' or t == 'Header' then
+    if t == 'Table' then
+      out = join_line(out, flatten_table(block))
+      local rest = List:new{}
+      for later = index + 1, #blocks do
+        rest:insert(blocks[later])
+      end
+      return join_line(out, flatten_blocks(rest))
+    elseif t == 'Para' or t == 'Plain' or t == 'Header' then
       out = join(out, List:new(block.content))
     elseif t == 'BulletList' or t == 'OrderedList' then
       local items = block.content
@@ -89,19 +174,6 @@ flatten_blocks = function(blocks)
     end
   end
   return out
-end
-
--- A pipe table row is one line, so a line break inside a cell is what a Word
--- author pressed shift and enter for and pipe syntax cannot hold. Left in
--- place it forces the writer to fall back to HTML for the whole table.
-local function strip_breaks(inlines)
-  -- Walked as a block rather than looped over, so a break nested inside emphasis
-  -- or a link is reached too.
-  local plain = pandoc.walk_block(pandoc.Plain(inlines), {
-    LineBreak = function(_) return pandoc.Space() end,
-    SoftBreak = function(_) return pandoc.Space() end,
-  })
-  return plain.content
 end
 
 local function empty_cell()

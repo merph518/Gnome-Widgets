@@ -28,8 +28,16 @@ import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
+from importlib import util
 from pathlib import Path
 from typing import Callable
+from xml.etree import ElementTree as ET
+
+# The Word file reader that knows which paragraphs the conversion numbers.
+_SPEC = util.spec_from_file_location(
+    "hidden_text", Path(__file__).resolve().parent / "hidden-text.py")
+HIDDEN = util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(HIDDEN)
 
 # Formats LibreOffice can lay out as pages. A spreadsheet has no pages a reader
 # turns, and the HTML, text, and Markdown sources have none at all.
@@ -211,6 +219,26 @@ def render(path: Path, workdir: Path) -> Path | None:
     return pdf if pdf.is_file() else None
 
 
+def as_listed(path: Path, workdir: Path) -> Path:
+    """The file LibreOffice lays out in place of PATH, numbered as the Markdown is.
+
+    In a `docx` copy LibreOffice wrote, a blank paragraph can carry a deleted list
+    item's list, which LibreOffice numbers and the conversion does not, so every
+    page opening on a later item of that list would carry a number the Markdown
+    lacks. The copy takes those paragraphs out of their lists and changes nothing
+    else. PATH itself is laid out when there are none, or when it cannot be read.
+    """
+    if path.suffix.lower() not in WORD:
+        return path
+    listed = workdir / "listed" / path.name
+    listed.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        taken = HIDDEN.unlist_copied_blanks(path, listed)
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
+        return path
+    return listed if taken else path
+
+
 def layout_of(path: Path, renderable: Path | None = None) -> Layout | None:
     """The best layout available for a document, or None when it has no pages.
 
@@ -229,7 +257,7 @@ def layout_of(path: Path, renderable: Path | None = None) -> Layout | None:
     if suffix not in RENDERABLE:
         return None
     with tempfile.TemporaryDirectory() as workdir:
-        pdf = render(candidate, Path(workdir))
+        pdf = render(as_listed(candidate, Path(workdir)), Path(workdir))
         if pdf is None:
             return None
         found = from_pdf(pdf, "as LibreOffice lays the document out")

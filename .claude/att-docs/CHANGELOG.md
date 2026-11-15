@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.31.38](https://github.com/merph518/Overmind/compare/v0.31.37...v0.31.38) (2026-11-15)
+
+
+### Bug Fixes
+
+* **convert-docs:** count a list level that names no start from 0 ([de76659](https://github.com/merph518/Overmind/commit/de76659fdf4c1484c8b340278c05b05d60800b2c))
+* **convert-docs:** count the spaces typed ahead of a hanging paragraph's first words ([501f3a1](https://github.com/merph518/Overmind/commit/501f3a10f44d1d500662ab75a27c8051c0d36c1c))
+* **convert-docs:** end an item at a paragraph Word starts short of its text ([5b3b01b](https://github.com/merph518/Overmind/commit/5b3b01ba33c93db2548f375691d01d3cb7a97e81))
+* **convert-docs:** follow a paragraph's own tab stops when placing a paragraph after a sub-list ([749d1d8](https://github.com/merph518/Overmind/commit/749d1d8de29e76efca35d845c6de3f428d912955))
+* **convert-docs:** keep a digit list apart from the one before it when it starts its own count ([3319e0b](https://github.com/merph518/Overmind/commit/3319e0b2a8f7ac2c8a0a2cdcf31c57e962f65e0e))
+* **convert-docs:** keep an indented paragraph in its list item across a blank paragraph ([329417c](https://github.com/merph518/Overmind/commit/329417ce2eff12a62223ae5d8149e95b734b24b1))
+* **convert-docs:** keep an indented paragraph in its list item across a blank paragraph ([e8877e9](https://github.com/merph518/Overmind/commit/e8877e9d5559d3fdc1890ae5bc892cb0d3ac905a))
+* **convert-docs:** number top-level lists the way Word prints them ([c108882](https://github.com/merph518/Overmind/commit/c108882aa5aaead75955f6cb7cf86ddf188d46d1))
+* **convert-docs:** take a list LibreOffice copied onto a paragraph off it when the Word file gives it none ([e74308f](https://github.com/merph518/Overmind/commit/e74308f88f39b15bb9f421bf9744b7a713fd8029))
+* **convert-docs:** write a paragraph after a sub-list under the item Word draws it under ([b104ba4](https://github.com/merph518/Overmind/commit/b104ba405cec75e7cdff64f84d32ce305fd49b75))
+* **convert-docs:** write a paragraph after a sub-list under the item Word draws it under ([c1b5816](https://github.com/merph518/Overmind/commit/c1b58161c0a6f6a406f5af1ba2c7aef35462d3b5))
+
+## [0.31.37](https://github.com/merph518/Overmind/compare/v0.31.36...v0.31.37) (2026-11-15)
+
+
+### Bug Fixes
+
+* **convert-docs:** count a Word list across its overrides and keep a heading Word numbers as an item ([14419db](https://github.com/merph518/Overmind/commit/14419db4baf33ff8d4006c21068342095a83afcd))
+* **convert-docs:** count a Word list across its overrides and keep a heading Word numbers as an item ([f7973c5](https://github.com/merph518/Overmind/commit/f7973c5be4c9d2ff4931acd65266b76168ebc715))
+* **convert-docs:** fall back to LibreOffice's copy and lay pages out from the rebuilt lists ([6286869](https://github.com/merph518/Overmind/commit/6286869121ba40bc656514e34d5bfe460c737ffd))
+* **convert-docs:** keep tracked-deleted text and the byte-order mark out of the list-number check ([20f9100](https://github.com/merph518/Overmind/commit/20f9100c1cc5bd4fe32ca42d0040114265fa61cc))
+* **convert-docs:** lay pages out with the copied list taken off the blank ([e1639ee](https://github.com/merph518/Overmind/commit/e1639ee3e57190f5fdf9635cf1a8776c79313389))
+* **convert-docs:** map the layout copy's blanks back through the tree, not by paragraph order ([b8b49e3](https://github.com/merph518/Overmind/commit/b8b49e39ab51c697b322b9305587d6adcece62f9))
+* **convert-docs:** read the list-number check's source without tracked deletions ([cab9220](https://github.com/merph518/Overmind/commit/cab9220aab48568a85fd58879eba8ed099139511))
+* **convert-docs:** take a blank paragraph LibreOffice gave a deleted item's list out of it ([28ebfd0](https://github.com/merph518/Overmind/commit/28ebfd03bcca8e9c559917e22311578a9bb5e7e7))
+* **convert-docs:** take a blank paragraph LibreOffice gave a deleted item's list out of it ([8184f0b](https://github.com/merph518/Overmind/commit/8184f0b253f7dee886b52d3841515c9c608b5270))
+* **convert-docs:** write a table nested in a cell one row per line ([7c63bda](https://github.com/merph518/Overmind/commit/7c63bda0a9e8c7632c1dd7e9390c90589da80021))
+* **convert-docs:** write a table nested in a cell one row per line ([4bcd2ad](https://github.com/merph518/Overmind/commit/4bcd2ad1ee7a3d6286ec52f515e03201b21c2430))
+* **convert-docs:** write letter and roman items as labeled bullets, drop tracked-deleted items ([4f7801e](https://github.com/merph518/Overmind/commit/4f7801e250ea8c000abab7affce48fd4b8bb1ee8))
+* **convert-docs:** write letter and roman items as labeled bullets, drop tracked-deleted items ([d5f5b99](https://github.com/merph518/Overmind/commit/d5f5b99da4b41940c61663cb857ed1eaa85f385b))
+
+## [0.31.36](https://github.com/merph518/Overmind/compare/v0.31.35...v0.31.36) (2026-11-13)
+
+
+### Bug Fixes
+
+* **convert-docs:** drop Word hidden text, write letter and roman list labels, keep a leading o ([#681](https://github.com/merph518/Overmind/issues/681)) ([#684](https://github.com/merph518/Overmind/issues/684)) ([339674b](https://github.com/merph518/Overmind/commit/339674bc53ac1c9b167747b5929310c8557cf09f))
+* **convert-docs:** keep the list number check from wrapping onto an earlier item ([#677](https://github.com/merph518/Overmind/issues/677)) ([2fb0abb](https://github.com/merph518/Overmind/commit/2fb0abb338b662c16af5227bd18ab690f3597f9d))
+
 ## [0.31.35](https://github.com/merph518/Overmind/compare/v0.31.34...v0.31.35) (2026-11-13)
 
 
