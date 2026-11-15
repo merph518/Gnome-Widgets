@@ -33,10 +33,11 @@ none, ask the user rather than guessing.
 | `<words-builder>` | The script that rebuilds the word list |
 | `<stub-names>` | The file names a failed download leaves behind |
 
-The scripts and both filters ship in this folder: `convert.sh`, `stamp.py`,
-`pages.py`, `doc_paths.py`, `list-numbers.py`, `check-list-numbers.py`,
-`check-shifted-text.py`, `build-words.py`,
-`check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`, and the
+The scripts and the filters ship in this folder: `convert.sh`, `stamp.py`,
+`pages.py`, `doc_paths.py`, `hidden-text.py`, `doc-lists.py`, `list-numbers.py`,
+`check-list-numbers.py`, `check-shifted-text.py`, `build-words.py`,
+`check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`,
+`list-markers.lua`, and the
 config reader `convert_config.py`. A script that needs a root, a host, or a data
 file reads it from `<config>`, given as `--config <file>`, and stops with exit 64
 without one. A path in the file is relative to the git toplevel of the file's
@@ -57,8 +58,9 @@ when it is not normal.
 `<converter-script>` walks the batch and routes each document by format. It
 calls `<stamp-script>` for the cleanup, the provenance block, and the page
 markers, which `<stamp-script>` gets from `<pages-script>`. Pandoc runs with
-two Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry, and
-`<flatten-tables-filter>` for the ones that would force a table into raw HTML.
+three Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry,
+`<flatten-tables-filter>` for the ones that would force a table into raw HTML,
+and `list-markers.lua` for list labels Markdown cannot draw.
 
 ## What the batch looks like
 
@@ -181,7 +183,10 @@ names which:
 3. **as LibreOffice lays the document out**: everything else LibreOffice can
    open, rendered to a PDF. A legacy `.doc` lands here, since the modern copy
    LibreOffice writes carries no Word layout. LibreOffice breaks lines a little
-   differently from Word, so a page can start a line or two off.
+   differently from Word, so a page can start a line or two off. A blank
+   paragraph LibreOffice gave a deleted list item's list is taken out of that
+   list in the copy it lays out, as it is in the conversion, so a page that
+   opens on a later item of the list carries the number the Markdown gives it.
 
 A Word or PowerPoint marker carries no link, because SharePoint opens those
 files in the browser, which takes no page number in the address.
@@ -270,8 +275,9 @@ Every file that lands has to satisfy all of this:
 
 Check the HTML tags by name rather than by scanning for an angle bracket. These
 documents write their own placeholders as `<First Name>` and quote XML payloads
-verbatim, and both have to survive. The one tag the conversion writes itself is
-the empty `<a id="page-N"></a>` anchor on each page marker line.
+verbatim, and both have to survive. The conversion writes two tags itself: the
+empty `<a id="page-N"></a>` anchor on each page marker line, and the `<br>`
+between the rows of a table nested inside a table cell.
 
 Tables are pipe tables, because that is the only table syntax that renders
 outside Pandoc. A grid table shows up in an ordinary Markdown viewer as one
@@ -285,6 +291,12 @@ Any one of them makes the writer fall back to a raw `<table>`, so
 `<flatten-tables-filter>` removes them first. Block content in a cell becomes
 one line, with list items kept apart by a semicolon so the boundaries survive,
 and a spanned cell is expanded into the individual cells it covered.
+
+A table nested inside a cell is a fifth. It becomes lines of the outer cell
+separated by `<br>`: whatever precedes it in the cell, such as the table's
+title, then one line per inner row with its cells joined by `; ` in Word's
+order, then whatever follows it. A cell Word merges down several rows is given
+once, in the first row it spans, and an empty inner cell is left out.
 
 ## Routes
 
@@ -320,14 +332,55 @@ definition, it starts an item at 1 where Word counts the unused levels above it
 as already used, and it nests by level where Word nests by indentation. Left
 alone, a list restarts at 1 partway through and a sub-list lands at the margin.
 
+Word never prints its hidden text, runs whose properties set `w:vanish`
+directly, through their character or paragraph style, or through the document
+defaults, and Pandoc writes it as any other text. `hidden-text.py` removes
+those runs from every route that reads a `docx`, `doc` and `dot` included,
+before `list-numbers.py` sees the file. A character style and a paragraph
+style that both hide a run cancel each other, as Word treats the setting as a
+toggle. A run holding a field code stays, since Word still reads a field whose
+code is hidden. A paragraph whose mark is a tracked deletion joins the
+paragraph after it, as it does in the document Word prints with its changes
+accepted, so a deleted list item takes no number from the item after it.
+LibreOffice's `docx` copy of a `.doc` file gives the paragraph after a deleted
+mark the deleted paragraph's properties, list included, in place of its own.
+When that paragraph is left with nothing Word prints, it is a blank line Word
+draws with no number, so it comes out of the list rather than reaching the
+Markdown as an empty item that pushes every number after it one up. A file it
+cannot read goes on unchanged.
+
+A `doc` or `dot` file numbers a list through overrides of it, and Word keeps one
+count for the list however many overrides it has. The LibreOffice copy gives
+each override a definition of its own, so a second override restarts the
+count. `doc-lists.py` reads the list and override tables of the Word file and
+points the copy's instances of one list at one shared definition, keeping an
+override's restart only at its first paragraph and that paragraph's level, as
+Word applies it. A file it cannot read goes on unchanged, and when the step
+fails Pandoc reads the LibreOffice copy as it stands. The page markers are laid
+out from the rebuilt copy, so a page that opens on a renumbered item still
+finds its opening line in the Markdown.
+
 `list-numbers.py` sits in front of Pandoc on every route that reads a `docx`,
 `doc` and `dot` included, and rewrites the numbering into a form Pandoc draws
 the way Word does. Lists inside tables and numbered headings are left as they
-are. A file it cannot read goes to Pandoc unchanged.
+are, with one exception: a heading whose own numbering, not its style's, puts
+it in a list beside an ordinary item at the same level is drawn as one more
+item, unless that list also numbers a heading standing alone or through its
+style, and so numbers the document's sections. A file it cannot read goes to
+Pandoc unchanged.
+
+Markdown numbers an ordered list with digits only, so Pandoc writes a list Word
+letters `a.`, `b.` or numbers `i.`, `ii.` as `1.`, `2.`, and a rule citing
+item 2.a finds no such item. `list-markers.lua` runs last on every route and
+turns each item of a letter or roman list outside a table into a bullet whose
+text opens with Word's label, such as `- a\.` or `- (ii)`. What else the item
+holds stays nested under that bullet, two letter or roman lists side by side
+make one bullet list, and a list Word numbers with digits is left as a list.
 
 After a Word document is stamped, `check-list-numbers.py` compares each
 numbered item at the margin of the Markdown with the label LibreOffice's text
-export gives the same item in the source. A document whose numbers differ is
+export gives the same item in the source, or in the `doc-lists.py` copy for a
+`doc` or `dot` file. A document whose numbers differ is
 still written, and the run lists the items and counts the document under
 `with list numbers off the source`. Correct those numbers in the Markdown
 before rules are written from it. The check runs on its own too, against a
@@ -339,6 +392,12 @@ python3 check-list-numbers.py <apps-root>/<group>/<page>.md SOURCE.doc
 
 It exits 0 when every item agrees, 2 when one differs, and 1 when the source
 cannot be read.
+
+The check reads the source as the conversion does: a `.doc` or `.dot` file
+through a `docx` copy, and without its hidden text or the paragraphs deleted
+with their changes tracked, and with the blank paragraph LibreOffice gives a
+deleted item's list taken out of it, so neither paragraph takes a number on
+either side.
 
 ## Text in a font the conversion could not map
 

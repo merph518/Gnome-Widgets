@@ -28,6 +28,13 @@ Paragraphs in tables, headings, and levels drawn without a number are counted,
 since Word counts them, but left as they are: the table filter flattens a
 cell's list to text, and a heading's number is not written to the Markdown.
 
+A heading is the one exception when its own numbering, rather than its
+style's, puts it in a list whose item beside it on the page is an ordinary
+paragraph at the same level. Word draws it as one more item of that list, so
+its heading style comes off and it is numbered with the others. A list that
+also numbers a heading standing alone, or numbers headings through their
+style, numbers the document's sections, and its headings stay headings.
+
 Usage:
   list-numbers.py IN OUT
 
@@ -283,6 +290,59 @@ class Rewriter:
             elif child.tag != W + "sectPr":
                 self.walk(child, in_table)
 
+    def unhead(self, body):
+        """Takes the heading style off each heading that sits in a list as one
+        of its items. Headings beside each other in one list are passed over
+        when looking for the ordinary item next to them."""
+        run, runs, sections = [], [], set()
+        for paragraph in blocks(body):
+            place = None if paragraph is None else self.place(paragraph)
+            if place == "empty":
+                continue
+            if place is not None and place[1] == "styled":
+                sections.add(place[0][0])
+                place = None
+            if run and (place is None or place[0] != run[-1][1]):
+                runs.append(run)
+                run = []
+            if place is not None:
+                run.append((paragraph, place[0], place[1]))
+        runs.append(run)
+        for run in runs:
+            if run and all(kind == "heading" for _, _, kind in run):
+                sections.add(run[0][1][0])
+        for run in runs:
+            if not run or run[0][1][0] in sections:
+                continue
+            if not any(kind == "item" for _, _, kind in run):
+                continue
+            for paragraph, _, kind in run:
+                if kind == "heading":
+                    ppr = paragraph.find(W + "pPr")
+                    ppr.remove(ppr.find(W + "pStyle"))
+
+    def place(self, paragraph):
+        """Where a body paragraph sits for unhead: "empty" for one with no text,
+        None for one outside a list, otherwise its (definition, level) and its
+        kind: "item" for an ordinary paragraph, "heading" for a heading its own
+        numbering put in the list, "styled" for one its style numbers."""
+        if not has_text(paragraph):
+            return "empty"
+        ppr = paragraph.find(W + "pPr")
+        style_id = val(ppr.find(W + "pStyle")) if ppr is not None else None
+        found = self.numbering_of(ppr, style_id)
+        if found is None or level_format(self.numbering.level(*found)) == "none":
+            return None
+        abstract_id, _ = self.numbering.abstract(found[0])
+        if not self.styles.is_heading(style_id):
+            return (abstract_id, found[1]), "item"
+        own = val(ppr.find(W + "numPr/" + W + "numId"))
+        from_style = self.styles.numbering(style_id)
+        if own is None or (
+                from_style and self.numbering.abstract(from_style[0])[0] == abstract_id):
+            return (abstract_id, found[1]), "styled"
+        return (abstract_id, found[1]), "heading"
+
     def numbering_of(self, ppr, style_id):
         num_pr = None if ppr is None else ppr.find(W + "numPr")
         num_id = None if num_pr is None else val(num_pr.find(W + "numId"))
@@ -398,6 +458,18 @@ class Rewriter:
         return num_id
 
 
+def blocks(parent):
+    """The paragraphs of the body outside tables in order, with None for each
+    table, which ends any list running into it."""
+    for child in parent:
+        if child.tag == W + "p":
+            yield child
+        elif child.tag == W + "tbl":
+            yield None
+        elif child.tag != W + "sectPr":
+            yield from blocks(child)
+
+
 def set_numbering(ppr, num_id, ilvl):
     num_pr = ppr.find(W + "numPr")
     if num_pr is None:
@@ -424,7 +496,9 @@ def rewrite(source, target):
     styles = Styles(ET.fromstring(parts["word/styles.xml"]) if "word/styles.xml" in parts else None)
     body = document.find(W + "body")
     if body is not None:
-        Rewriter(Numbering(numbering, styles), styles).walk(body)
+        rewriter = Rewriter(Numbering(numbering, styles), styles)
+        rewriter.unhead(body)
+        rewriter.walk(body)
     parts["word/document.xml"] = ET.tostring(document, encoding="UTF-8", xml_declaration=True)
     parts["word/numbering.xml"] = ET.tostring(numbering, encoding="UTF-8", xml_declaration=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as out:

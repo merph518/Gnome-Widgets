@@ -2,6 +2,7 @@
 """Cases for pages.py: where page markers land, and how Word's layout is read."""
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import shutil
 import sys
@@ -14,6 +15,33 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import pages  # noqa: E402
 import stamp  # noqa: E402
+
+# Word files whose blank paragraph LibreOffice gave a deleted list item's list.
+_COPIES_SPEC = importlib.util.spec_from_file_location(
+    "hidden_text_test", HERE / "hidden-text_test.py")
+COPIES = importlib.util.module_from_spec(_COPIES_SPEC)
+_COPIES_SPEC.loader.exec_module(COPIES)
+
+
+def without_markup(path: pathlib.Path) -> None:
+    """Sets the Word file at PATH to show its tracked changes accepted, as
+    LibreOffice's copy of a .doc file does, so a layout leaves deletions out."""
+    with zipfile.ZipFile(path) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    parts["word/settings.xml"] = (
+        f'<w:settings xmlns:w="{COPIES.NS}">'
+        '<w:revisionView w:insDel="0" w:formatting="0"/></w:settings>').encode()
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+        b"</Types>", b'<Override PartName="/word/settings.xml" ContentType="application/'
+        b'vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>')
+    parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(
+        b"</Relationships>", b'<Relationship Id="rIdSettings" Type="http://schemas.'
+        b'openxmlformats.org/officeDocument/2006/relationships/settings" '
+        b'Target="settings.xml"/></Relationships>')
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+
 
 BODY = "\n".join([
     "## Brief Description",
@@ -151,6 +179,48 @@ class Word(unittest.TestCase):
     def test_a_file_word_never_laid_out_has_no_word_layout(self):
         path = self.docx('<w:p><w:r><w:t>a</w:t><w:br w:type="page"/><w:t>b</w:t></w:r></w:p>')
         self.assertIsNone(pages.from_word(path))
+
+
+class Listed(unittest.TestCase):
+    """A layout numbers a list the way the Markdown does."""
+
+    def setUp(self):
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+
+    def source(self, app):
+        # Two rules deleted ahead of the list, then a rule on a page of its own.
+        path = self.work / "rules.docx"
+        COPIES.WORD.docx(path, [
+            COPIES.deleted_item("Regional workers can open the window."),
+            COPIES.deleted_item("State workers can open the window.", COPIES.COPIED),
+            COPIES.copied(),
+            COPIES.WORD.para("Any user with a role in the stage can view the milestones.", 1),
+            '<w:p><w:pPr><w:pageBreakBefore/><w:numPr><w:ilvl w:val="0"/>'
+            '<w:numId w:val="1"/></w:numPr></w:pPr>' + COPIES.run(
+                "Upon window entry the milestones display for the first child.") + "</w:p>",
+        ], [COPIES.WORD.abstract(1, COPIES.WORD.level(0, left=720)), COPIES.WORD.num(1, 1)])
+        without_markup(path)
+        COPIES.application(path, app)
+        return path
+
+    def test_libreoffices_copy_is_laid_out_without_the_copied_list(self):
+        listed = pages.as_listed(self.source(COPIES.LIBREOFFICE), self.work)
+        self.assertEqual(listed, self.work / "listed" / "rules.docx")
+
+    def test_a_file_without_the_copy_is_laid_out_as_it_is(self):
+        path = self.source(COPIES.MS_WORD)
+        self.assertEqual(pages.as_listed(path, self.work), path)
+        broken = self.work / "broken.docx"
+        broken.write_text("not a zip archive", encoding="utf-8")
+        self.assertEqual(pages.as_listed(broken, self.work / "other"), broken)
+
+    @unittest.skipUnless(shutil.which("soffice") and shutil.which("pdftotext"),
+                         "LibreOffice or pdftotext is not installed")
+    def test_a_page_opens_on_the_number_the_markdown_gives_its_item(self):
+        layout = pages.layout_of(self.source(COPIES.LIBREOFFICE))
+        self.assertEqual(layout.pages, 2)
+        self.assertTrue(layout.starts[0].lstrip().startswith("2."), layout.starts[0])
 
 
 class SharePoint(unittest.TestCase):

@@ -51,6 +51,8 @@ DOCUMENT_RELS = (
 STYLES = (
     f'<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="{NS}">'
     '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>'
+    '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>'
+    '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>'
     "</w:styles>"
 )
 
@@ -249,6 +251,63 @@ class RewriteTest(Rewriting):
             ("Next part", None, None), ("indented after the heading", None, None),
         ])
 
+    # FCI 1.1.2.1 Edit Placement Information: Word draws the sixth bullet of a
+    # rule's sub-list in a heading style, and its own numbering keeps it a bullet.
+    BULLETS = [
+        abstract(1, level(0, left=720),
+                 level(1, fmt="bullet", text="\u2022", left=1440)), num(2, 1),
+    ]
+
+    def test_a_heading_its_numbering_puts_in_a_list_is_an_item(self):
+        body = [para("rule", 2, 0), para("first", 2, 1), para("second", 2, 1),
+                para("third", 2, 1, style="Heading1"), para("next rule", 2, 0)]
+        out = self.rewrite(body, self.BULLETS)
+        self.assertEqual(drawn(out), [
+            ("rule", 0, 1), ("first", 1, 1), ("second", 1, 2), ("third", 1, 3),
+            ("next rule", 0, 2),
+        ])
+        with zipfile.ZipFile(out) as archive:
+            document = ET.fromstring(archive.read("word/document.xml"))
+        self.assertEqual(list(document.iter(W + "pStyle")), [])
+
+    def test_headings_in_a_row_in_a_list_are_items(self):
+        body = [para("one", 2, 0, style="Heading1"), para("two", 2, 0),
+                para("three", 2, 0, style="Heading1"), para(""),
+                para("four", 2, 0, style="Heading1")]
+        self.assertEqual(self.items(body, self.BULLETS), [
+            ("one", 0, 1), ("two", 0, 2), ("three", 0, 3), ("four", 0, 4),
+        ])
+
+    def test_a_numbered_heading_over_its_own_sub_items_stays_a_heading(self):
+        body = [para("Navigation", 2, 0, style="Heading1"), para("from the tree", 2, 1),
+                para("from the detail", 2, 1), para("Combining", 2, 0, style="Heading1")]
+        out = self.rewrite(body, self.BULLETS)
+        with zipfile.ZipFile(out) as archive:
+            document = ET.fromstring(archive.read("word/document.xml"))
+        self.assertEqual([s.get(W + "val") for s in document.iter(W + "pStyle")],
+                         ["Heading1", "Heading1"])
+
+    def test_headings_of_a_list_that_numbers_sections_stay_headings(self):
+        # PLC 1.3 Placement Evaluation: Word numbers its section headings on the
+        # list that numbers the rules before them, so the rules end at 3 and the
+        # next section heading is 4.
+        body = [para("rule one", 2, 0), para("rule two", 2, 0),
+                para("Database Requirements", 2, 0, style="Heading1"), table(para("cell")),
+                para("Testing Conditions", 2, 0, style="Heading1")]
+        out = self.rewrite(body, self.BULLETS)
+        with zipfile.ZipFile(out) as archive:
+            document = ET.fromstring(archive.read("word/document.xml"))
+        self.assertEqual([s.get(W + "val") for s in document.iter(W + "pStyle")],
+                         ["Heading1", "Heading1"])
+
+    def test_a_heading_its_style_numbers_stays_a_heading(self):
+        definitions = [abstract(1, level(0, left=720)), num(1, 1), num(3, 1)]
+        body = [para("Section", 3, style="Heading2"), para("item", 1)]
+        out = self.rewrite(body, definitions)
+        with zipfile.ZipFile(out) as archive:
+            document = ET.fromstring(archive.read("word/document.xml"))
+        self.assertEqual([s.get(W + "val") for s in document.iter(W + "pStyle")], ["Heading2"])
+
     def test_tables_and_headings_are_left_as_they_are(self):
         definitions = [abstract(1, level(0, left=720)), num(1, 1)]
         body = [para("Heading", 1, style="Heading1"), table(para("cell", 1)), para("after", 1)]
@@ -294,6 +353,15 @@ class PandocTest(Rewriting):
         self.assertEqual(lines, [
             "1.  rule a", "2.  rule b", "    1.  grid i", "    2.  grid ii",
             "        more", "    1.  sub", "2.  rule c",
+        ])
+
+    def test_a_heading_inside_a_bullet_list_is_drawn_as_a_bullet(self):
+        body = [para("rule", 2, 0), para("first", 2, 1),
+                para("second", 2, 1, style="Heading1"), para("next rule", 2, 0)]
+        lines = [line for line in self.markdown(body, RewriteTest.BULLETS).splitlines()
+                 if line.strip() not in ("", "<!-- -->")]
+        self.assertEqual(lines, [
+            "1.  rule", "    - first", "    - second", "2.  next rule",
         ])
 
 
