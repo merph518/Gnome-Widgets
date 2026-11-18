@@ -10,8 +10,9 @@ Subcommands:
   changes             print the converted documents changed in a range, with their rule
                       changes split into sections and their dependents, as JSON
   rules FILE MAP      print the business rule sets a changes run reaches, with the rule IDs
-                      whose anchors sit in the changed text, as JSON. MAP is the rule
-                      store's document map
+                      whose quoted text changed, or whose anchors sit in the changed text
+                      when a rule quotes nothing usable, as JSON. MAP is the rule store's
+                      document map, which carries each rule's quote
   drift FILE          print the issues a drift result files, one per uploaded document
                       folder that differs from the master, and the rules still waiting in
                       staging or promoted out of it, as JSON
@@ -34,11 +35,13 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import html
 import json
 import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -57,6 +60,9 @@ PROVENANCE = "**Document provenance**"
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+# A list marker a conversion escaped so it reads as plain text: `2\.`, `2\)`, `\-`, `\*`,
+# `\+`, at the start of a line and followed by a space.
+ESCAPED_MARKER = re.compile(r"^(\s*)(?:(\d+)\\([.)])|\\([-*+]))(?=\s)")
 SPACE = re.compile(r"\s+")
 DASHES = re.compile(r"[-\u2013\u2014_]+")
 
@@ -206,6 +212,13 @@ def squash(text: str) -> str:
     return SPACE.sub(" ", text).strip()
 
 
+def plain_marker(line: str) -> str:
+    """The line with an escaped list marker written plainly, so `2\\. Text` and `2. Text`
+    compare equal. The same text with the marker escaped says nothing new."""
+    return ESCAPED_MARKER.sub(lambda m: m.group(1) + (f"{m.group(2)}{m.group(3)}"
+                                                      if m.group(2) else m.group(4)), line)
+
+
 def table_row(line: str) -> str:
     cells = [squash(cell) for cell in line.strip().strip("|").split("|")]
     return "| " + " | ".join(cells) + " |"
@@ -233,6 +246,7 @@ def units(text: str) -> list[tuple[str, str]]:
         if PAGE_MARKER.match(line):
             continue
         bare = line.lstrip("> ").rstrip() if line.lstrip().startswith(">") else line
+        bare = plain_marker(bare)
         if not bare.strip():
             flush()
             continue
@@ -682,10 +696,11 @@ def numbered_rules(text: str) -> list[tuple[int, str]]:
     """The document's top-level numbered rules, each with every indented line under it."""
     out: list[tuple[int, list[str]]] = []
     inside = False
-    for line in strip_provenance(text.splitlines()):
+    for raw in strip_provenance(text.splitlines()):
         # A page marker sits between blocks without ending the rule it falls inside.
-        if PAGE_MARKER.match(line):
+        if PAGE_MARKER.match(raw):
             continue
+        line = plain_marker(raw)
         if match := NUMBERED.match(line):
             out.append((int(match.group(1)), [match.group(2)]))
             inside = True
@@ -747,29 +762,166 @@ def anchor_key(text: str) -> str:
     return " " + squash(re.sub(r"\.+(?=\s|$)", " ", text)) + " "
 
 
+# A word, a comparison or sign that changes what a rule says (`<`, `>=`, `+5`, `-5`), or the
+# full stop that ends a sentence. A dot inside a number or an abbreviation is not a token, so
+# `5.2.3.1` reads as its digits on both sides.
+WORD = re.compile(r"[^\W_]+|[<>=\u2260\u2264\u2265+%$\u00b1\u2212]|(?<![^\W_])-(?=\d)|[.!?](?!\w)")
+# A list marker at the start of a line: `-`, `1.`, `a)`, `(iv)`.
+LEADING_LIST = re.compile(
+    r"^\s*(?:[-*+]|\d+[.)]|\(?[a-z][.)]|\(?(?:i{1,3}|iv|vi{0,3}|ix|x)[.)])\s+", re.I)
+LEADING_MARK = re.compile(r"^[\s>]*(?:#{1,6}\s+)?")
+LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+# An HTML comment, which may run over several lines. It holds no backtick and stays short, so
+# a `<!--` written as code, in a fence or inline, does not run on to a later `-->`.
+COMMENT = re.compile(r"<!--[^`]{0,2000}?-->")
+# An HTML tag such as `<br>`, `<a id="x">` or `<td colspan=2 nowrap>`: its attributes read
+# `name=value` or are one of the bare ones HTML defines. `3 < x and y > 7` and `x<y and y>z`
+# are prose.
+TAG = re.compile(
+    r"</?[A-Za-z][A-Za-z0-9]*"
+    r"(?:\s+(?:[A-Za-z][\w:-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s<>]+)"
+    r"|(?:checked|disabled|hidden|nowrap|open|readonly|required|selected)(?![\w=-])))*"
+    r"\s*/?>")
+AUTOLINK = re.compile(r"<((?:https?|ftp|mailto):[^<>\s]*)>", re.I)
+# A line that only draws: a setext underline or the border of a grid table.
+DRAWING = re.compile(r"^\s*(?:=+|\+[-=+:]+\+)\s*$")
+ELLIPSIS = re.compile(r"\[\.\.\.\]|\.{3}|\u2026")
+SUMMARY = re.compile(r"Atomic Summary:?")
+# A quote of fewer words than this is as likely to sit in unrelated text as in its own rule.
+MIN_QUOTE_WORDS = 4
+# An ellipsis in a quote leaves out text, so the runs on either side must still sit close
+# together, and each must say enough to find.
+MIN_RUN_WORDS = 2
+MAX_ELLIPSIS_GAP = 100
+
+
+def normal_tokens(text: str) -> list[str]:
+    """The words of a text with everything a layout change moves left out: page markers,
+    the provenance block, list markers and nesting, heading marks, table pipes, emphasis,
+    quote marks, case, and where lines break."""
+    words: list[str] = []
+    for raw in strip_provenance(COMMENT.sub(" ", text).splitlines()):
+        if PAGE_MARKER.match(raw.rstrip()) or DRAWING.match(raw):
+            continue
+        line = plain_marker(raw)
+        # A leading `>` is a quote mark here, and an entity such as `&gt;` is a comparison.
+        line = LEADING_LIST.sub("", LEADING_MARK.sub("", line))
+        line = unicodedata.normalize("NFKC", html.unescape(line))
+        line = TAG.sub(" ", AUTOLINK.sub(r"\1", LINK.sub(r"\1", line)))
+        words += WORD.findall(line.casefold())
+    return words
+
+
+def quote_of(description) -> str:
+    """The text a rule's description quotes: what sits in quotation marks after the leading
+    anchor parenthetical and before the atomic summary, else everything in that span."""
+    text = squash(str(description or ""))
+    if text.startswith("("):
+        depth = 0
+        for i, char in enumerate(text):
+            depth += (char == "(") - (char == ")")
+            if depth == 0:
+                text = text[i + 1:].strip()
+                break
+    text = SUMMARY.split(text, 1)[0].strip()
+    quoted = re.fullmatch(r'["\u201c](.*)["\u201d]', text, re.S)
+    return (quoted.group(1) if quoted else text).strip()
+
+
+def rule_quote(rule: dict) -> str:
+    """The wording a map entry says its rule quotes: its `quote`, else the quote in its
+    `description`."""
+    quote = rule.get("quote")
+    return quote if isinstance(quote, str) and quote.strip() else quote_of(rule.get("description"))
+
+
+def quote_fragments(quote) -> list[list[str]]:
+    """A quote as the runs of words it must hold, in order. An ellipsis splits a quote into
+    runs. A quote of fewer than MIN_QUOTE_WORDS words, or with a run under MIN_RUN_WORDS,
+    returns nothing, so the rule falls back to its anchor."""
+    runs = [normal_tokens(part) for part in ELLIPSIS.split(str(quote or ""))]
+    runs = [run for run in runs if run]
+    sizes = [sum(1 for token in run if token not in ".!?") for run in runs]
+    if sum(sizes) < MIN_QUOTE_WORDS or (len(runs) > 1 and min(sizes) < MIN_RUN_WORDS):
+        return []
+    return runs
+
+
+def find_run(tokens: list[str], run: list[str], start: int, stop: int | None = None) -> int:
+    """Where a run of tokens first begins at or after `start`, and no later than `stop`."""
+    first, size = run[0], len(run)
+    last = len(tokens) - size if stop is None else min(len(tokens) - size, stop)
+    for i in range(start, last + 1):
+        if tokens[i] == first and tokens[i:i + size] == run:
+            return i
+    return -1
+
+
+def count_in(fragments: list[list[str]], tokens: list[str]) -> int:
+    """How many times the runs of a quote occur in order in a token list."""
+    count, start = 0, 0
+    while (at := find_run(tokens, fragments[0], start)) >= 0:
+        start = end = at + len(fragments[0])
+        for run in fragments[1:]:
+            if (found := find_run(tokens, run, end, end + MAX_ELLIPSIS_GAP)) < 0:
+                break
+            end = found + len(run)
+        else:
+            # Occurrences do not share text, so the next one starts past this one.
+            count += 1
+            start = end
+    return count
+
+
+def quote_count(quote, text: str) -> int:
+    """How many times a quote occurs in a document's text, 0 for a quote too short to trust."""
+    fragments = quote_fragments(quote)
+    return count_in(fragments, normal_tokens(text)) if fragments else 0
+
+
 def anchored_rules(rules: list[dict], old: str, new: str, hunks: list[dict]) -> dict:
-    """The rules whose anchors sit in what a change touched."""
+    """The rules a change reached.
+
+    A rule that quotes wording is flagged when the quote occurs fewer times in the new text
+    than in the old, wherever its anchor points, and left alone when it does not, whatever
+    its anchor says: a renumbered or re-nested list moves the numbers the anchors name
+    without touching the words. `kept` lists the rules an anchor placed in the change whose
+    quote survived. A rule with no usable quote, or whose quote the old text never held,
+    is placed by its anchor, and the second kind is listed under `unmatched`."""
     numbers, restarts = changed_numbers(old, new)
     # A heading carries a number, a colon, or a qualifier the anchor leaves off:
     # `Screen Print (if applicable): Sort Notes` is the `Screen Print` section.
     sections = [re.sub(r"^ [\d.]+ ", " ", anchor_key(section)) for hunk in hunks
                 for section in hunk.get("sections", [hunk["section"]])]
     changed = [anchor_key(unit) for hunk in hunks for unit in hunk["removed"] + hunk["added"]]
-    found = []
+    old_tokens = new_tokens = None
+    found, kept, unmatched = [], [], []
     for rule in rules:
         anchor = anchor_of(rule)
-        if anchor is None:
-            continue
-        kind, value = anchor
-        if kind == "number":
-            hit = value in numbers
-        elif kind == "requirement":
-            hit = any(anchor_key(str(value)) in unit for unit in changed)
-        else:
-            hit = any(section.startswith(anchor_key(str(value))) for section in sections)
+        hit = False
+        if anchor is not None:
+            kind, value = anchor
+            if kind == "number":
+                hit = value in numbers
+            elif kind == "requirement":
+                hit = any(anchor_key(str(value)) in unit for unit in changed)
+            else:
+                hit = any(section.startswith(anchor_key(str(value))) for section in sections)
+        fragments = quote_fragments(rule_quote(rule))
+        if fragments:
+            if old_tokens is None:
+                old_tokens, new_tokens = normal_tokens(old), normal_tokens(new)
+            before = count_in(fragments, old_tokens)
+            if before:
+                if count_in(fragments, new_tokens) < before:
+                    found.append({"rule_id": rule["rule_id"], "anchor": "quote changed"})
+                elif hit:
+                    kept.append({"rule_id": rule["rule_id"], "anchor": f"{kind} {value}"})
+                continue
+            unmatched.append(rule["rule_id"])
         if hit:
             found.append({"rule_id": rule["rule_id"], "anchor": f"{kind} {value}"})
-    return {"changed": found, "restarts": restarts}
+    return {"changed": found, "kept": kept, "unmatched": unmatched, "restarts": restarts}
 
 
 def rule_refresh(result: dict, rule_map: dict, read=show) -> list[dict]:
@@ -789,7 +941,8 @@ def rule_refresh(result: dict, rule_map: dict, read=show) -> list[dict]:
             continue
         item = {"doc": doc["path"], "map_doc": entry["doc"], "key": doc["key"],
                 "prefix": entry["prefix"], "rules": len(entry["rules"]), "kind": doc["kind"],
-                "changed": [], "restarts": False, "future": doc.get("future", False)}
+                "changed": [], "kept": [], "unmatched": [], "restarts": False,
+                "future": doc.get("future", False)}
         if doc["kind"] == "removed":
             # Every rule the removed document was the source of is up for retiring.
             item["changed"] = [{"rule_id": r["rule_id"], "anchor": "document removed"}
@@ -800,6 +953,9 @@ def rule_refresh(result: dict, rule_map: dict, read=show) -> list[dict]:
             else:
                 old = read(result["base"], doc.get("old_path") or doc["path"])
             new = read(result["head"], doc["path"])
+            if not moved and normal_tokens(old or "") == normal_tokens(new or ""):
+                # Numbering, nesting, or markup moved and no word did.
+                continue
             item.update(anchored_rules(entry["rules"], old or "", new or "", doc["hunks"]))
         items.append(item)
     return items

@@ -126,7 +126,7 @@ check "register.tsx names a section and script that exist" "" "$(
       [[ -n $section ]] || echo "no section for $script"
     done
 )"
-check "register.tsx lists every hook script" "7" \
+check "register.tsx lists every hook script" "8" \
   "$(grep -cE "args: \[('--default-on', )?'[A-Za-z]+', '[^']+'\]" "$here/register.tsx")"
 
 exit $fail

@@ -13,6 +13,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SCRATCH_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-compare-test-'));
 after(() => fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true }));
 const tmp = () => fs.mkdtempSync(path.join(SCRATCH_ROOT, 'case-'));
+// folderProblem refuses a folder inside the home folder, and the temporary folder can sit
+// there, so the tests' home folder is a scratch folder of its own, beside the cases.
+process.env.HOME = process.env.USERPROFILE = fs.mkdtempSync(path.join(SCRATCH_ROOT, 'home-'));
 const touch = (dir, ...names) => names.forEach((name) => fs.writeFileSync(path.join(dir, name), 'x'));
 const staged = (dir, rules = 'rules.json') => touch(dir, 'reference.xlsx', 'pack.xlsx', 'doc.md', rules);
 

@@ -1,6 +1,6 @@
 ---
 name: repo-hooks
-description: Reusable repository session hooks for pull request checks, merge reminders, stray files, tests, formatting, and persistent implement loops. Use when wiring or configuring these hooks or diagnosing their behavior.
+description: Reusable repository session hooks for pull request checks, ready-label checks, merge reminders, stray files, tests, formatting, and persistent implement loops. Use when wiring or configuring these hooks or diagnosing their behavior.
 ---
 
 # Repo hooks
@@ -28,6 +28,7 @@ with `claude plugin test plugins/general`.
 | PostToolUse | `Bash` | `mergeWatchReminder remind-pr-merge-watch.sh` | 10 |
 | PostToolUse | `Edit\|Write` | `prettierOnSave prettier-on-save.sh` | 60 |
 | PostToolUse | `Edit\|Write` | `testOnEdit test-on-edit.sh` | 180 |
+| Stop | (none) | `readyLabelGate ready_label_gate.py` | 90 |
 | Stop | (none) | `--default-on implementLoop implement_loop.py` | 30 |
 | SessionStart | `startup\|resume\|compact\|clear\|fork` | `--default-on implementLoop implement_loop.py` | 30 |
 
@@ -82,6 +83,9 @@ the repository root.
     "checkerLabel": "npm run check:pr-testing -- <file>",
     "failureMarker": "The ## Testing section cannot be parsed"
   },
+  "readyLabelGate": {
+    "label": "Manual Review Needed"
+  },
   "mergeWatchReminder": {
     "ledgerTool": "scripts/catchup.py"
   },
@@ -121,6 +125,57 @@ Keys:
 - `failureMarker`: text the checker prints when it rejects a body. When set, an exit 1
   without it is reported as a checker that could not run (a missing dependency, for
   example) instead of a failed body.
+
+## Ready-label gate
+
+`ready_label_gate.py`, Stop, section `readyLabelGate`. When the session's final reply
+says a pull request is ready for review and the turn opened or pushed to one, it reads
+that pull request's labels with `gh`. A pull request without the review label blocks the
+stop. The reason names it and gives the commands that add the label and read it back:
+
+```
+gh api repos/<owner>/<repo>/issues/<n>/labels -f "labels[]=Manual Review Needed"
+gh pr view <n> --repo <owner>/<repo> --json labels --jq '[.labels[].name]'
+```
+
+With the label, with no pull request in the turn, or with a reply that does not report
+one ready, the stop goes through. The section may be an empty object to take every
+default.
+
+The turn is everything after the last prompt the person typed; a background task's
+notification or a message from another session does not start a new one. A pull request
+counts as opened or pushed to when a Bash command in that turn is `gh pr create` (the
+URL it printed on a line of its own), `gh pr ready <n>`, or `git push`, with or without
+`gh -R <owner>/<repo>`. A push, or `gh pr ready` with no number, is looked up with
+`gh pr list --head <branch>` for the branch checked out in the folder the push ran in:
+the session's folder, moved by an earlier `cd` in the same command and by `git -C <dir>`.
+A `cd` to a variable the hook cannot read leaves the folder unknown, and the lookup runs
+in the repository root. `gh pr ready -R <owner>/<repo>` with no number looks in that
+repository. A command that only mentions `gh pr create`, in a `grep` for example, does
+not count. When the reply names some of the pull requests by number, only those are
+checked. The final reply is the stop event's `last_assistant_message`, or the last text
+the transcript holds for the turn.
+
+A `gh` call that fails, or a `gh` that is not installed, lets the stop through with a
+note in the transcript saying the label was not checked. A subagent's stop is not
+checked. The hook still checks a stop that another hook already continued, such as the
+oversee loop's, and caps the blocks instead: after `maxBlocks` blocks for one pull request
+in one session, it only reports that pull request in the transcript.
+
+Keys, all optional:
+
+- `label`: the label a ready pull request carries. Defaults to `Manual Review Needed`.
+- `readyPattern`: a regular expression, matched without regard to case, that marks the
+  final reply as a ready report. Defaults to
+  `\b(ready for (manual )?review|marked (it )?ready|review-ready)\b`. A match up to
+  two words after `not`, `never`, `n't`, `will` or `'ll` does not count, so "not quite
+  yet ready" and "will mark it ready" are not ready reports. An invalid expression falls
+  back to the default with a note.
+- `maxBlocks`: how many times one pull request may block a stop in one session. Defaults
+  to 2.
+
+When the ready-label gate and the implement loop both block one stop, both reasons reach
+the model.
 
 ## Stray-file gate
 
@@ -235,7 +290,8 @@ bash plugins/general/hooks/prettier-on-save_test.sh
 python3 plugins/general/hooks/stray_files_gate_test.py
 python3 plugins/general/hooks/implement_loop_test.py
 python3 plugins/general/hooks/pr_testing_gate_test.py
+python3 plugins/general/hooks/ready_label_gate_test.py
 ```
 
-All of them need `jq`, and the gate's test needs `python3`. None needs a repository's
+All of them need `jq`, and the Python tests need `python3`. None needs a repository's
 own checker, formatter or test runner: they use stand-ins.

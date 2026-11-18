@@ -1,0 +1,7 @@
+{
+  "name": "pin-drift",
+  "description": "Shows a band in the Overmind repository when a release is pending or a repository that pins Overmind is behind the latest tag, and a pane listing each pin",
+  "version": "0.32.4",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

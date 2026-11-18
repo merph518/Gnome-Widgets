@@ -21,6 +21,31 @@ def hyphenated(name: str) -> str:
     return re.sub(r"-(\.[A-Za-z0-9]+)$", r"\1", joined)
 
 
+# The first words of the line the living-wiki page writer puts at the top of every
+# page it generates. The rest of the line names the docs folder, which differs from
+# one repository to the next. convert.sh's is_wiki_page restates this prefix.
+GENERATED_PREFIX = "<!-- Generated from the folder layout under "
+
+
+def is_generated_page(path: pathlib.Path, future: str) -> bool:
+    """Whether a file is a living-wiki page, which is never a source document.
+
+    The wiki writes a page beside each folder, so a suite's `future` folder has a
+    `<future>.md` page next to it. A file is that page when it carries that name and
+    the folder exists, or when it is a Markdown file whose first line is the wiki's
+    generated header. A missing or unreadable file is not a generated page.
+    """
+    if path.name == f"{future}.md" and (path.parent / future).is_dir():
+        return True
+    if path.suffix != ".md":
+        return False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return handle.readline().startswith(GENERATED_PREFIX)
+    except OSError:
+        return False
+
+
 def markdown_under(paths: list[str]) -> list[pathlib.Path]:
     """Walks each directory for `.md` files and takes each file as given.
 

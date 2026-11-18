@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import shutil
 import subprocess
@@ -32,8 +33,30 @@ STYLES = (
     '<w:basedOn w:val="Jump"/></w:style>'
     '<w:style w:type="paragraph" w:styleId="Hidden"><w:name w:val="Hidden"/>'
     "<w:rPr><w:vanish/></w:rPr></w:style>"
+    '<w:style w:type="paragraph" w:styleId="Shown"><w:name w:val="Shown"/>'
+    '<w:rPr><w:vanish w:val="0"/></w:rPr></w:style>'
+    '<w:style w:type="table" w:styleId="HiddenGrid"><w:name w:val="Hidden Grid"/>'
+    "<w:rPr><w:vanish/></w:rPr></w:style>"
+    '<w:style w:type="table" w:styleId="HiddenGridChild"><w:name w:val="Hidden Grid Child"/>'
+    '<w:basedOn w:val="HiddenGrid"/></w:style>'
+    '<w:style w:type="table" w:styleId="ShownGrid"><w:name w:val="Shown Grid"/>'
+    '<w:rPr><w:vanish w:val="0"/></w:rPr></w:style>'
     "</w:styles>"
 )
+# Document defaults that turn hidden text on, and the paragraph style that
+# fills in for a paragraph naming none.
+DEFAULTS_ON = ("<w:docDefaults><w:rPrDefault><w:rPr><w:vanish/></w:rPr></w:rPrDefault>"
+               "</w:docDefaults>")
+DEFAULT_PARAGRAPH = ('<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                     '<w:name w:val="Normal"/><w:rPr><w:vanish/></w:rPr></w:style>')
+DEFAULT_TABLE = ('<w:style w:type="table" w:default="1" w:styleId="TableNormal">'
+                 '<w:name w:val="Normal Table"/><w:rPr><w:vanish/></w:rPr></w:style>')
+
+
+def styled(defaults="", *extra):
+    """STYLES with document defaults ahead of the styles and EXTRA styles after them."""
+    out = STYLES.replace(f'xmlns:w="{NS}">', f'xmlns:w="{NS}">{defaults}', 1)
+    return out.replace("</w:styles>", "".join(extra) + "</w:styles>")
 
 
 JUMP = '<w:rStyle w:val="Jump"/>'
@@ -56,6 +79,16 @@ def run(text, properties=""):
 
 def para(*runs):
     return f'<w:p>{"".join(runs)}</w:p>'
+
+
+def styled_para(style, *runs):
+    return f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>{"".join(runs)}</w:p>'
+
+
+def table(style, *paragraphs):
+    """A one-cell table in table style STYLE, or in none when STYLE is empty."""
+    properties = f'<w:tblPr><w:tblStyle w:val="{style}"/></w:tblPr>' if style else ""
+    return f'<w:tbl>{properties}<w:tr><w:tc>{"".join(paragraphs)}</w:tc></w:tr></w:tbl>'
 
 
 def deleted_item(text, properties=LISTED):
@@ -236,6 +269,145 @@ class HiddenTextTest(unittest.TestCase):
         self.assertNotIn("default", document)
         self.assertIn("shown", document)
 
+    def test_a_table_style_that_hides_hides_its_cell_text(self):
+        _, document = self.visible(table("HiddenGrid", para(run("cellgone"))), para(run("after")))
+        self.assertNotIn("cellgone", document)
+        self.assertIn("after", document)
+
+    def test_a_table_style_based_on_a_hiding_one_hides_its_cell_text(self):
+        _, document = self.visible(table("HiddenGridChild", para(run("cellgone"))))
+        self.assertNotIn("cellgone", document)
+
+    def test_a_table_style_and_a_hiding_paragraph_style_cancel(self):
+        _, document = self.visible(table(
+            "HiddenGrid", styled_para("Hidden", run("cellshown")), para(run("cellgone"))))
+        self.assertIn("cellshown", document)
+        self.assertNotIn("cellgone", document)
+
+    def test_the_inner_table_style_decides_for_a_nested_table(self):
+        inner = table("ShownGrid", para(run("inner")))
+        _, document = self.visible(table("HiddenGrid", para(run("outer")), inner))
+        self.assertIn("inner", document)
+        self.assertNotIn("outer", document)
+
+    def test_a_text_box_in_a_cell_does_not_take_the_table_style(self):
+        box = ('<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:pict><w:txbxContent>'
+               + para(run("boxed")) + "</w:txbxContent></w:pict></w:r>")
+        _, document = self.visible(table("HiddenGrid", para(box, run("cell"))))
+        self.assertIn("boxed", document)
+        self.assertNotIn("cell<", document)
+
+    def test_a_runs_own_value_beats_the_table_style(self):
+        _, document = self.visible(table(
+            "HiddenGrid", para(run("own", '<w:vanish w:val="0"/>'), run("styled"))))
+        self.assertIn("own", document)
+        self.assertNotIn("styled", document)
+
+    def test_a_table_style_the_file_lacks_takes_the_default_table_style(self):
+        styles = styled("", DEFAULT_TABLE)
+        for named in ("NoSuchStyle", ""):
+            _, document = self.visible(table(named, para(run("cellgone"))),
+                                       para(run("after")), styles=styles)
+            self.assertNotIn("cellgone", document)
+            self.assertIn("after", document)
+
+    def test_a_paragraph_with_no_style_takes_the_hiding_default_paragraph_style(self):
+        styles = styled("", DEFAULT_PARAGRAPH)
+        _, document = self.visible(
+            para(run("gone")), styled_para("Shown", run("named")),
+            styled_para("NoSuchStyle", run("missing")), para(run("both", JUMP)), styles=styles)
+        self.assertNotIn("gone", document)
+        self.assertNotIn("missing", document)
+        self.assertIn("named", document)
+        self.assertIn("both", document)
+
+    def test_the_last_default_paragraph_style_wins_and_a_false_one_is_not_a_default(self):
+        off = DEFAULT_PARAGRAPH.replace('w:default="1"', 'w:default="0"')
+        _, document = self.visible(para(run("stays")), styles=styled("", off))
+        self.assertIn("stays", document)
+        shown = ('<w:style w:type="paragraph" w:default="1" w:styleId="Body">'
+                 '<w:name w:val="Body"/></w:style>')
+        _, document = self.visible(para(run("stays")),
+                                   styles=styled("", DEFAULT_PARAGRAPH, shown))
+        self.assertIn("stays", document)
+
+    def test_a_default_style_with_no_type_is_a_paragraph_style(self):
+        typeless = DEFAULT_PARAGRAPH.replace(' w:type="paragraph"', "")
+        _, document = self.visible(para(run("gone")), styles=styled("", typeless))
+        self.assertNotIn("gone", document)
+
+    def test_a_paragraph_naming_a_style_of_another_type_takes_the_default(self):
+        _, document = self.visible(
+            styled_para("Jump", run("stays")), styles=styled("", DEFAULT_PARAGRAPH))
+        self.assertNotIn("stays", document)
+        _, document = self.visible(styled_para("Jump", run("stays")))
+        self.assertIn("stays", document)
+
+    def test_a_style_with_no_id_speaks_for_no_run(self):
+        nameless = '<w:style w:type="character"><w:rPr><w:vanish/></w:rPr></w:style>'
+        _, document = self.visible(para(run("stays")), styles=styled("", nameless))
+        self.assertIn("stays", document)
+
+    def test_a_file_with_no_styles_part_hides_only_what_a_run_says(self):
+        whole, source = self.work / "whole.docx", self.work / "in.docx"
+        docx(whole, para(run("shown"), run("gone", "<w:vanish/>")))
+        with zipfile.ZipFile(whole) as read, zipfile.ZipFile(source, "w") as archive:
+            for name in read.namelist():
+                if name != "word/styles.xml":
+                    archive.writestr(name, read.read(name))
+        target = self.work / "out.docx"
+        self.assertEqual(HIDDEN.main(["hidden-text.py", str(source), str(target)]), 0)
+        with zipfile.ZipFile(target) as archive:
+            document = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("shown", document)
+        self.assertNotIn("gone", document)
+
+    def test_the_defaults_on_with_both_styles_hiding_hide(self):
+        _, document = self.visible(
+            styled_para("Hidden", run("x", JUMP)), styles=styled(DEFAULTS_ON))
+        self.assertNotIn("x<", document)
+
+    def test_the_defaults_on_with_both_styles_showing_hide(self):
+        _, document = self.visible(
+            styled_para("Shown", run("x", '<w:rStyle w:val="JumpShown"/>')),
+            styled_para("Shown", run("one")), styles=styled(DEFAULTS_ON))
+        self.assertNotIn("x<", document)
+        self.assertIn("one", document)
+
+    def test_each_combination_of_levels_matches_words_toggle_rule(self):
+        # (defaults, table, paragraph, character, hidden): None is a level that
+        # says nothing, which takes the defaults' value.
+        table_ids = {True: "HiddenGrid", False: "ShownGrid"}
+        para_ids = {True: "Hidden", False: "Shown"}
+        char_ids = {True: "Jump", False: "JumpShown"}
+        cases = [
+            (False, None, None, None, False), (False, True, None, None, True),
+            (False, True, True, None, False), (False, None, True, None, True),
+            (False, None, True, True, False), (False, True, True, True, True),
+            (False, False, True, None, True), (False, False, False, False, False),
+            (True, None, None, None, True), (True, None, True, True, True),
+            (True, None, False, False, True), (True, None, False, None, False),
+            (True, None, True, None, True), (True, False, None, None, False),
+            (True, False, False, True, True), (True, False, False, False, False),
+            (True, True, True, True, True),
+        ]
+        for defaults, table_style, paragraph, character, hidden in cases:
+            with self.subTest(defaults=defaults, table=table_style, paragraph=paragraph,
+                              character=character):
+                runs = run("x", f'<w:rStyle w:val="{char_ids[character]}"/>' if character
+                           is not None else "")
+                if paragraph is None:
+                    body = para(runs)
+                else:
+                    body = styled_para(para_ids[paragraph], runs)
+                if table_style is not None:
+                    body = table(table_ids[table_style], body)
+                _, document = self.visible(
+                    body, para(run("after", '<w:vanish w:val="0"/>')),
+                    styles=styled(DEFAULTS_ON if defaults else ""))
+                self.assertEqual("x<" not in document, hidden)
+                self.assertIn("after", document)
+
     def test_spec_vanish_alone_stays(self):
         _, document = self.visible(para(run("Heading text", "<w:specVanish/>")))
         self.assertIn("Heading text", document)
@@ -296,7 +468,60 @@ class HiddenTextTest(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         self.assertEqual(out.strip(), "See [link](http://x.y) now")
 
-    def test_convert_runs_it_before_the_list_numbers_and_pandoc(self):
+    def route(self, source):
+        """Runs convert.sh's Word route on SOURCE with a Pandoc that records its input.
+
+        Returns the bytes Pandoc was given."""
+        script = (HERE / "convert.sh").read_text()
+        at = script.index("\nrun_pandoc() {")
+        function = script[at:script.index("\n}\n", at) + 3]
+        tools = self.work / "tools"
+        tools.mkdir()
+        (tools / "pandoc").write_text(
+            "#!/bin/sh\n"
+            'while [ "$#" -gt 0 ]; do\n'
+            '  if [ "$2" = "-o" ]; then cp "$1" "$RECORD"; printf text > "$3"; exit 0; fi\n'
+            "  shift\n"
+            "done\n"
+            "exit 1\n")
+        (tools / "pandoc").chmod(0o755)
+        (self.work / "work").mkdir()
+        runner = self.work / "route.sh"
+        runner.write_text("set -uo pipefail\nPANDOC_TO=gfm\n" + function +
+                          'run_pandoc docx "$1" "$2"\n')
+        record = self.work / "recorded.docx"
+        result = subprocess.run(
+            ["bash", str(runner), str(source), str(self.work / "body.md")],
+            capture_output=True, text=True,
+            env={"PATH": f"{tools}:{os.environ['PATH']}", "HERE": str(HERE),
+                 "WORK": str(self.work / "work"), "RECORD": str(record)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return record.read_bytes()
+
+    def test_convert_gives_pandoc_the_file_without_its_hidden_text(self):
+        source = self.work / "in.docx"
+        docx(source, para(run("shown"), run("Jump_Name", "<w:vanish/>")))
+        recorded = self.work / "seen.docx"
+        recorded.write_bytes(self.route(source))
+        with zipfile.ZipFile(recorded) as archive:
+            document = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn("shown", document)
+        self.assertNotIn("Jump_Name", document)
+
+    def test_convert_gives_pandoc_the_original_when_the_script_refuses_the_file(self):
+        source = self.work / "in.docx"
+        whole = self.work / "whole.docx"
+        docx(whole, para(run("shown")))
+        with zipfile.ZipFile(whole) as read, zipfile.ZipFile(source, "w") as archive:
+            for name in read.namelist():
+                archive.writestr(name, f'<w:document xmlns:w="{NS}"><w:body>'
+                                 if name == "word/document.xml" else read.read(name))
+        # The script and the step after it both refuse a part that is cut short.
+        self.assertEqual(
+            HIDDEN.main(["hidden-text.py", str(source), str(self.work / "out.docx")]), 1)
+        self.assertEqual(self.route(source), source.read_bytes())
+
+    def test_convert_numbers_the_lists_before_the_list_markers_filter(self):
         script = (HERE / "convert.sh").read_text()
         hidden = script.index('"$HERE/hidden-text.py" "$input" "$WORK/visible.docx"')
         numbers = script.index('"$HERE/list-numbers.py"')

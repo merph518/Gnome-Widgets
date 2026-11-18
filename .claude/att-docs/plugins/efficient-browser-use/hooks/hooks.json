@@ -1,0 +1,4 @@
+{
+  "description": "Shrinks the pictures tool results carry before Claude reads them, or writes them out in words in describe mode.",
+  "modules": ["./register.ts"]
+}

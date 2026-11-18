@@ -126,8 +126,23 @@ check "$(grep -c '^ELSEWHERE	5' <<< "$out")" 1 "another session sees the issue a
 check "$(grep -c '^DEFER	6.*area held by issue 5' <<< "$out")" 1 "an issue in the same area is deferred"
 check "$(grep -c '^NEXT	7' <<< "$out")" 1 "an issue with no area is served"
 
+# --- the board the status row's pane reads
+board() { python3 "$HERE/loop.py" --session "$1" board | jq -c "$2"; }
+check "$(board A '[.current.issue, .current.phase, .current.branch]')" \
+  '[5,"working","feat/issue-5-first"]' "the board shows the session's started issue as current"
+check "$(board A '[.queued[].issue]')" '[6,7,14,16,17]' \
+  "the board lists the rest of the queue in order"
+as A "$LIVE" runs 5 > /dev/null
+check "$(board A '[.current.issue, .current.phase]')" '[5,"waiting on runs"]' \
+  "a parked issue stays current, waiting on runs"
+as A "$LIVE" resume 5 > /dev/null
+check "$(board A '.current.phase')" '"working"' "a resumed issue is worked again"
+check "$(board B '.current')" 'null' "another session's started issue is not current"
+
 # --- finish and an open pull request
 as A "$LIVE" finish 5 done 20 "ready"
+check "$(board A '[.current, (.finished[] | [.issue, .status, .pr])]')" '[null,[5,"done",20]]' \
+  "a finished issue moves from current to finished with its pull request"
 echo '[{"number":20}]' > "$FIXTURES/prs.json"
 out=$(as B "$LIVE" next)
 check "$(grep -c '^DEFER	6.*area held by PR #20' <<< "$out")" 1 \

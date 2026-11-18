@@ -53,19 +53,26 @@ STYLES = (
     '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>'
     '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>'
     '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>'
+    '<w:style w:type="paragraph" w:styleId="Note"><w:name w:val="Note"/>'
+    '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr></w:pPr></w:style>'
     "</w:styles>"
 )
 
 
-def level(ilvl, fmt="decimal", text=None, left=None, hanging=360, start=1, restart=None):
-    """A list level. `start` None leaves the start out of the definition."""
-    text = text or f"%{ilvl + 1}."
+def level(ilvl, fmt="decimal", text=None, left=None, hanging=360, start=1, restart=None,
+          suff=None, hidden=False, legal=False):
+    """A list level. `start` None leaves the start out of the definition, and
+    `text` "" gives a level whose text is empty."""
+    text = f"%{ilvl + 1}." if text is None else text
     indent = "" if left is None else (
         f'<w:pPr><w:ind w:left="{left}" w:hanging="{hanging}"/></w:pPr>')
     restart = "" if restart is None else f'<w:lvlRestart w:val="{restart}"/>'
     start = "" if start is None else f'<w:start w:val="{start}"/>'
-    return (f'<w:lvl w:ilvl="{ilvl}">{start}<w:numFmt w:val="{fmt}"/>'
-            f'{restart}<w:lvlText w:val="{text}"/>{indent}</w:lvl>')
+    suff = "" if suff is None else f'<w:suff w:val="{suff}"/>'
+    hidden = "<w:rPr><w:vanish/></w:rPr>" if hidden else ""
+    legal = "<w:isLgl/>" if legal else ""
+    return (f'<w:lvl w:ilvl="{ilvl}">{start}{legal}<w:numFmt w:val="{fmt}"/>'
+            f'{restart}{suff}<w:lvlText w:val="{text}"/>{indent}{hidden}</w:lvl>')
 
 
 def abstract(abstract_id, *levels):
@@ -550,6 +557,113 @@ class RewriteTest(Rewriting):
         self.assertEqual(LIST.main(["list-numbers.py", str(source), str(self.work / "o")]), 1)
 
 
+class UnnumberedLevelTest(Rewriting):
+    """A level drawn without a number whose text Word still draws, such as a
+    literal `6.`: the label becomes the paragraph's own text."""
+
+    LISTED = [abstract(1, level(0, left=720)), num(1, 1)]
+
+    def document(self, body, definitions):
+        with zipfile.ZipFile(self.rewrite(body, definitions)) as archive:
+            return ET.fromstring(archive.read("word/document.xml"))
+
+    def test_a_literal_label_at_the_margin_is_text_and_the_list_goes_on(self):
+        definitions = self.LISTED + [
+            abstract(2, level(0, fmt="none", text="6.", left=720)), num(2, 2)]
+        body = [para("one", 1), para("six", 2), para("two", 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions)), [
+            ("one", 0, 1), ("6. six", None, None), ("two", 0, 2),
+        ])
+
+    def test_a_label_indented_to_the_items_text_continues_the_item(self):
+        definitions = self.LISTED + [
+            abstract(2, level(0, fmt="none", text="5a.", left=1440)), num(2, 2)]
+        body = [para("five", 1), para("more", 2), para("six", 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions)), [
+            ("five", 0, 1), ("5a. more", None, "continues"), ("six", 0, 2),
+        ])
+
+    def test_a_shallower_levels_number_is_drawn_in_the_label(self):
+        definitions = [abstract(1, level(0, left=720),
+                                level(1, fmt="none", text="%1a.", left=720)), num(1, 1)]
+        body = [para("one", 1), para("two", 1), para("more", 1, 1), para("three", 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions)), [
+            ("one", 0, 1), ("two", 0, 2), ("2a. more", None, None), ("three", 0, 3),
+        ])
+
+    def test_a_roman_shallower_number_is_drawn_as_word_draws_it(self):
+        definitions = [abstract(1, level(0, fmt="upperRoman", left=720),
+                                level(1, fmt="none", text="%1-", left=720)), num(1, 1)]
+        body = [para("one", 1), para("two", 1), para("three", 1), para("note", 1, 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions))[3], ("III- note", None, None))
+
+    def test_a_label_is_set_off_by_one_space_whatever_follows_it(self):
+        # LibreOffice writes "nothing" after the text of a Word 97 file's level
+        # whose Word render draws a gap there.
+        for text, suff in (("6.", "nothing"), ("6.", "tab"), ("6. ", None)):
+            definitions = self.LISTED + [
+                abstract(2, level(0, fmt="none", text=text, left=720, suff=suff)), num(2, 2)]
+            body = [para("one", 1), para("six", 2)]
+            self.assertEqual(drawn(self.rewrite(body, definitions))[1], ("6. six", None, None),
+                             (text, suff))
+
+    def test_the_level_still_counts_for_the_levels_under_it(self):
+        definitions = [abstract(1, level(0, fmt="none", text="Part", left=0),
+                                level(1, left=720)), num(1, 1)]
+        body = [para("a", 1, 0), para("first", 1, 1), para("second", 1, 1),
+                para("b", 1, 0), para("first again", 1, 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions)), [
+            ("Part a", None, None), ("first", 0, 1), ("second", 0, 2),
+            ("Part b", None, None), ("first again", 0, 1),
+        ])
+
+    def test_a_blank_paragraph_before_a_label_is_read_as_any_other(self):
+        definitions = self.LISTED + [
+            abstract(2, level(0, fmt="none", text="6.", left=720)), num(2, 2)]
+        body = [para("Body text."), para("one", 1), para(""), para("six", 2), para("two", 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions))[3:], [
+            ("6. six", None, None), ("two", 0, 2),
+        ])
+
+    def test_the_style_that_numbers_a_label_comes_off_it(self):
+        # Pandoc reads a style's numbering even under `w:numId` 0.
+        definitions = self.LISTED + [
+            abstract(7, level(0, fmt="none", text="Note:", left=0)), num(7, 7)]
+        body = [para("one", 1), para("read this", style="Note")]
+        paragraph = list(self.document(body, definitions).iter(W + "p"))[1]
+        self.assertIsNone(paragraph.find(f"{W}pPr/{W}pStyle"))
+        self.assertIsNone(paragraph.find(f"{W}pPr/{W}numPr"))
+        self.assertEqual("".join(t.text for t in paragraph.iter(W + "t")), "Note: read this")
+
+    def test_a_legal_level_draws_the_numbers_above_it_as_decimals(self):
+        definitions = [abstract(1, level(0, fmt="upperRoman", left=720),
+                                level(1, fmt="none", text="%1.x", left=720, legal=True)),
+                       num(1, 1)]
+        body = [para("one", 1), para("two", 1), para("note", 1, 1)]
+        self.assertEqual(drawn(self.rewrite(body, definitions))[2], ("2.x note", None, None))
+
+    def test_the_levels_indent_stays_with_the_paragraph(self):
+        definitions = self.LISTED + [
+            abstract(2, level(0, fmt="none", text="5a.", left=1440, hanging=360)), num(2, 2)]
+        body = [para("five", 1), para("more", 2)]
+        ind = list(self.document(body, definitions).iter(W + "p"))[1].find(f"{W}pPr/{W}ind")
+        self.assertEqual((ind.get(W + "left"), ind.get(W + "hanging")), ("1440", "360"))
+
+    def test_an_empty_or_hidden_label_is_left_as_it_is(self):
+        for lvl in (level(0, fmt="none", text="", left=720),
+                    level(0, fmt="none", text="6.", left=720, hidden=True)):
+            definitions = self.LISTED + [abstract(2, lvl), num(2, 2)]
+            body = [para("one", 1), para("six", 2)]
+            self.assertEqual(drawn(self.rewrite(body, definitions))[1], ("six", 0, 1), lvl)
+
+    def test_labels_in_tables_and_headings_are_left_as_they_are(self):
+        definitions = self.LISTED + [
+            abstract(2, level(0, fmt="none", text="6.", left=720)), num(2, 2)]
+        body = [table(para("cell", 2)), para("Six", 2, style="Heading1")]
+        self.assertEqual([t for t, _, _ in drawn(self.rewrite(body, definitions))],
+                         ["cell", "Six"])
+
+
 @unittest.skipUnless(shutil.which("pandoc"), "pandoc is not installed")
 class PandocTest(Rewriting):
     def markdown(self, body, definitions):
@@ -630,6 +744,23 @@ class PandocTest(Rewriting):
                 RewriteTest.UNLISTED.format(indent="", text="at the margin"), para("two", 1)]
         lines = [line for line in self.markdown(body, definitions).splitlines() if line.strip()]
         self.assertEqual(lines, ["1.  one", "at the margin", "2.  two"])
+
+    def test_pandoc_draws_a_literal_label_as_text(self):
+        # The label hangs to the margin, as the numbers of the list do.
+        definitions = UnnumberedLevelTest.LISTED + [
+            abstract(2, level(0, fmt="none", text="6.", left=360, hanging=360)), num(2, 2)]
+        body = [para("one", 1), para("six", 2), para("two", 1)]
+        lines = [line for line in self.markdown(body, definitions).splitlines()
+                 if line.strip() not in ("", "<!-- -->")]
+        self.assertEqual(lines, ["1.  one", r"6\. six", "2.  two"])
+
+    def test_pandoc_draws_a_label_its_style_numbers_at_the_margin(self):
+        definitions = UnnumberedLevelTest.LISTED + [
+            abstract(7, level(0, fmt="none", text="Note:", left=0)), num(7, 7)]
+        body = [para("one", 1), para("read this", style="Note"), para("two", 1)]
+        lines = [line for line in self.markdown(body, definitions).splitlines()
+                 if line.strip() not in ("", "<!-- -->")]
+        self.assertEqual(lines, ["1.  one", "Note: read this", "2.  two"])
 
 
 if __name__ == "__main__":

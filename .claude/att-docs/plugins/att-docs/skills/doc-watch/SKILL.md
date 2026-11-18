@@ -310,6 +310,8 @@ python3 <scan-script> issue-body --result <scratchpad>/result.json \
 The body is regenerated from `<todo-root>` plus the pending downloads, never
 appended to. `issue-body` also flags a document waiting under the wrong suite
 folder, and one that was already converted after it was added.
+It lists no row for a page the living-wiki skill generated, such as the page
+beside a suite's Future folder, because that page is not a document.
 
 - No open issue and nothing waiting: nothing to do.
 - No open issue and something waiting: create it with the title and labels

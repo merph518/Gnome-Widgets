@@ -10,12 +10,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { GeneralLoop, GeneralSession } from '../types'
+import type { GeneralBoard, GeneralLoop, GeneralSession } from '../types'
 import { combine, merge, parseHookOutput, toolInput } from './classic'
 import type { HookOutput } from './classic'
 
 const session = atom({ plugin: 'general', key: 'session' } as const, null)
 const loop = atom({ plugin: 'general', key: 'loop' } as const, null, { shape: 'loop-1' })
+const board = atom({ plugin: 'general', key: 'board' } as const, null, { shape: 'board-1' })
+
+// The pane the row's Open button shows: the loop's current issue, queue and results.
+const BOARD_PANE = 'oversee-loop'
+const BOARD_TITLE = 'Oversee loop'
 
 const SECOND = 1000
 // How often the row rereads the loop's marker while a loop is active or paused, so a
@@ -39,7 +44,10 @@ const HOOKS = {
       { args: ['testOnEdit', 'test-on-edit.sh'], timeoutMs: 180 * SECOND, status: 'Running related tests...' },
     ],
   },
-  Stop: [{ args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND }],
+  Stop: [
+    { args: ['readyLabelGate', 'ready_label_gate.py'], timeoutMs: 90 * SECOND },
+    { args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND },
+  ],
   SessionStart: [{ args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND }],
 } satisfies Record<string, Record<string, Script[]> | Script[]>
 
@@ -173,11 +181,45 @@ async function refreshLoop($: EngineInterface): Promise<void> {
   await update($, loop, () => value)
   const shown = value !== null && (value.state === 'active' || value.state === 'paused')
   if (shown) {
-    loopPoll ??= $.clock.every(LOOP_POLL_MS, () => void refreshLoop($))
+    // A refresh that fails, such as one still running when the plugin unloads, leaves
+    // the row as it was until the next one.
+    loopPoll ??= $.clock.every(LOOP_POLL_MS, () => {
+      refreshLoop($).catch(() => undefined)
+    })
+    await refreshBoard($)
   } else {
     loopPoll?.cancel()
     loopPoll = undefined
+    await update($, board, () => null)
   }
+}
+
+// Reads the loop's queue and ledger for the pane. Runs only while the row shows, on the
+// row's own refreshes, so a repository with no loop never starts the reader.
+async function refreshBoard($: EngineInterface): Promise<void> {
+  let value: GeneralBoard | null = null
+  try {
+    const ran = await loopPy($, ['board'])
+    const parsed: unknown =
+      ran.exitCode === 0 && ran.stdout.trim() !== '' ? JSON.parse(ran.stdout) : null
+    const isBoard = typeof parsed === 'object' && parsed !== null && 'queued' in parsed
+    if (isBoard && 'finished' in parsed) {
+      value = parsed as GeneralBoard
+    }
+  } catch {
+    value = null
+  }
+  await update($, board, () => value)
+}
+
+async function openBoard($: EngineInterface): Promise<void> {
+  try {
+    await $.ui.open({ id: BOARD_PANE, title: BOARD_TITLE })
+  } catch (error) {
+    $.ui.toast(`Oversee loop: ${String(error)}`)
+    return
+  }
+  await refreshBoard($)
 }
 
 async function loopCommand($: EngineInterface, args: readonly string[]): Promise<void> {
@@ -236,7 +278,7 @@ export const register: Register = on => {
     await remember($, e)
     const isBash = e.tool_name === 'Bash'
     if (isBash && /\b(loop\.py|oversee\.sh)\b/.test(bashCommand(e.tool_input))) {
-      void refreshLoop($)
+      refreshLoop($).catch(() => undefined)
     }
     const scripts = isBash
       ? HOOKS.PostToolUse.Bash
@@ -252,7 +294,7 @@ export const register: Register = on => {
 
   on('classic.SessionStart', async ($, e, next) => {
     await remember($, e)
-    void refreshLoop($)
+    refreshLoop($).catch(() => undefined)
     const [beneath, output] = await Promise.all([next(e), runAll($, 'SessionStart', HOOKS.SessionStart, e)])
     return merge(beneath, output)
   })
@@ -285,6 +327,76 @@ export const register: Register = on => {
         ) : (
           <Button key="resume" label="Resume" onPress={() => loopCommand($, ['resume'])} />
         )}
+        <Text> </Text>
+        <Button key="open" label="Open" onPress={() => openBoard($)} />
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: BOARD_PANE }, async ($, e) => {
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
+    const shown = await read($, board)
+    const close = (
+      <Button key="close" label="Close" onPress={() => $.ui.close({ id: BOARD_PANE })} />
+    )
+    if (shown === null) {
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>No loop data yet.</Text>
+          {close}
+        </Box>
+      )
+    }
+    const repo = shown.repo
+    // An issue or pull request number, linked when the repository is on GitHub.
+    const ref = (key: string, kind: 'issues' | 'pull', n: number, label: string) =>
+      repo === null ? (
+        <Text key={key}>{label}</Text>
+      ) : (
+        <Link key={key} href={`${repo}/${kind}/${n}`} label={label} />
+      )
+    // The details of one issue, the empty ones left out.
+    const line = (...parts: (string | null | undefined)[]) =>
+      parts.filter(part => part !== null && part !== undefined && part !== '').join(' · ')
+
+    const current = shown.current
+    const finishedCount = shown.finished.length + shown.more
+    return (
+      <Box flexDirection="column">
+        <Text bold>Current</Text>
+        {current === null ? (
+          <Text dimColor>Nothing is being worked on.</Text>
+        ) : (
+          <Box>
+            {ref('current-issue', 'issues', current.issue, `#${current.issue}`)}
+            <Text> {line(current.title, current.phase, current.branch)}</Text>
+          </Box>
+        )}
+        <Text> </Text>
+        <Text bold>Queued ({shown.queued.length})</Text>
+        {shown.queued.length === 0 ? <Text dimColor>The queue is empty.</Text> : null}
+        {shown.queued.map((item, index) => (
+          <Box key={`queued-${index}`}>
+            {ref(`queued-issue-${index}`, 'issues', item.issue, `#${item.issue}`)}
+            <Text> {line(item.title)}</Text>
+            {item.blockers !== null ? <Text dimColor> · blocked by {item.blockers}</Text> : null}
+          </Box>
+        ))}
+        <Text> </Text>
+        <Text bold>Finished ({finishedCount})</Text>
+        {finishedCount === 0 ? <Text dimColor>No finished issues yet.</Text> : null}
+        {shown.finished.map((item, index) => (
+          <Box key={`finished-${index}`}>
+            {ref(`finished-issue-${index}`, 'issues', item.issue, `#${item.issue}`)}
+            <Text> {line(item.title, item.status, item.note)} </Text>
+            {item.pr !== null
+              ? ref(`finished-pr-${index}`, 'pull', item.pr, `PR #${item.pr}`)
+              : null}
+          </Box>
+        ))}
+        {shown.more > 0 ? <Text dimColor>and {shown.more} more</Text> : null}
+        <Text> </Text>
+        {close}
       </Box>
     )
   })

@@ -2,7 +2,9 @@
 """Cases for check-list-numbers.py: which converted list numbers disagree with the source."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import pathlib
 import shutil
 import tempfile
@@ -187,6 +189,45 @@ class CompareTest(unittest.TestCase):
         self.assertEqual([(n, label) for _, n, label, _ in differ], [(5, "1"), (6, "2")])
         self.assertEqual((found, missing), (2, 0))
 
+    def test_an_item_never_pairs_with_a_later_item_that_only_opens_alike(self):
+        # Items 166 to 170 open with the same 48 characters. Item 167's own copy
+        # is not a labelled item in the export, and the export's 170 has no
+        # Markdown item; 167 is not in the source, not numbered 170.
+        rule = "Upon a successful save when the Event type is {} a Shadow Code is made"
+        codes = {166: "M910", 167: "M960", 168: "M980", 169: "M981", 170: "M982"}
+        markdown = "\n\n".join(f"{n}.  {rule.format(code)}"
+                                 for n, code in codes.items() if n != 170) + "\n"
+        export = "\n".join(f"    {n}. {rule.format(code)}"
+                           for n, code in codes.items() if n != 167) + "\n"
+        self.assertEqual(CHECK.compare(markdown, export), ([], 3, 1))
+
+    def test_items_opening_alike_pair_in_order_when_copies_are_missing(self):
+        rule = "Upon a successful save when the Event type is {} a Shadow Code is made"
+        codes = {166: "M910", 167: "M960", 168: "M980", 169: "M981", 170: "M982",
+                 173: "M960 - Child Ends Absence or"}
+        markdown = "\n\n".join(f"{n}.  {rule.format(code)}" for n, code in codes.items()) + "\n"
+        for dropped in ({167}, {168, 169}):
+            export = "\n".join(f"    {n}. {rule.format(code)}"
+                               for n, code in codes.items() if n not in dropped) + "\n"
+            differ, found, missing = CHECK.compare(markdown, export)
+            self.assertEqual(differ, [])
+            self.assertEqual((found, missing), (6 - len(dropped), len(dropped)))
+
+    def test_items_that_differ_past_a_mark_are_different_items(self):
+        self.assertFalse(CHECK.same_item(
+            "upon a successful save when the event type is m960 - child ends absence or",
+            "upon a successful save when the event type is m960 a shadow code is made"))
+        self.assertTrue(CHECK.same_item(
+            "the window shows the value of the case field taken from <https://example.org>",
+            "the window shows the value of the case field taken from https://example.org."))
+
+    def test_a_copy_that_wraps_or_hyphenates_sooner_still_pairs(self):
+        export = ("    4. The Children Search rules apply when the user selects the Search push-\n"
+                  "       button from the Workload window.\n")
+        markdown = ("4.  The Children Search rules apply when the user selects the Search pushbutton\n"
+                    "    from the Workload window.\n")
+        self.assertEqual(CHECK.compare(markdown, export), ([], 1, 0))
+
     def test_short_items_and_fenced_code_are_skipped(self):
         markdown = ("1.  Yes\n\n```\n"
                     "9.  The window will display the case name and the case number.\n```\n")
@@ -286,6 +327,143 @@ class SourceTest(unittest.TestCase):
         work = self.work / "work"
         work.mkdir()
         self.assertEqual(CHECK.as_printed(legacy, work), work / "visible" / "rules.docx")
+
+
+# Word's render of a source whose list LibreOffice counts differently: Word
+# carries the count on at 51, LibreOffice starts the list again at 2.
+WORD_RENDER = (
+    "Children Search\n\n"
+    "    50. The Children Search window lists every child on the workload.\n"
+    "    51. The following rules are applicable for the Search buttons on the\n"
+    "        Children Search window.\n"
+    "    52. The Clear pushbutton empties every search field on the window.\n"
+    "\f   7\n"
+)
+LIBREOFFICE_EXPORT = (
+    "Children Search\n\n"
+    "    50. The Children Search window lists every child on the workload.\n"
+    "    2. The following rules are applicable for the Search buttons on the Children Search window.\n"
+    "    3. The Clear pushbutton empties every search field on the window.\n"
+)
+AS_WORD = ("50. The Children Search window lists every child on the workload.\n\n"
+           "51. The following rules are applicable for the Search buttons on the\n"
+           "    Children Search window.\n\n"
+           "52. The Clear pushbutton empties every search field on the window.\n")
+
+
+class WordRenderTest(unittest.TestCase):
+    def test_pdf_text_reads_as_the_export_does(self):
+        self.assertEqual(CHECK.pdf_text("\ufb01eld \u00adlist non\u2011breaking\f2. Next"),
+                         "field list non-breaking\n2. Next")
+
+    def test_word_and_libreoffice_disagreements_are_listed(self):
+        rows = CHECK.disagreements(AS_WORD, LIBREOFFICE_EXPORT, CHECK.pdf_text(WORD_RENDER))
+        self.assertEqual([(line, word, other) for line, word, other, _ in rows],
+                         [(3, "51", "2"), (6, "52", "3")])
+
+    def test_a_page_number_or_running_line_is_not_an_item(self):
+        text = CHECK.pdf_text("    3. The Clear pushbutton empties the window.\n\n"
+                              "Workload Mockups & Design    Page 7 of 12\n\f\n      7\n"
+                              "    4. The Search pushbutton runs the search.\n")
+        self.assertEqual([label for label, _ in CHECK.export_items(text)], ["3", "4"])
+
+    def test_a_sub_item_at_the_margin_is_read_by_its_label_in_the_render(self):
+        render = CHECK.pdf_text("    2. The grid lists every stage of the case in date order.\n"
+                                "         i. The Stage column holds the stage name.\n"
+                                "        ii. The Status column holds the stage status.\n"
+                                "         b) The Owner column holds the case owner.\n")
+        markdown = ("2.  The grid lists every stage of the case in date order.\n\n"
+                    "2.  The Status column holds the stage status.\n\n"
+                    "2.  The Owner column holds the case owner.\n")
+        self.assertEqual(CHECK.compare(markdown, render), ([], 3, 0))
+        differ = CHECK.compare(markdown.replace("2.  The Status", "3.  The Status"), render)[0]
+        self.assertEqual([(n, label) for _, n, label, _ in differ], [(3, "ii")])
+
+    def test_markdown_numbered_as_word_prints_agrees_with_word(self):
+        differ, found, missing = CHECK.compare(AS_WORD, CHECK.pdf_text(WORD_RENDER))
+        self.assertEqual((differ, found, missing), ([], 3, 0))
+
+
+class WordMainTest(unittest.TestCase):
+    def setUp(self):
+        self.work = pathlib.Path(tempfile.mkdtemp())
+        (self.work / "source.txt").write_text(LIBREOFFICE_EXPORT, encoding="utf-8")
+        (self.work / "render.txt").write_text(WORD_RENDER, encoding="utf-8")
+        self.page = self.work / "page.md"
+
+    def tearDown(self):
+        shutil.rmtree(self.work)
+
+    def run_check(self, markdown, *extra):
+        self.page.write_text(markdown, encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            status = CHECK.main(["check-list-numbers.py", str(self.page),
+                                 str(self.work / "source.txt"), *extra])
+        return status, out.getvalue()
+
+    def test_numbered_as_word_prints_passes_and_names_the_disagreement(self):
+        status, out = self.run_check(AS_WORD, "--word", str(self.work / "render.txt"))
+        self.assertEqual(status, 0)
+        self.assertIn("page.md:3: Word numbers it 51, LibreOffice numbers it 2", out)
+        self.assertIn("2 where Word and LibreOffice differ", out)
+        self.assertIn("render.txt", out)
+
+    def test_numbered_as_libreoffice_counts_differs_from_word(self):
+        markdown = AS_WORD.replace("51. ", "2. ").replace("52. ", "3. ")
+        status, out = self.run_check(markdown, "--word", str(self.work / "render.txt"))
+        self.assertEqual(status, 2)
+        self.assertIn("page.md:3: numbered 2, Word numbers it 51", out)
+
+    def test_without_a_render_libreoffice_is_the_reference(self):
+        status, out = self.run_check(AS_WORD)
+        self.assertEqual(status, 2)
+        self.assertIn("the source numbers it 2", out)
+        self.assertNotIn("Word", out)
+
+    def test_a_wrong_call(self):
+        self.assertEqual(self.run_check(AS_WORD, "--word")[0], 64)
+        self.assertEqual(self.run_check(AS_WORD, "--word", "a.pdf", "b.pdf")[0], 64)
+
+    def test_a_render_that_cannot_be_read_leaves_the_export_the_reference(self):
+        (self.work / "broken.pdf").write_text("not a PDF", encoding="utf-8")
+        for name in ("none.pdf", "broken.pdf"):
+            status, out = self.run_check(AS_WORD, "--word", str(self.work / name))
+            self.assertEqual(status, 2)
+            self.assertIn(f"cannot read {name} (", out)
+            self.assertIn("the source numbers it 2", out)
+
+    def test_a_render_with_no_list_items_finds_nothing(self):
+        (self.work / "empty.txt").write_text("Workload\n\nNo lists here.\n\f  3\n",
+                                             encoding="utf-8")
+        status, out = self.run_check(AS_WORD, "--word", str(self.work / "empty.txt"))
+        self.assertEqual(status, 0)
+        self.assertIn("0 found, 0 differ, 3 not in the source", out)
+        self.assertIn("0 where Word and LibreOffice differ", out)
+
+    def test_a_render_libreoffice_made_is_not_word(self):
+        self.assertTrue(CHECK.libreoffice_made("Creator: Writer\nProducer: LibreOffice 24.2\n"))
+        self.assertFalse(CHECK.libreoffice_made(
+            "Creator: Microsoft\u00ae Word for Microsoft 365\nProducer: Microsoft\u00ae Word\n"))
+        self.assertFalse(CHECK.libreoffice_made("Producer: Writer's Guild Press\n"))
+
+    @unittest.skipUnless(shutil.which("soffice") and shutil.which("pdfinfo"),
+                         "LibreOffice or pdfinfo is not installed")
+    def test_a_libreoffice_pdf_falls_back_to_the_export(self):
+        source = self.work / "rules.docx"
+        WORD.docx(source, BODY, DEFINITIONS)
+        pdf = CHECK.libreoffice(source, "pdf", "pdf", self.work / "lo")
+        status, out = self.run_check(AS_WORD, "--word", str(pdf))
+        self.assertEqual(status, 2)
+        self.assertIn("LibreOffice made", out)
+
+
+class ConvertCallTest(unittest.TestCase):
+    def test_convert_passes_the_group_pdf_to_the_check(self):
+        script = (HERE / "convert.sh").read_text(encoding="utf-8")
+        call = script[script.index('"$HERE/check-list-numbers.py"'):]
+        call = call[:call.index(")\"")]
+        self.assertIn('${word[@]+"${word[@]}"}', call)
+        self.assertIn('word=(--word "$linked")', script)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+{
+  "name": "cache-clock",
+  "description": "Counts down above the prompt until the chat's prompt cache goes cold, offers a handoff for a large cold chat, and keeps the cache warm on request",
+  "version": "0.32.4",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

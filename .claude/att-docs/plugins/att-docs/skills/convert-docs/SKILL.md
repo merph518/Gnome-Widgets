@@ -34,7 +34,7 @@ none, ask the user rather than guessing.
 | `<stub-names>` | The file names a failed download leaves behind |
 
 The scripts and the filters ship in this folder: `convert.sh`, `stamp.py`,
-`pages.py`, `doc_paths.py`, `hidden-text.py`, `doc-lists.py`, `list-numbers.py`,
+`pages.py`, `slides.py`, `doc_paths.py`, `hidden-text.py`, `doc-lists.py`, `list-numbers.py`,
 `check-list-numbers.py`, `check-shifted-text.py`, `build-words.py`,
 `check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`,
 `list-markers.lua`, and the
@@ -59,6 +59,8 @@ when it is not normal.
 calls `<stamp-script>` for the cleanup, the provenance block, and the page
 markers, which `<stamp-script>` gets from `<pages-script>`. Pandoc runs with
 three Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry,
+the placeholder each picture leaves, and the space a bookmark leaves at the
+front of a paragraph,
 `<flatten-tables-filter>` for the ones that would force a table into raw HTML,
 and `list-markers.lua` for list labels Markdown cannot draw.
 
@@ -74,6 +76,10 @@ A group folder's `<future-folder>` folder is a batch of its own:
 documents specify does not carry yet, which converts beside the version that
 system follows rather than over it, per the `doc-watch` rule for a revision not
 carried yet.
+
+A page the living-wiki skill generates is not a document. The page beside a
+group's `<future-folder>` folder, and any Markdown file whose first line is the
+wiki's generated header, stay in `<todo-root>` and are never converted.
 
 When `<todo-root>` is not ignored by git, a batch dropped there, and the `_done`
 folder it moves into, shows up in `git status` as untracked. Stage the converted
@@ -175,21 +181,28 @@ So `Example-5.0-Home-Page.md#page-7` lands on the text that opens page 7 of the
 original. The pages come from the best layout available, and the `Pages` line
 names which:
 
-1. **from the PDF**: the group holds a PDF of the document, whose pages are the
+1. **one per slide shown in the deck**: a presentation's pages are its slides. Each slide opens on a heading in the Markdown, so every slide gets a marker, one with only a picture included, and the deck decides the pages even when the group also holds a PDF.
+2. **from the PDF**: the group holds a PDF of the document, whose pages are the
    pages. When the library path of that PDF is known, each marker also links to
    that page of it, as `*[Page 7](https://...pdf#page=7)*`.
-2. **as Word last laid the document out**: a `.docx` that Word saved carries a
+3. **as Word last laid the document out**: a `.docx` that Word saved carries a
    `w:lastRenderedPageBreak` wherever a page ended when Word last laid it out.
-3. **as LibreOffice lays the document out**: everything else LibreOffice can
+   Word leaves some pages unmarked, so this layout is used only when the page
+   count Word stored in the file agrees with the marks. When they differ, the
+   document goes to the next layout, and the `Pages` line says what Word marked
+   and what its stored count says, as in `(Word's last layout marked 6, its stored
+   count says 10)`.
+4. **as LibreOffice lays the document out**: everything else LibreOffice can
    open, rendered to a PDF. A legacy `.doc` lands here, since the modern copy
    LibreOffice writes carries no Word layout. LibreOffice breaks lines a little
    differently from Word, so a page can start a line or two off. A blank
    paragraph LibreOffice gave a deleted list item's list is taken out of that
    list in the copy it lays out, as it is in the conversion, so a page that
    opens on a later item of the list carries the number the Markdown gives it.
+   When LibreOffice cannot lay out a document whose Word marks and stored count
+   differ, Word's layout is used and the `Pages` line names the difference.
 
-A Word or PowerPoint marker carries no link, because SharePoint opens those
-files in the browser, which takes no page number in the address.
+A Word marker carries no link, because SharePoint opens those files in the browser, which takes no page number in the address. Neither does a deck's marker, unless the group holds a PDF of the deck with as many pages as the deck shows slides, and its library path is known: then each marker links to that page of the PDF.
 
 A spreadsheet, an HTML page, and a text file have no pages and get neither the
 line nor the markers.
@@ -206,6 +219,8 @@ list, a table, or a code block, the marker goes in front of the whole block, and
 in front of the list item an indented block belongs to. A page whose opening
 text is not in the body at all, such as a page holding only a screenshot, gets
 no marker, and the `Pages` line names it.
+
+A deck's slides are found by their headings instead: each slide's marker goes in front of the next heading line, in order, whose text is that slide's heading, so slides sharing a title and untitled slides are marked too.
 
 ### The ladder
 
@@ -261,7 +276,14 @@ Nothing else answers. In particular:
 ## What the output may contain
 
 Markdown, and nothing else. No images are extracted and no `_assets` folder is
-written, so a link to a file that does not exist cannot be produced.
+written, so a link to a file that does not exist cannot be produced. Each
+picture leaves a plain-text placeholder where it was: `[picture]` inside a line
+of text, such as an icon quoted between quote marks, and `[Picture]` on a line
+of its own, such as a screen print. The picture's alt text follows a colon when
+the document gives one, apart from the description Word writes for itself.
+The Markdown escapes the brackets, `\[picture\]`, so the placeholder reads as
+text and never as a link. A picture with a caption keeps the caption under its
+placeholder.
 
 Every file that lands has to satisfy all of this:
 
@@ -303,14 +325,16 @@ once, in the first row it spans, and an empty inner cell is left out.
 ## Routes
 
 Pandoc cannot read the legacy Word format, any presentation format, or any
-spreadsheet, so those go through LibreOffice first.
+spreadsheet, so those go through LibreOffice first, or, for a presentation,
+through the slide reader beside this skill.
 
 | Input | Route |
 |---|---|
 | `docx` `docm` `odt` `rtf` | pandoc |
 | `doc` `dot` | soffice to `docx`, then pandoc |
 | `htm` `html` | pandoc, with divs and spans dropped at the reader |
-| `ppt` `pptx` `pptm` `odp` | soffice to `html`, then pandoc |
+| `pptx` `pptm` | the slide reader |
+| `ppt` `odp` | soffice to `pptx`, then the slide reader |
 | `xls` `xlsx` `xlsm` `ods` | soffice to one `csv` per sheet, then pandoc |
 | `pdf` | `pdftotext -layout`, then a heading heuristic |
 | `txt` `md` | copied |
@@ -319,6 +343,8 @@ A workbook exports one csv per sheet, named for the sheet, which is where the
 sheet names in the output come from. An empty sheet is reported rather than
 rendered as an empty table, and the padding around a sheet's used range is
 trimmed before conversion.
+
+A presentation is read straight from its slide XML by the slide reader, `slides.py`. Every shape with text is read, in the order the slide stacks them: title and body placeholders, free-standing text boxes and rectangles, shapes inside a group, and tables, which become pipe tables with a cell's paragraphs joined by `; `. Each slide opens with a heading, its title or `Slide N` when it has none, so a slide with only a picture still has its place. A title with no letter or digit stays on the slide as text under `Slide N`. An equation is read as its text. A deck saved as Strict Open XML is read the same way, and a deck that shows no slides fails. Hidden slides are left out, as they are from a PDF of the deck. A paragraph's level is its list depth, and its bullet or number comes from the paragraph, then from the shape, then from the slide layout and master, which is where a body placeholder's bullets come from. A lettered or roman list is written as bullets that open with the label the slide draws. Date, footer, and slide number placeholders, speaker notes, charts, and SmartArt are not read.
 
 A PDF carries no heading structure, so the only signal left is layout: a short
 line standing alone that does not read as a sentence becomes a heading, and
@@ -335,12 +361,14 @@ as already used, and it nests by level where Word nests by indentation. Left
 alone, a list restarts at 1 partway through and a sub-list lands at the margin.
 
 Word never prints its hidden text, runs whose properties set `w:vanish`
-directly, through their character or paragraph style, or through the document
-defaults, and Pandoc writes it as any other text. `hidden-text.py` removes
-those runs from every route that reads a `docx`, `doc` and `dot` included,
-before `list-numbers.py` sees the file. A character style and a paragraph
-style that both hide a run cancel each other, as Word treats the setting as a
-toggle. A run holding a field code stays, since Word still reads a field whose
+directly, through their character style, their paragraph style (the default
+paragraph style when a paragraph names none), the style of the table they sit
+in, or the document defaults, and Pandoc writes it as any other text.
+`hidden-text.py` removes those runs from every route that reads a `docx`, `doc`
+and `dot` included, before `list-numbers.py` sees the file. Word treats the
+setting as a toggle: the document defaults give the starting value, and each of
+those styles that sets it the other way flips it, so two styles that both hide
+a run cancel each other. A run holding a field code stays, since Word still reads a field whose
 code is hidden. A paragraph whose mark is a tracked deletion joins the
 paragraph after it, as it does in the document Word prints with its changes
 accepted, so a deleted list item takes no number from the item after it.
@@ -372,7 +400,12 @@ are, with one exception: a heading whose own numbering, not its style's, puts
 it in a list beside an ordinary item at the same level is drawn as one more
 item, unless that list also numbers a heading standing alone or through its
 style, and so numbers the document's sections. A level whose definition names
-no start counts from 0, as Word counts it. A paragraph with no number stays in
+no start counts from 0, as Word counts it. A level drawn without a number
+can still draw text, such as `6.` or `5a.` typed into the level, or the number
+of a level above it. Outside tables and headings, that text goes at the start
+of the paragraph, followed by a space, and the paragraph comes out of the list.
+Pandoc would otherwise draw it as an item numbered `1.`. Word still counts the
+paragraph for the levels under it. A paragraph with no number stays in
 the item above it when it starts at or past that item's text, and a hanging
 indent starts it at its first line unless it opens with a tab, with spaces
 typed ahead of its first words counted at about their width. The blank
@@ -395,6 +428,49 @@ item's text starts at a stop set between its number and its hanging indent. A
 paragraph that leaves the sub-list this way reaches Pandoc as a one-item list
 starting at 32768, past any start Word takes, and `list-markers.lua` writes
 such a list as the paragraphs it holds, under the item and after the sub-list.
+
+The column a list or a paragraph is drawn in also takes it out of the item
+before it. A list of another definition is an item's sub-list when its number
+is drawn at or past the text of the item's first line, a tab stop set between
+the item's number and its hanging indent included. A deeper level of the
+item's own list is its sub-list unless Word draws that level's number beside
+the item or beside an item it is under, in the column of that item's number
+and with the same kind of number: such a level is a run of items beside that
+item, and it is written at that item's depth. A deeper level of bullets stays
+a sub-list. A paragraph with no number that a blank paragraph sets off from
+the last item read, and that starts at that item's text, is left out of the
+item when it starts where the last paragraph ahead of the list did, no
+heading, and no table outside every item, lies between the two, and no
+paragraph after it, up to the next heading, is more of an open item's list:
+numbered by its definition, or drawn beside it. Past a table only an item
+of the definition and level of an open item inside another counts, since only
+such an item takes the list up again. That paragraph
+is the text of the body going on after a list whose numbers hang left of it. A table in an
+item, and a note or table at the margin that the list takes back in when it
+goes on, are part of the list, not of the body. After a sub-list of the item,
+the paragraph goes to the item it starts nearest, as above.
+
+Pandoc ends every list at a table, and at a paragraph that holds only a picture
+or an empty run, so the items after one would land at the margin. A table is
+inside the item above it when its indent sets it at or past that item's text
+and the item's text is set in from the page margin; a table set in the middle
+or at the right sits in the deepest such item. When the list goes on after the
+table, with a paragraph or an item still inside an item left open,
+`list-numbers.py` puts a run of empty items after the table, one at each level
+of the items the table sits in, in a list starting at 65536. Pandoc nests what
+follows the table in those, and `list-markers.lua` moves the table and what
+they hold back into the items of the list before the table, so the table is
+written inside its item and the items after it keep their depth and their
+count. A paragraph with no text between two items of a list that goes on stays
+in the item above it. A table followed by nothing of the list it is drawn in is
+written after the list.
+
+An item that counts on from the last item at its depth, under the same item
+above, stays in that list when a paragraph or a table at the margin came
+between the two, as a note set at the margin between two lettered items does.
+What was read between them is written one level inside the item they are
+under, between the two parts of the list. A list that starts its count again,
+and any item after a heading, is placed by where it is drawn alone.
 
 Markdown numbers an ordered list with digits only, so Pandoc writes a list Word
 letters `a.`, `b.` or numbers `i.`, `ii.` as `1.`, `2.`, and a rule citing
@@ -429,6 +505,34 @@ through a `docx` copy, and without its hidden text or the paragraphs deleted
 with their changes tracked, and with the blank paragraph LibreOffice gives a
 deleted item's list taken out of it, so neither paragraph takes a number on
 either side.
+
+An item is paired with its copy in the source in order, and only with a copy
+that reads the same as far as both lines go. Items that open with the same
+words, such as a run of rules that differ only in the code they name, each
+pair with their own copy, never with a later item that only opens alike. An
+item whose own copy is not a numbered item in the source is counted under `not
+in the source`.
+
+LibreOffice does not always count a list the way Word prints it, and a rule
+cites the number Word prints. When the group holds a PDF of the document, the
+run hands it to the check as Word's render, and Word's numbers become the
+reference. The check still reads LibreOffice's export and lists each item the
+two number differently, as `Word numbers it 51, LibreOffice numbers it 2`. Those
+lines do not fail the check. Each one marks an item where the converter, which
+counts the lists from the Word file, may have followed LibreOffice instead of
+Word. A PDF that LibreOffice made carries LibreOffice's numbers, so the check
+says so and keeps the export as the reference, as it does when it cannot read
+the PDF. A PDF of an older revision reports most of
+its items as different, so check that the PDF and the Word file are the same
+revision. On its own, the check takes the render with `--word`, as a PDF or as
+the text `pdftotext -layout` reads from one:
+
+```bash
+python3 check-list-numbers.py <apps-root>/<group>/<page>.md SOURCE.doc --word SOURCE.pdf
+```
+
+To get Word's render of a library file, open it in the browser with
+`?format=pdf` added to its address and save the PDF beside the Word file.
 
 ## Text in a font the conversion could not map
 
