@@ -92,6 +92,32 @@ class RuleChanges(unittest.TestCase):
         new = '## Rules\n\n12. The rule\n\n<a id="page-3"></a>*Page 3*\n\n    1. Its sub-rule\n'
         self.assertEqual(docimpact.changed_numbers(old, new), (set(), False))
 
+    def test_an_escaped_list_marker_is_unchanged(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        self.assertEqual(docimpact.rule_changes(RULE_DOC, new)["kind"], "unchanged")
+        self.assertEqual(docimpact.changed_numbers(RULE_DOC, new), (set(), False))
+        # Either side may be the escaped one.
+        self.assertEqual(docimpact.rule_changes(new, RULE_DOC)["kind"], "unchanged")
+        self.assertEqual(docimpact.changed_numbers(new, RULE_DOC), (set(), False))
+
+    def test_escaped_markers_of_every_list_kind_are_unchanged(self):
+        old = "## Rules\n\n2) A\n\n   1. Nested\n\n- Bullet\n* Star\n+ Plus\n\n> 3. Quoted\n"
+        new = ("## Rules\n\n2\\) A\n\n   1\\. Nested\n\n\\- Bullet\n\\* Star\n\\+ Plus\n\n"
+               "> 3\\. Quoted\n")
+        self.assertEqual(docimpact.rule_changes(old, new)["kind"], "unchanged")
+
+    def test_text_that_only_looks_like_an_escaped_marker_is_still_a_change(self):
+        old = "## Rules\n\n2.x The value\n\nEnds here.\n"
+        self.assertEqual(docimpact.rule_changes(old, old.replace("2.x", "2\\.x"))["kind"],
+                         "content")
+        self.assertEqual(docimpact.rule_changes(old, old.replace("Ends here.", "Ends\\. here."))
+                         ["kind"], "content")
+
+    def test_wording_changed_on_an_escaped_marker_line_is_a_change(self):
+        new = revise(RULE_DOC, "2. The end date may not", "2\\. The end date may")
+        self.assertEqual(docimpact.rule_changes(RULE_DOC, new)["kind"], "content")
+        self.assertEqual(docimpact.changed_numbers(RULE_DOC, new), ({2}, False))
+
     def test_paragraph_split_differently_is_layout(self):
         new = revise(HEAD, "once every\nrequired", "once every\n\nrequired")
         self.assertEqual(docimpact.rule_changes(HEAD, new)["kind"], "layout")
@@ -463,6 +489,20 @@ class RuleRefresh(unittest.TestCase):
 
     def changed(self, items):
         return [c["rule_id"] for c in items[0]["changed"]]
+
+    def test_an_escaped_list_marker_flags_no_rule(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        self.assertEqual(self.review(MAPPED, new), [])
+
+    def test_wording_changed_under_an_escaped_number_still_flags_its_rule(self):
+        new = revise(RULE_DOC, "2. The end date may not", "2\\. The end date may")
+        self.assertEqual(self.changed(self.review(MAPPED, new)), ["BR-ACT4-002"])
+
+    def test_an_escape_on_one_rule_never_flags_it_for_a_change_under_another(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        new = revise(new, "3. Requirement # CPRS-5.2.3.1 applies to every",
+                     "3. Requirement # CPRS-5.2.3.1 applies to closed")
+        self.assertEqual(self.changed(self.review(MAPPED, new)), ["BR-ACT4-003"])
 
     def test_requirement_number_followed_by_punctuation_is_found(self):
         new = revise(RULE_DOC, "applies to every activity.",

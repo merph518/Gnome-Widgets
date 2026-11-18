@@ -115,12 +115,43 @@ their registration under `docs/runners/`, and the tester hand-off plan under
 triage label and domain docs settings, which the engineering skills read from the
 repository root, and the permission rules that let sessions file and comment on GitHub
 issues without a prompt.
+[docs/agents/user-rules.md](docs/agents/user-rules.md) holds the rules that every session
+on the owner's machine loads. `~/.claude/CLAUDE.md` (Claude Code) and
+`~/.omp/agent/AGENTS.md` (omp) each import it with one line,
+`@~/Code/Overmind-Mod/docs/agents/user-rules.md`, which reads it from the owner's main
+checkout at `~/Code/Overmind-Mod`.
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, and `general` holds the workflow skills that serve any repository (implementing
-issues). Both install at user scope. Further groups sit beside them and follow the same
-layout and the same extension contract. A group's `hooks/hooks.json` names its hooks
+issues). Both install at user scope. Further skill groups sit beside them and follow the
+same layout and the same extension contract. A group's `hooks/hooks.json` names its hooks
 module, `hooks/register.tsx`, which registers its hooks when the plugin is installed.
+
+`effort-optimizer` holds no skills, only a hooks module: after each typed prompt it
+shows a suggested reasoning effort level in a row above the prompt, and switches to
+that level when asked, or by itself in auto mode. See its
+[README](plugins/effort-optimizer/README.md).
+
+`model-router` holds no skills, only a hooks module, `hooks/model-router.ts`: before each
+subagent starts, Haiku reads its task and the subagent moves up or down a model tier when
+Haiku is sure enough. See its [README](plugins/model-router/README.md).
+
+`efficient-browser-use` holds no skills, only a hooks module and one shell script: on
+Linux, it shrinks large pictures in tool results before the model reads them, so browser
+screenshots cost fewer tokens. A screenshot keeps its coordinate frame, so clicks still
+land where they are aimed. Shrinking uses ImageMagick (`sudo apt install imagemagick`);
+without it no picture is shrunk. See its
+[README](plugins/efficient-browser-use/README.md).
+
+`mods` holds no skills, only a hooks module: `/mods` opens a pane that lists every mod
+on the computer and switches each one on or off, or hides its band or pane, in every
+open chat, through `mods/switches.json` in the configuration folder. See its
+[README](plugins/mods/README.md).
+
+`cache-clock` holds no skills, only a hooks module, `hooks/register.tsx`: a row above the
+prompt counts down until the chat's prompt cache goes cold. `/keepwarm` turns on a
+one-word ping sent just before the cache would go cold, so the cache is read and its time
+starts over; it is off until turned on. See its [README](plugins/cache-clock/README.md).
 
 A skill links to a shared file with a relative path, `../../shared/<file>`. The link
 resolves the same way from a vendored copy and from a plugin cache.
@@ -152,10 +183,20 @@ parses, every `SKILL.md` has a `name` and a `description`, relative Markdown lin
 resolve, and every Python, JavaScript and shell file passes a syntax check. Pass
 `--tests-only` or `--checks-only` to run just one half.
 
-The `test-all` check in `.github/workflows/ci.yml` runs this same command on every pull
-request and on each push to `main`. `shellcheck` also runs when it is installed, but
-its findings are advisory and never fail the run. The runners need `node`, `python3`,
-`jq` and `bash`.
+`--changed-since <rev>` runs only the test files that the change from the merge base of
+`<rev>` to `HEAD` can affect, and prints a `SKIP` line for each file it leaves out.
+`scripts/select_tests.py` picks them: a changed file selects the tests in its own folder
+(a skill, `shared/`, a `scripts/` subfolder) and in the folders its `EDGES` table lists
+as depending on it. A change to the test runner, the workflows, `package.json` or a file
+outside every known folder runs everything. Markdown at the root or under `docs/` runs
+no tests, except a file a test reads, such as `CLAUDE.md`, which `EDGES` lists. The
+static checks always run.
+
+The `test-all` check in `.github/workflows/ci.yml` runs this command with
+`--changed-since` on every pull request, against the base the pull request merges onto,
+and with no flag on each push to `main`, so `main` always runs every test. `shellcheck`
+also runs when it is installed, but its findings are advisory and never fail the run.
+The runners need `node`, `python3`, `jq` and `bash`.
 
 `.github/workflows/pack-compare.yml` is run by hand and compares two staged test packs on a
 desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files.
@@ -292,8 +333,8 @@ hold the base lock's tag at the base lock's commit, which shows it carries the s
 releases. `overmind-sync.sh` writes the new `repo=` when `ATT_DOCS_REPO` names it, and the
 pin script does the same with `PIN_REPO`. The check runs from the base commit, so the move
 takes two pins. The first pins a tag that holds this rule and leaves `repo=` as it is.
-The second moves `repo=`. `merge_pin_pr.py` never merges a pin that moves `repo=`; it is
-left for review.
+The second moves `repo=`, on that tag or a newer one. `merge_pin_pr.py` never merges a
+pin that moves `repo=`; it is left for review.
 
 Moving `url=` or `prefix=` is a deliberate change: the check fails in the pull request
 that makes it, unless `ATT_DOCS_BASE` names a commit that already holds the new values.
@@ -335,8 +376,19 @@ claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
 ```
 
+`effort-optimizer`, `model-router`, `efficient-browser-use`, `mods` and `cache-clock` are
+optional and installed the same way:
+
+```
+claude plugin install effort-optimizer@att-docs --scope user
+claude plugin install model-router@att-docs --scope user
+claude plugin install efficient-browser-use@att-docs --scope user
+claude plugin install mods@att-docs --scope user
+claude plugin install cache-clock@att-docs --scope user
+```
+
 The pin moves by hand. To move it, remove the marketplace (which uninstalls its
-plugins), add it again with the new tag, and install both plugins again:
+plugins), add it again with the new tag, and install the plugins again:
 
 ```
 claude plugin marketplace remove att-docs
@@ -344,6 +396,9 @@ claude plugin marketplace add merph518/Overmind-Mod#<new tag>
 claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
 ```
+
+A machine that had `effort-optimizer`, `model-router`, `efficient-browser-use`, `mods` or
+`cache-clock` installs it again too.
 
 Adding the marketplace again without removing it keeps the old tag, and
 `claude plugin marketplace update` stays on the tag it was added with.
@@ -483,7 +538,7 @@ and publishes the GitHub release with its changelog.
 
 A tag cut by hand, which only happens while the workflow is off, leaves the manifest
 behind it. A `chore:` pull request then sets `.release-please-manifest.json` and the
-two `plugin.json` versions to that tag, and release-please counts commits from there.
+`plugin.json` versions to that tag, and release-please counts commits from there.
 
 The version comes from the commit subjects on `main`, written as conventional commits.
 While the version is below 1.0:
@@ -500,7 +555,7 @@ With a merge commit, each commit on the branch counts, and a subject that is not
 conventional commit is left out.
 
 `.release-please-manifest.json` holds the current version. Each release also writes it
-into the two `plugin.json` files, so every plugin carries the repository's version.
+into every `plugin.json`, so every plugin carries the repository's version.
 
 The workflow's token comes from the automation GitHub App, described under
 [Automation GitHub App](#automation-github-app).
@@ -519,7 +574,8 @@ summary has one line per consumer.
 For each consumer, `scripts/pin/overmind-pin.sh`:
 
 1. Clones the default branch and reads the pinned tag from the lock. A consumer already on
-   the tag, or on a newer one, is left alone.
+   the tag, or on a newer one, is left alone, except that `PIN_REPO` still moves a
+   consumer already on the tag: only `repo=` changes, and the notes say so.
 2. Runs `overmind-sync.sh` and `overmind-check.sh` from `main` in this repository, which
    also serves the tag, so a rerun for an old tag uses today's scripts. No consumer
    wrapper runs, so a consumer needs no copy of the scripts. A sync or check that fails
@@ -528,7 +584,8 @@ For each consumer, `scripts/pin/overmind-pin.sh`:
 3. Reads `CHANGELOG.md` at the tag and writes the pull request body. A changelog that
    cannot be read, or that has no section for the tag, fails that consumer; the body
    never says there are no entries because the file was missing.
-4. Commits the move to the branch `overmind/pin-vX.Y.Z` as
+4. Commits the move to the branch `overmind/pin-vX.Y.Z` (`overmind/move-vX.Y.Z` when
+   `PIN_REPO` moves a consumer already on the tag) as
    `chore: Move the Overmind pin to vX.Y.Z`, with the author and committer
    `overmind-automation[bot]` whatever identity the runner has configured, and pushes it.
    The push is never forced. The branch is looked up by its exact name, so a branch that
@@ -562,7 +619,8 @@ gh workflow run pin-consumers.yml -f tag=v0.32.0 -f consumer=Gnome-Widgets
 
 The optional `repo` input writes `repo=` in each lock, so the pin also moves the
 consumers to a repository the source moved to. Each consumer must already be on a tag
-whose check allows the move (see the move rule under the check):
+whose check allows the move (see the move rule under the check). The tag can be the one
+the consumers are already on; then only `repo=` changes:
 
 ```bash
 gh workflow run pin-consumers.yml -f tag=v0.33.0 -f repo=merph518/Overmind-Mod

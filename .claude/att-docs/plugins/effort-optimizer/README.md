@@ -48,7 +48,9 @@ changes your effort setting without asking.
 ## Turning it off
 
 The plugin reads `mods/switches.json` in the Claude Code configuration folder
-(`~/.claude`, or `CLAUDE_CONFIG_DIR` when that is set) each time you type a prompt:
+(`~/.claude`, or `CLAUDE_CONFIG_DIR` when that is set) every 3 seconds and each time
+you type a prompt, so a change made in another chat, or in the `mods` plugin's `/mods`
+pane, reaches every open chat within a few seconds:
 
 ```json
 {

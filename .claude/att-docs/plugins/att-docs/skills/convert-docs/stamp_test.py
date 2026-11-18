@@ -34,5 +34,28 @@ class BulletGlyphTest(unittest.TestCase):
         self.assertEqual(STAMP.clean(text), text)
 
 
+class PagesLineTest(unittest.TestCase):
+    def layout(self, **kept):
+        return STAMP.pages.Layout(
+            10, [], "as LibreOffice lays the document out", **kept)
+
+    def test_a_plain_layout_names_its_source(self):
+        self.assertEqual(STAMP.pages_line(self.layout(), []),
+                         "- Pages: 10, as LibreOffice lays the document out")
+
+    def test_a_disagreement_is_named(self):
+        self.assertEqual(
+            STAMP.pages_line(self.layout(marked=6, stored=10), []),
+            "- Pages: 10, as LibreOffice lays the document out"
+            " (Word's last layout marked 6, its stored count says 10)")
+
+    def test_the_disagreement_comes_before_the_missed_pages(self):
+        self.assertEqual(
+            STAMP.pages_line(self.layout(marked=6, stored=10), [4]),
+            "- Pages: 10, as LibreOffice lays the document out"
+            " (Word's last layout marked 6, its stored count says 10),"
+            " no marker for page 4, whose opening text was not found")
+
+
 if __name__ == "__main__":
     unittest.main()

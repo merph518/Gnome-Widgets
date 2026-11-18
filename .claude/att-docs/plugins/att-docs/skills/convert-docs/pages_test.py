@@ -22,6 +22,9 @@ _COPIES_SPEC = importlib.util.spec_from_file_location(
 COPIES = importlib.util.module_from_spec(_COPIES_SPEC)
 _COPIES_SPEC.loader.exec_module(COPIES)
 
+# Decks built in code, with the reader they are read by.
+import slides_test as DECK  # noqa: E402
+
 
 def without_markup(path: pathlib.Path) -> None:
     """Sets the Word file at PATH to show its tracked changes accepted, as
@@ -132,6 +135,81 @@ class Place(unittest.TestCase):
         self.assertEqual(lines[at + 3], "| Medical exam is overdue | b |")
 
 
+class Decks(unittest.TestCase):
+    """A deck's pages are its slides, found by the heading each one opens on."""
+
+    def deck(self, folder: str, *slides_xml: str, name: str = "d.pptx") -> pathlib.Path:
+        return DECK.deck(pathlib.Path(folder, name), list(slides_xml))
+
+    def test_every_slide_is_marked_even_with_shared_titles_and_no_title(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.deck(folder, DECK.slide(DECK.title("Default View")),
+                             DECK.slide(DECK.title("Default View")),
+                             DECK.slide(DECK.title("Default View")), DECK.slide())
+            layout = pages.layout_of(path)
+            body = stamp.clean(DECK.slides.markdown(path))
+        self.assertEqual((layout.pages, layout.label), (4, "one per slide shown in the deck"))
+        placed = pages.place(body, layout)
+        self.assertEqual(placed.missed, [])
+        self.assertEqual([line for _, line in markers(placed.markdown)],
+                         ["## Default View", "## Default View", "## Default View",
+                          "## Slide 4"])
+
+    def test_text_matching_a_later_title_does_not_take_its_marker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.deck(
+                folder,
+                DECK.slide(DECK.title("Intro"),
+                           DECK.shape("TextBox", DECK.para("Historical View"))),
+                DECK.slide(DECK.title("Historical View")))
+            layout = pages.layout_of(path)
+            body = stamp.clean(DECK.slides.markdown(path))
+        placed = pages.place(body, layout)
+        self.assertEqual(markers(placed.markdown)[1][1], "## Historical View")
+
+    def test_a_legacy_deck_is_read_through_its_modern_copy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            copy = self.deck(folder, DECK.slide(), DECK.slide())
+            layout = pages.layout_of(pathlib.Path(folder, "d.ppt"), copy)
+        self.assertEqual(layout.pages, 2)
+
+    def test_a_deck_that_cannot_be_read_falls_back_to_a_render(self):
+        with tempfile.TemporaryDirectory() as folder:
+            broken = pathlib.Path(folder, "broken.pptx")
+            broken.write_bytes(b"not a zip")
+            with unittest.mock.patch.object(pages, "render", return_value=None) as render:
+                self.assertIsNone(pages.layout_of(broken))
+        render.assert_called_once()
+
+
+class DeckLinks(unittest.TestCase):
+    """A deck's markers link into a PDF beside it only when the page counts agree."""
+
+    HOST = "https://example.test"
+    WHERE = {"Deck.pdf": "/sites/Docs/Deck.pdf"}
+    DECK_LAYOUT = pages.Layout(3, ["b", "c"], "one per slide shown in the deck",
+                               headings=True)
+
+    def link(self, pdf_pages: int, pdf: str | None = "Deck.pdf") -> str | None:
+        with unittest.mock.patch.object(pages, "pdf_pages",
+                                        return_value=["page"] * pdf_pages):
+            return stamp.page_link(self.DECK_LAYOUT,
+                                   pathlib.Path("/x", pdf) if pdf else None,
+                                   self.WHERE, self.HOST)
+
+    def test_a_pdf_with_one_page_per_slide_is_linked(self):
+        self.assertEqual(self.link(3), "https://example.test/sites/Docs/Deck.pdf")
+
+    def test_a_pdf_with_another_page_count_is_not(self):
+        self.assertIsNone(self.link(4))
+
+    def test_a_pdf_the_library_does_not_hold_is_not(self):
+        self.assertIsNone(self.link(3, "Other.pdf"))
+
+    def test_no_pdf_no_link(self):
+        self.assertIsNone(self.link(3, None))
+
+
 class Openings(unittest.TestCase):
     def test_running_header_page_number_and_bullets_come_off(self):
         page = "Process Description\n\nPage {n} of 3\nBody text of page {n}\n"
@@ -153,7 +231,7 @@ class Openings(unittest.TestCase):
 
 
 class Word(unittest.TestCase):
-    def docx(self, body: str) -> pathlib.Path:
+    def docx(self, body: str, app: str | None = None) -> pathlib.Path:
         scratch = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
         path = pathlib.Path(scratch) / "doc.docx"
@@ -161,7 +239,76 @@ class Word(unittest.TestCase):
             archive.writestr(
                 "word/document.xml", f"<w:document><w:body>{body}</w:body></w:document>"
             )
+            if app is not None:
+                archive.writestr("docProps/app.xml", f"<Properties>{app}</Properties>")
         return path
+
+    def marked(self, marks: int, app: str | None = None) -> pathlib.Path:
+        """A Word file whose text carries MARKS rendered page breaks."""
+        body = "<w:p><w:r><w:t>Opening text of the first page</w:t></w:r></w:p>" + "".join(
+            f"<w:p><w:r><w:lastRenderedPageBreak/><w:t>Opening of page {n + 2}"
+            "</w:t></w:r></w:p>" for n in range(marks))
+        return self.docx(body, app)
+
+    @staticmethod
+    def word_app(pages: str) -> str:
+        return (f"<Application>Microsoft Office Word</Application><Pages>{pages}</Pages>")
+
+    def rendered(self, pages_in_render: int):
+        """Stands in for LibreOffice: a render that lays the document out on N pages."""
+        layout = pages.Layout(pages_in_render, ["x"] * (pages_in_render - 1),
+                              "as LibreOffice lays the document out")
+        render = unittest.mock.patch.object(pages, "render", return_value=pathlib.Path("r.pdf"))
+        source = unittest.mock.patch.object(pages, "from_pdf", return_value=layout)
+        listed = unittest.mock.patch.object(pages, "as_listed", side_effect=lambda p, w: p)
+        self.addCleanup(unittest.mock.patch.stopall)
+        return render.start(), source.start(), listed.start()
+
+    def test_a_stored_count_above_the_marks_is_recorded(self):
+        found = pages.from_word(self.marked(5, self.word_app("10")))
+        self.assertEqual((found.pages, found.marked, found.stored), (6, 6, 10))
+
+    def test_a_stored_count_below_the_marks_is_recorded(self):
+        found = pages.from_word(self.marked(5, self.word_app("4")))
+        self.assertEqual(found.stored, 4)
+
+    def test_agreeing_counts_record_nothing(self):
+        self.assertIsNone(pages.from_word(self.marked(5, self.word_app("6"))).stored)
+
+    def test_a_count_word_did_not_write_is_not_compared(self):
+        for app in (
+            None, "<Pages>10</Pages>", "<Application>LibreOffice/7</Application><Pages>10</Pages>",
+            self.word_app("many"), self.word_app("0"),
+        ):
+            with self.subTest(app=app):
+                self.assertIsNone(pages.from_word(self.marked(5, app)).stored)
+        self.assertIsNone(pages.from_word(self.marked(5, "<broken")).stored)
+
+    def test_disagreeing_counts_send_the_document_to_libreoffice(self):
+        render, _, _ = self.rendered(10)
+        found = pages.layout_of(self.marked(5, self.word_app("10")))
+        render.assert_called_once()
+        self.assertEqual(found.label, "as LibreOffice lays the document out")
+        self.assertEqual((found.pages, found.marked, found.stored), (10, 6, 10))
+
+    def test_a_stored_count_below_the_marks_also_goes_to_libreoffice(self):
+        render, _, _ = self.rendered(4)
+        found = pages.layout_of(self.marked(5, self.word_app("4")))
+        render.assert_called_once()
+        self.assertEqual(found.pages, 4)
+
+    def test_agreeing_counts_keep_the_word_layout(self):
+        render, _, _ = self.rendered(10)
+        found = pages.layout_of(self.marked(5, self.word_app("6")))
+        render.assert_not_called()
+        self.assertEqual(found.label, "as Word last laid the document out")
+
+    def test_no_render_keeps_the_word_layout_with_its_disagreement(self):
+        render, _, _ = self.rendered(10)
+        render.return_value = None
+        found = pages.layout_of(self.marked(5, self.word_app("10")))
+        self.assertEqual((found.label, found.marked, found.stored),
+                         ("as Word last laid the document out", 6, 10))
 
     def test_rendered_breaks_are_the_pages(self):
         path = self.docx(

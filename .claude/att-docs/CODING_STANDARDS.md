@@ -9,7 +9,9 @@ already checks is not a review finding.
 Checked by `scripts/validate.py` in CI:
 
 - Python, Node and shell syntax, `SKILL.md` frontmatter, `plugin.json` and
-  `marketplace.json` parsing, relative Markdown links:
+  `marketplace.json` parsing, a `marketplace.json` entry and a release-please
+  `extra-files` entry for every plugin, `extra-files` paths that exist, relative
+  Markdown links:
   [scripts/validate.py](scripts/validate.py).
 
 Review checks (a reviewer decides):

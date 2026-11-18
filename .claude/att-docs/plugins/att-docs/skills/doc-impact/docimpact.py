@@ -57,6 +57,9 @@ PROVENANCE = "**Document provenance**"
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+# A list marker a conversion escaped so it reads as plain text: `2\.`, `2\)`, `\-`, `\*`,
+# `\+`, at the start of a line and followed by a space.
+ESCAPED_MARKER = re.compile(r"^(\s*)(?:(\d+)\\([.)])|\\([-*+]))(?=\s)")
 SPACE = re.compile(r"\s+")
 DASHES = re.compile(r"[-\u2013\u2014_]+")
 
@@ -206,6 +209,13 @@ def squash(text: str) -> str:
     return SPACE.sub(" ", text).strip()
 
 
+def plain_marker(line: str) -> str:
+    """The line with an escaped list marker written plainly, so `2\\. Text` and `2. Text`
+    compare equal. The same text with the marker escaped says nothing new."""
+    return ESCAPED_MARKER.sub(lambda m: m.group(1) + (f"{m.group(2)}{m.group(3)}"
+                                                      if m.group(2) else m.group(4)), line)
+
+
 def table_row(line: str) -> str:
     cells = [squash(cell) for cell in line.strip().strip("|").split("|")]
     return "| " + " | ".join(cells) + " |"
@@ -233,6 +243,7 @@ def units(text: str) -> list[tuple[str, str]]:
         if PAGE_MARKER.match(line):
             continue
         bare = line.lstrip("> ").rstrip() if line.lstrip().startswith(">") else line
+        bare = plain_marker(bare)
         if not bare.strip():
             flush()
             continue
@@ -682,10 +693,11 @@ def numbered_rules(text: str) -> list[tuple[int, str]]:
     """The document's top-level numbered rules, each with every indented line under it."""
     out: list[tuple[int, list[str]]] = []
     inside = False
-    for line in strip_provenance(text.splitlines()):
+    for raw in strip_provenance(text.splitlines()):
         # A page marker sits between blocks without ending the rule it falls inside.
-        if PAGE_MARKER.match(line):
+        if PAGE_MARKER.match(raw):
             continue
+        line = plain_marker(raw)
         if match := NUMBERED.match(line):
             out.append((int(match.group(1)), [match.group(2)]))
             inside = True

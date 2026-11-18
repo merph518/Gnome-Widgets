@@ -1,0 +1,7 @@
+{
+  "name": "mods",
+  "description": "A /mods pane that lists every installed mod and switches each one on or off, shows or hides its band or pane, and reopens a closed pane, in every open chat",
+  "version": "0.32.2",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

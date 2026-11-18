@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Static checks for the repository. Standard library only.
 
-Checks: plugin and marketplace JSON, SKILL.md frontmatter, relative Markdown links,
+Checks: plugin and marketplace JSON, that every plugin has its marketplace.json and
+release-please-config.json entries, SKILL.md frontmatter, relative Markdown links,
 and syntax of every .py, .mjs/.js and .sh file. shellcheck runs on .sh files when it
 is installed; its output is advisory and never fails the run.
 """
@@ -53,7 +54,11 @@ def check_json(files):
             data = load_json(path)
             if not isinstance(data, dict):
                 continue
-            for plugin in data.get("plugins", []):
+            plugins = data.get("plugins", [])
+            if not isinstance(plugins, list):
+                error(path, '"plugins" is not a list')
+                continue
+            for plugin in plugins:
                 source = plugin.get("source") if isinstance(plugin, dict) else None
                 if not isinstance(source, str):
                     error(path, f"plugin {plugin!r} has no string source")
@@ -88,6 +93,109 @@ def check_skills(files):
             value = fields.get(key, "").strip().strip("|>-").strip()
             if not value:
                 error(path, f"frontmatter {key} is missing or empty")
+
+
+MARKETPLACE = os.path.join(".claude-plugin", "marketplace.json")
+RELEASE_CONFIG = "release-please-config.json"
+
+
+def check_plugin_registration(root):
+    """Return the problems with how the plugins under root/plugins are registered.
+
+    A plugin is a plugins/<name>/ folder holding .claude-plugin/plugin.json. Each one
+    needs a marketplace.json entry named <name> with source ./plugins/<name>, and a
+    release-please extra-files entry for its plugin.json with type json and jsonpath
+    $.version, or release-please leaves its version behind. Every extra-files path must
+    exist, because release-please skips a missing file without saying so.
+    """
+    problems = []
+
+    def load(rel):
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                return json.load(f)
+        except OSError as e:
+            problems.append(f"{rel}: cannot be read ({e.strerror})")
+        except ValueError as e:
+            problems.append(f"{rel}: not valid JSON ({e})")
+        return None
+
+    plugins_dir = os.path.join(root, "plugins")
+    names = sorted(
+        name for name in (os.listdir(plugins_dir) if os.path.isdir(plugins_dir) else [])
+        if os.path.isfile(os.path.join(plugins_dir, name, ".claude-plugin", "plugin.json"))
+    )
+
+    market = load(MARKETPLACE)
+    if market is not None and not isinstance(market, dict):
+        problems.append(f"{MARKETPLACE}: the top level is not an object")
+    # A plugins value that is not a list, and an entry with no string source, are
+    # reported by check_json.
+    if isinstance(market, dict) and isinstance(market.get("plugins", []), list):
+        sources = {}
+        for entry in market.get("plugins", []):
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            name = entry["name"]
+            if name in sources:
+                problems.append(f"{MARKETPLACE}: plugin {name} is listed more than once")
+            sources[name] = entry.get("source")
+        for name in names:
+            want = f"./plugins/{name}"
+            if name not in sources:
+                problems.append(f"{MARKETPLACE}: no entry for plugin {name} (source {want})")
+            elif isinstance(sources[name], str) and (
+                    os.path.normpath(sources[name]) != os.path.normpath(want)):
+                problems.append(
+                    f"{MARKETPLACE}: plugin {name} has source {sources[name]!r}, not {want}")
+
+    config = load(RELEASE_CONFIG)
+    if config is not None and not isinstance(config, dict):
+        problems.append(f"{RELEASE_CONFIG}: the top level is not an object")
+    if isinstance(config, dict):
+        packages = config.get("packages")
+        if not isinstance(packages, dict):
+            problems.append(f'{RELEASE_CONFIG}: "packages" is missing or not an object')
+            packages = {}
+        entries = {}
+        for package_dir, package in packages.items():
+            if not isinstance(package, dict):
+                problems.append(f"{RELEASE_CONFIG}: package {package_dir} is not an object")
+                continue
+            # release-please reads extra-files paths relative to their package's folder.
+            extra_files = package.get("extra-files", [])
+            if not isinstance(extra_files, list):
+                problems.append(
+                    f'{RELEASE_CONFIG}: "extra-files" in package {package_dir} is not a list')
+                continue
+            for entry in extra_files:
+                path = entry if isinstance(entry, str) else (
+                    entry.get("path") if isinstance(entry, dict) else None)
+                if not isinstance(path, str) or not path:
+                    problems.append(f"{RELEASE_CONFIG}: extra-files entry {entry!r} has no path")
+                    continue
+                path = os.path.normpath(os.path.join(package_dir, path)).replace(os.sep, "/")
+                if os.path.isabs(path) or path == ".." or path.startswith("../"):
+                    problems.append(
+                        f"{RELEASE_CONFIG}: extra-files path {path} is outside the repository")
+                    continue
+                if path in entries:
+                    problems.append(f"{RELEASE_CONFIG}: extra-files lists {path} more than once")
+                entries[path] = entry
+                if not os.path.exists(os.path.join(root, path)):
+                    problems.append(f"{RELEASE_CONFIG}: extra-files path {path} does not exist")
+        for name in names:
+            path = f"plugins/{name}/.claude-plugin/plugin.json"
+            entry = entries.get(path)
+            if entry is None:
+                problems.append(
+                    f"{RELEASE_CONFIG}: plugin {name} has no extra-files entry for {path}")
+            elif not isinstance(entry, dict) or entry.get("type") != "json" or (
+                    entry.get("jsonpath") != "$.version"):
+                problems.append(f"{RELEASE_CONFIG}: the extra-files entry for {path} needs "
+                                f'"type": "json" and "jsonpath": "$.version"')
+
+    return problems
 
 
 LINK = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
@@ -158,6 +266,8 @@ def shellcheck(files):
 def main():
     files = list(walk())
     check_json(files)
+    # check_json has already reported a marketplace.json that does not parse.
+    errors.extend(p for p in check_plugin_registration(ROOT) if p not in errors)
     check_skills(files)
     check_links(files)
     check_syntax(files)

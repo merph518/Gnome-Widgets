@@ -1,0 +1,4 @@
+{
+  "description": "Picks each subagent's model at agent.spawn from Haiku's tier and confidence; prompt.submit and turn.step can also route the main chat's effort (off by default).",
+  "modules": ["./model-router.ts"]
+}

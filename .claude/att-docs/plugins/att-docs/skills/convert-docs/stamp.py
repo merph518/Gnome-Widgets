@@ -48,7 +48,7 @@ OPC_SUFFIXES = {".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm"}
 # Pandoc hangs its own identifier and the source document's Word style name off
 # every heading it writes, as `# Page Name {#page-name .Style1}`. Neither means
 # anything once the document is Markdown.
-HEADING_ATTRS = re.compile(r"[ \t]*\{[^{}\n]*\}[ \t]*$")
+HEADING_ATTRS = re.compile(r"[ \t]*(?<!\\)\{[^{}\n]*\}[ \t]*$")
 
 HEADING = re.compile(r"^(#{1,6})(\s+)(.*)$")
 
@@ -58,11 +58,11 @@ EMPTY_ANCHOR = re.compile(r"\[\]\{[^{}\n]*\}")
 # A span carrying a Word character style, as `[BCA to Connections]{.underline}`.
 # The styling is gone either way once this is Markdown, so the text comes out of
 # the wrapper rather than out of the document.
-STYLED_SPAN = re.compile(r"\[([^\[\]\n]*)\]\{[^{}\n]*\}")
+STYLED_SPAN = re.compile(r"(?<!\\)\[([^\[\]\n]*)\]\{[^{}\n]*\}")
 
 # LibreOffice fills an empty spreadsheet cell with a lone backslash, which is a
 # Markdown line break rather than a value.
-EMPTY_CELL = re.compile(r"(?<=\|)(\s*)\\(\s*)(?=\|)")
+EMPTY_CELL = re.compile(r"(?<=\|)(\s*)\\(?!\|)(\s*)(?=\|)")
 
 # A non-breaking space that arrived as its entity name rather than as a
 # character, which is how the HTML routes spell an empty paragraph.
@@ -75,7 +75,7 @@ LIST_BULLET_GLYPH = re.compile(
     r"^(\s*(?:[-*+]|\d+\.)\s+)(?:[•·▪◦§]\s*|o(?:[ \t]+|$))", re.MULTILINE)
 
 IMAGE_MD = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-IMAGE_HTML = re.compile(r"<img\b[^>]*/?>", re.IGNORECASE)
+IMAGE_HTML = re.compile(r"(?<!\\)<img\b[^>]*/?>", re.IGNORECASE)
 
 # Everything below the space except tab and newline, plus the BOM wherever it
 # landed.
@@ -481,6 +481,9 @@ def sharepoint_line(name: str, path: str, host: str) -> str:
 
 def pages_line(layout: pages.Layout, missed: list[int]) -> str:
     line = f"- Pages: {layout.pages}, {layout.label}"
+    if layout.stored is not None:
+        line += (f" (Word's last layout marked {layout.marked},"
+                 f" its stored count says {layout.stored})")
     if missed:
         listed = ", ".join(str(page) for page in missed)
         noun = "page" if len(missed) == 1 else "pages"
@@ -600,6 +603,22 @@ def page_title(out: Path) -> str | None:
     return None
 
 
+def page_link(
+    layout: pages.Layout, pdf: Path | None, sharepoint: dict[str, str], host: str,
+) -> str | None:
+    """The PDF address the page markers link into, or None.
+
+    A page link reaches the page only in a PDF the library holds. When the pages
+    were counted from another file, such as a deck, a PDF of it beside it lands on
+    the right page only when it has as many pages as were counted.
+    """
+    name = layout.from_pdf.name if layout.from_pdf else None
+    if name is None and pdf is not None and pdf.name in sharepoint:
+        if len(pages.pdf_pages(pdf)) == layout.pages:
+            name = pdf.name
+    return sharepoint_url(sharepoint[name], host) if name in sharepoint else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Clean and stamp one document.")
     parser.add_argument(
@@ -639,6 +658,11 @@ def main() -> int:
         "--pages-renderable",
         help="a copy of --pages-from that LibreOffice and the Word reader can open",
     )
+    parser.add_argument(
+        "--pages-link",
+        help="a PDF of the document the page markers link to, when the pages are "
+             "counted from another file",
+    )
     args = parser.parse_args()
     host = convert_config.load(args.config, "stamp").value("sharePointHost")
 
@@ -664,9 +688,8 @@ def main() -> int:
         renderable = Path(args.pages_renderable) if args.pages_renderable else None
         layout = pages.layout_of(Path(args.pages_from), renderable)
         if layout:
-            # A page link reaches the page only in a PDF the library holds.
-            pdf = layout.from_pdf.name if layout.from_pdf else None
-            link = sharepoint_url(sharepoint[pdf], host) if pdf in sharepoint else None
+            pdf = Path(args.pages_link) if args.pages_link else None
+            link = page_link(layout, pdf, sharepoint, host)
             placed = pages.place(body, layout, link)
             marked = placed.markdown
             paged = pages_line(layout, placed.missed)
