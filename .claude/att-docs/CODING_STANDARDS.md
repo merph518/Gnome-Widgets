@@ -3,13 +3,19 @@
 The rules this repository's reviews check changes against. Each line names a rule and
 links its source; the source is the authority, not this file.
 
-A documented rule here overrides the code-smell baseline. Anything `scripts/validate.py`
-already checks is not a review finding.
+The general rules every repository follows are in
+[docs/standards/CODING_STANDARDS.md](docs/standards/CODING_STANDARDS.md), and they apply
+here too. A rule below overrides the general rule it contradicts.
+
+A documented rule here or there overrides the code-smell baseline. Anything
+`scripts/validate.py` already checks is not a review finding.
 
 Checked by `scripts/validate.py` in CI:
 
 - Python, Node and shell syntax, `SKILL.md` frontmatter, `plugin.json` and
-  `marketplace.json` parsing, relative Markdown links:
+  `marketplace.json` parsing, a `marketplace.json` entry and a release-please
+  `extra-files` entry for every plugin, `extra-files` paths that exist, relative
+  Markdown links:
   [scripts/validate.py](scripts/validate.py).
 
 Review checks (a reviewer decides):

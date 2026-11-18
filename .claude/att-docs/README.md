@@ -64,7 +64,9 @@ This repository is private and for my own use.
 
 ```
 CLAUDE.md                         standing rules for sessions working in this repository
-CODING_STANDARDS.md               pointers to the rules a code review checks changes against
+CODING_STANDARDS.md               this repository's rules a code review checks changes against,
+                                  and a link to the general ones
+docs/standards/                   the general coding standards every consumer extends
 .claude-plugin/marketplace.json   marketplace entry, for a machine that installs a plugin
 plugins/<group>/
   .claude-plugin/plugin.json
@@ -109,18 +111,62 @@ the worktree again. It then removes the worktree with `git worktree remove` with
 `--force`. It never removes the worktree it runs from, and it leaves the branch in place.
 
 `docs/` holds the documents about the harness on the repository side: the runners and
-their registration under `docs/runners/`, and the tester hand-off plan under
-`docs/hand-off/`. A consuming repository reads them from its vendored copy, at
-`.claude/att-docs/docs/<subject>/`. `docs/agents/` holds this repository's issue tracker,
+their registration under `docs/runners/`, the tester hand-off plan under
+`docs/hand-off/`, and the general coding standards under `docs/standards/`. A consuming
+repository reads them from its vendored copy, at `.claude/att-docs/docs/<subject>/`.
+`docs/agents/` holds this repository's issue tracker,
 triage label and domain docs settings, which the engineering skills read from the
 repository root, and the permission rules that let sessions file and comment on GitHub
 issues without a prompt.
+[docs/agents/user-rules.md](docs/agents/user-rules.md) holds the rules that every session
+on the owner's machine loads. `~/.claude/CLAUDE.md` (Claude Code) and
+`~/.omp/agent/AGENTS.md` (omp) each import it with one line,
+`@~/Code/Overmind-Mod/docs/agents/user-rules.md`, which reads it from the owner's main
+checkout at `~/Code/Overmind-Mod`.
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
 skills, and `general` holds the workflow skills that serve any repository (implementing
-issues). Both install at user scope. Further groups sit beside them and follow the same
-layout and the same extension contract. A group's `hooks/hooks.json` names its hooks
+issues). Both install at user scope. Further skill groups sit beside them and follow the
+same layout and the same extension contract. A group's `hooks/hooks.json` names its hooks
 module, `hooks/register.tsx`, which registers its hooks when the plugin is installed.
+
+`effort-optimizer` holds no skills, only a hooks module: after each typed prompt it
+shows a suggested reasoning effort level in a row above the prompt, and switches to
+that level when asked, or by itself in auto mode. See its
+[README](plugins/effort-optimizer/README.md).
+
+`model-router` holds no skills, only a hooks module, `hooks/model-router.ts`: before each
+subagent starts, Haiku reads its task and the subagent moves up or down a model tier when
+Haiku is sure enough. See its [README](plugins/model-router/README.md).
+
+`efficient-browser-use` holds no skills, only a hooks module and one shell script: on
+Linux, it shrinks large pictures in tool results before the model reads them, so browser
+screenshots cost fewer tokens. A screenshot keeps its coordinate frame, so clicks still
+land where they are aimed. Shrinking uses ImageMagick (`sudo apt install imagemagick`);
+without it no picture is shrunk. See its
+[README](plugins/efficient-browser-use/README.md).
+
+`mods` holds no skills, only a hooks module: `/mods` opens a pane that lists every mod
+on the computer and switches each one on or off, or hides its band or pane, in every
+open chat, through `mods/switches.json` in the configuration folder. See its
+[README](plugins/mods/README.md).
+
+`cache-clock` holds no skills, only a hooks module, `hooks/register.tsx`: a row above the
+prompt counts down until the chat's prompt cache goes cold. `/keepwarm` turns on a
+one-word ping sent just before the cache would go cold, so the cache is read and its time
+starts over; it is off until turned on. See its [README](plugins/cache-clock/README.md).
+
+`review-queue` holds no skills, only a hooks module, `hooks/register.tsx`: a row above the
+prompt counts the open pull requests labeled `Manual Review Needed` in this repository
+and the repositories that pin it, and lists each one with its CI state and age, linked
+to the pull request. It reads them with `gh` every few minutes. See its
+[README](plugins/review-queue/README.md).
+
+`runner-health` holds no skills, only a hooks module: a row above the prompt shows when a
+self-hosted CI runner is stopped or offline, a job has waited too long for a runner, or a
+disk the runners write to is low, and stays out of sight while all is well. It reads the
+runner services on the computer with `systemctl` and asks GitHub through `gh`. See its
+[README](plugins/runner-health/README.md).
 
 A skill links to a shared file with a relative path, `../../shared/<file>`. The link
 resolves the same way from a vendored copy and from a plugin cache.
@@ -149,13 +195,27 @@ It finds and runs every `*.test.mjs` (with `node --test`), `*_test.py` (with
 line per file and a summary, and exits non-zero if anything failed. It then runs
 `scripts/validate.py`, which checks that every `plugin.json` and `marketplace.json`
 parses, every `SKILL.md` has a `name` and a `description`, relative Markdown links
-resolve, and every Python, JavaScript and shell file passes a syntax check. Pass
-`--tests-only` or `--checks-only` to run just one half.
+resolve, and every Python, JavaScript and shell file passes a syntax check. The plugin
+registration check requires every plugin folder (a folder under `plugins/` with a
+`.claude-plugin/plugin.json`) to have a `marketplace.json` entry whose `source` is
+`./plugins/<name>`, and a `release-please-config.json` `extra-files` entry for its
+`plugin.json` with `"type": "json"` and `"jsonpath": "$.version"`. It also requires every
+`extra-files` path to exist. Pass `--tests-only` or `--checks-only` to run just one half.
 
-The `test-all` check in `.github/workflows/ci.yml` runs this same command on every pull
-request and on each push to `main`. `shellcheck` also runs when it is installed, but
-its findings are advisory and never fail the run. The runners need `node`, `python3`,
-`jq` and `bash`.
+`--changed-since <rev>` runs only the test files that the change from the merge base of
+`<rev>` to `HEAD` can affect, and prints a `SKIP` line for each file it leaves out.
+`scripts/select_tests.py` picks them: a changed file selects the tests in its own folder
+(a skill, `shared/`, a `scripts/` subfolder) and in the folders its `EDGES` table lists
+as depending on it. A change to the test runner, the workflows, `package.json` or a file
+outside every known folder runs everything. Markdown at the root or under `docs/` runs
+no tests, except a file a test reads, such as `CLAUDE.md`, which `EDGES` lists. The
+static checks always run.
+
+The `test-all` check in `.github/workflows/ci.yml` runs this command with
+`--changed-since` on every pull request, against the base the pull request merges onto,
+and with no flag on each push to `main`, so `main` always runs every test. `shellcheck`
+also runs when it is installed, but its findings are advisory and never fail the run.
+The runners need `node`, `python3`, `jq` and `bash`.
 
 `.github/workflows/pack-compare.yml` is run by hand and compares two staged test packs on a
 desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files.
@@ -183,6 +243,17 @@ desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files
    vendored copy is never registered and the two cannot collide. A machine that
    also has the plugin installed at user level can disable it in the project
    settings so a second copy at a different version is not loaded.
+4. **Extend the coding standards by a link.** `docs/standards/CODING_STANDARDS.md`
+   holds the rules that hold in every repository. The consuming repository's own
+   `CODING_STANDARDS.md` at its root links the vendored copy,
+   `.claude/att-docs/docs/standards/CODING_STANDARDS.md`, and adds only its own rules.
+   A rule there overrides the general rule it contradicts, the way a documented rule
+   overrides the code-smell baseline of a review. A repository with only a
+   `CONTRIBUTING.md` puts the link there. A copy kept to part of the tree with `paths=`
+   (or `ATT_DOCS_PATHS`) adds `docs/standards` to it and reruns the sync script,
+   or the link has no target. The general document also links `README.md`,
+   `plugins/general` and `plugins/att-docs/skills`; a pruned copy without one of them
+   has a dead link in the document, which breaks nothing.
 
 The repository name is read from the lock, so a move or rename of this repository
 changes one line there. A lock that still names an earlier location moves to the new
@@ -292,8 +363,8 @@ hold the base lock's tag at the base lock's commit, which shows it carries the s
 releases. `overmind-sync.sh` writes the new `repo=` when `ATT_DOCS_REPO` names it, and the
 pin script does the same with `PIN_REPO`. The check runs from the base commit, so the move
 takes two pins. The first pins a tag that holds this rule and leaves `repo=` as it is.
-The second moves `repo=`. `merge_pin_pr.py` never merges a pin that moves `repo=`; it is
-left for review.
+The second moves `repo=`, on that tag or a newer one. `merge_pin_pr.py` never merges a
+pin that moves `repo=`; it is left for review.
 
 Moving `url=` or `prefix=` is a deliberate change: the check fails in the pull request
 that makes it, unless `ATT_DOCS_BASE` names a commit that already holds the new values.
@@ -335,8 +406,21 @@ claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
 ```
 
+`effort-optimizer`, `model-router`, `efficient-browser-use`, `mods`, `cache-clock`,
+`review-queue` and `runner-health` are optional and installed the same way:
+
+```
+claude plugin install effort-optimizer@att-docs --scope user
+claude plugin install model-router@att-docs --scope user
+claude plugin install efficient-browser-use@att-docs --scope user
+claude plugin install mods@att-docs --scope user
+claude plugin install cache-clock@att-docs --scope user
+claude plugin install review-queue@att-docs --scope user
+claude plugin install runner-health@att-docs --scope user
+```
+
 The pin moves by hand. To move it, remove the marketplace (which uninstalls its
-plugins), add it again with the new tag, and install both plugins again:
+plugins), add it again with the new tag, and install the plugins again:
 
 ```
 claude plugin marketplace remove att-docs
@@ -344,6 +428,9 @@ claude plugin marketplace add merph518/Overmind-Mod#<new tag>
 claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
 ```
+
+A machine that had `effort-optimizer`, `model-router`, `efficient-browser-use`, `mods`,
+`cache-clock`, `review-queue` or `runner-health` installs it again too.
 
 Adding the marketplace again without removing it keeps the old tag, and
 `claude plugin marketplace update` stays on the tag it was added with.
@@ -483,7 +570,7 @@ and publishes the GitHub release with its changelog.
 
 A tag cut by hand, which only happens while the workflow is off, leaves the manifest
 behind it. A `chore:` pull request then sets `.release-please-manifest.json` and the
-two `plugin.json` versions to that tag, and release-please counts commits from there.
+`plugin.json` versions to that tag, and release-please counts commits from there.
 
 The version comes from the commit subjects on `main`, written as conventional commits.
 While the version is below 1.0:
@@ -500,7 +587,11 @@ With a merge commit, each commit on the branch counts, and a subject that is not
 conventional commit is left out.
 
 `.release-please-manifest.json` holds the current version. Each release also writes it
-into the two `plugin.json` files, so every plugin carries the repository's version.
+into every `plugin.json`, so every plugin carries the repository's version. A new plugin
+needs a `marketplace.json` entry and a `release-please-config.json` `extra-files` entry
+for its `plugin.json`, with `"type": "json"` and `"jsonpath": "$.version"`. Without
+either, `scripts/validate.py` fails its plugin registration check. Without the
+`extra-files` entry, release-please also leaves that plugin's version behind.
 
 The workflow's token comes from the automation GitHub App, described under
 [Automation GitHub App](#automation-github-app).
@@ -519,7 +610,8 @@ summary has one line per consumer.
 For each consumer, `scripts/pin/overmind-pin.sh`:
 
 1. Clones the default branch and reads the pinned tag from the lock. A consumer already on
-   the tag, or on a newer one, is left alone.
+   the tag, or on a newer one, is left alone, except that `PIN_REPO` still moves a
+   consumer already on the tag: only `repo=` changes, and the notes say so.
 2. Runs `overmind-sync.sh` and `overmind-check.sh` from `main` in this repository, which
    also serves the tag, so a rerun for an old tag uses today's scripts. No consumer
    wrapper runs, so a consumer needs no copy of the scripts. A sync or check that fails
@@ -528,7 +620,8 @@ For each consumer, `scripts/pin/overmind-pin.sh`:
 3. Reads `CHANGELOG.md` at the tag and writes the pull request body. A changelog that
    cannot be read, or that has no section for the tag, fails that consumer; the body
    never says there are no entries because the file was missing.
-4. Commits the move to the branch `overmind/pin-vX.Y.Z` as
+4. Commits the move to the branch `overmind/pin-vX.Y.Z` (`overmind/move-vX.Y.Z` when
+   `PIN_REPO` moves a consumer already on the tag) as
    `chore: Move the Overmind pin to vX.Y.Z`, with the author and committer
    `overmind-automation[bot]` whatever identity the runner has configured, and pushes it.
    The push is never forced. The branch is looked up by its exact name, so a branch that
@@ -562,7 +655,8 @@ gh workflow run pin-consumers.yml -f tag=v0.32.0 -f consumer=Gnome-Widgets
 
 The optional `repo` input writes `repo=` in each lock, so the pin also moves the
 consumers to a repository the source moved to. Each consumer must already be on a tag
-whose check allows the move (see the move rule under the check):
+whose check allows the move (see the move rule under the check). The tag can be the one
+the consumers are already on; then only `repo=` changes:
 
 ```bash
 gh workflow run pin-consumers.yml -f tag=v0.33.0 -f repo=merph518/Overmind-Mod

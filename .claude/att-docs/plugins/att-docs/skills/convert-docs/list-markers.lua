@@ -16,6 +16,13 @@
 -- follows a sub-list and belongs to an item above it in a list of its own, so
 -- that the reader nests it under that item, and starts the list at a number
 -- past any start Word takes. Such a list is written as the paragraphs it holds.
+--
+-- Another is the run of empty items list-numbers.py puts after a table that sits
+-- inside a list item, one at each level of the items the table is in. The reader
+-- ends every list at a table, and nests what follows the table in those empty
+-- items. Before anything else is written, the table and what each empty item
+-- holds go back into the item at the same level of the list before the table, so
+-- the item goes on after its table and the items after it keep their depth.
 
 local List = require 'pandoc.List'
 
@@ -23,6 +30,10 @@ local List = require 'pandoc.List'
 -- Word takes a start of 32767 at the most. list-numbers.py holds the same
 -- number.
 local UNNUMBERED_START = 32768
+
+-- The start of the list of empty items list-numbers.py puts after a table inside
+-- a list. list-numbers.py holds the same number.
+local RESUMED_START = 65536
 
 local ROMAN = {
   {1000, 'm'}, {900, 'cm'}, {500, 'd'}, {400, 'cd'}, {100, 'c'}, {90, 'xc'},
@@ -96,7 +107,7 @@ local function labeled_items(list)
 end
 
 -- The last block written so far, or nil. A paragraph with nothing left in it,
--- as one that held only an image, writes nothing.
+-- as one that held only a bookmark, writes nothing.
 local function last_written(out)
   for index = #out, 1, -1 do
     local block = out[index]
@@ -161,3 +172,118 @@ function Blocks(blocks)
   flush()
   return out
 end
+
+local function is_list(block)
+  return block ~= nil and (block.t == 'OrderedList' or block.t == 'BulletList')
+end
+
+local function is_resumed(block)
+  return block ~= nil and block.t == 'OrderedList'
+    and block.listAttributes.start >= RESUMED_START
+end
+
+-- Whether the reader split one Word list in two: bullets after bullets, or a
+-- numbered list of the same kind that counts on from the one above.
+local function counts_on(above, list)
+  if not is_list(above) or list.t ~= above.t then
+    return false
+  end
+  if list.t == 'BulletList' then
+    return true
+  end
+  local first, second = above.listAttributes, list.listAttributes
+  return first.style == second.style and first.delimiter == second.delimiter
+    and second.start == first.start + #above.content
+end
+
+-- Adds blocks to the end of a list of blocks. A list that goes on from the list
+-- the blocks end with becomes more items of that one.
+local function append(blocks, more)
+  for _, block in ipairs(more) do
+    local last = blocks[#blocks]
+    if counts_on(last, block) then
+      local items = last.content
+      items:extend(block.content)
+      last.content = items
+      blocks[#blocks] = last
+    else
+      blocks:insert(block)
+    end
+  end
+end
+
+-- What a list of empty items holds, with the empty items themselves taken out.
+local function unframed(list)
+  local out = List:new{}
+  for _, item in ipairs(list.content) do
+    for _, block in ipairs(item) do
+      if is_resumed(block) then
+        out:extend(unframed(block))
+      else
+        out:insert(block)
+      end
+    end
+  end
+  return out
+end
+
+-- Puts a table, and what the empty items after it hold, into the last item of a
+-- list. An empty item that opens with another one stands for the item one level
+-- further in, the last item of the list this one ends with, and the table goes
+-- in the deepest of them.
+local function rehomed(list, tbl, frame)
+  local items = list.content
+  local item = items[#items]
+  local held = List:new{}
+  for _, blocks in ipairs(frame.content) do
+    held:extend(blocks)
+  end
+  local rest = 1
+  if is_resumed(held[1]) and is_list(item[#item]) and not is_resumed(item[#item]) then
+    item[#item] = rehomed(item[#item], tbl, held[1])
+    rest = 2
+  else
+    item:insert(tbl)
+  end
+  for position = rest, #held do
+    if is_resumed(held[position]) then
+      append(item, unframed(held[position]))
+    else
+      append(item, List:new{held[position]})
+    end
+  end
+  items[#items] = item
+  list.content = items
+  return list
+end
+
+-- Moves each table that sits inside a list item, and the items read after it,
+-- back into the list before the table. A list right after them that goes on
+-- from that list joins it. Empty items with no list and table ahead of them are
+-- taken out, and what they hold is left where it is.
+local function resume_lists(document)
+  local out = List:new{}
+  local resumed = false
+  for _, block in ipairs(document.blocks) do
+    local count = #out
+    if is_resumed(block) and count >= 2 and out[count].t == 'Table'
+      and is_list(out[count - 1]) and not is_resumed(out[count - 1]) then
+      local tbl = out:remove()
+      out[count - 1] = rehomed(out[count - 1], tbl, block)
+      resumed = true
+    elseif is_resumed(block) then
+      out:extend(unframed(block))
+      resumed = false
+    elseif resumed and counts_on(out[count], block) then
+      append(out, List:new{block})
+      resumed = false
+    else
+      out:insert(block)
+      resumed = false
+    end
+  end
+  document.blocks = out
+  return document
+end
+
+return {{Pandoc = resume_lists}, {Blocks = Blocks}}

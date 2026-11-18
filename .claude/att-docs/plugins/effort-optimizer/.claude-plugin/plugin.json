@@ -1,7 +1,7 @@
 {
   "name": "effort-optimizer",
   "description": "Suggests a reasoning effort level for each prompt and switches to it on request, or by itself in auto mode",
-  "version": "0.32.0",
+  "version": "0.32.3",
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {

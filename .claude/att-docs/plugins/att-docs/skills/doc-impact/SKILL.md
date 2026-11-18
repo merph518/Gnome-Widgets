@@ -52,7 +52,7 @@ and the report says so.
 | `<watch-skill>` | The scheduled document scan that ends with a bare run |
 | `<work-skill>` | What works an issue this files |
 | `<rule-store>` | The working master of the business rules |
-| `<rule-map-command>` | What reads the document map from `<rule-store>` |
+| `<rule-map-command>` | What reads the document map from `<rule-store>`. Each rule in it carries `quote`, the wording it quotes from the document, or a `description` the quote can be read from |
 | `<rule-update-skill>` | What refreshes a document's rules in `<rule-store>` |
 | `<rule-extract-skill>` | What extracts a document's rules for the first time |
 | `<rule-tool>` | Where approved rules are uploaded for test management |
@@ -244,25 +244,36 @@ Each item in `rule-refresh.json` is one document the map holds:
 | `key` | the blob read, as in step 1 |
 | `prefix`, `rules` | the rule ID prefix and how many active rules it holds |
 | `kind` | `content`, `removed`, or `layout`/`unchanged` for a rename the map has not followed |
-| `changed` | the rules whose anchor sits in the changed text: a numbered rule whose text changed, a requirement number a changed unit quotes, or the section a hunk landed in; every rule for a removal |
+| `changed` | the rules whose quoted wording is gone from the new text, or, for a rule with no usable quote, whose anchor sits in the changed text: a numbered rule whose text changed, a requirement number a changed unit quotes, or the section a hunk landed in; every rule for a removal |
+| `kept` | the rules an anchor placed in the change whose quoted wording is still in the new text, so a renumbered or re-nested list does not flag them |
+| `unmatched` | the rules whose quote the old text does not hold, placed by their anchors instead |
 | `restarts` | the document numbers its rules again per section, so a numbered match may be another section's rule |
 | `future` | the document is a `future` revision, read against the rules of the suite folder's copy |
 
 A document the map does not hold gets no item. Its first extraction is a
 choice made through `<rule-extract-skill>`, not something a revision files.
 A `layout` or `unchanged` revision gets none either, unless the map still
-names the old path.
+names the old path. Neither does a revision that only renumbers a list, nests
+one under its rule, or changes markup, with every word in place.
+
+A rule is flagged when the wording it quotes occurs fewer times in the new
+document than in the old, however the anchor reads. Page markers, line breaks,
+list markers, table cells, emphasis, curly quotes, and case do not count as
+wording. A quote of fewer than four words counts as none, so such a rule is
+placed by its anchor, as is a rule whose entry carries no quote. A change to the
+meaning of a rule outside the words it quotes is not seen by this check.
 
 File one issue per item through `<issue-rules>`, with `<rule-labels>` and the
 prefix in the name slot. The same-name check appends a later revision of that
 document to the open issue rather than opening a second one. The body names the
 document, the blob, the prefix and rule count, the `changed` rule IDs with their
 anchors and the hunks that reached them, and the `<rule-update-skill>` call that
-does the work. An empty `changed` says the anchors could not place the change,
-so the update reads the whole document. Say so, and say when `restarts` is true.
-Its marker line is `<rules-marker>`, naming the document, the first 12
-characters of the key, and the prefix. Search for it with `<marker-search>`
-before filing.
+does the work. An empty `changed` says neither the quotes nor the anchors could
+place the change, so the update reads the whole document. Say so, and say when
+`restarts` is true. Name the `kept` rules, whose quoted wording survived, so the
+update can skip them. Its marker line is `<rules-marker>`, naming the document,
+the first 12 characters of the key, and the prefix. Search for it with
+`<marker-search>` before filing.
 
 The issue asks for the update; it never stages, approves, or writes to
 `<rule-tool>`. An import always waits for review in `<rule-update-skill>`.

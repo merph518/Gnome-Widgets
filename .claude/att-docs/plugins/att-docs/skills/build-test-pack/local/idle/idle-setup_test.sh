@@ -6,7 +6,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CTL="$HERE/idle-setup.sh"
-SANDBOX="$(mktemp -d)"
+# The sandbox is under /tmp whatever TMPDIR says: the node it holds has to sit in folders
+# other users can enter, and a home folder usually cannot be.
+SANDBOX="$(mktemp -d -p /tmp)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 # Stubs: sudo logs and runs its arguments; systemctl logs what it gets. systemctl is-enabled

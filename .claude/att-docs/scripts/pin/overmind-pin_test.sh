@@ -310,6 +310,42 @@ check "$?" 2 "a PIN_REPO that is not owner/name exits 2"
 has "$(cat "$SANDBOX/out")" "refusing PIN_REPO 'bad'" "a bad PIN_REPO is named"
 check "$(remote badrepo branch --list | wc -l)" 1 "a bad PIN_REPO pushes nothing"
 
+# A consumer already on the tag still moves when PIN_REPO names another repository: the
+# lock keeps its tag, commit and tree, and only repo= changes. A PIN_REPO equal to the
+# lock's repo=, or a consumer ahead of the tag, still gets nothing.
+# The move takes its own branch, so a pin branch left over from reaching the tag, which
+# still holds the old pin's commits, is not built on.
+MOVE=overmind/move-v0.2.0
+make_consumer samemove v0.2.0
+git --git-dir="$REMOTES/merph518/samemove.git" branch "$BRANCH" main~1
+: > "$GH_LOG"
+PIN_REPO=acme/skills-mod pin v0.2.0 samemove > "$SANDBOX/out" 2>&1
+check "$?" 0 "a repo= move on the pinned tag succeeds"
+check "$(remote samemove show "$MOVE:.claude/att-docs.lock" | sed -n 's/^repo=//p')" acme/skills-mod "a move on the pinned tag writes repo="
+check "$(remote samemove diff --name-only main "$MOVE")" .claude/att-docs.lock "a move on the pinned tag changes only the lock"
+check "$(remote samemove rev-parse "$MOVE~1")" "$(remote samemove rev-parse main)" "a move on the pinned tag is one commit on the default branch"
+check "$(remote samemove rev-parse "$BRANCH")" "$(remote samemove rev-parse main~1)" "a leftover pin branch for the tag is not touched"
+check "$(pr_creates)" 1 "a move on the pinned tag opens a pull request"
+has "$(cat "$GH_STATE/open-merph518_samemove-overmind_move-v0.2.0.body")" "Moves where the Overmind pin is fetched from" "the notes say what moved"
+check "$(grep -c 'acme/' "$GH_STATE/open-merph518_samemove-overmind_move-v0.2.0.body")" 0 "the notes name no repository"
+PIN_REPO=acme/skills-mod pin v0.2.0 samemove > "$SANDBOX/out" 2>&1
+check "$?" 0 "a rerun of the move with its pull request open succeeds"
+check "$(pr_creates)" 1 "a rerun of the move opens no second pull request"
+git --git-dir="$REMOTES/merph518/samemove.git" update-ref refs/heads/main "refs/heads/$MOVE"
+PIN_REPO=acme/skills-mod pin v0.2.0 samemove > "$SANDBOX/out" 2>&1
+has "$(cat "$SANDBOX/out")" "unchanged: already on v0.2.0" "a rerun after the move merged changes nothing"
+check "$(pr_creates)" 1 "a rerun after the move merged opens no pull request"
+make_consumer samestay v0.2.0
+: > "$GH_LOG"
+PIN_REPO=acme/skills pin v0.2.0 samestay > "$SANDBOX/out" 2>&1
+check "$?" 0 "a PIN_REPO equal to repo= on the pinned tag succeeds"
+check "$(remote samestay branch --list | wc -l)" 1 "a PIN_REPO equal to repo= on the pinned tag gets no branch"
+check "$(pr_creates)" 0 "a PIN_REPO equal to repo= on the pinned tag gets no pull request"
+make_consumer aheadmove v0.2.0
+PIN_REPO=acme/skills-mod pin v0.1.1 aheadmove > "$SANDBOX/out" 2>&1
+check "$?" 0 "a move for a tag behind the pin succeeds"
+check "$(remote aheadmove branch --list | wc -l)" 1 "a move for a tag behind the pin gets no branch"
+
 # A tag whose changelog cannot be read fails the consumer before anything is pushed.
 git -C "$UP" rm -q CHANGELOG.md
 git -C "$UP" commit -q -m "drop the changelog"

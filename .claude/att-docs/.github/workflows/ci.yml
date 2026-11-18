@@ -1,8 +1,12 @@
 name: CI
 
-# Runs every test and the static checks on each pull request and on each push to main.
+# Runs the tests and the static checks on each pull request and on each push to main.
 # The check name is the job name, test-all. scripts/test-all.sh keeps going after a
 # failing test file and exits non-zero if any file or any static check failed.
+#
+# A push to main runs every test file. A pull request runs only the test files its
+# change can affect (scripts/select_tests.py says which), and always the static checks,
+# so the job reports a result on every pull request.
 
 on:
   pull_request:
@@ -35,7 +39,11 @@ jobs:
           echo "::error::A pull request from a fork is not run on the overmind runners."
           exit 1
 
+      # A pull request checks out the merge of its head into the base. A depth of two
+      # fetches that merge commit and both its parents, which the test selection compares.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
 
       # The runners reuse their workspace, and another workflow's sparse checkout turns on
       # extensions.worktreeConfig. actions/checkout disables sparse checkout, then unsets
@@ -48,5 +56,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run every test and the static checks
-        run: bash scripts/test-all.sh
+      # The runners share /tmp, and its per-user quota, with every other process of the
+      # same user. When the quota runs out, a test whose output cannot be written stops
+      # mid-line with exit 7. The tests' scratch folders and test-all.sh's logs go to the
+      # job's own temporary folder instead, which is on the runner's disk and is emptied
+      # for each job.
+      #
+      # On a pull request, HEAD is the merge commit and HEAD^1 the base it merged onto, so
+      # the change since HEAD^1 is exactly what the pull request brings. Without a second
+      # parent there is no such change to read, and every test file runs.
+      - name: Run the tests and the static checks
+        env:
+          TMPDIR: ${{ runner.temp }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            bash scripts/test-all.sh
+          elif git rev-parse -q --verify 'HEAD^2' >/dev/null; then
+            bash scripts/test-all.sh --changed-since 'HEAD^1'
+          else
+            echo "Selection: every test file (the checkout is not a merge commit)"
+            bash scripts/test-all.sh
+          fi

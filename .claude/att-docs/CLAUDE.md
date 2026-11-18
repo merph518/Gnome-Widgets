@@ -32,3 +32,19 @@ The five default triage labels: `needs-triage`, `needs-info`, `ready-for-agent`,
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Other Repos
+
+Pointers to the other repositories on this machine, so a session started here can open
+or clone one without searching the disk. Read a repository's own `CLAUDE.md`, when it has one, before
+changing it, and do work there from a session started in that repository. Every name in
+`.github/consumers.json` has a pointer; `scripts/consumers_test.py` fails when one is
+missing.
+
+- `ATT-Test-Pack-Gen` (builds test pack workbooks with a model on the local workstation; pins Overmind): `~/Code/ATT-Test-Pack-Gen`. Clone from https://github.com/merph518/ATT-Test-Pack-Gen if missing.
+- `Gnome-Widgets` (Spotify now-playing Conky widget for GNOME on Wayland; pins Overmind): `~/Code/conky-spotify-nowplaying`. Clone from https://github.com/merph518/Gnome-Widgets if missing. The folder name differs from the repository name.
+- `Laundry-Bot` (Discord bot that runs the family laundry schedule; pins Overmind): `~/Code/LaundryBot`. Clone from https://github.com/merph518/Laundry-Bot if missing. The local clone's remote may still name `mfagerstrom/LaundryBot`, which GitHub redirects.
+- `Playwright-Testing` (the Automated Testing Team's Playwright test suites; pins Overmind): `~/Code/Playwright-Testing`. Clone from https://github.com/merph518/Playwright-Testing if missing. The local clone may be behind, so `git pull` first.
+- `personal` (personal tasks; pins Overmind): `~/Code/personal`. Clone from https://github.com/merph518/personal if missing. The local clone may sit on an old branch whose upstream is gone, so check out `main` and `git pull` first.
+- `AI-Health-Coach` (family weight loss coach; pins Overmind with a lock not yet migrated, so it is not in `consumers.json`): `~/Code/fagerteam-health-coach`. Clone from https://github.com/merph518/AI-Health-Coach if missing. The local clone's remote may still name `mfagerstrom/fagerteam-health-coach`, which GitHub redirects, and may be behind, so `git pull` first.
+- `TheRPGClub-bot` (GameDB Discord bot for the RPG Club community, owned by the `TheRPGClub` organization; pins Overmind but is not in `consumers.json`): `~/Code/bot`. Clone from https://github.com/TheRPGClub/TheRPGClub-bot if missing.

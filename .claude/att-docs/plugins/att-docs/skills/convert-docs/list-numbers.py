@@ -46,6 +46,45 @@ its text, unless it opens with a tab. Spaces typed ahead of its first words
 carry them right by about their width. One that starts short of the item's
 text ends the item, and numbering that names no list comes off it.
 
+What Word draws at an outer column is not under the item before it. A list of
+another definition is the item's sub-list when its number is drawn at or past
+the text of the item's first line. A deeper level of the item's own list is
+its sub-list unless Word draws that level's number beside the item or beside
+an item it is under: in the column of that item's number, with the same kind
+of number, bullets excepted. A paragraph that a blank paragraph sets off from
+the last item read, and that starts at that item's text, is the text of the
+body going on after the list, not more of the item, when it starts where the
+last paragraph ahead of the list did, no heading, and no table outside every
+item, lies between the two, and no paragraph after it, up to the next
+heading, is more of an open item's list: numbered by its definition, or drawn
+beside it. Past a table only an item of the definition and level of an open
+item inside another counts, since only such an item takes the list up again.
+A table in an item, and a paragraph or table at the margin that the list
+takes back in when it goes on, are part of the list, not of the body.
+
+A table is inside the item above it when its indent sets it at or past that
+item's text and the item's text is itself set in from the page margin. A table
+set in the middle or at the right names no left edge, and sits in the deepest
+such item. The item stays open across the table. Pandoc ends every list at a
+table, and at a paragraph that holds only a picture or an empty run, so an item
+read after one would land at the margin with a count of its own. When the list
+goes on, that is when a later paragraph or item is still inside an item left
+open, each paragraph with no text read on the way joins the item above it, and
+each table is followed by a run of empty items, one at each level of the items
+it sits in. Pandoc nests what comes after the table in those, and
+list-markers.lua moves the table and what they hold back into the items of the
+list before the table. Their list starts at a number past the one that marks a
+paragraph after a sub-list. A table followed by nothing of the list it is drawn
+in stays after the list.
+
+An item that counts on from the last item at its depth, under the same item
+above, belongs with it even when a paragraph or a table at the margin came
+between them: Word draws it as the next item of that list. The items closed at
+the margin open again, and what was read between the two is written one level
+inside the item they are under, between the two parts of the list. A list that
+starts its count again is placed by where it is drawn, and so is any item after
+a heading.
+
 Paragraphs in tables, headings, and levels drawn without a number are counted,
 since Word counts them, but left as they are: the table filter flattens a
 cell's list to text, and a heading's number is not written to the Markdown.
@@ -68,6 +107,7 @@ from __future__ import annotations
 
 import copy
 import io
+import re
 import shutil
 import sys
 import xml.etree.ElementTree as ET
@@ -90,6 +130,15 @@ DEFAULT_TAB = 720
 # takes a start of 32767 at the most, so no list of the document's own starts
 # here. list-markers.lua holds the same number.
 UNNUMBERED_START = 32768
+
+# The number that starts the list of empty items put after a table inside a
+# list. list-markers.lua holds the same number.
+RESUMED_START = 65536
+
+# Where the text of a table at the page margin starts, in twentieths of a point:
+# the default left margin of a cell. An item whose text starts no further in
+# than this has no table inside it, since the margin holds the same table.
+TABLE_MARGIN = 108
 
 # About the width Word gives a space in 12 point text, in twentieths of a point.
 SPACE = 60
@@ -237,6 +286,13 @@ def level_format(lvl):
     return "decimal" if lvl is None else (val(lvl.find(W + "numFmt")) or "decimal")
 
 
+def label_kind(lvl, fmt):
+    """The kind of mark a level draws: its format and its text, the same for
+    two levels whose text differs only in the level it names."""
+    text = None if lvl is None else val(lvl.find(W + "lvlText"))
+    return fmt, re.sub(r"%\d", "%", text or "%1.")
+
+
 def restarts_after(lvl, used):
     """Whether using the level numbered `used`, counting from 1, restarts this
     level's count. A level restarts after any shallower level unless lvlRestart
@@ -279,18 +335,33 @@ class WordCount:
 class Open:
     """An item on the page whose sub-lists are still open."""
 
-    def __init__(self, abstract_id, ilvl, text_pos, depth, drawn):
+    def __init__(self, abstract_id, ilvl, text_pos, depth, drawn, number_pos, label):
         self.abstract_id = abstract_id
         self.ilvl = ilvl
         self.text_pos = text_pos
         self.depth = depth
         # Where Word starts the text of the item's first line.
         self.drawn = drawn
+        # Where Word draws the item's number or bullet, and the kind of mark it is.
+        self.number_pos = number_pos
+        self.label = label
 
-    def holds(self, abstract_id, ilvl, number_pos):
+    def beside(self, number_pos, label):
+        """Whether Word draws a mark as one more item beside this one: in the
+        column of its number, with the same kind of mark."""
+        return label == self.label and abs(number_pos - self.number_pos) <= NEST_TOLERANCE
+
+    def goes_on(self, abstract_id, number_pos, label):
+        """Whether a numbered paragraph further on is more of this item's list:
+        of its definition, or drawn beside it."""
+        return abstract_id == self.abstract_id or self.beside(number_pos, label)
+
+    def holds(self, abstract_id, ilvl, number_pos, beside=None):
         if abstract_id == self.abstract_id:
-            return ilvl > self.ilvl
-        return number_pos >= self.text_pos - NEST_TOLERANCE
+            # A deeper level of the item's own list is its sub-list unless Word
+            # draws its number beside this item or beside one this item is under.
+            return ilvl > self.ilvl and (beside is None or beside.depth > self.depth)
+        return number_pos >= self.drawn - NEST_TOLERANCE
 
 
 def has_text(paragraph):
@@ -346,17 +417,35 @@ class Rewriter:
         # The item Pandoc joins a continuing paragraph to, the last one it read,
         # under the items it is nested in, outermost first.
         self.joined = []
+        # The last item read, for telling a paragraph right after it from one
+        # after its sub-list.
+        self.read = None
+        # Where the last paragraph outside every list starts, and the stretch
+        # of the body it is in.
+        self.body = None
+        # What self.body was before the blocks read since the list was left
+        # changed it, with the list of those blocks: if the list goes on and
+        # takes them in, the body never went on at them.
+        self.body_ahead = (None, None)
+        # Read ahead by outline: the stretch of the body each paragraph is in,
+        # and the lists numbered paragraphs later in that stretch are in.
+        self.stretch = {}
+        self.lists_after = {}
+        # The blocks read since the last item or paragraph of a list that are in
+        # no list: a paragraph, or (parent, table, the items open across it).
+        self.between = []
+        # The number Word draws on the last item read at each depth.
+        self.numbers = {}
         self.next_abstract = 1 + max([to_int(k) for k in numbering.abstracts] or [0])
         self.next_num = 1 + max([to_int(k) for k in numbering.nums] or [0])
 
     def walk(self, parent, in_table=False):
-        for child in parent:
+        for child in list(parent):
             if child.tag == W + "p":
                 self.paragraph(child, in_table)
             elif child.tag == W + "tbl":
                 if not in_table:
-                    self.open.clear()
-                    self.blank.clear()
+                    self.table(parent, child)
                 self.walk(child, True)
             elif child.tag != W + "sectPr":
                 self.walk(child, in_table)
@@ -444,6 +533,7 @@ class Rewriter:
             elif not in_table:
                 self.blank.append(paragraph)
             return
+        blank = list(self.blank)
         self.blank.clear()
         num_id, ilvl = found
         number = self.word.next(num_id, ilvl)
@@ -455,6 +545,14 @@ class Rewriter:
             self.forget_below(ilvl)
             if not in_table and fmt != "none":
                 self.open.clear()
+            if not in_table:
+                # Pandoc reads an item of its own here, so nothing read so far
+                # goes back into a list after it, and no later item rejoins one.
+                # A table still waiting to see whether its list goes on has
+                # ended it.
+                if self.between:
+                    self.open.clear()
+                self.joined, self.between = [], []
             return
         abstract_id, _ = self.numbering.abstract(num_id)
         number_pos, text_pos = self.positions(ppr, style_id, lvl)
@@ -462,20 +560,27 @@ class Rewriter:
             # With no hanging indent, Word sets the text at the next default
             # tab stop after the number.
             text_pos = (max(number_pos, 0) // DEFAULT_TAB + 1) * DEFAULT_TAB
-        while self.open and not self.open[-1].holds(abstract_id, ilvl, number_pos):
+        label = label_kind(lvl, fmt)
+        self.rejoin(abstract_id, ilvl, number_pos, number, fmt, label)
+        beside = self.drawn_beside(fmt, number_pos, label)
+        while self.open and not self.open[-1].holds(abstract_id, ilvl, number_pos, beside):
             self.open.pop()
         depth = len(self.open)
+        self.resume(depth, blank)
         # A tab stop the paragraph sets between its number and its hanging
         # indent is where Word starts the text of its first line.
         drawn = next((stop for stop in tab_stops(ppr) if number_pos < stop < text_pos), text_pos)
-        self.open.append(Open(abstract_id, ilvl, text_pos, depth, drawn))
+        self.open.append(Open(abstract_id, ilvl, text_pos, depth, drawn, number_pos, label))
+        self.read = self.open[-1]
         self.joined = list(self.open)
+        self.numbers[depth] = number
         self.number(ppr, lvl, fmt, number, depth)
 
     def text(self, paragraph, ppr, style_id):
         blank, self.blank = self.blank, []
         if self.styles.is_heading(style_id):
             self.open.clear()
+            self.joined, self.between = [], []
             return
         # A hanging indent starts the paragraph left of the rest of its text,
         # unless a tab carries its first words across to where the rest sits.
@@ -487,7 +592,13 @@ class Rewriter:
         after_item = bool(self.open)
         while self.open and left < self.open[-1].text_pos - NEST_TOLERANCE:
             self.open.pop()
+        if self.open and blank and self.at_body_text(paragraph, left):
+            self.open.clear()
+        if not self.open and id(paragraph) in self.stretch:
+            self.hold_body()
+            self.body = (self.stretch[id(paragraph)], left)
         if self.open:
+            self.resume(len(self.open))
             # Pandoc ends the list at a paragraph outside it, even one with no
             # text, so the blank paragraphs between the item and the paragraph
             # continuing it join the item too.
@@ -524,6 +635,171 @@ class Rewriter:
             # paragraph out of every list in Word. Pandoc reads it as one more
             # paragraph of the item above, so here it comes off.
             ppr.remove(ppr.find(W + "numPr"))
+        if not self.open and self.joined:
+            self.between.extend(blank + [paragraph])
+
+    def table(self, parent, table):
+        """Reads a table of the body. While an item is open, the table sits in
+        the deepest of the items a continuing paragraph would join that it is
+        not drawn short of, and ends the open items past that one. An item
+        whose text starts at the margin holds no table. It waits, with the
+        blank paragraphs ahead of it, to see whether the list goes on after it.
+        A table set in the middle or at the right names no left edge, and sits
+        in the deepest item whose text is set in from the margin."""
+        left = table_left(table)
+        held = list(self.joined) if self.open else []
+        while held and (held[-1].text_pos - NEST_TOLERANCE <= TABLE_MARGIN or (
+                left is not None and left < held[-1].text_pos - NEST_TOLERANCE)):
+            held.pop()
+        del self.open[len(held):]
+        if not held:
+            # A table outside every list starts a new stretch of the body, so
+            # no paragraph ahead of it sets the column.
+            self.hold_body()
+            self.body = None
+        if self.joined:
+            self.between.extend(self.blank)
+            self.between.append((parent, table, held))
+        self.blank.clear()
+
+    def drawn_beside(self, fmt, number_pos, label, items=None):
+        """The deepest of the open items, or of `items`, that Word draws a mark
+        beside, or None. A bullet is no number, so a deeper level of bullets
+        stays a sub-list."""
+        if fmt == "bullet":
+            return None
+        return next((item for item in reversed(self.open if items is None else items)
+                     if item.beside(number_pos, label)), None)
+
+    def hold_body(self):
+        """Keeps self.body as it was before the list was left, for resume."""
+        if self.body_ahead[0] is not self.between:
+            self.body_ahead = (self.between, self.body)
+
+    def rejoin(self, abstract_id, ilvl, number_pos, number, fmt, label):
+        """Opens again the items a paragraph or a table at the margin closed,
+        when the item read now counts on from the last item at a depth inside
+        them and the item above that one still holds it."""
+        for depth in range(len(self.joined) - 1, len(self.open), -1):
+            last = self.joined[depth]
+            beside = self.drawn_beside(fmt, number_pos, label, self.joined[:depth])
+            if (last.abstract_id, last.ilvl, self.numbers.get(depth)) == (
+                    abstract_id, ilvl, number - 1) and (
+                    self.joined[depth - 1].holds(abstract_id, ilvl, number_pos, beside)):
+                self.open = self.joined[:depth]
+                return
+
+    def resume(self, depth, blank=()):
+        """Takes the blocks read since the list was left back into it, `depth`
+        items deep, with the blank paragraphs right ahead of the paragraph that
+        goes on with it. At depth 0 the list ended, and they stay where they are."""
+        held_with, body = self.body_ahead
+        if depth and held_with is self.between:
+            self.body = body
+        self.body_ahead = (None, None)
+        between, self.between = self.between + list(blank), []
+        if not depth:
+            return
+        for block in between:
+            if isinstance(block, tuple):
+                parent, table, held = block
+                if len(held) < depth:
+                    held = self.open[:depth]
+                # Pandoc nests what follows the table in these empty items, and
+                # forgets every deeper count at the first of them.
+                frame = self.frame()
+                for level in range(len(held)):
+                    marker = ET.Element(W + "p")
+                    set_numbering(ET.SubElement(marker, W + "pPr"), frame, level)
+                    parent.insert(list(parent).index(table) + 1 + level, marker)
+                self.forget_below(0)
+                self.joined = list(held)
+                continue
+            ppr = block.find(W + "pPr")
+            if ppr is None:
+                ppr = ET.Element(W + "pPr")
+                block.insert(0, ppr)
+            if has_text(block):
+                self.after_sub_list(ppr, depth)
+            else:
+                set_numbering(ppr, self.continuation(), depth)
+
+    def frame(self):
+        """The instance of a list with every level, each starting at the number
+        that marks the empty items put after a table."""
+        abstract = ET.Element(W + "abstractNum")
+        for level in range(LEVELS):
+            new = ET.SubElement(abstract, W + "lvl")
+            new.set(W + "ilvl", str(level))
+            ET.SubElement(new, W + "start").set(W + "val", str(RESUMED_START))
+            ET.SubElement(new, W + "numFmt").set(W + "val", "decimal")
+            ET.SubElement(new, W + "lvlText").set(W + "val", f"%{level + 1}.")
+        return self.define(abstract)
+
+    def outline(self, body):
+        """Reads ahead for at_body_text. A heading starts a new stretch of the
+        body, and each paragraph with no number is given the numbered
+        paragraphs after it in its stretch: the definition, the number's column
+        and the kind of mark of each, up to the first table after it; and the
+        definition and level of each numbered paragraph past that table. Pandoc
+        ends a list at a table, and only an item inside another goes on past
+        one, as the next item of its own level (Rewriter.rejoin), so those
+        count only for that; Rewriter.table resets the body's column at a
+        table outside every item."""
+        stretch, read = 0, []
+        for paragraph in blocks(body):
+            ppr = None if paragraph is None else paragraph.find(W + "pPr")
+            style_id = val(ppr.find(W + "pStyle")) if ppr is not None else None
+            if paragraph is None:
+                read.append(("table", None))
+                continue
+            if self.styles.is_heading(style_id):
+                stretch += 1
+                read.append(("end", None))
+                continue
+            self.stretch[id(paragraph)] = stretch
+            found = self.numbering_of(ppr, style_id)
+            lvl = None if found is None else self.numbering.level(*found)
+            fmt = level_format(lvl)
+            if found is None:
+                read.append(("text", paragraph))
+            elif fmt != "none":
+                abstract_id = self.numbering.abstract(found[0])[0]
+                read.append(("item", ((abstract_id, self.positions(ppr, style_id, lvl)[0],
+                                       label_kind(lvl, fmt)), (abstract_id, found[1]))))
+        following, levels, past_table = frozenset(), frozenset(), frozenset()
+        for kind, value in reversed(read):
+            if kind == "end":
+                following, levels, past_table = frozenset(), frozenset(), frozenset()
+            elif kind == "table":
+                following, past_table = frozenset(), levels
+            elif kind == "item":
+                following |= {value[0]}
+                levels |= {value[1]}
+            else:
+                self.lists_after[id(value)] = (following, past_table)
+
+    def at_body_text(self, paragraph, left):
+        """Whether a paragraph a blank one sets off from the last item read is
+        the text of the body going on after the list: it starts at that item's
+        text, no further in, where the last paragraph outside every list did,
+        in the same stretch of the body with no table outside every item
+        between them, and no numbered paragraph later in that stretch is more
+        of an open item's list; past a table, an item of the level of an open
+        item inside another.
+        After a sub-list of the item the paragraph is left to the item it
+        starts nearest."""
+        if self.body is None or self.read is not self.open[-1]:
+            return False
+        stretch, column = self.body
+        near, past_table = self.lists_after[id(paragraph)]
+        return (stretch == self.stretch.get(id(paragraph))
+                and left <= self.open[-1].text_pos + NEST_TOLERANCE
+                and abs(left - column) <= NEST_TOLERANCE
+                and not any(item.goes_on(*later) for item in self.open
+                            for later in near)
+                and not any((item.abstract_id, item.ilvl) in past_table
+                            for item in self.open[1:]))
 
     def after_sub_list(self, ppr, depth):
         """Numbers a paragraph that follows a sub-list as the only item of a
@@ -595,6 +871,21 @@ def blocks(parent):
             yield from blocks(child)
 
 
+def table_left(table):
+    """Where a table's left edge is drawn, in twentieths of a point: its indent,
+    or the margin for a table that names none. None for a table set in the
+    middle or at the right, whose left edge follows from its width."""
+    properties = table.find(W + "tblPr")
+    if properties is None:
+        return 0
+    if val(properties.find(W + "jc")) in ("center", "right", "end"):
+        return None
+    indent = properties.find(W + "tblInd")
+    if indent is None or val(indent, "type") not in (None, "dxa"):
+        return 0
+    return to_int(val(indent, "w"))
+
+
 def set_numbering(ppr, num_id, ilvl):
     num_pr = ppr.find(W + "numPr")
     if num_pr is None:
@@ -623,6 +914,7 @@ def rewrite(source, target):
     if body is not None:
         rewriter = Rewriter(Numbering(numbering, styles), styles)
         rewriter.unhead(body)
+        rewriter.outline(body)
         rewriter.walk(body)
     parts["word/document.xml"] = ET.tostring(document, encoding="UTF-8", xml_declaration=True)
     parts["word/numbering.xml"] = ET.tostring(numbering, encoding="UTF-8", xml_declaration=True)

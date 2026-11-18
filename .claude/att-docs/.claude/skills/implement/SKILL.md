@@ -61,7 +61,7 @@ Harness substitutes. Never ask only in reply text: the user does not see it ther
 | `<asking-note>` | Every question goes through the `AskUserQuestion` tool, never only in reply text, because the user will not see it there. Without that tool, the harness's own ask tool, under Harness substitutes |
 | `<in-progress-label>` | `In Progress` |
 | `<ready-label>` | `Manual Review Needed` |
-| `<preflight>` | In the main checkout: `node --version`, `python3 --version`, `gh --version` and `gh auth status` must succeed, and a change whose tests import `dotenv` also needs `node -e "require.resolve('dotenv')"` to succeed. On a failure, label the issue `Blocked` and comment with the failed command and its exact fix: `apt install nodejs` or `apt install python3` for a missing tool, GitHub's official apt repository with its signing key for a missing `gh`, `gh auth login` for authentication, `npm install` in the main checkout for `dotenv` |
+| `<preflight>` | In the main checkout: `node --version`, `python3 --version`, `gh --version` and `gh auth status` must succeed, `gh extension list` should list `cli/gh-webhook` (without it, `scripts/catchup.py wait` checks on its timer, so report it and go on), and a change whose tests import `dotenv` also needs `node -e "require.resolve('dotenv')"` to succeed. On a failure, label the issue `Blocked` and comment with the failed command and its exact fix: `apt install nodejs` or `apt install python3` for a missing tool, GitHub's official apt repository with its signing key for a missing `gh`, `gh auth login` for authentication, `gh extension install cli/gh-webhook`, run by the user, for the extension, `npm install` in the main checkout for `dotenv` |
 | `<label-script>` | None. Under Overrides, Labels |
 | `<labels-note>` | Under Overrides, Labels |
 | `<area-label-rule>` | A title starting `[Tooling]` carries the `Tooling` label; add it when missing, under the same gate |
@@ -81,16 +81,16 @@ Harness substitutes. Never ask only in reply text: the user does not see it ther
 | `<writing-rules>` | `repo-writing`, under Added gates |
 | `<repo-constraints>` | None beyond the writing rules and the README rule under Repository notes |
 | `<static-checks>` | Local checks, under Overrides, Section 5 |
-| `<pr-checks>` | The `test-all` job in `.github/workflows/ci.yml` runs every test and the static checks on a pull request and again on each push to its branch. The ready signal waits for it, under Overrides, Section 7, Ready signal. This replaces the general skill's wording that a pull request check runs static checks only: the local runs in Section 6 still go green before the pull request opens |
+| `<pr-checks>` | The `test-all` job in `.github/workflows/ci.yml` runs the static checks and the test files the change can affect (`scripts/select_tests.py` picks them) on a pull request and again on each push to its branch, and every test file on a push to `main`. The ready signal waits for it, under Overrides, Section 7, Ready signal. This replaces the general skill's wording that a pull request check runs static checks only: the local runs in Section 6 still go green before the pull request opens |
 | `<test-dispatch>` | Not applicable here, because nothing is dispatched. Tests run locally, under Overrides, Section 6 |
 | `<branch-age-note>` | Before opening the pull request and before marking it ready, merge `origin/main` into the branch when it is behind, and as soon as `<claim-script> sync` prints a file. Never rebase, and never force-push |
-| `<run-watch>` | No run watcher, because nothing is dispatched. After the ready signal, wait for the merge with a background command that has no command substitution: `until gh pr view <n> --json state --jq .state | grep -qvx OPEN; do sleep 120; done; gh pr view <n> --json state --jq .state`. When working under `oversee-development`, record the opened pull request on its ledger with `bash plugins/general/skills/oversee-development/oversee.sh finish <N> done <pr> "<note>"`, where `<pr>` is the pull request number. Outside it, only that wait |
+| `<run-watch>` | No run watcher, because nothing is dispatched. After the label, record the pull request on the session's ledger with `python3 scripts/catchup.py add-pr <scratchpad>/catchup.tsv <n>` and keep one `python3 scripts/catchup.py wait <scratchpad>/catchup.tsv` running in the background until it hands back with the merge, under Overrides, Section 7. When working under `oversee-development`, record the opened pull request on its ledger with `bash plugins/general/skills/oversee-development/oversee.sh finish <N> done <pr> "<note>"`, where `<pr>` is the pull request number. Outside it, only that wait |
 | `<fix-cycle-budget>` | Three cycles on one failure, then record it on the issue and stop |
 | `<mergeability-note>` | Under Overrides, Section 7 |
 | `<self-review>` | Under Overrides, Section 7 |
 | `<ready-signal>` | Under Overrides, Section 7, Ready signal. A pull request reported ready carries `Manual Review Needed`, read back |
 | `<instructions-file>` | `CLAUDE.md` at the root, for the rule that every pull request follows this procedure. `README.md` for the layout and the extension contract |
-| `<post-merge-checks>` | The post-merge pin, under Added gates. It runs after the merge, not before the pull request is ready |
+| `<post-merge-checks>` | The post-merge pin, under Added gates: the release, the plugin update, and closing and merging the pin pull requests the automation app opens. It runs after the merge, not before the pull request is ready |
 | `<pairing>` | None |
 | `<merge-cleanup>` | Nothing runs automatically. Removing the worktree after the merge, with `git worktree remove` from the main checkout, is the user's |
 
@@ -293,38 +293,39 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   review of the last fix, with the fallback from Models where a model could not be chosen.
 - Ready signal: never leave the pull request in draft. When the loop ends, mark it ready
   with `gh pr ready <n>`. The label is added only when every check on the pull request has
-  passed on the current head. A read right after a push or a merge of `origin/main` can
-  still show the previous commit's result, so first confirm the pull request's head is the
-  commit pushed. Write the local commit to a file in the scratchpad, then compare it with
-  the pull request's head every ten seconds for two minutes, in a background command that
-  has no command substitution:
+  passed on the current head. Wait on the checks with `scripts/catchup.py`, which keeps a
+  ledger of the runs and pull requests this session waits on. Use one ledger per session,
+  `<scratchpad>/catchup.tsv`. After each push, record the `CI` run on the pull request's
+  head commit, then start one `wait` as a background command:
 
   ```bash
-  git rev-parse HEAD > <scratchpad>/head.txt
-  for i in {1..12}; do gh pr view <n> --json headRefOid --jq .headRefOid | grep -qxFf <scratchpad>/head.txt && { echo matched; break; }; sleep 10; done
+  python3 scripts/catchup.py add-checks <scratchpad>/catchup.tsv <n>
+  python3 scripts/catchup.py wait <scratchpad>/catchup.tsv
   ```
 
-  If it never prints `matched`, check that the push landed (`git status -sb`) and push it,
-  or ask through `AskUserQuestion`.
-
-  Then wait while any check is pending, or while none is reported yet, with a background
-  command that has no command substitution and stops after thirty minutes:
-
-  ```bash
-  for i in {1..30}; do gh pr checks <n> 2>&1 | grep -Eq 'pending|no checks reported' || break; sleep 60; done; gh pr checks <n>
-  ```
-
-  If the thirty minutes pass with a check still pending or none reported (a conflict, a
-  skipped run, or offline runners keep a run from starting), stop waiting and ask through
-  `AskUserQuestion`. Merging `origin/main` into the branch, or any push, starts the checks
-  again, so the head check and the wait repeat after it.
+  `add-checks` reads the head from the branch, waits up to two minutes for its run to
+  appear, and drops the row an earlier push left behind. Exit 1 means the pull request is
+  not open or could not be read. Exit 3 means no run was found, and the message says why.
+  On a conflict with the base, merge `origin/main`, push, and run `add-checks` again. When
+  the conflict state is not yet worked out, run `add-checks` again at once. Otherwise
+  check that the push landed (`git status -sb`) and run it once more. If it still finds
+  no run, ask through `AskUserQuestion`. `wait` listens for GitHub's notices through
+  `gh webhook forward` and checks on a timer when no notice comes. It hands back when a
+  row finishes, and when a pull request it holds turns `conflicting`; a conflict is
+  handled like the one above. For a finished run it prints the `test-all` tally, and for
+  a failed run the error lines and the path of the saved log. `python3
+  scripts/catchup.py check <scratchpad>/catchup.tsv` reads the ledger once without waiting.
+  If `wait` has not handed back after thirty minutes (offline runners keep a run queued),
+  read it with `check` and ask through `AskUserQuestion`. Merging `origin/main` into the
+  branch, or any push, starts the checks again, so `add-checks` and the wait repeat after it.
 
   A check that fails is a real failure to fix, then the fix is reviewed and pushed
   like any other fix; the label stays off until the rerun passes. This holds for a docs-only
-  branch too, because `test-all` runs the whole suite on every pull request: a failure
-  already on `main` is fixed here, and the body's Verification reports the CI result. A
-  check that reads `cancel` (a newer push cancels the older run, and a run past its timeout
-  reads the same) is not a pass: when the head is current, rerun it once with
+  branch too: `test-all` runs the static checks and the test files the branch can affect
+  on every pull request, so a failure already on `main` that shows there is fixed here,
+  and the body's Verification reports the CI result. A check that reads `cancel` (a newer
+  push cancels the older run, and a run past its timeout reads the same) is not a pass:
+  when the head is current, rerun it once with
   `gh run rerun <run-id>`, and ask through `AskUserQuestion` if it cancels again. Once
   every check reads `pass` on the current head, add the label through the issues endpoint
   and read it back:
@@ -334,9 +335,12 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   gh pr view <n> --json labels --jq '[.labels[].name]'
   ```
 
-  A report that calls a pull request ready without the label reading back is wrong; fix
-  the label first. A label on this session's own pull request whose checks are pending or
-  red is wrong too: remove it. A commit pushed after the label is a new change: remove the label with
+  After the label reads back, record the pull request with `add-pr` and keep one `wait`
+  running for the merge, per `<run-watch>`. When it hands back with `pr: <n>
+  conflicting`, remove the label, merge `origin/main`, push, and start again from
+  `add-checks`. A report that calls a pull request ready without the label reading back
+  is wrong; fix the label first. A label on this session's own pull request whose checks
+  are pending or red is wrong too: remove it. A commit pushed after the label is a new change: remove the label with
   `gh api -X DELETE repos/merph518/Overmind-Mod/issues/<n>/labels/Manual%20Review%20Needed`
   (a 404 means it was not on yet) and add it again only once the review of that commit
   is clean and its checks have passed.
@@ -387,8 +391,11 @@ open pull requests' files first, per Section 3.
 
 ### Post-merge pin
 
-A pull request that changes functionality ends with a pin cut and a pin-bump pull
-request in every repository that pins Overmind. The step runs after the merge, from the
+A pull request that changes functionality ends with a pin cut. The automation GitHub App
+opens the pin pull request in every consumer listed in `.github/consumers.json` once the
+tag exists (README, Pin pull requests), so this session never opens one and never hands
+one to a session in another repository or to the user. It waits for them, closes the
+superseded ones and merges the pin-only ones. The step runs after the merge, from the
 wait in `<run-watch>`, for a pull request with or without an issue, and the work is not
 done until it finishes or is skipped.
 
@@ -402,24 +409,44 @@ done until it finishes or is skipped.
   exist without a GitHub release. Keep it as the tag from before the merge. Then read
   the release workflow's run on the merge commit
   (`gh run list --workflow release.yml --commit <merge sha> --json conclusion,status,url`),
-  waiting until that run appears and has finished or shows `skipped`. A `cancelled` run
-  is reported to the user with its link: stop there, open no bump pull request, and take
-  neither branch below. For any other result, take the branch that fits:
+  waiting until that run appears and has finished or shows `skipped`, for up to thirty
+  minutes, after which the run's link is reported and the step stops. A `cancelled` run
+  is reported to the user with its link: stop there, run nothing below, and take
+  neither branch below. Say that a newer push most likely replaced it and that the pin
+  comes from the newer release run, so this session cuts none for this pull request. For any other result, take the branch that fits:
   - The workflow ran. Look for the open release pull request with
     `gh pr list --state open --head release-please--branches--main --json number,title`.
     When it lists this pull request in its changelog, ask the user through
     `AskUserQuestion` to merge it, because this skill merges only pin-only bump pull
     requests. When there is none, or it does not list this pull request, because the change merged as a type
     release-please ignores (it reads only `feat`, `fix` and `perf`), report that no pin
-    was cut and why, and open no bump pull request. A failed run is reported the same
-    way, with the run's link.
+    was cut and why, and run nothing below. A failed run is reported the same way, with
+    the run's link.
   - The workflow is skipped. The tag is cut by hand, an exception to the README's rule
     that holds only while the workflow is off, and any release pull request left open is
-    ignored: ask the user through `AskUserQuestion` to cut it. When the workflow runs
-    again, resync the manifest to that tag, under Releases below.
+    ignored: ask the user through `AskUserQuestion` to cut it. The app's jobs run only
+    from the release workflow, so a hand-cut tag opens no pin pull requests. Report that,
+    with the README's repeat command for the user to run once the tag is pushed,
+    `gh workflow run pin-consumers.yml -f tag=<new tag>`, which uses the App's secrets
+    and which this session never starts. The repeat only redoes the app's own step; no
+    bump is asked of anyone. Then update the installed plugins, skip the steps below that
+    read, close or merge the pin pull requests for that tag, and run the one that reports
+    a repository the app does not know. When the workflow runs again, resync the manifest
+    to that tag, under Releases below.
 
-  After the user was asked to merge the release pull request or to cut the tag, open no
-  bump pull request until the newest tag is above the one from before the merge.
+  After the user answered the question about the release pull request or the tag, read
+  the newest tag again. A merged release pull request is tagged only once the release run
+  it starts has gone through its queue, so poll every minute for up to thirty minutes
+  before deciding, and stop early when the release run on the release pull request's merge
+  commit has completed with a conclusion other than `cancelled`; a cancelled run is
+  replaced by a later one, so keep polling. After a hand-cut tag one read is enough, with no
+  poll. For a release pull request, read its merge commit with
+  `gh pr view <release pr number> --json mergeCommit --jq .mergeCommit.oid`, using the
+  number from the `gh pr list` call above, and its run with
+  `gh run list --workflow release.yml --commit <release merge sha> --json conclusion,status`.
+  An empty merge commit means the user did not merge it: skip the poll. When the newest tag
+  is still not above the one from before the merge, report that the pin was not cut and run
+  nothing below.
 - **Update the installed plugins.** Once the newest tag is above the one from before the
   merge, bring this machine's installed plugins to it, so the next new session lists the
   new skills. The update changes Claude Code's plugin folder through the `claude` command,
@@ -437,34 +464,55 @@ done until it finishes or is skipped.
     worktree's own entry. For each other repository with entries in that file, report the
     same update commands, with that entry's scope, for the user to run there.
   - The update applies to sessions started afterward. Report what ran and its result.
-- **Find every repository that pins Overmind.** List the owner's repositories with
+- **Wait for the app, then find its pull requests.** The jobs start after the release run
+  that made the tag, so wait for that run to finish. Read the tag's commit with
+  `git ls-remote origin 'refs/tags/<new tag>' 'refs/tags/<new tag>^{}'` and take the last
+  line: a lightweight tag has no `^{}` line, and an annotated one lists the commit it
+  points to last. Then run
+  `gh run list --workflow release.yml --limit 20 --json databaseId,headSha,conclusion,status,createdAt,url`
+  and take the run that created the tag: the run whose `headSha` is the tag's commit, or,
+  when that run was cancelled because a newer push replaced it, the earliest run created
+  after it that is not cancelled. The tag exists once the `release-please` job finishes,
+  while the pin jobs appear later, so wait for that run to reach `completed`
+  (`gh run view <id> --json status,conclusion,jobs`) and only then read its jobs. A run
+  that has not appeared within ten minutes, or has not completed within thirty because an
+  offline runner leaves it queued, is reported, not waited for any longer. When the run
+  never appeared, or has no `pin <consumer>` job that ran (it completed with a failed
+  `pin-consumers / plan` job or with none, or it is still unfinished with its jobs not
+  started), report what there is: the run's link or that none exists, the failed job when
+  there is one, and the full rerun command
+  `gh workflow run pin-consumers.yml -f tag=<new tag>`. Then skip the per-consumer reading
+  and the close and merge steps for that tag; the report of a repository the app does not
+  know and the final report still run. Otherwise the run has one job per consumer, with a
+  name ending in `pin <consumer>`, and a job that is not `completed` counts as never
+  finished. The consumers are `git show origin/main:.github/consumers.json`. For each
+  consumer, read the open pull request for the tag:
+  `gh pr list --repo merph518/<consumer> --head overmind/pin-<new tag> --state open --json number,title,url`.
+  - A consumer whose job succeeded and has no open pull request was already on the tag or a
+    newer one, or its pull request was merged or closed already. That is not a failure.
+  - A consumer with no job in the run, for example one added to the file afterward, and no
+    open pull request is reported with the rerun command below.
+  - A consumer whose job failed, was cancelled, or never finished, and has no open pull
+    request, is reported with the run's link and the rerun command
+    `gh workflow run pin-consumers.yml -f tag=<new tag> -f consumer=<consumer>`; the others go
+    ahead. This session starts the rerun only when the user asks. A consumer that has an
+    open pull request is handled below whatever its job did.
+  - A pull request from the branch `overmind/move-<tag>` moves a repository, not a
+    release, and is left alone.
+- **Report a repository the app does not know.** The app never sees a repository missing
+  from `.github/consumers.json`, so list the owner's repositories with
   `gh repo list merph518 --no-archived --limit 100 --json name --jq '.[].name'` (raise the
   limit when it returns 100 names) and keep each one whose lock names Overmind:
   `gh api repos/merph518/<name>/contents/.claude/att-docs.lock -H "Accept: application/vnd.github.raw"`
   has a `repo=` line naming `merph518/Overmind-Mod` or an earlier location of it. A 404 means
-  the repository does not pin Overmind. Read the list fresh each time. Compare the
-  result with `.github/consumers.json` and report drift both ways to the user: a repository
-  that pins Overmind but is missing from the file, so it can be added, and a listed
-  repository that no longer pins Overmind, so it can be removed.
-- **Open one pin-bump pull request per repository.** This session cannot write outside
-  its own worktree, so each bump is handed to a session started in that repository, or to
-  the user. That session runs `scripts/overmind-sync.sh <new tag>`, then
-  `scripts/overmind-check.sh`, a `chore:` commit, and a pull request titled
-  `chore: Move the Overmind pin to <new tag>` that names the Overmind pull request. When
-  the new tag crosses a minor version, it checks its extension first, per the README's
-  Releases section. Nothing pushes to a repository's `main`.
-  - A bump whose diff is only the lock, `.claude/att-docs.lock`, and the vendored files
-    under `.claude/att-docs/` is a pin-only pull request. It skips the self review loop,
-    the review and the ready label, because the code it brings in was reviewed in
-    this repository, and it merges by the next step without a confirm. The handoff says
-    so, because that repository's own rules otherwise call for the full procedure.
-  - A bump with any other change, such as an extension edit for a new minor version,
-    runs that repository's own implement procedure in full, with its review loop and
-    ready label, and is never merged by this step.
-- **Close the pin pull requests it supersedes.** Once a repository's bump pull request is
-  open, run `close_superseded_pins.py` from this skill's folder in the Overmind checkout
-  (add `--dry-run` first to see the list). It only calls `gh`, so it works for a repository
-  whose bump was handed to another session once that session reports its pull request number:
+  the repository does not pin Overmind. Read the list fresh each time. Report each one
+  that pins Overmind and is not in the file, so the user can add it, except `AI-Health-Coach`
+  and `TheRPGClub-bot`, which the file leaves out on purpose (`CLAUDE.md`, Other Repos). A
+  listed repository that no longer pins Overmind needs no report: its job fails and the
+  failure is reported above.
+- **Close the pin pull requests it supersedes.** For each pin pull request found above,
+  run `close_superseded_pins.py` from this skill's folder in the Overmind checkout (add
+  `--dry-run` first to see the list):
 
   ```bash
   python3 .claude/skills/implement/close_superseded_pins.py <owner/repo> <new tag> <new pull request number>
@@ -478,13 +526,26 @@ done until it finishes or is skipped.
   A pull request it could not close, or whose branch it could not delete, is reported with
   the reason.
 - **Merge each pin-only pull request once its checks pass.** This is the one exception to
-  the rule that a session never merges. Once a repository's bump pull request is open,
-  run `merge_pin_pr.py` from this skill's folder in the Overmind checkout, in the
-  background, one per repository:
+  the rule that a session never merges. A pin-only pull request has a diff of only the
+  lock, `.claude/att-docs.lock`, and the vendored files under `.claude/att-docs/`. The
+  app's pull requests are that, and the code they bring in was reviewed in this
+  repository, so they need no review, ready label or confirm. For each pin pull request
+  found above, run `merge_pin_pr.py` from this skill's folder in the Overmind checkout, in
+  the background, one per repository:
 
   ```bash
   python3 .claude/skills/implement/merge_pin_pr.py <owner/repo> <pull request number>
   ```
+
+  A consumer moving its pin across a minor version checks its extension first, per the
+  README's Releases section. Before running it for a consumer, read the tag that consumer
+  pins on its default branch: the `tag=` line of
+  `gh api repos/merph518/<consumer>/contents/.claude/att-docs.lock -H "Accept: application/vnd.github.raw"`.
+  Drop any `\r` from the line. When the new tag's major and minor versions, compared as a
+  pair, are above that tag's, do not run `merge_pin_pr.py` for that consumer: report its
+  pull request as waiting on the user, with that reason. Do the same when the lock cannot
+  be read or its tag is not `vMAJOR.MINOR.PATCH`, because an unknown tag is no proof that
+  no minor version was crossed. Read the lock before the pull request merges.
 
   It reads the pull request again and acts only on a pin-only one: an open, non-draft pull
   request from a branch in the same repository into its default branch, with a pin title,
@@ -501,21 +562,21 @@ done until it finishes or is skipped.
   `Manual Review Needed` label, so it shows as waiting on the user (exit 1, verdict
   `flagged`). `--dry-run` judges the pull request
   as it stands, without waiting, and writes nothing.
-- **Finish each merged pin.** For each pull request merged, run that repository's
-  post-merge steps in a session there: the session that opened the bump when it is still
-  running, or a session started for those steps alone, closed when they finish.
 - **Report** one line per tag, not per repository: the tag, how many repositories it
   merged in, and each pull request left waiting on the user with its reason, such as
   `v1.4.0 pinned in 6 repositories; Gnome-Widgets #12 waits on you, a check failed`.
-  A repository whose sync or check fails is named on that line with the failing command,
-  and the others still go ahead.
+  A consumer whose `pin` job failed, was cancelled or never finished, or that has no job
+  in the run, and has no open pull request, is named on that line with the run's link and
+  the rerun command, and the others still go ahead. When the run could not be read, the
+  line says so, with the link and the rerun command. A repository the app does not know
+  is named once.
 
 ### Releases
 
 release-please reads conventional commits on `main`. Never bump a version, and never
 edit `.release-please-manifest.json`, `CHANGELOG.md`, or a `plugin.json` version by hand.
 The one exception is a resync: when a tag was cut by hand and the manifest is behind it,
-a `chore:` pull request sets the manifest and the two `plugin.json` versions to that
+a `chore:` pull request sets the manifest and the `plugin.json` versions to that
 tag. It changes no other version.
 
 ## Repository notes

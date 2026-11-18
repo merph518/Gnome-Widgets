@@ -1,5 +1,119 @@
 # Changelog
 
+## [0.32.3](https://github.com/merph518/Overmind-Mod/compare/v0.32.2...v0.32.3) (2026-11-18)
+
+
+### Features
+
+* add a ready-label gate that blocks a ready report on an unlabeled pull request ([#89](https://github.com/merph518/Overmind-Mod/issues/89)) ([2fdb5ae](https://github.com/merph518/Overmind-Mod/commit/2fdb5ae600e9a7b21b7d121f221b9388bb580467))
+* add a ready-label gate that blocks a ready report on an unlabeled pull request ([#89](https://github.com/merph518/Overmind-Mod/issues/89)) ([cf5c7f6](https://github.com/merph518/Overmind-Mod/commit/cf5c7f644b4f501b942de6763637f4e5ecd99707))
+* add review-queue band for pull requests waiting on review ([c3badba](https://github.com/merph518/Overmind-Mod/commit/c3badba97fcbcc1db5bd0a425bc8905abf49afc8))
+* add runner-health, a band for an offline or starved self-hosted runner ([8cef000](https://github.com/merph518/Overmind-Mod/commit/8cef00083cd377849137db716b230923ed8c2e83))
+* add runner-health, a band for an offline or starved self-hosted runner ([#92](https://github.com/merph518/Overmind-Mod/issues/92)) ([2bd0f36](https://github.com/merph518/Overmind-Mod/commit/2bd0f364b2590a69dfac7cb201a85b7d7b132807))
+* review-queue band for pull requests waiting on review ([#88](https://github.com/merph518/Overmind-Mod/issues/88)) ([07a34af](https://github.com/merph518/Overmind-Mod/commit/07a34af29af83e54c9938a63d2ac1ef34e6c03d6))
+* route subagent models in the background and drop the selector pane ([3ea1dee](https://github.com/merph518/Overmind-Mod/commit/3ea1deee8404460f20a3c584ac4bfcda6e4935e5))
+* route subagent models in the background and drop the selector pane ([#81](https://github.com/merph518/Overmind-Mod/issues/81)) ([0e42229](https://github.com/merph518/Overmind-Mod/commit/0e422298a9606bef85507e6ac7872658d2caccef))
+
+
+### Bug Fixes
+
+* bound the pin waits and fail closed on an unreadable lock ([3bc9ce2](https://github.com/merph518/Overmind-Mod/commit/3bc9ce21033c048bbc49eb8ffe99cc03b7ab19d5))
+* drop stale pane wording from the model-router license, README and tsconfig ([2b2779d](https://github.com/merph518/Overmind-Mod/commit/2b2779d9aac50a1834fe4e02a730405c422fe811))
+* expand variables and skip options in cd targets for the ready-label gate ([b193dad](https://github.com/merph518/Overmind-Mod/commit/b193dad06c5eb4b2c6809b97c9364667c84a942d))
+* find the pin run and compare minor versions per consumer ([c5ba33a](https://github.com/merph518/Overmind-Mod/commit/c5ba33a868f4966d2521bfbd425b289f49e5eb1d))
+* flag a rule only when the text it quotes changed ([#73](https://github.com/merph518/Overmind-Mod/issues/73)) ([19501b9](https://github.com/merph518/Overmind-Mod/commit/19501b931c67a5560b439e8af77c865ff947800d))
+* give every unreadable pin run the rerun command and a report line ([864d92d](https://github.com/merph518/Overmind-Mod/commit/864d92dc88e3fa78c059349396146f98bf560769))
+* hedge the replaced-run cause and skip the tag poll for an unmerged release ([04ae3e1](https://github.com/merph518/Overmind-Mod/commit/04ae3e16725b3466f7bf6b4fadb3082d2692ef77))
+* keep a comment opener written as code from swallowing later text ([2419d38](https://github.com/merph518/Overmind-Mod/commit/2419d38a5daa678b13b182ec31f9ad83483a5c7f))
+* keep a slow pin run from skipping healthy consumers and the report ([ef8cf0a](https://github.com/merph518/Overmind-Mod/commit/ef8cf0a665ccb110e7898a4077445a039fa3b29e))
+* keep review-queue refreshes from overlapping across a reload ([eb3ec91](https://github.com/merph518/Overmind-Mod/commit/eb3ec916e37a6e56bda28e3cfca3df3dce3ae2f3))
+* keep the placeholder strip linear on a long body ([#63](https://github.com/merph518/Overmind-Mod/issues/63)) ([3ffcb07](https://github.com/merph518/Overmind-Mod/commit/3ffcb07664ddf2ec063057623ae630d0ffed2582))
+* keep the ready-label gate on the turn across notifications and odd commands ([94ee6da](https://github.com/merph518/Overmind-Mod/commit/94ee6da1ff5490760af4b7b6fa9e9aebfc612696))
+* leave consumer pin bumps to the automation app in the implement skill ([91532e7](https://github.com/merph518/Overmind-Mod/commit/91532e747ca45c949fc325b1f78cbd6b3c7fdae0))
+* leave consumer pin bumps to the automation app in the implement skill ([#80](https://github.com/merph518/Overmind-Mod/issues/80)) ([4161be3](https://github.com/merph518/Overmind-Mod/commit/4161be3a978995f81e1a7e588bfbf2a0c0524de8))
+* leave picture placeholders out of the text pages.py searches ([#63](https://github.com/merph518/Overmind-Mod/issues/63)) ([4935716](https://github.com/merph518/Overmind-Mod/commit/4935716942aed7b0abd7cf8f43a07ce53bb46b6f))
+* leave picture placeholders out of the text pages.py searches ([#63](https://github.com/merph518/Overmind-Mod/issues/63)) ([3aa57e0](https://github.com/merph518/Overmind-Mod/commit/3aa57e058adc5b70e4ba114f0af471eba3f10a2b))
+* match style types and keep the list order check in hidden-text ([#32](https://github.com/merph518/Overmind-Mod/issues/32)) ([7a70cb1](https://github.com/merph518/Overmind-Mod/commit/7a70cb15537f68c5c7f01124115e11d03f6b85ae))
+* name the release merge commit and the replaced-run case in the pin step ([f5ecb16](https://github.com/merph518/Overmind-Mod/commit/f5ecb166281e0b0dcb87970284790054ef35467f))
+* name the stopped runners in the start command and say a job waits for a runner ([68ad3e7](https://github.com/merph518/Overmind-Mod/commit/68ad3e74f23d9d0728eafcee286438c5d49caa79))
+* read every repository when one times out, and drop the list on hide ([2ad01b1](https://github.com/merph518/Overmind-Mod/commit/2ad01b1c432f5d5a2376e9bb1d57534746dcf4df))
+* read table styles, the default paragraph style and defaults with toggles in hidden-text ([#32](https://github.com/merph518/Overmind-Mod/issues/32)) ([898dde2](https://github.com/merph518/Overmind-Mod/commit/898dde2a35ea70dab708b728122253d1da287ec6))
+* read table styles, the default paragraph style and defaults with toggles in hidden-text ([#32](https://github.com/merph518/Overmind-Mod/issues/32)) ([1e9be1c](https://github.com/merph518/Overmind-Mod/commit/1e9be1c89523c2169638b1241c8377910cd991ad))
+* report a hand-cut tag instead of chasing a dispatched run ([1ae956a](https://github.com/merph518/Overmind-Mod/commit/1ae956ae693504f0e0bbca86d8228cc07f4d87ab))
+* resolve relative cd and -C, keep gh -R on branch lookups, narrow future-tense words ([b048756](https://github.com/merph518/Overmind-Mod/commit/b048756aa7a045158690e71cf14f715e97adebdb))
+* skip the living-wiki page beside a Future folder as a source ([dcb9bb3](https://github.com/merph518/Overmind-Mod/commit/dcb9bb3eaccc7cc1bca5f81149d43e27cc48036b))
+* skip the living-wiki page beside a Future folder as a source ([#20](https://github.com/merph518/Overmind-Mod/issues/20)) ([6f31504](https://github.com/merph518/Overmind-Mod/commit/6f3150491f22d99e519c78904579f43f3d2d4fe9))
+* strip only markup the quote check can tell from wording ([c5be669](https://github.com/merph518/Overmind-Mod/commit/c5be669656b9450c662b5e4f2f53c03b7241bff0))
+* strip tags with bare attributes and multi-line comments in the quote check ([61ff2e9](https://github.com/merph518/Overmind-Mod/commit/61ff2e9e45a2a2e698bc9111b9934febe2ac7a08))
+* wait for the tag and the pin jobs before judging the pin run ([fb31a28](https://github.com/merph518/Overmind-Mod/commit/fb31a285b7f8babe3b16efafd747ef34894e6268))
+
+## [0.32.2](https://github.com/merph518/Overmind-Mod/compare/v0.32.1...v0.32.2) (2026-11-18)
+
+
+### Features
+
+* check that every plugin has its marketplace and release-please entries ([#58](https://github.com/merph518/Overmind-Mod/issues/58)) ([add5784](https://github.com/merph518/Overmind-Mod/commit/add5784fbaf3d37d6ca839e0275c17e4fb6d65a9))
+
+
+### Bug Fixes
+
+* catch Python and shell cross-skill references in test selection ([d6c6fcd](https://github.com/merph518/Overmind-Mod/commit/d6c6fcd5429dddc3c9e47fa5e8027ff5100df706))
+* do not trust Word page marks that disagree with its stored count ([#35](https://github.com/merph518/Overmind-Mod/issues/35)) ([3b22b3c](https://github.com/merph518/Overmind-Mod/commit/3b22b3ce4dca84376ea9973a22cc1d27569b6810))
+* do not trust Word page marks that disagree with its stored page count ([e424bfc](https://github.com/merph518/Overmind-Mod/commit/e424bfc526d081bcafec565d9bda0e8a56c1faf2))
+* read an escaped list marker as the plain marker in the rule diff ([105fe7e](https://github.com/merph518/Overmind-Mod/commit/105fe7e8c00b059d37e173f9467d8bda235a9ac0))
+* read an escaped list marker as the plain marker in the rule diff ([#33](https://github.com/merph518/Overmind-Mod/issues/33)) ([098aedd](https://github.com/merph518/Overmind-Mod/commit/098aeddbf3a841e88dc5bfcee3b26ed8d4ebe05b))
+
+## [0.32.1](https://github.com/merph518/Overmind-Mod/compare/v0.32.0...v0.32.1) (2026-11-18)
+
+
+### Features
+
+* add efficient-browser-use, a screenshot shrinker for Linux ([9d3803b](https://github.com/merph518/Overmind-Mod/commit/9d3803b5c711306b58073f30a71254ae9b308204))
+* add efficient-browser-use, a screenshot shrinker for Linux ([#5](https://github.com/merph518/Overmind-Mod/issues/5)) ([3e15ac9](https://github.com/merph518/Overmind-Mod/commit/3e15ac9239beb77e88c30f125c18fe9d5b3f71bc))
+* add model-router, a plugin that picks each subagent's model ([#9](https://github.com/merph518/Overmind-Mod/issues/9)) ([2c655d4](https://github.com/merph518/Overmind-Mod/commit/2c655d40adab82e9d649765b5d362f787255a035))
+* add the cache-clock plugin, a prompt-cache countdown above the prompt ([cb90557](https://github.com/merph518/Overmind-Mod/commit/cb9055734fedcaaf1ea3c57db5d24cad4fe045e2)), closes [#8](https://github.com/merph518/Overmind-Mod/issues/8)
+* add the handoff plugin, a Linux port of the Refresh handoff mod ([b3fd32c](https://github.com/merph518/Overmind-Mod/commit/b3fd32cb6e29984934bbc1af5854de4b0d1557bc))
+* add the mods plugin, a /mods switchboard pane ([0a902c9](https://github.com/merph518/Overmind-Mod/commit/0a902c96ca50ff56fa0be5ec7578343e444076cb))
+* add the mods switchboard plugin ([#4](https://github.com/merph518/Overmind-Mod/issues/4)) ([7fa683e](https://github.com/merph518/Overmind-Mod/commit/7fa683efedaae473a30dc503fdf0d70c2d68e49b))
+* list the handoff plugin in the marketplace and release config ([c9aee70](https://github.com/merph518/Overmind-Mod/commit/c9aee70fdaa5d3a382e3c55d18a030c9bd112e6d))
+* list the handoff plugin in the marketplace and release config ([#45](https://github.com/merph518/Overmind-Mod/issues/45)) ([3c118da](https://github.com/merph518/Overmind-Mod/commit/3c118da81ef2684d245cba305762181ab5786eba))
+* re-read switches.json every 3 seconds in effort-optimizer ([9a8e061](https://github.com/merph518/Overmind-Mod/commit/9a8e0616ddbbca4ff45f3a500af1f7f3cd502111))
+
+
+### Bug Fixes
+
+* a table still ends a top-level list for the body column rule ([abcc50f](https://github.com/merph518/Overmind-Mod/commit/abcc50f1eed7d768d39358e8c15fdcef173f641a))
+* block a second handoff press before the first await ([cbabf47](https://github.com/merph518/Overmind-Mod/commit/cbabf47fd375974b9f81ae43836da43ef7623e37)), closes [#8](https://github.com/merph518/Overmind-Mod/issues/8)
+* count only a lettered item that takes the list up past a table ([bc9b9fe](https://github.com/merph518/Overmind-Mod/commit/bc9b9fee6e8d4975713294f3be58a1ca2a47d955))
+* count pictures made smaller even when the ledger cannot be written ([4462fc9](https://github.com/merph518/Overmind-Mod/commit/4462fc984b69f8c2fffdc03eb4449c2aded44878))
+* give a same-tag repo= move its own branch and plain notes ([bdf511f](https://github.com/merph518/Overmind-Mod/commit/bdf511f4a5223daee179520548d1364b4d85c22d))
+* harden cache-clock keep warm and the handoff request ([1fd56d6](https://github.com/merph518/Overmind-Mod/commit/1fd56d687eee07b03510263e78ce38415e6f5b83)), closes [#8](https://github.com/merph518/Overmind-Mod/issues/8)
+* keep a turn's count when it runs during a keep-warm ping ([d6905d6](https://github.com/merph518/Overmind-Mod/commit/d6905d6b5dc771a4e09cda051dc7d0fde80b7e54)), closes [#8](https://github.com/merph518/Overmind-Mod/issues/8)
+* keep tables in items and resumed notes out of the body column rule ([0d52ef5](https://github.com/merph518/Overmind-Mod/commit/0d52ef5f2e80cbb809be74f83dac1202aab99e21))
+* keep the describer hidden while it is spawned, and test the defaults ([747095e](https://github.com/merph518/Overmind-Mod/commit/747095e732ebc03fb2d6a573d8619f819a9e83c7)), closes [#53](https://github.com/merph518/Overmind-Mod/issues/53)
+* keep the describer hidden while it is spawned, and test the defaults ([#53](https://github.com/merph518/Overmind-Mod/issues/53)) ([d67b1e7](https://github.com/merph518/Overmind-Mod/commit/d67b1e79cb657d9f8fb00619b95f90a0c8a2f0aa))
+* leave a placeholder where convert-docs drops a picture ([7ccfb32](https://github.com/merph518/Overmind-Mod/commit/7ccfb32f24c91851e2434a5653abf2f523aae8f7))
+* leave a placeholder where convert-docs drops a picture ([#36](https://github.com/merph518/Overmind-Mod/issues/36)) ([d96cdc4](https://github.com/merph518/Overmind-Mod/commit/d96cdc44a445787b804394a0f8acd43483fd7bf8))
+* let a second secret scrub leave removed values alone ([c9208bb](https://github.com/merph518/Overmind-Mod/commit/c9208bbee8ade7249803721b6e5a12b72e953052))
+* list the mods plugin in the marketplace and release-please config ([52dcb67](https://github.com/merph518/Overmind-Mod/commit/52dcb67c02e89faa024d6cd2e9883eb360e5f734))
+* list the mods plugin in the marketplace and release-please config ([#47](https://github.com/merph518/Overmind-Mod/issues/47)) ([980aaf1](https://github.com/merph518/Overmind-Mod/commit/980aaf15bfdd082adf4134bbb57cb1cb62ddae29))
+* **model-router:** describe the port as it works now in shipped text ([287e51b](https://github.com/merph518/Overmind-Mod/commit/287e51b0ef68eb4b9c8bfc05a3d6de94c1f2a0df))
+* **model-router:** one model table, Fable ranked with the deep tier ([601f416](https://github.com/merph518/Overmind-Mod/commit/601f4162ce7a62de5f0168ab32873815863cb628))
+* **mods:** keep a switch press from being undone, and refresh after a reload ([693be7c](https://github.com/merph518/Overmind-Mod/commit/693be7c16b7e804696ad0920f0a8f7d025cee4bb))
+* **mods:** offer Reopen only with a chat, and read nested hook sources ([4e6f392](https://github.com/merph518/Overmind-Mod/commit/4e6f3928a26323265be3a8919e19ab25b5b85a48))
+* move repo= for a consumer already on the pinned tag ([262e795](https://github.com/merph518/Overmind-Mod/commit/262e79574eed134db8561f2c92e7651b08fe9c59))
+* read a leading ~ in CLAUDE_CONFIG_DIR in effort-optimizer too ([341a722](https://github.com/merph518/Overmind-Mod/commit/341a722038327a2ab9d1483980019325fcec8d07))
+* read a slide equation's Office Math text ([1cbd0fe](https://github.com/merph518/Overmind-Mod/commit/1cbd0fe4cc80e722a046fe5909a0bf9950b56a4b))
+* read deck text from the slide XML so text boxes and rectangles survive ([645b4b2](https://github.com/merph518/Overmind-Mod/commit/645b4b263307fe11772355777cfc0d72122c9c6b))
+* read deck text from the slide XML so text boxes and rectangles survive ([#28](https://github.com/merph518/Overmind-Mod/issues/28)) ([8c6364a](https://github.com/merph518/Overmind-Mod/commit/8c6364ac5d5d00ef5be4e2858938b58e15495fe1))
+* read Strict decks, equations and symbol titles, and keep escaped slide text intact ([1d8f5b3](https://github.com/merph518/Overmind-Mod/commit/1d8f5b3d02ff9c3c5f98ceaa0a6b34b7df3711a3))
+* read Strict math and keep a multi-line equation's lines apart ([689b581](https://github.com/merph518/Overmind-Mod/commit/689b581cb78700e1908674f44d161a8cc63b97b4))
+* return the size parse from sizeOf and tidy the tests ([6d75c3b](https://github.com/merph518/Overmind-Mod/commit/6d75c3be8344396841bd49a948818a35d2db0ac2)), closes [#53](https://github.com/merph518/Overmind-Mod/issues/53)
+* say what happens without ImageMagick in describe mode, and keep words when a ledger write fails ([dae6915](https://github.com/merph518/Overmind-Mod/commit/dae69155ea08806c498b6f3242583a77307ad761))
+* scrub before cutting, and keep a request that arrives during a run ([1ed9ce3](https://github.com/merph518/Overmind-Mod/commit/1ed9ce3f8e0d2433dfbbea06478e7ece0cda7d54))
+* shrink to 75% with a 768 px floor, and keep describe mode working without ImageMagick ([83864bd](https://github.com/merph518/Overmind-Mod/commit/83864bdc14bd5694ba7c36783a5a6ad6657b3998))
+* skip Word's newer alt text and test every picture shape ([51b0876](https://github.com/merph518/Overmind-Mod/commit/51b087647b3ac5e60f2f02dc283d06471e9e59f9))
+
 ## [0.32.0](https://github.com/merph518/Overmind-Mod/compare/v0.31.38...v0.32.0) (2026-11-18)
 
 

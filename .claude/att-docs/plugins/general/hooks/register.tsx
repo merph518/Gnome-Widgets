@@ -39,7 +39,10 @@ const HOOKS = {
       { args: ['testOnEdit', 'test-on-edit.sh'], timeoutMs: 180 * SECOND, status: 'Running related tests...' },
     ],
   },
-  Stop: [{ args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND }],
+  Stop: [
+    { args: ['readyLabelGate', 'ready_label_gate.py'], timeoutMs: 90 * SECOND },
+    { args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND },
+  ],
   SessionStart: [{ args: ['--default-on', 'implementLoop', 'implement_loop.py'], timeoutMs: 30 * SECOND }],
 } satisfies Record<string, Record<string, Script[]> | Script[]>
 

@@ -92,6 +92,32 @@ class RuleChanges(unittest.TestCase):
         new = '## Rules\n\n12. The rule\n\n<a id="page-3"></a>*Page 3*\n\n    1. Its sub-rule\n'
         self.assertEqual(docimpact.changed_numbers(old, new), (set(), False))
 
+    def test_an_escaped_list_marker_is_unchanged(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        self.assertEqual(docimpact.rule_changes(RULE_DOC, new)["kind"], "unchanged")
+        self.assertEqual(docimpact.changed_numbers(RULE_DOC, new), (set(), False))
+        # Either side may be the escaped one.
+        self.assertEqual(docimpact.rule_changes(new, RULE_DOC)["kind"], "unchanged")
+        self.assertEqual(docimpact.changed_numbers(new, RULE_DOC), (set(), False))
+
+    def test_escaped_markers_of_every_list_kind_are_unchanged(self):
+        old = "## Rules\n\n2) A\n\n   1. Nested\n\n- Bullet\n* Star\n+ Plus\n\n> 3. Quoted\n"
+        new = ("## Rules\n\n2\\) A\n\n   1\\. Nested\n\n\\- Bullet\n\\* Star\n\\+ Plus\n\n"
+               "> 3\\. Quoted\n")
+        self.assertEqual(docimpact.rule_changes(old, new)["kind"], "unchanged")
+
+    def test_text_that_only_looks_like_an_escaped_marker_is_still_a_change(self):
+        old = "## Rules\n\n2.x The value\n\nEnds here.\n"
+        self.assertEqual(docimpact.rule_changes(old, old.replace("2.x", "2\\.x"))["kind"],
+                         "content")
+        self.assertEqual(docimpact.rule_changes(old, old.replace("Ends here.", "Ends\\. here."))
+                         ["kind"], "content")
+
+    def test_wording_changed_on_an_escaped_marker_line_is_a_change(self):
+        new = revise(RULE_DOC, "2. The end date may not", "2\\. The end date may")
+        self.assertEqual(docimpact.rule_changes(RULE_DOC, new)["kind"], "content")
+        self.assertEqual(docimpact.changed_numbers(RULE_DOC, new), ({2}, False))
+
     def test_paragraph_split_differently_is_layout(self):
         new = revise(HEAD, "once every\nrequired", "once every\n\nrequired")
         self.assertEqual(docimpact.rule_changes(HEAD, new)["kind"], "layout")
@@ -464,6 +490,20 @@ class RuleRefresh(unittest.TestCase):
     def changed(self, items):
         return [c["rule_id"] for c in items[0]["changed"]]
 
+    def test_an_escaped_list_marker_flags_no_rule(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        self.assertEqual(self.review(MAPPED, new), [])
+
+    def test_wording_changed_under_an_escaped_number_still_flags_its_rule(self):
+        new = revise(RULE_DOC, "2. The end date may not", "2\\. The end date may")
+        self.assertEqual(self.changed(self.review(MAPPED, new)), ["BR-ACT4-002"])
+
+    def test_an_escape_on_one_rule_never_flags_it_for_a_change_under_another(self):
+        new = revise(RULE_DOC, "2. The end date", "2\\. The end date")
+        new = revise(new, "3. Requirement # CPRS-5.2.3.1 applies to every",
+                     "3. Requirement # CPRS-5.2.3.1 applies to closed")
+        self.assertEqual(self.changed(self.review(MAPPED, new)), ["BR-ACT4-003"])
+
     def test_requirement_number_followed_by_punctuation_is_found(self):
         new = revise(RULE_DOC, "applies to every activity.",
                      "applies to every activity (see CPRS-5.2.3.1).")
@@ -516,6 +556,316 @@ class RuleRefresh(unittest.TestCase):
                                        RULE_MAP, read=lambda rev, p: texts[(rev, p)])
         self.assertEqual((items[0]["map_doc"], items[0]["future"]), (MAPPED, True))
         self.assertEqual(self.changed(items), ["BR-ACT4-002"])
+
+
+QUOTES = {
+    "BR-ACT4-001": "The worker must enter a start date.",
+    "BR-ACT4-002": "The end date may not precede the start date. It may equal the start date.",
+    "BR-ACT4-003": "Requirement # CPRS-5.2.3.1 applies to every activity.",
+    "BR-ACT4-004": "The Save button returns to the activity list.",
+    "BR-ACT4-005": "An image of the window.",
+}
+# The same rules as RULE_MAP, each with the wording it quotes. BR-ACT4-006 quotes nothing.
+QUOTED_MAP = {"documents": [{**RULE_MAP["documents"][0], "rules": [
+    {**r, **({"quote": QUOTES[r["rule_id"]]} if r["rule_id"] in QUOTES else {})}
+    for r in RULE_MAP["documents"][0]["rules"]]}]}
+
+
+class QuoteMatching(unittest.TestCase):
+    def count(self, quote, text):
+        return docimpact.quote_count(quote, text)
+
+    def test_quote_is_found_through_a_page_marker_and_a_rewrapped_line(self):
+        text = ("1. The end date may not\n   precede the start date.\n"
+                '<a id="page-3"></a>*Page 3*\n   It may equal the start date.\n')
+        self.assertEqual(self.count(QUOTES["BR-ACT4-002"], text), 1)
+
+    def test_quote_is_found_across_list_markers_emphasis_and_curly_quotes(self):
+        text = "5\\. The *worker* must enter a \u201cstart\u201d date.\n"
+        self.assertEqual(self.count(QUOTES["BR-ACT4-001"], text), 1)
+        nested = "   a. It may equal the start date.\n   - The end date may not precede\n"
+        self.assertEqual(self.count("It may equal the start date.", nested), 1)
+
+    def test_quote_is_found_inside_a_padded_table_cell(self):
+        text = "| Rule | Text |\n|---|---|\n|  1  |  The worker must   enter a start date.  |\n"
+        self.assertEqual(self.count(QUOTES["BR-ACT4-001"], text), 1)
+
+    def test_an_edited_extended_or_split_quote_is_not_found(self):
+        self.assertEqual(self.count(QUOTES["BR-ACT4-002"], RULE_DOC.replace(
+            "may equal", "may not equal")), 0)
+        self.assertEqual(self.count("The worker must enter a start date.",
+                                    "The worker must enter a start date unless closed."), 0)
+        self.assertEqual(self.count("The worker must enter a start date.",
+                                    "The worker must enter a\n\nstart date."), 1)
+
+    def test_occurrences_are_counted(self):
+        twice = "Retain the record for seven years.\n\nRetain the record for seven years.\n"
+        self.assertEqual(self.count("Retain the record for seven years.", twice), 2)
+
+    def test_an_ellipsis_quote_needs_every_fragment_in_order(self):
+        quote = "The end date ... the start date."
+        self.assertEqual(self.count(quote, RULE_DOC), 1)
+        self.assertEqual(self.count("the start date ... The end date", RULE_DOC), 0)
+
+    def test_a_quote_split_by_inserted_text_or_spanning_list_items(self):
+        split = RULE_DOC.replace("The worker must enter", "The worker must, if asked, enter")
+        self.assertEqual(self.count(QUOTES["BR-ACT4-001"], split), 0)
+        two_items = ("The worker must enter a start date. The end date may not precede the "
+                     "start date.")
+        self.assertEqual(self.count(two_items, RULE_DOC), 1)
+
+    def test_bracketed_ellipsis_and_short_runs(self):
+        self.assertEqual(self.count("The end date [...] the start date.", RULE_DOC), 1)
+        self.assertEqual(docimpact.quote_fragments("fee ... is ... due ... now"), [])
+        far = "Do not pay late fees. " + "Filler words here. " * 60 + "After the deadline."
+        self.assertEqual(self.count("Do not pay late fees ... after the deadline", far), 0)
+
+    def test_comparisons_and_signs_are_wording(self):
+        def tokens(text):
+            return docimpact.normal_tokens(text)
+        self.assertNotEqual(tokens("Fee applies if amount < 100 and age > 65"),
+                            tokens("Fee applies if amount < 500 or age > 65"))
+        self.assertNotEqual(tokens("Waive the fee if qty \u2265 5"),
+                            tokens("Waive the fee if qty \u2264 5"))
+        self.assertNotEqual(tokens("Delay is +5 days"), tokens("Delay is -5 days"))
+        self.assertEqual(tokens("Line one<br>line two"), tokens("Line one line two"))
+        self.assertEqual(self.count("Waive the fee if qty \u2265 5 units",
+                                    "Waive the fee if qty \u2264 5 units"), 0)
+
+    def test_markup_that_is_not_wording_is_dropped(self):
+        def tokens(text):
+            return docimpact.normal_tokens(text)
+        self.assertEqual(tokens("- the first rule applies\n\n<!-- -->\n\n- and the second"),
+                         tokens("- the first rule applies\n- and the second"))
+        self.assertEqual(tokens("see <https://x.y> now"), tokens("see https://x.y now"))
+        self.assertEqual(tokens("+---+---+\n| a | b |\n+---+---+"), tokens("| a | b |"))
+        self.assertEqual(tokens("Title\n=====\nText"), tokens("Title\nText"))
+        self.assertEqual(tokens("the limit is _-5_ days"), tokens("the limit is -5 days"))
+        self.assertEqual(tokens('<a id="p"></a>Line<br/>two'), tokens("Line two"))
+
+    def test_tags_with_bare_or_spaced_attributes_and_multiline_comments_are_dropped(self):
+        def tokens(text):
+            return docimpact.normal_tokens(text)
+        self.assertEqual(tokens("<details open>t</details>"), ["t"])
+        self.assertEqual(tokens("<td colspan=2 nowrap>x</td>"), ["x"])
+        self.assertEqual(tokens('<div data-x = "1">y</div>'), ["y"])
+        self.assertEqual(tokens("a\n<!--\nsecret words\n-->\nb"), ["a", "b"])
+        self.assertEqual(tokens("text <!-- a\nb --> more"), ["text", "more"])
+
+    def test_a_comment_opener_written_as_code_does_not_swallow_the_text_after_it(self):
+        text = ("Write `<!--` to open a comment.\nThe system shall reject a duplicate order.\n"
+                "Close with `-->` always.")
+        self.assertIn("reject", docimpact.normal_tokens(text))
+        fenced = "```\n<!-- not\n```\nafter\n<!-- real -->\nend"
+        tokens = docimpact.normal_tokens(fenced)
+        self.assertEqual((tokens[-2:], "real" in tokens), (["after", "end"], False))
+
+    def test_unclosed_comment_openers_stay_fast(self):
+        import time
+        text = "line word <!-- open\n" * 5000
+        start = time.monotonic()
+        docimpact.normal_tokens(text)
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_an_entity_and_its_literal_form_read_alike(self):
+        self.assertEqual(docimpact.normal_tokens("&frac12; cup"),
+                         docimpact.normal_tokens("\u00bd cup"))
+        self.assertEqual(docimpact.normal_tokens("&#xFF1C; 5"),
+                         docimpact.normal_tokens("\uff1c 5"))
+        self.assertEqual(docimpact.normal_tokens("\uff1c 5"), ["<", "5"])
+
+    def test_prose_that_looks_like_a_tag_stays_wording(self):
+        self.assertEqual(docimpact.normal_tokens("if x<y and y>z then"),
+                         ["if", "x", "<", "y", "and", "y", ">", "z", "then"])
+
+    def test_a_comparison_at_the_start_of_a_line_is_wording(self):
+        self.assertEqual(docimpact.normal_tokens("&gt; 5 days"), [">", "5", "days"])
+        self.assertEqual(docimpact.normal_tokens("&gt;= 5 days"), [">", "=", "5", "days"])
+        self.assertEqual(docimpact.normal_tokens("> quoted text"), ["quoted", "text"])
+
+    def test_occurrences_of_an_ellipsis_quote_do_not_share_text(self):
+        quote = "alpha beta ... gamma delta"
+        self.assertEqual(self.count(quote, "alpha beta gamma delta alpha beta gamma delta"), 2)
+        self.assertEqual(self.count(quote, "alpha beta alpha beta gamma delta"), 1)
+
+    def test_a_word_made_of_numeral_letters_is_not_a_list_marker(self):
+        self.assertEqual(docimpact.normal_tokens("Civil. Penalty applies"),
+                         ["civil", ".", "penalty", "applies"])
+        self.assertEqual(docimpact.normal_tokens("iv. Penalty applies"),
+                         ["penalty", "applies"])
+
+    def test_a_quote_too_short_to_trust_counts_as_no_quote(self):
+        self.assertEqual(docimpact.quote_fragments("Save"), [])
+        self.assertEqual(docimpact.quote_fragments(""), [])
+        self.assertEqual(docimpact.quote_fragments(None), [])
+
+    def test_quote_of_reads_the_wording_out_of_a_description(self):
+        def quote(text):
+            return docimpact.quote_of(text)
+        want = "The worker must enter a start date."
+        self.assertEqual(quote(f'(Rule 1, Page 2) "{want}" Atomic Summary: Enter a date.'), want)
+        self.assertEqual(quote(f'(Rule 1, Page 2) "{want}"\n\nAtomic Summary: Enter.'), want)
+        self.assertEqual(quote(f'(Screen Print (if applicable), Page 3) "{want}" Atomic '
+                               "Summary: x"), want)
+        self.assertEqual(quote(f'(Section "Navigation", Page 4) "{want}" Atomic Summary: x'),
+                         want)
+        self.assertEqual(quote(f"(Rule 1, Page 2) {want} Atomic Summary: x"), want)
+        self.assertEqual(quote(None), "")
+
+
+class QuotedRules(unittest.TestCase):
+    def review(self, new, rule_map=QUOTED_MAP, path=MAPPED, base=RULE_DOC):
+        doc = {"path": path, "old_path": None, "predecessor": None, "status": "M",
+               "key": "b" * 40, **docimpact.rule_changes(base, new)}
+        texts = {"base": base, "head": new}
+        return docimpact.rule_refresh({"base": "base", "head": "head", "documents": [doc]},
+                                      rule_map, read=lambda rev, _: texts[rev])
+
+    def changed(self, items):
+        return [c["rule_id"] for c in items[0]["changed"]]
+
+    def anchored(self, new):
+        hunks = docimpact.rule_changes(RULE_DOC, new)["hunks"]
+        return docimpact.anchored_rules(QUOTED_MAP["documents"][0]["rules"], RULE_DOC, new,
+                                        hunks)
+
+    RENUMBERED = [("1. The worker", "4. The worker"), ("2. The end", "5. The end"),
+                  ("3. Requirement", "6. Requirement")]
+
+    def renumbered(self):
+        new = RULE_DOC
+        for old, to in self.RENUMBERED:
+            new = revise(new, old, to)
+        return new
+
+    def test_the_fixture_renumbering_flags_every_numbered_rule_by_anchor_alone(self):
+        new = self.renumbered()
+        hunks = docimpact.rule_changes(RULE_DOC, new)["hunks"]
+        found = docimpact.anchored_rules(RULE_MAP["documents"][0]["rules"], RULE_DOC, new, hunks)
+        self.assertEqual([c["rule_id"] for c in found["changed"]],
+                         ["BR-ACT4-001", "BR-ACT4-002", "BR-ACT4-003"])
+
+    def test_a_renumbering_files_no_item_even_for_a_map_with_no_quotes(self):
+        self.assertEqual(self.review(self.renumbered(), RULE_MAP), [])
+
+    def test_renumbering_with_the_wording_unchanged_flags_no_rule_and_files_no_item(self):
+        new = self.renumbered()
+        found = self.anchored(new)
+        self.assertEqual(found["changed"], [])
+        self.assertEqual([k["rule_id"] for k in found["kept"]],
+                         ["BR-ACT4-001", "BR-ACT4-002", "BR-ACT4-003"])
+        self.assertEqual(self.review(new), [])
+
+    def test_nesting_a_lettered_list_or_bullets_under_a_rule_flags_nothing(self):
+        for marker in ("a. ", "- ", "i. "):
+            new = revise(RULE_DOC, "   It may equal", f"   {marker}It may equal")
+            self.assertEqual(self.anchored(new)["changed"], [], marker)
+            self.assertEqual(self.review(new), [], marker)
+
+    def test_reworded_quote_is_still_flagged(self):
+        new = revise(RULE_DOC, "   It may equal", "   It may not equal")
+        self.assertEqual(self.changed(self.review(new)), ["BR-ACT4-002"])
+        self.assertEqual(self.review(new)[0]["changed"][0]["anchor"], "quote changed")
+
+    def test_a_reworded_rule_is_flagged_even_when_a_renumber_rides_along(self):
+        new = revise(self.renumbered(), "must enter a start", "must record a start")
+        self.assertEqual(self.changed(self.review(new)), ["BR-ACT4-001"])
+
+    def test_a_quote_gone_from_a_rule_the_anchor_cannot_place_is_flagged(self):
+        rules = [{"rule_id": "BR-ACT4-009", "anchor": "Page 6", "section": "6",
+                  "quote": "The Save button returns to the activity list."}]
+        entry = {**QUOTED_MAP["documents"][0], "rules": rules}
+        new = revise(RULE_DOC, "returns to the activity list", "returns to the home page")
+        self.assertEqual(self.changed(self.review(new, {"documents": [entry]})),
+                         ["BR-ACT4-009"])
+
+    def test_a_quote_the_document_still_holds_clears_a_hit_anchor(self):
+        new = revise(RULE_DOC, "returns to the activity list.", "returns to the activity list "
+                     "when it is done.")
+        new = revise(new, "The Save button", "On a save, the Save button")
+        self.assertEqual(self.changed(self.review(new)), ["BR-ACT4-004"])
+        new = revise(RULE_DOC, "An image of the window.", "An image of the window.\n\nNote.")
+        self.assertEqual(self.review(new)[0]["changed"], [])
+        self.assertEqual([k["rule_id"] for k in self.review(new)[0]["kept"]],
+                         ["BR-ACT4-005"])
+
+    def test_a_page_marker_inside_a_quote_and_a_rewrap_do_not_flag_it(self):
+        new = revise(RULE_DOC, "start date.\n   It may equal",
+                     'start date.\n<a id="page-3"></a>*Page 3*\n   It may\n   equal')
+        new = revise(new, "must enter a start date", "must record a start date")
+        self.assertEqual(self.changed(self.review(new)), ["BR-ACT4-001"])
+
+    def test_a_quote_moved_to_another_section_is_kept(self):
+        new = revise(RULE_DOC, "The Save button returns to the activity list.\n\n", "")
+        new = revise(new, "An image of the window.",
+                     "An image of the window.\n\nThe Save button returns to the activity list.")
+        items = self.review(new)
+        self.assertEqual((self.changed(items), [k["rule_id"] for k in items[0]["kept"]]),
+                         ([], ["BR-ACT4-004", "BR-ACT4-005"]))
+
+    def test_a_sentence_added_after_a_quote_keeps_the_rule_the_anchor_placed(self):
+        new = revise(RULE_DOC, "enter a start date.", "enter a start date. Dates are in UTC.")
+        items = self.review(new)
+        self.assertEqual((self.changed(items), [k["rule_id"] for k in items[0]["kept"]]),
+                         ([], ["BR-ACT4-001"]))
+
+    def test_a_comparison_swapped_in_a_document_files_the_item(self):
+        old = RULE_DOC.replace("The worker must enter a start date.",
+                               "Reject when 3 < x and y > 7 in the order.")
+        new = old.replace("3 < x and y > 7", "3 < x or y > 7")
+        items = self.review(new, RULE_MAP, base=old)
+        self.assertEqual(self.changed(items), ["BR-ACT4-001"])
+
+    def test_one_changed_copy_of_repeated_wording_flags_the_rule(self):
+        doc = RULE_DOC + "\nThe Save button returns to the activity list.\n"
+        new = revise(doc, "Save button returns to the activity list.\n\n##",
+                     "Save button returns to the home page.\n\n##")
+        self.assertEqual(self.changed(self.review(new, base=doc)), ["BR-ACT4-004"])
+
+    def test_a_quote_the_old_text_never_held_falls_back_to_the_anchor(self):
+        rules = [{"rule_id": "BR-ACT4-002", "anchor": "Business Rule 2.a, Page 2",
+                  "quote": "This sentence is nowhere in the document at all."}]
+        entry = {**QUOTED_MAP["documents"][0], "rules": rules}
+        new = revise(RULE_DOC, "   It may equal", "   It may not equal")
+        items = self.review(new, {"documents": [entry]})
+        self.assertEqual(self.changed(items), ["BR-ACT4-002"])
+        self.assertEqual(items[0]["unmatched"], ["BR-ACT4-002"])
+
+    def test_a_short_or_missing_quote_keeps_the_anchor_behavior(self):
+        rules = [{"rule_id": "BR-ACT4-002", "anchor": "Business Rule 2.a, Page 2",
+                  "quote": "It may equal"},
+                 {"rule_id": "BR-ACT4-001", "anchor": "Rule 1, Page 2"}]
+        entry = {**QUOTED_MAP["documents"][0], "rules": rules}
+        new = revise(self.renumbered(), "must enter", "must record")
+        self.assertEqual(self.changed(self.review(new, {"documents": [entry]})),
+                         ["BR-ACT4-002", "BR-ACT4-001"])
+
+    def test_the_wording_comes_from_the_description_when_the_entry_has_no_quote(self):
+        rules = [{"rule_id": "BR-ACT4-001", "anchor": "Rule 1, Page 2",
+                  "description": '(Rule 1, Page 2) "The worker must enter a start date." '
+                                 "Atomic Summary: Start date is required."}]
+        entry = {**QUOTED_MAP["documents"][0], "rules": rules}
+        self.assertEqual(self.review(self.renumbered(), {"documents": [entry]}), [])
+        new = revise(RULE_DOC, "must enter a start", "must record a start")
+        self.assertEqual(self.changed(self.review(new, {"documents": [entry]})),
+                         ["BR-ACT4-001"])
+
+    def test_a_removed_document_still_puts_every_rule_up_for_retiring(self):
+        doc = {"path": MAPPED, "old_path": None, "predecessor": None, "status": "D",
+               "key": "removed-" + "c" * 40, **docimpact.rule_changes(RULE_DOC, None)}
+        items = docimpact.rule_refresh({"base": "b", "head": "h", "documents": [doc]},
+                                       QUOTED_MAP)
+        self.assertEqual(len(items[0]["changed"]), 6)
+
+    def test_a_rename_with_the_wording_unchanged_still_reports_the_old_map_path(self):
+        moved = "docs/apps/CONNECTIONS/Activity Entry Window.md"
+        new = self.renumbered()
+        doc = {"path": moved, "old_path": MAPPED, "predecessor": None, "status": "R",
+               "key": "b" * 40, **docimpact.rule_changes(RULE_DOC, new)}
+        texts = {("base", MAPPED): RULE_DOC, ("head", moved): new}
+        items = docimpact.rule_refresh({"base": "base", "head": "head", "documents": [doc]},
+                                       QUOTED_MAP, read=lambda rev, p: texts[(rev, p)])
+        self.assertEqual((items[0]["map_doc"], items[0]["changed"]), (MAPPED, []))
 
 
 def drift_report(**drift) -> dict:

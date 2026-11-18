@@ -169,6 +169,21 @@ test('a failing gate lets the call through, and a stop keeps both blocks', async
   expect(stop.block).toBe('a settings hook blocks too\n\nresume the loop')
 })
 
+test('the ready-label gate and the loop both block a stop, and both reasons are kept', async ($, on) => {
+  const runs = engine(on, argv => {
+    if (argv.includes('ready_label_gate.py')) return { stdout: JSON.stringify({ decision: 'block', reason: 'add the label' }) }
+    if (argv.includes('implement_loop.py')) return { stdout: JSON.stringify({ decision: 'block', reason: 'resume the loop' }) }
+    return {}
+  })
+  on('classic.Stop', () => ({}))
+
+  const stop = await $.classic.Stop({ stop_hook_active: false })
+
+  expect(stop.block).toBe('add the label\n\nresume the loop')
+  const gate = runs.find(run => run.argv.includes('ready_label_gate.py'))
+  expect(gate?.argv.slice(-2)).toEqual(['readyLabelGate', 'ready_label_gate.py'])
+})
+
 test('session start hands the loop instructions to the model', async ($, on) => {
   engine(on, argv =>
     argv.includes('implement_loop.py')

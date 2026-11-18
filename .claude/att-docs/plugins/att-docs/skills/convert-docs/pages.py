@@ -11,10 +11,18 @@ The layouts, best first:
 
 1. A PDF of the document. Its pages are the pages, so nothing is guessed.
 2. Word's own last layout. Word writes a `w:lastRenderedPageBreak` element wherever a
-   page ended the last time it laid the document out, and saves it with the file.
+   page ended the last time it laid the document out, and saves it with the file. Word
+   leaves some pages unmarked, so the layout is used only when the page count Word
+   stored in `docProps/app.xml` agrees with the marks. When the two differ, neither is
+   trusted and the document goes to the LibreOffice layout, whose provenance line says
+   what Word marked and what its stored count says.
 3. LibreOffice's layout, from a PDF it renders. Its line breaking is close to Word's
    but not identical, so a page can start a line or two away from where Word starts
    it, and the provenance block says this was the layout used.
+
+A deck is the exception: each slide shown is a page, and its Markdown opens every
+slide with a heading, so the pages are read from the deck itself and each one is
+found by its heading rather than by its opening text.
 
 Standard library only, like stamp.py beside it.
 """
@@ -24,6 +32,7 @@ from __future__ import annotations
 import html
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections import Counter
@@ -39,11 +48,16 @@ _SPEC = util.spec_from_file_location(
 HIDDEN = util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(HIDDEN)
 
+# The deck reader, whose slide headings are the page openings of a deck.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import slides as SLIDES  # noqa: E402
+
 # Formats LibreOffice can lay out as pages. A spreadsheet has no pages a reader
 # turns, and the HTML, text, and Markdown sources have none at all.
 RENDERABLE = {".doc", ".dot", ".docx", ".docm", ".odt", ".rtf",
               ".ppt", ".pptx", ".pptm", ".odp"}
 WORD = {".docx", ".docm"}
+DECKS = {".pptx", ".pptm"}
 
 # The marker line, which also serves as the pattern doc-impact reads to tell a
 # marker from the document's own text.
@@ -73,7 +87,19 @@ WORD_TOKEN = re.compile(
     r"|</w:p>"
 )
 
+# The text the conversion leaves where a picture was, as Pandoc writes it with its
+# brackets escaped: `\[picture\]` in a line of text, `\[Picture\]` on a line of its
+# own, either with alt text after a colon. Escaped characters in the alt text are
+# part of it, and a long one can wrap over two lines but never across a blank one.
+# The alt text ends at the first escaped bracket, since Pandoc writes a bracket in it
+# the same way. It is at most ALT_TEXT_CHARS long, so an opener that never closes costs
+# a bounded look ahead rather than a scan to the next blank line.
+ALT_TEXT_CHARS = 1000
+PLACEHOLDER = re.compile(
+    r"\\\[[Pp]icture(?::(?:\\[^\]\n]|[^\]\\\n]|\n(?!\n)){0,%d}?)?\\\]" % ALT_TEXT_CHARS)
+
 FENCE = re.compile(r"^\s*(```|~~~)")
+HEADING = re.compile(r"^#{1,6}\s+(.*)$")
 
 
 @dataclass
@@ -84,6 +110,13 @@ class Layout:
     starts: list[str]
     label: str
     from_pdf: Path | None = None
+    # Each page after the first opens on a heading whose text is its start, so it
+    # is found by the whole heading line rather than by a piece of its text.
+    headings: bool = False
+    # Set when Word's marks and the page count it stored disagree: the pages the marks
+    # give, and the count in `docProps/app.xml`.
+    marked: int | None = None
+    stored: int | None = None
 
 
 @dataclass
@@ -152,12 +185,32 @@ def from_pdf(path: Path, label: str) -> Layout | None:
     return Layout(len(pages), starts, label, path)
 
 
+def stored_pages(path: Path) -> int | None:
+    """The page count Word wrote in `docProps/app.xml`, or None when it did not write one.
+
+    Another application's count is that application's layout, not Word's, so only a
+    file naming Word as its application has one.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            properties = ET.fromstring(archive.read("docProps/app.xml"))
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        return None
+    found = {element.tag.rsplit("}", 1)[-1]: (element.text or "").strip()
+             for element in properties.iter()}
+    if not found.get("Application", "").startswith("Microsoft Office Word"):
+        return None
+    count = found.get("Pages", "")
+    return int(count) if count.isdigit() and int(count) >= 1 else None
+
+
 def from_word(path: Path) -> Layout | None:
     """Word's last layout, read from the page breaks it saved in document.xml.
 
     None when the file carries no `w:lastRenderedPageBreak` at all, which is what a
     file saved by anything other than Word looks like. An explicit page break alone
     does not count: it says where the author forced a page, not where the others fell.
+    The layout records the stored page count when it differs from the marks' count.
     """
     try:
         with zipfile.ZipFile(path) as archive:
@@ -202,7 +255,22 @@ def from_word(path: Path) -> Layout | None:
     # A break before the first word or after the last one opens no page.
     breaks = [at for at in breaks if first_word < at < last_word]
     starts = [body[at:at + 400].lstrip() for at in breaks]
-    return Layout(len(starts) + 1, starts, "as Word last laid the document out")
+    layout = Layout(len(starts) + 1, starts, "as Word last laid the document out")
+    stored = stored_pages(path)
+    if stored is not None and stored != layout.pages:
+        layout.marked, layout.stored = layout.pages, stored
+    return layout
+
+
+def from_slides(path: Path) -> Layout | None:
+    """One page per slide the deck shows, each opening on the slide's heading."""
+    try:
+        found = SLIDES.headings(path)
+    except SLIDES.READ_ERRORS:
+        return None
+    if not found:
+        return None
+    return Layout(len(found), found[1:], "one per slide shown in the deck", headings=True)
 
 
 def render(path: Path, workdir: Path) -> Path | None:
@@ -244,25 +312,32 @@ def layout_of(path: Path, renderable: Path | None = None) -> Layout | None:
 
     `path` is the file pages are counted from. `renderable` is a file LibreOffice can
     open in its place, such as the modern copy a legacy Word file was converted to,
-    which is what Word's layout is looked for in too.
+    which is what Word's layout is looked for in too. A Word layout whose marks
+    disagree with the page count Word stored gives way to LibreOffice's, and stands
+    in only when that cannot be had.
     """
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return from_pdf(path, "from the PDF")
     candidate = renderable or path
-    if candidate.suffix.lower() in WORD:
-        word = from_word(candidate)
-        if word:
-            return word
+    if candidate.suffix.lower() in DECKS:
+        slides = from_slides(candidate)
+        if slides:
+            return slides
+    word = from_word(candidate) if candidate.suffix.lower() in WORD else None
+    if word and word.stored is None:
+        return word
     if suffix not in RENDERABLE:
-        return None
+        return word
     with tempfile.TemporaryDirectory() as workdir:
         pdf = render(as_listed(candidate, Path(workdir)), Path(workdir))
-        if pdf is None:
-            return None
-        found = from_pdf(pdf, "as LibreOffice lays the document out")
-    if found:
-        found.from_pdf = None
+        found = from_pdf(pdf, "as LibreOffice lays the document out") if pdf else None
+    if not found:
+        # Word's pages are likelier right than none, and the line says they are doubtful.
+        return word
+    found.from_pdf = None
+    if word:
+        found.marked, found.stored = word.marked, word.stored
     return found
 
 
@@ -281,6 +356,32 @@ def fence_state(lines: list[str]) -> list[int | None]:
             continue
         state.append(opened)
     return state
+
+
+def without_placeholders(lines: list[str], fences: list[int | None]) -> list[str]:
+    """The lines with each picture placeholder taken out, so the text matches the source's.
+
+    The source's page text has nothing where a picture sat, so a placeholder would stop
+    a page from being found when it falls inside the opening. The result has as many
+    lines as the input, each placeholder leaving behind the line breaks it held, so a
+    position in it still names the line it came from. A placeholder in a code block
+    is the block's own text and stays.
+    """
+    text = "\n".join(lines)
+    out: list[str] = []
+    # `copied` is how far the text has been copied to `out`, `counted` how far its
+    # line breaks have been counted, and `line` the line `counted` is on.
+    copied = counted = line = 0
+    for hit in PLACEHOLDER.finditer(text):
+        line += text.count("\n", counted, hit.start())
+        counted = hit.start()
+        if fences[line] is not None:
+            continue
+        out.append(text[copied:hit.start()])
+        out.append("\n" * hit.group(0).count("\n"))
+        copied = hit.end()
+    out.append(text[copied:])
+    return "".join(out).split("\n")
 
 
 def block_start(lines: list[str], index: int, fences: list[int | None]) -> int:
@@ -315,17 +416,21 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
     found, so pages land in order. A page whose full opening is not there is tried
     on shorter pieces, between the pages found on either side of it, and goes to the
     block holding the most of them. A page with no piece there, or with two blocks
-    holding as many, is left unmarked and reported, rather than guessed at.
+    holding as many, is left unmarked and reported, rather than guessed at. The text
+    searched leaves out the placeholders that stand for pictures, since the page text
+    of the source has none.
     """
     lines = markdown.split("\n")
+    if layout.headings:
+        return place_on_headings(lines, layout, link)
+    fences = fence_state(lines)
     flat: list[str] = []
     origin: list[int] = []
-    for number, line in enumerate(lines):
+    for number, line in enumerate(without_placeholders(lines, fences)):
         for ch in normalize(line):
             flat.append(ch)
             origin.append(number)
     haystack = "".join(flat)
-    fences = fence_state(lines)
 
     found: dict[int, int] = {}
     cursor = 0
@@ -354,7 +459,37 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
 
     first = next((i for i, line in enumerate(lines) if line.strip()), 0)
     before.setdefault(first, []).insert(0, 1)
+    return Placed(write_markers(lines, before, link), missed)
 
+
+def place_on_headings(lines: list[str], layout: Layout, link: str | None) -> Placed:
+    """Marks each page at the next heading line whose text is the page's start.
+
+    Slides can share a title, and an untitled slide's heading can be as short as
+    `Slide 7`, so neither a piece of text nor a minimum length would find them.
+    Taking the headings in order, and only whole heading lines, does: the body of a
+    slide never holds a heading of its own.
+    """
+    fences = fence_state(lines)
+    first = next((i for i, line in enumerate(lines) if line.strip()), 0)
+    before: dict[int, list[int]] = {first: [1]}
+    missed: list[int] = []
+    cursor = first + 1
+    for page, start in enumerate(layout.starts, start=2):
+        target = normalize(start)
+        for index in range(cursor, len(lines)):
+            match = HEADING.match(lines[index])
+            if match and fences[index] is None and normalize(match.group(1)) == target:
+                before.setdefault(index, []).append(page)
+                cursor = index + 1
+                break
+        else:
+            missed.append(page)
+    return Placed(write_markers(lines, before, link), missed)
+
+
+def write_markers(lines: list[str], before: dict[int, list[int]], link: str | None) -> str:
+    """The lines with each page's marker in front of the line it opens on."""
     out: list[str] = []
     for index, line in enumerate(lines):
         for page in before.get(index, []):
@@ -363,7 +498,7 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
             out.append(marker(page, link))
             out.append("")
         out.append(line)
-    return Placed("\n".join(out), missed)
+    return "\n".join(out)
 
 
 def locate(window: str, start: str, block_at: Callable[[int], int]) -> int | None:

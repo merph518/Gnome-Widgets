@@ -1,0 +1,7 @@
+{
+  "name": "review-queue",
+  "description": "Shows above the prompt how many pull requests wait for your review, with each one's CI state and age, across this repository and the ones that pin it",
+  "version": "0.32.3",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
