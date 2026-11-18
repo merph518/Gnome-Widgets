@@ -1,6 +1,6 @@
 # GitHub write permissions
 
-Sessions file and comment on GitHub issues with the `gh` command line tool. Each of those commands asks for approval by default, and a session that is voice driven or running unattended has nobody to answer the prompt, so it stalls. The rules below let the routine tracker writes through and keep everything destructive behind a prompt.
+Sessions file and comment on GitHub issues with the `gh` command line tool. Each of those commands asks for approval by default, and a session that is running unattended has nobody to answer the prompt, so it stalls. The rules below let the routine tracker writes through and keep everything destructive behind a prompt.
 
 The user adds these rules. A session never edits its own permissions, so this page only documents what to add.
 

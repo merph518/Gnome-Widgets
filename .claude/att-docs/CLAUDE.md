@@ -1,6 +1,6 @@
 # Overmind
 
-These rules are for the `merph518/Overmind` repository itself. In a vendored copy under
+These rules are for the `merph518/Overmind-Mod` repository itself. In a vendored copy under
 `.claude/att-docs/`, ignore this file.
 
 ## Every pull request follows the implement procedure
@@ -23,7 +23,7 @@ Two parts are easy to miss:
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `merph518/Overmind`, worked with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `merph518/Overmind-Mod`, worked with the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -127,8 +127,8 @@ appear in the blocker report. The queue reads this file from the main checkout.
 `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`. That tag is how several conductor sessions share
 one queue: each holds its own in-flight issue and passes over the others'.
 
-An issue's area is the word before the colon in its title (`voice: speechctl commands ...`
-is area `voice`). Two issues in one area never run together, because they edit the same
+An issue's area is the word before the colon in its title (`hooks: stray file check ...`
+is area `hooks`). Two issues in one area never run together, because they edit the same
 folder: `next` defers the second until the first one's pull request is merged or closed.
 A title with no such prefix has no area and is never deferred.
 

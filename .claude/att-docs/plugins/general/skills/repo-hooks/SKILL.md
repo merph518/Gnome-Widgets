@@ -5,13 +5,37 @@ description: Reusable repository session hooks for pull request checks, merge re
 
 # Repo hooks
 
-The `general` plugin registers repository hooks in `hooks/hooks.json`. Their settings
+The `general` plugin registers repository hooks in its hooks module,
+`hooks/register.tsx`. Their settings
 are sections of `.claude/skills/repo-hooks/extension.json`. The stray-file and
 implement-loop hooks run by default and accept `false` to turn them off; the other hooks
 run only when their section is present.
 
-The scripts are in `plugins/general/hooks/`, beside `hooks.json` and the runner
-`run.sh`. Each has a `_test.sh` or `_test.py` beside it.
+The scripts are in `plugins/general/hooks/`, beside `register.tsx` and the runner
+`run.sh`. Each has a `_test.sh` or `_test.py` beside it. The module hands each event to
+`run.sh` with the event's JSON on stdin and reads the script's answer from its exit code
+and stdout: exit 2 with a reason on stderr, or a JSON object (`hookSpecificOutput`,
+`decision` and `reason`, `continue`, `systemMessage`). A PreToolUse payload is built
+from the tool call; it has no `agent_id`, and its `transcript_path` and
+`permission_mode` are the ones the session's last event gave. A script that fails with
+any exit but 2 says so in the transcript and the event goes on. `register.test.tsx` tests the module
+with `claude plugin test plugins/general`.
+
+| Event | Matcher | Section and script | Timeout |
+| --- | --- | --- | --- |
+| PreToolUse | `Bash` | `prTestingGate pr_testing_gate.py` | 90 |
+| PreToolUse | `Bash` | `--default-on strayFiles stray_files_gate.py` | 30 |
+| PostToolUse | `Bash` | `mergeWatchReminder remind-pr-merge-watch.sh` | 10 |
+| PostToolUse | `Edit\|Write` | `prettierOnSave prettier-on-save.sh` | 60 |
+| PostToolUse | `Edit\|Write` | `testOnEdit test-on-edit.sh` | 180 |
+| Stop | (none) | `--default-on implementLoop implement_loop.py` | 30 |
+| SessionStart | `startup\|resume\|compact\|clear\|fork` | `--default-on implementLoop implement_loop.py` | 30 |
+
+While this session's oversee loop is active or paused, a row above the prompt shows its
+state and scope with a Pause or Resume button. The row rereads the loop's marker at
+session start, after each stop, after a Bash command that runs `loop.py` or
+`oversee.sh`, and every 30 seconds while it shows. It reads nothing in a repository
+with no `.claude/oversee/loops` folder.
 
 ## Wiring
 
@@ -23,7 +47,7 @@ claude plugin install general@att-docs --scope user
 
 A repository that vendors this repository instead registers the vendored runner in its
 own `.claude/settings.json`, once per hook, with the same matcher, timeout, section and
-script that `hooks/hooks.json` gives it:
+script that the table above gives it:
 
 ```json
 {
@@ -198,7 +222,7 @@ Set `"implementLoop": false` to disable it. The loop's state, recovery, and comm
 are described in `oversee-development`.
 
 Vendoring repositories register both events using `--default-on implementLoop
-implement_loop.py`, with the same matchers as `hooks/hooks.json`. Registering only one
+implement_loop.py`, with the matchers in the table above. Registering only one
 event leaves the plugin registration for the other in place.
 
 ## Tests

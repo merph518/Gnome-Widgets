@@ -2,4 +2,3 @@
 *.py text eol=lf
 *.mjs text eol=lf
 *.template text eol=lf
-speechctl text eol=lf

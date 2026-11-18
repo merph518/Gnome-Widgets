@@ -31,7 +31,7 @@ def pull(**changes):
 
 SHOWN = {"state", "isDraft", "isCrossRepository", "baseRefName", "title", "headRefOid",
          "statusCheckRollup", "mergeable", "mergeStateStatus"}
-LOCK_TEXT = "repo=merph518/Overmind\ntag=v0.24.3\ncommit=c1\ntree=t1\n"
+LOCK_TEXT = "repo=merph518/Overmind-Mod\ntag=v0.24.3\ncommit=c1\ntree=t1\n"
 
 
 def files_out(view):
@@ -203,10 +203,10 @@ class Merge(unittest.TestCase):
         self.assertEqual(gh.did("pr", "merge"), [])
 
     def test_a_lock_naming_another_repository_goes_to_review(self):
-        gh = FakeGh([pull(lock=LOCK_TEXT.replace("merph518/Overmind", "someone/Overmind"))])
+        gh = FakeGh([pull(lock=LOCK_TEXT.replace("merph518/Overmind-Mod", "someone/Overmind"))])
         code, out, _ = run(gh, REPO, "5")
         self.assertEqual(code, 2)
-        self.assertIn("names someone/Overmind, not merph518/Overmind", out)
+        self.assertIn("names someone/Overmind, not merph518/Overmind-Mod", out)
         self.assertEqual(gh.did("pr", "merge"), [])
 
     def test_a_lock_with_a_repeated_key_goes_to_review(self):
@@ -257,7 +257,7 @@ class Merge(unittest.TestCase):
         self.assertEqual(reads, ["repos/owner/repo/contents/.claude/att-docs.lock?ref=abc",
                                  "repos/owner/repo/contents/.claude/att-docs.lock?ref=main"])
         self.assertEqual([c[1] for c in gh.did("api") if "/commits/" in c[1]],
-                         ["repos/merph518/Overmind/commits/v0.24.3"])
+                         ["repos/merph518/Overmind-Mod/commits/v0.24.3"])
 
     def test_a_default_branch_that_cannot_be_read_stops(self):
         gh = FakeGh([pull()], base_code=1)

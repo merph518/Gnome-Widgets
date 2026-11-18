@@ -2,3 +2,6 @@ node_modules
 .claude/oversee/
 __pycache__/
 *.pyc
+
+# Type declarations Claude Code writes beside a mod it loads from a working folder
+plugins/*/.claude-plugin/types/

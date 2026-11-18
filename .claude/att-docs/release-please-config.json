@@ -12,7 +12,7 @@
       "extra-files": [
         { "type": "json", "path": "plugins/att-docs/.claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "json", "path": "plugins/general/.claude-plugin/plugin.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "plugins/voice/.claude-plugin/plugin.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "plugins/effort-optimizer/.claude-plugin/plugin.json", "jsonpath": "$.version" }
       ]
     }
   }
