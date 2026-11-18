@@ -206,15 +206,15 @@ class MarkerTest(unittest.TestCase):
         ])
 
     def test_a_paragraph_left_empty_keeps_two_digit_lists_apart(self):
-        # A paragraph holding only a picture writes nothing once the picture is dropped.
+        # A paragraph holding only a bookmark writes nothing once the bookmark is unwrapped.
         text = ('[OrderedList (1,Decimal,Period) [[Plain [Str "one"]]],'
-                ' Para [Image ("",[],[]) [] ("picture.png","")],'
+                ' Para [Span ("_Ref1",[],[]) []],'
                 ' OrderedList (1,Decimal,Period) [[Plain [Str "again"]]]]')
         self.assertEqual(self.native(text), ["1.  one", "<!-- -->", "1.  again"])
 
     def test_a_digit_list_that_counts_on_from_the_one_before_takes_no_comment(self):
         text = ('[OrderedList (1,Decimal,Period) [[Plain [Str "one"]], [Plain [Str "two"]]],'
-                ' Para [Image ("",[],[]) [] ("picture.png","")],'
+                ' Para [Span ("_Ref1",[],[]) []],'
                 ' OrderedList (3,Decimal,Period) [[Plain [Str "three"]]]]')
         self.assertEqual(self.native(text), ["1.  one", "2.  two", "3.  three"])
 

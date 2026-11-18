@@ -93,11 +93,15 @@ export function parseSwitches(text: string | undefined): EffortSwitches {
   }
 }
 
-// Claude Code's configuration folder: CLAUDE_CONFIG_DIR when set, else ~/.claude.
+// Claude Code's configuration folder: CLAUDE_CONFIG_DIR when set, with a leading `~`
+// read as HOME, else ~/.claude.
 export function configDir(home: string | undefined, configured: string | undefined): string {
   const dir = configured?.trim()
+  const homeDir = (home ?? '').replace(/\/+$/, '')
+  if (dir === '~') return homeDir || '/'
+  if (dir?.startsWith('~/')) return `${homeDir}${dir.slice(1)}`.replace(/\/+$/, '')
   if (dir) return dir.replace(/\/+$/, '')
-  return `${home ?? ''}/.claude`
+  return `${homeDir}/.claude`
 }
 
 const RUBRIC = `You choose how much reasoning effort a coding assistant should spend on the user's next request.

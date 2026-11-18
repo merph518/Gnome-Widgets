@@ -16,6 +16,31 @@
       "name": "effort-optimizer",
       "source": "./plugins/effort-optimizer",
       "description": "Suggests a reasoning effort level for each prompt above the prompt, and switches to it on request or by itself in auto mode"
+    },
+    {
+      "name": "model-router",
+      "source": "./plugins/model-router",
+      "description": "Picks each subagent's model from Haiku's tier and confidence, and logs each pick and its cost difference"
+    },
+    {
+      "name": "cache-clock",
+      "source": "./plugins/cache-clock",
+      "description": "Counts down above the prompt until the chat's prompt cache goes cold, offers a handoff for a large cold chat, and keeps the cache warm on request"
+    },
+    {
+      "name": "efficient-browser-use",
+      "source": "./plugins/efficient-browser-use",
+      "description": "Shrinks the screenshots and other pictures tool results carry before Claude reads them, or writes them out in words, and logs the tokens saved"
+    },
+    {
+      "name": "mods",
+      "source": "./plugins/mods",
+      "description": "A /mods pane that lists every installed mod and switches each one on or off, shows or hides its band or pane, and reopens a closed pane, in every open chat"
+    },
+    {
+      "name": "handoff",
+      "source": "./plugins/handoff",
+      "description": "Writes a handoff of a long chat, saves it, and starts a fresh chat from it on Linux"
     }
   ]
 }

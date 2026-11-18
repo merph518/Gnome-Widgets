@@ -48,5 +48,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The runners share /tmp, and its per-user quota, with every other process of the
+      # same user. When the quota runs out, a test whose output cannot be written stops
+      # mid-line with exit 7. The tests' scratch folders and test-all.sh's logs go to the
+      # job's own temporary folder instead, which is on the runner's disk and is emptied
+      # for each job.
       - name: Run every test and the static checks
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: bash scripts/test-all.sh

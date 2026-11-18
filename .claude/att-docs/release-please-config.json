@@ -12,7 +12,12 @@
       "extra-files": [
         { "type": "json", "path": "plugins/att-docs/.claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "json", "path": "plugins/general/.claude-plugin/plugin.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "plugins/effort-optimizer/.claude-plugin/plugin.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "plugins/effort-optimizer/.claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "plugins/model-router/.claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "plugins/cache-clock/.claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "plugins/efficient-browser-use/.claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "plugins/mods/.claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "plugins/handoff/.claude-plugin/plugin.json", "jsonpath": "$.version" }
       ]
     }
   }

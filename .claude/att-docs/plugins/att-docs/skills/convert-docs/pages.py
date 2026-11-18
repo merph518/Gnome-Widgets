@@ -16,6 +16,10 @@ The layouts, best first:
    but not identical, so a page can start a line or two away from where Word starts
    it, and the provenance block says this was the layout used.
 
+A deck is the exception: each slide shown is a page, and its Markdown opens every
+slide with a heading, so the pages are read from the deck itself and each one is
+found by its heading rather than by its opening text.
+
 Standard library only, like stamp.py beside it.
 """
 
@@ -24,6 +28,7 @@ from __future__ import annotations
 import html
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections import Counter
@@ -39,11 +44,16 @@ _SPEC = util.spec_from_file_location(
 HIDDEN = util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(HIDDEN)
 
+# The deck reader, whose slide headings are the page openings of a deck.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import slides as SLIDES  # noqa: E402
+
 # Formats LibreOffice can lay out as pages. A spreadsheet has no pages a reader
 # turns, and the HTML, text, and Markdown sources have none at all.
 RENDERABLE = {".doc", ".dot", ".docx", ".docm", ".odt", ".rtf",
               ".ppt", ".pptx", ".pptm", ".odp"}
 WORD = {".docx", ".docm"}
+DECKS = {".pptx", ".pptm"}
 
 # The marker line, which also serves as the pattern doc-impact reads to tell a
 # marker from the document's own text.
@@ -74,6 +84,7 @@ WORD_TOKEN = re.compile(
 )
 
 FENCE = re.compile(r"^\s*(```|~~~)")
+HEADING = re.compile(r"^#{1,6}\s+(.*)$")
 
 
 @dataclass
@@ -84,6 +95,9 @@ class Layout:
     starts: list[str]
     label: str
     from_pdf: Path | None = None
+    # Each page after the first opens on a heading whose text is its start, so it
+    # is found by the whole heading line rather than by a piece of its text.
+    headings: bool = False
 
 
 @dataclass
@@ -205,6 +219,17 @@ def from_word(path: Path) -> Layout | None:
     return Layout(len(starts) + 1, starts, "as Word last laid the document out")
 
 
+def from_slides(path: Path) -> Layout | None:
+    """One page per slide the deck shows, each opening on the slide's heading."""
+    try:
+        found = SLIDES.headings(path)
+    except SLIDES.READ_ERRORS:
+        return None
+    if not found:
+        return None
+    return Layout(len(found), found[1:], "one per slide shown in the deck", headings=True)
+
+
 def render(path: Path, workdir: Path) -> Path | None:
     """A PDF of the document as LibreOffice lays it out, or None when soffice fails."""
     try:
@@ -250,6 +275,10 @@ def layout_of(path: Path, renderable: Path | None = None) -> Layout | None:
     if suffix == ".pdf":
         return from_pdf(path, "from the PDF")
     candidate = renderable or path
+    if candidate.suffix.lower() in DECKS:
+        slides = from_slides(candidate)
+        if slides:
+            return slides
     if candidate.suffix.lower() in WORD:
         word = from_word(candidate)
         if word:
@@ -318,6 +347,8 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
     holding as many, is left unmarked and reported, rather than guessed at.
     """
     lines = markdown.split("\n")
+    if layout.headings:
+        return place_on_headings(lines, layout, link)
     flat: list[str] = []
     origin: list[int] = []
     for number, line in enumerate(lines):
@@ -354,7 +385,37 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
 
     first = next((i for i, line in enumerate(lines) if line.strip()), 0)
     before.setdefault(first, []).insert(0, 1)
+    return Placed(write_markers(lines, before, link), missed)
 
+
+def place_on_headings(lines: list[str], layout: Layout, link: str | None) -> Placed:
+    """Marks each page at the next heading line whose text is the page's start.
+
+    Slides can share a title, and an untitled slide's heading can be as short as
+    `Slide 7`, so neither a piece of text nor a minimum length would find them.
+    Taking the headings in order, and only whole heading lines, does: the body of a
+    slide never holds a heading of its own.
+    """
+    fences = fence_state(lines)
+    first = next((i for i, line in enumerate(lines) if line.strip()), 0)
+    before: dict[int, list[int]] = {first: [1]}
+    missed: list[int] = []
+    cursor = first + 1
+    for page, start in enumerate(layout.starts, start=2):
+        target = normalize(start)
+        for index in range(cursor, len(lines)):
+            match = HEADING.match(lines[index])
+            if match and fences[index] is None and normalize(match.group(1)) == target:
+                before.setdefault(index, []).append(page)
+                cursor = index + 1
+                break
+        else:
+            missed.append(page)
+    return Placed(write_markers(lines, before, link), missed)
+
+
+def write_markers(lines: list[str], before: dict[int, list[int]], link: str | None) -> str:
+    """The lines with each page's marker in front of the line it opens on."""
     out: list[str] = []
     for index, line in enumerate(lines):
         for page in before.get(index, []):
@@ -363,7 +424,7 @@ def place(markdown: str, layout: Layout, link: str | None = None) -> Placed:
             out.append(marker(page, link))
             out.append("")
         out.append(line)
-    return Placed("\n".join(out), missed)
+    return "\n".join(out)
 
 
 def locate(window: str, start: str, block_at: Callable[[int], int]) -> int | None:

@@ -22,6 +22,9 @@ _COPIES_SPEC = importlib.util.spec_from_file_location(
 COPIES = importlib.util.module_from_spec(_COPIES_SPEC)
 _COPIES_SPEC.loader.exec_module(COPIES)
 
+# Decks built in code, with the reader they are read by.
+import slides_test as DECK  # noqa: E402
+
 
 def without_markup(path: pathlib.Path) -> None:
     """Sets the Word file at PATH to show its tracked changes accepted, as
@@ -130,6 +133,81 @@ class Place(unittest.TestCase):
         lines = placed.markdown.split("\n")
         at = lines.index('<a id="page-2"></a>*Page 2*')
         self.assertEqual(lines[at + 3], "| Medical exam is overdue | b |")
+
+
+class Decks(unittest.TestCase):
+    """A deck's pages are its slides, found by the heading each one opens on."""
+
+    def deck(self, folder: str, *slides_xml: str, name: str = "d.pptx") -> pathlib.Path:
+        return DECK.deck(pathlib.Path(folder, name), list(slides_xml))
+
+    def test_every_slide_is_marked_even_with_shared_titles_and_no_title(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.deck(folder, DECK.slide(DECK.title("Default View")),
+                             DECK.slide(DECK.title("Default View")),
+                             DECK.slide(DECK.title("Default View")), DECK.slide())
+            layout = pages.layout_of(path)
+            body = stamp.clean(DECK.slides.markdown(path))
+        self.assertEqual((layout.pages, layout.label), (4, "one per slide shown in the deck"))
+        placed = pages.place(body, layout)
+        self.assertEqual(placed.missed, [])
+        self.assertEqual([line for _, line in markers(placed.markdown)],
+                         ["## Default View", "## Default View", "## Default View",
+                          "## Slide 4"])
+
+    def test_text_matching_a_later_title_does_not_take_its_marker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.deck(
+                folder,
+                DECK.slide(DECK.title("Intro"),
+                           DECK.shape("TextBox", DECK.para("Historical View"))),
+                DECK.slide(DECK.title("Historical View")))
+            layout = pages.layout_of(path)
+            body = stamp.clean(DECK.slides.markdown(path))
+        placed = pages.place(body, layout)
+        self.assertEqual(markers(placed.markdown)[1][1], "## Historical View")
+
+    def test_a_legacy_deck_is_read_through_its_modern_copy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            copy = self.deck(folder, DECK.slide(), DECK.slide())
+            layout = pages.layout_of(pathlib.Path(folder, "d.ppt"), copy)
+        self.assertEqual(layout.pages, 2)
+
+    def test_a_deck_that_cannot_be_read_falls_back_to_a_render(self):
+        with tempfile.TemporaryDirectory() as folder:
+            broken = pathlib.Path(folder, "broken.pptx")
+            broken.write_bytes(b"not a zip")
+            with unittest.mock.patch.object(pages, "render", return_value=None) as render:
+                self.assertIsNone(pages.layout_of(broken))
+        render.assert_called_once()
+
+
+class DeckLinks(unittest.TestCase):
+    """A deck's markers link into a PDF beside it only when the page counts agree."""
+
+    HOST = "https://example.test"
+    WHERE = {"Deck.pdf": "/sites/Docs/Deck.pdf"}
+    DECK_LAYOUT = pages.Layout(3, ["b", "c"], "one per slide shown in the deck",
+                               headings=True)
+
+    def link(self, pdf_pages: int, pdf: str | None = "Deck.pdf") -> str | None:
+        with unittest.mock.patch.object(pages, "pdf_pages",
+                                        return_value=["page"] * pdf_pages):
+            return stamp.page_link(self.DECK_LAYOUT,
+                                   pathlib.Path("/x", pdf) if pdf else None,
+                                   self.WHERE, self.HOST)
+
+    def test_a_pdf_with_one_page_per_slide_is_linked(self):
+        self.assertEqual(self.link(3), "https://example.test/sites/Docs/Deck.pdf")
+
+    def test_a_pdf_with_another_page_count_is_not(self):
+        self.assertIsNone(self.link(4))
+
+    def test_a_pdf_the_library_does_not_hold_is_not(self):
+        self.assertIsNone(self.link(3, "Other.pdf"))
+
+    def test_no_pdf_no_link(self):
+        self.assertIsNone(self.link(3, None))
 
 
 class Openings(unittest.TestCase):
