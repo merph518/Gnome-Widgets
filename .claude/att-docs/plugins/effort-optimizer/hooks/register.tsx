@@ -36,6 +36,9 @@ let seen: EffortLevel | null = null
 // either is dropped.
 let pickGeneration = 0
 let folder: string | null = null
+// Re-reads switches.json, so a switch flipped in another chat reaches this one.
+let switchPoll: { cancel: () => void } | null = null
+const SWITCH_POLL_MS = 3000
 
 async function configFolder($: EngineInterface): Promise<string> {
   folder ??= configDir(await $.env.get('HOME'), await $.env.get('CLAUDE_CONFIG_DIR'))
@@ -62,7 +65,8 @@ async function readSwitches($: EngineInterface): Promise<EffortSwitches> {
     () => undefined,
   )
   const value = parseSwitches(text)
-  await update($, switches, () => value)
+  const before = await read($, switches)
+  if (before.isOff !== value.isOff || before.isHidden !== value.isHidden) await update($, switches, () => value)
   return value
 }
 
@@ -165,6 +169,8 @@ export const register: Register = (on, options) => {
   seen = null
   pickGeneration = 0
   folder = null
+  switchPoll?.cancel()
+  switchPoll = null
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -176,6 +182,9 @@ export const register: Register = (on, options) => {
     const stored = await $.store.get('mode')
     await update($, mode, () => (stored === 'auto' ? 'auto' : 'suggest'))
     await readSwitches($)
+    switchPoll ??= $.clock.every(SWITCH_POLL_MS, () => {
+      readSwitches($).catch(() => undefined)
+    })
     const row = await effortRow($)
     await log($, row === undefined ? 'no effort row in /config' : `effort row ${row.key}${row.isLocked ? ' (locked)' : ''}`)
     return next(e)

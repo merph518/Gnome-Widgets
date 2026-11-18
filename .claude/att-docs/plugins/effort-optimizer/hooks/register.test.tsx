@@ -391,6 +391,32 @@ test('a hidden band still lets auto mode work', async ($, on) => {
   await ui.unmount()
 })
 
+test('a switch flipped in another chat reaches the band within a few seconds, with no prompt', async ($, on) => {
+  const setup: Setup = {}
+  const { clock } = engine(on, setup)
+  await start($)
+  await prompt($, clock, 'split the parser into three modules', 't1')
+  const band = async () => {
+    const ui = await $.ui.mount(BAND('desktop'))
+    const text = (await ui.find({ type: 'Text' }))?.text
+    await ui.unmount()
+    return text
+  }
+  expect(await band()).toMatch(/High/)
+
+  setup.switches = '{"effort-optimizer": false}'
+  await clock.advance(3000)
+  expect(await band()).toBe('engine')
+
+  setup.switches = '{"effort-optimizer:hidden": true}'
+  await clock.advance(3000)
+  expect(await band()).toBe('engine')
+
+  setup.switches = '{}'
+  await clock.advance(3000)
+  expect(await band()).toMatch(/High/)
+})
+
 test('CLAUDE_CONFIG_DIR moves the switches file', async ($, on) => {
   const { seen } = engine(on, { env: { CLAUDE_CONFIG_DIR: '/cfg' } })
   await start($)
@@ -471,4 +497,6 @@ test('helpers read picks, switches, rows and the configuration folder', () => {
 
   expect(configDir('/home/me', undefined)).toBe('/home/me/.claude')
   expect(configDir('/home/me', ' /cfg/ ')).toBe('/cfg')
+  expect(configDir('/home/me', '~/cc')).toBe('/home/me/cc')
+  expect(configDir('/home/me', '~')).toBe('/home/me')
 })

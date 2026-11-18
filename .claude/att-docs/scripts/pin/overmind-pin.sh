@@ -6,7 +6,8 @@
 # A consumer is a repository name without its owner. For each one the script clones the
 # default branch, runs the sync script from this checkout against the tag, runs the check
 # script on the result, writes the notes from the tag's changelog, commits the move to the
-# branch overmind/pin-<tag>, pushes it, and opens a pull request unless one is already open
+# branch overmind/pin-<tag> (overmind/move-<tag> for a PIN_REPO move on the tag the
+# consumer already holds), pushes it, and opens a pull request unless one is already open
 # for that branch. A consumer that fails does not stop the others, and its result line
 # carries the failing script's output; the exit status is 1 if any failed, and 2 for a bad
 # argument.
@@ -22,9 +23,10 @@
 #                    changelog is read from the tag, never from the consumer.
 #   PIN_OWNER        owner of the consumers; default merph518
 #   PIN_REPO         owner/name written to repo= in each consumer's lock, to move it to a
-#                    repository the source moved to; default: keep the lock's repo=. The
-#                    consumer's check accepts the move only when its base copy of the check
-#                    script allows one and the new repository holds the base lock's tag.
+#                    repository the source moved to, even for a consumer already on the
+#                    tag; default: keep the lock's repo=. The consumer's check accepts the
+#                    move only when its base copy of the check script allows one and the
+#                    new repository holds the base lock's tag.
 #   PIN_CLONE_BASE   where consumers are cloned from; default https://github.com
 #   GH_TOKEN         a token with contents and pull request write access to the consumers;
 #                    used for the clone and push as well as for gh
@@ -84,16 +86,25 @@ pin_one() {
     echo "the pinned tag '$pinned' is not vMAJOR.MINOR.PATCH" >&2
     return 1
   fi
-  if [ "$pinned" = "$tag" ]; then
-    echo "unchanged: already on $tag"
-    return 0
-  fi
-  if [ "$(printf '%s\n%s\n' "$pinned" "$tag" | sort -V | tail -n 1)" = "$pinned" ]; then
+  # A PIN_REPO that differs from the lock's repo= moves it, and a consumer already on the
+  # tag still gets that move: only repo= changes. A consumer ahead of the tag never goes
+  # back. The move on the pinned tag takes its own branch, since a pin branch left over
+  # from reaching that tag would carry the old pin's commits.
+  local same_tag="" moves_repo="" branch="overmind/pin-$tag"
+  if [ "$pinned" = "$tag" ]; then same_tag=1; fi
+  if [ -n "${PIN_REPO:-}" ] && [ "$PIN_REPO" != "$repo" ]; then moves_repo=1; fi
+  if [ -n "$same_tag" ]; then
+    if [ -z "$moves_repo" ]; then
+      echo "unchanged: already on $tag"
+      return 0
+    fi
+    branch="overmind/move-$tag"
+  elif [ "$(printf '%s\n%s\n' "$pinned" "$tag" | sort -V | tail -n 1)" = "$pinned" ]; then
     echo "unchanged: already on $pinned, which is newer"
     return 0
   fi
 
-  local branch="overmind/pin-$tag" title="chore: Move the Overmind pin to $tag"
+  local title="chore: Move the Overmind pin to $tag"
   # The full ref names exactly this branch; a bare name would also match a branch that
   # only ends in it, such as topic/overmind/pin-<tag>. Exit status 2 is "no such branch";
   # any other failure is a failed lookup, never a reason to start a fresh branch.
@@ -133,7 +144,12 @@ pin_one() {
     fail_with "could not read CHANGELOG.md at $tag" "$(cat "$work/changelog.err")"
     return 1
   fi
-  if ! step_out="$(python3 -I "$OVERMIND_DIR/scripts/pin/pin_notes.py" --changelog "$work/changelog.md" \
+  # A move on the pinned tag has no changelog entries to list, so its notes say what moved.
+  # Like pin_notes.py, they name no repository, which the readers cannot open.
+  if [ -n "$same_tag" ]; then
+    printf 'Moves where the Overmind pin is fetched from. The version, %s, and the vendored files stay the same.\n' \
+      "$tag" > "$work/body.md"
+  elif ! step_out="$(python3 -I "$OVERMIND_DIR/scripts/pin/pin_notes.py" --changelog "$work/changelog.md" \
     --from "$pinned" --to "$tag" --repo "$repo" 2>&1 > "$work/body.md")"; then
     fail_with "could not write the pull request notes" "$step_out"
     return 1

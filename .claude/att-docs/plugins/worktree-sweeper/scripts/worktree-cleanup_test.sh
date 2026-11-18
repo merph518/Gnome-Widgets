@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs worktree-cleanup.sh against a scratch repository with one worktree per case and a stub
 # gh that answers from files, so no real worktree, remote or pull request is touched.
-# usage: bash scripts/worktree-cleanup_test.sh
+# usage: bash plugins/worktree-sweeper/scripts/worktree-cleanup_test.sh
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -162,6 +162,110 @@ git init -q -b main "$SOLO"
 git -C "$SOLO" commit -q --allow-empty -m init
 out="$(cd "$SOLO" && "$SCRIPT" 2>&1)"
 has "no worktrees says so" "No worktrees besides the main checkout" "$out"
+
+# --tsv: the table's rows, one per line, cells split by tabs, with the absolute path last.
+TAB=$'\t'
+HEADER="worktree${TAB}branch${TAB}pull request${TAB}uncommitted${TAB}unpushed${TAB}verdict${TAB}path"
+tsv="$(cd "$M" && "$SCRIPT" --tsv 2>/dev/null </dev/null)"; rc=$?
+check "--tsv exits 0" 0 "$rc"
+check "--tsv starts with the header" "$HEADER" "$(head -n 1 <<<"$tsv")"
+table="$(cd "$M" && "$SCRIPT" 2>/dev/null </dev/null | sed '/^$/,$d')"
+check "--tsv rows match the table" "$table" "$(cut -f1-6 <<<"$tsv" | column -t -s "$TAB")"
+bad_paths=0
+while IFS="$TAB" read -r -a cells; do
+  p=${cells[6]:-}
+  case "$p" in /*) [ -d "$p" ] || bad_paths=$((bad_paths + 1)) ;; *) bad_paths=$((bad_paths + 1)) ;; esac
+  [ "${#cells[@]}" -eq 7 ] || bad_paths=$((bad_paths + 1))
+done < <(tail -n +2 <<<"$tsv")
+check "every --tsv row has seven cells and an absolute path that exists" 0 "$bad_paths"
+check "--tsv marks the dirty worktree kept" 1 \
+  "$(grep -c "^.claude/worktrees/merged-dirty${TAB}.*${TAB}keep: 1 uncommitted path(s)${TAB}" <<<"$tsv")"
+check "--tsv marks the worktree ahead of the merge kept" 1 \
+  "$(grep -c "^.claude/worktrees/merged-ahead${TAB}.*${TAB}keep: 1 unpushed commit(s)${TAB}" <<<"$tsv")"
+tsv="$(cd "$M/.claude/worktrees/inside" && "$SCRIPT" --tsv 2>/dev/null </dev/null)"
+check "--tsv from inside a worktree keeps it" 1 \
+  "$(grep -c "^.claude/worktrees/inside${TAB}.*this is where the script runs" <<<"$tsv")"
+check "--tsv prints only the header with no other worktree" "$HEADER" "$(cd "$SOLO" && "$SCRIPT" --tsv 2>&1)"
+out="$(cd "$SANDBOX" && "$SCRIPT" --tsv 2>/dev/null)"; rc=$?
+check "--tsv outside a repository exits 64" 64 "$rc"
+check "--tsv outside a repository prints nothing on stdout" "" "$out"
+
+# --remove-path: one worktree, checked again, removed without --force, the branch kept.
+wt rp-clean;  pr rp-clean MERGED 31
+wt rp-dirty;  pr rp-dirty MERGED 32
+echo scratch >"$M/.claude/worktrees/rp-dirty/notes.txt"
+wt rp-ahead;  pr rp-ahead MERGED 33
+git -C "$M/.claude/worktrees/rp-ahead" commit -q --allow-empty -m "after the merge"
+wt rp-locked; pr rp-locked MERGED 34
+git -C "$M" worktree lock "$M/.claude/worktrees/rp-locked"
+wt rp-open;   pr rp-open OPEN 35
+wt rp-slash;  pr rp-slash MERGED 36
+wt rp-rel;    pr rp-rel MERGED 37
+wt rp-dots;   pr rp-dots MERGED 38
+wt rp-link;   pr rp-link MERGED 39
+ln -s "$M/.claude/worktrees/rp-link" "$SANDBOX/link-to-rp-link"
+
+rp() { # <cwd> <arg>...: sets out and rc
+  out="$(cd "$1" && shift && "$SCRIPT" --remove-path "$@" 2>/dev/null </dev/null)"
+  rc=$?
+}
+rp "$M" "$M/.claude/worktrees/rp-clean"
+check "--remove-path removes a done worktree" 0 "$rc"
+check "--remove-path says removed" "removed $M/.claude/worktrees/rp-clean" "$out"
+check "--remove-path deletes the folder" no "$(exists rp-clean)"
+check "--remove-path keeps the branch" rp-clean "$(git -C "$M" branch --list rp-clean --format '%(refname:short)')"
+rp "$M" "$M/.claude/worktrees/rp-dirty"
+check "--remove-path keeps uncommitted work" 1 "$rc"
+check "--remove-path names the uncommitted path" "kept $M/.claude/worktrees/rp-dirty: 1 uncommitted path(s)" "$out"
+check "the dirty worktree is still there" yes "$(exists rp-dirty)"
+rp "$M" "$M/.claude/worktrees/rp-ahead"
+check "--remove-path keeps a commit after the merge" 1 "$rc"
+has "--remove-path names the unpushed commit" "1 unpushed commit(s)" "$out"
+check "the worktree ahead of the merge is still there" yes "$(exists rp-ahead)"
+rp "$M" "$M/.claude/worktrees/rp-locked"
+check "--remove-path keeps a locked worktree" "kept $M/.claude/worktrees/rp-locked: locked" "$out"
+check "the locked worktree is still there" yes "$(exists rp-locked)"
+rp "$M" "$M/.claude/worktrees/rp-open"
+check "--remove-path keeps a worktree whose pull request is open" \
+  "kept $M/.claude/worktrees/rp-open: pull request open" "$out"
+rp "$M/.claude/worktrees/inside" "$M/.claude/worktrees/inside"
+check "--remove-path never removes the worktree it runs from" 1 "$rc"
+has "--remove-path says why" "this is where the script runs" "$out"
+check "the current worktree is still there" yes "$(exists inside)"
+rp "$M" "$M"
+check "--remove-path refuses the main checkout" "kept $M: not a worktree of this repository" "$out"
+check "--remove-path on the main checkout exits 1" 1 "$rc"
+rp "$M" "$SANDBOX/nowhere"
+check "--remove-path refuses an unknown path" "kept $SANDBOX/nowhere: not a worktree of this repository" "$out"
+rp "$M" "$M/.claude/worktrees/rp-slash/"
+check "--remove-path takes a trailing slash" 0 "$rc"
+check "the worktree named with a trailing slash is removed" no "$(exists rp-slash)"
+rp "$M" ".claude/worktrees/rp-rel"
+check "--remove-path takes a path relative to where it runs" 0 "$rc"
+check "the worktree named by a relative path is removed" no "$(exists rp-rel)"
+rp "$M/.claude" "./worktrees/../worktrees/rp-dots//"
+check "--remove-path takes ./, ../ and doubled slashes" 0 "$rc"
+check "the worktree named with dots is removed" no "$(exists rp-dots)"
+rp "$M" "$SANDBOX/link-to-rp-link"
+check "--remove-path follows a symbolic link to the worktree" 0 "$rc"
+check "the worktree named through a link is removed" no "$(exists rp-link)"
+(cd "$M" && "$SCRIPT" --remove-path >/dev/null 2>&1)
+check "--remove-path with no path exits 64" 64 "$?"
+(cd "$M" && "$SCRIPT" --tsv --remove >/dev/null 2>&1)
+check "two options exit 64" 64 "$?"
+
+# /mods offers a switch, Hide, and Reopen from what it finds in the hooks module's source.
+MODULE="$HERE/../hooks/register.tsx"
+for pattern in 'switches\.json' "component: 'AbovePrompt'" "component: 'Pane'" '\.open-'; do
+  check "the hooks module carries what /mods reads: $pattern" 1 "$(grep -cm1 -E "$pattern" "$MODULE")"
+done
+
+# The path in scripts/ runs the plugin's copy.
+WRAPPER="$HERE/../../../scripts/worktree-cleanup.sh"
+"$WRAPPER" --bogus >/dev/null 2>&1
+check "the wrapper passes the exit code through" 64 "$?"
+check "the wrapper lists the same rows" "$(cd "$M" && "$SCRIPT" --tsv 2>/dev/null </dev/null)" \
+  "$(cd "$M" && bash "$WRAPPER" --tsv 2>/dev/null </dev/null)"
 
 if [ "$fails" -ne 0 ]; then
   echo "worktree-cleanup_test.sh: $fails failed" >&2

@@ -91,6 +91,7 @@ COLLISIONS="$(config_value collisions)" || exit 64
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+PICTURES="$WORK/pictures.txt"
 
 DONE_ROOT="$IN/_done"
 STAGE="$IN/_needs_merge"
@@ -104,6 +105,8 @@ held=0
 quarantined=0
 unmapped=0
 renumbered=0
+recovered=0
+unread=0
 
 log() { printf '%s\n' "$*"; }
 
@@ -111,10 +114,9 @@ log() { printf '%s\n' "$*"; }
 # options live in one place: no images, pipe tables, and a column cap that keeps
 # prose readable.
 #
-# The output is Markdown and nothing else. Left alone, a presentation routed
-# through HTML arrives as a stack of `::::` fenced divs wrapped around raw
-# `<div>` blocks, which is the page layout of the slide rather than anything the
-# document says.
+# The output is Markdown and nothing else. Left alone, an HTML source arrives
+# as a stack of `::::` fenced divs wrapped around raw `<div>` blocks, which is
+# the layout of the page rather than anything the document says.
 #
 # The table syntax is the pipe table, because it is the only one that renders
 # outside Pandoc. Reaching it takes the filter beside this script: the writer
@@ -137,14 +139,21 @@ run_pandoc() {
     # Word never prints its hidden text, and Pandoc writes it as any other
     # text, so the hidden runs come out first. Then, since Pandoc counts and
     # nests a Word list differently from Word, the numbering is rewritten into
-    # a form it draws the way Word does. A file a step cannot read, such as an
-    # RTF file tried here first, goes on as it is.
+    # a form it draws the way Word does. Last, the text a vector picture holds,
+    # such as a range pasted from a spreadsheet, goes in where the picture was,
+    # and the step counts in PICTURES what it put back and what it could not
+    # read. A file a step cannot read, such as an RTF file tried here first,
+    # goes on as it is.
     docx)
       if python3 "$HERE/hidden-text.py" "$input" "$WORK/visible.docx" 2>/dev/null; then
         input="$WORK/visible.docx"
       fi
       if python3 "$HERE/list-numbers.py" "$input" "$WORK/numbered.docx" 2>/dev/null; then
         input="$WORK/numbered.docx"
+      fi
+      if python3 "$HERE/picture-text.py" "$input" "$WORK/pictured.docx" \
+        --report "${PICTURES:-$WORK/pictures.txt}" 2>/dev/null; then
+        input="$WORK/pictured.docx"
       fi
       ;;
   esac
@@ -324,13 +333,22 @@ to_markdown() {
     htm|html)
       run_pandoc html "$input" "$output"
       ;;
-    ppt|pptx|pptm|odp)
-      # Pandoc reads no presentation format at all, so this one goes through
-      # HTML rather than through the container.
-      run_soffice html "$input" "$WORK/ppt"
-      base="$(basename "${input%.*}").html"
-      [ -f "$WORK/ppt/$base" ] || return 1
-      run_pandoc html "$WORK/ppt/$base" "$output"
+    pptx|pptm)
+      # The slide XML is read directly. LibreOffice's HTML export keeps the
+      # title and body placeholders and drops much of the text in free-standing
+      # text boxes and rectangles.
+      python3 "$HERE/slides.py" "$input" "$output"
+      ;;
+    ppt|odp)
+      # The legacy and OpenDocument formats are written as a modern deck first,
+      # and that copy is what the page step and the provenance ladder read too.
+      local copies
+      copies="$(mktemp -d "$WORK/ppt.XXXXXX")"
+      run_soffice pptx "$input" "$copies"
+      base="$(basename "${input%.*}").pptx"
+      [ -f "$copies/$base" ] || return 1
+      READABLE="$copies/$base"
+      python3 "$HERE/slides.py" "$READABLE" "$output"
       ;;
     xls|xlsx|xlsm|ods)
       spreadsheet_to_markdown "$input" "$output"
@@ -412,15 +430,30 @@ library_path_of() {
 }
 
 # The file a document's pages are counted from: a PDF of it when the group has
-# one, since its pages are the pages, and otherwise the body's own source.
+# one, since its pages are the pages, and otherwise the body's own source. A deck
+# counts its own pages, one per slide shown, so an image-only slide still gets
+# its marker; a PDF beside it only supplies the page links.
 pages_source_of() {
+  local pdf=""
+  is_deck "$primary" || pdf="$(pdf_of "$@")"
+  printf '%s' "${pdf:-$primary}"
+}
+
+# A PDF of the group, or nothing, for a body whose pages come from elsewhere.
+pdf_of() {
   local path
   for path in "$@"; do
     case "$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')" in
       pdf) printf '%s' "$path"; return 0 ;;
     esac
   done
-  printf '%s' "$primary"
+}
+
+is_deck() {
+  case "$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')" in
+    ppt|pptx|pptm|odp) return 0 ;;
+  esac
+  return 1
 }
 
 # A file that failed to download is a stub explaining the failure, not a
@@ -433,6 +466,21 @@ is_download_stub() {
   esac
   grep -qlE 'cannot be downloaded|RemoteItemNotFound|have not been downloaded' \
     "$path" 2>/dev/null
+}
+
+# A page the living-wiki script generated is not a source document: the page
+# beside a suite's Future folder, or any Markdown file under the wiki's generated
+# header. This restates doc_paths.is_generated_page, which doc-watch uses to leave
+# the same files out of the tracking issue.
+is_wiki_page() {
+  local path="$1"
+  if [ "$(basename "$path")" = "$FUTURE.md" ] && [ -d "$(dirname "$path")/$FUTURE" ]; then
+    return 0
+  fi
+  case "$path" in
+    *.md) head -n 1 "$path" 2>/dev/null | grep -q '^<!-- Generated from the folder layout under ' ;;
+    *) return 1 ;;
+  esac
 }
 
 # Reports how much of a secondary source's vocabulary the chosen body lost.
@@ -479,6 +527,7 @@ for suite_dir in "${suites[@]}"; do
   : >"$stems"
   while IFS= read -r path; do
     [ -n "$path" ] || continue
+    is_wiki_page "$path" && continue
     printf '%s\n' "${path%.*}"
   # Byte ordering, because a locale collation folds away spaces and punctuation
   # and would treat two names that differ only in those as one document.
@@ -497,6 +546,7 @@ for suite_dir in "${suites[@]}"; do
       # does, and the glob reaches that from the shorter `FA Home License`.
       # Only a candidate whose own stem is this stem is this document.
       [ "${path%.*}" = "$stem" ] || continue
+      is_wiki_page "$path" && continue
       [ -f "$path" ] && sources+=("$path")
     done < <(find "$(dirname "$stem")" -maxdepth 1 -type f \
       -name "$(basename "$stem").*" | sort)
@@ -533,6 +583,8 @@ for suite_dir in "${suites[@]}"; do
     body="$WORK/body.md"
     : >"$body"
     READABLE="$primary"
+    PICTURES="$WORK/pictures.txt"
+    rm -f "$PICTURES"
     if ! to_markdown "$primary" "$body" || [ ! -s "$body" ]; then
       log "     conversion produced nothing, left in place"
       skipped=$((skipped + 1))
@@ -542,6 +594,23 @@ for suite_dir in "${suites[@]}"; do
     # would otherwise leave its own intermediate here.
     primary_readable="$READABLE"
     primary_numbered="$primary"
+    # The secondary check below runs the same steps, so the picture counts are
+    # read now and the later runs write theirs where nothing reads them.
+    pictures_recovered=0
+    pictures_unread=0
+    if [ -f "$PICTURES" ]; then
+      pictures_recovered="$(awk '$1 == "recovered" {print $2}' "$PICTURES")"
+      pictures_unread="$(awk '$1 == "unread" {print $2}' "$PICTURES")"
+    fi
+    PICTURES="$WORK/secondary-pictures.txt"
+    if [ "${pictures_recovered:-0}" -gt 0 ]; then
+      log "     text of $pictures_recovered picture(s) put back where the picture was"
+      recovered=$((recovered + 1))
+    fi
+    if [ "${pictures_unread:-0}" -gt 0 ]; then
+      log "     $pictures_unread picture(s) hold text that was not read, restore it by hand"
+      unread=$((unread + 1))
+    fi
     if [ "$NUMBERED" != "$primary" ]; then
       primary_numbered="$WORK/primary-lists.${NUMBERED##*.}"
       cp "$NUMBERED" "$primary_numbered"
@@ -624,11 +693,14 @@ for suite_dir in "${suites[@]}"; do
     done
     paged="$(pages_source_of "${sources[@]}")"
     args+=(--pages-from "$paged")
+    args+=(--unread-pictures "${pictures_unread:-0}")
     # The ladder lays pages out from the copy whose lists the Markdown carries,
     # so a page that opens on a renumbered item still finds its opening line.
     renderable="$primary_readable"
     [ "$primary_numbered" != "$primary" ] && renderable="$primary_numbered"
     [ "$paged" = "$primary" ] && args+=(--pages-renderable "$renderable")
+    linked="$(pdf_of "${sources[@]}")"
+    [ -n "$linked" ] && [ "$linked" != "$paged" ] && args+=(--pages-link "$linked")
     if ! python3 "$HERE/stamp.py" --config "$CONFIG" --markdown "$body" \
       --out "$OUT/$suite/$page.md" --converted "$CONVERTED" "${args[@]}"; then
       log "     stamping failed, left in place"
@@ -640,11 +712,16 @@ for suite_dir in "${suites[@]}"; do
     # differently is reported. The document is still written: the numbers are a
     # thing to correct in the Markdown, not a reason to doubt the rest of it.
     # A route that rebuilt the source's lists hands the check its rebuilt copy.
+    # A PDF in the group is taken as Word's render of the document, whose
+    # numbers are the ones a rule cites; the check keeps LibreOffice's export as
+    # the reference when LibreOffice made the PDF.
     case "$(printf '%s' "${primary##*.}" | tr '[:upper:]' '[:lower:]')" in
       docx|docm|doc|dot)
         status=0
+        word=()
+        [ -n "$linked" ] && word=(--word "$linked")
         listed="$(python3 "$HERE/check-list-numbers.py" "$OUT/$suite/$page.md" \
-          "$primary_numbered" 2>&1)" || status=$?
+          "$primary_numbered" ${word[@]+"${word[@]}"} 2>&1)" || status=$?
         if [ "$status" -eq 2 ]; then
           printf '%s\n' "$listed" | sed 's/^/     /'
           log "     list numbers differ from the source"
@@ -682,6 +759,7 @@ done
 log ""
 log "converted $converted, staged for merge $held, skipped $skipped," \
     "quarantined $quarantined, in an unmapped font $unmapped," \
-    "with list numbers off the source $renumbered"
+    "with list numbers off the source $renumbered," \
+    "with picture text put back $recovered, with picture text not read $unread"
 [ -s "$WORK/pandoc.err" ] && log "pandoc reported warnings, see the run output"
 exit 0

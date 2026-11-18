@@ -50,5 +50,68 @@ class MarkdownUnderTest(unittest.TestCase):
         self.assertIn("no such file or directory", str(ctx.exception.code))
 
 
+class IsGeneratedPageTest(unittest.TestCase):
+    HEADER = doc_paths.GENERATED_PREFIX + "docs/. Edits here are overwritten. -->\n"
+    OTHER_DOCS_HEADER = doc_paths.GENERATED_PREFIX + "wiki/. Edits here are overwritten. -->\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name: str, text: str) -> pathlib.Path:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_page_beside_the_future_folder_is_generated_without_a_header(self):
+        page = self.write("Future.md", "# Future\n")
+        (self.root / "Future").mkdir()
+        self.assertTrue(doc_paths.is_generated_page(page, "Future"))
+
+    def test_future_named_page_without_a_folder_or_header_is_a_document(self):
+        page = self.write("Future.md", "# Future\n")
+        self.assertFalse(doc_paths.is_generated_page(page, "Future"))
+
+    def test_configured_future_name_is_used(self):
+        page = self.write("Later.md", "# Later\n")
+        (self.root / "Later").mkdir()
+        self.assertTrue(doc_paths.is_generated_page(page, "Later"))
+        self.assertFalse(doc_paths.is_generated_page(page, "Future"))
+
+    def test_only_the_future_name_is_matched_by_the_sibling_rule(self):
+        page = self.write("Notes.md", "# Notes\n")
+        (self.root / "Notes").mkdir()
+        self.assertFalse(doc_paths.is_generated_page(page, "Future"))
+
+    def test_header_on_the_first_line_marks_any_markdown_file(self):
+        page = self.write("Notes.md", self.HEADER + "# Notes\n")
+        self.assertTrue(doc_paths.is_generated_page(page, "Future"))
+
+    def test_header_names_any_docs_folder(self):
+        page = self.write("Notes.md", self.OTHER_DOCS_HEADER + "# Notes\n")
+        self.assertTrue(doc_paths.is_generated_page(page, "Future"))
+
+    def test_header_after_the_first_line_does_not_count(self):
+        page = self.write("Notes.md", "# Notes\n" + self.HEADER)
+        self.assertFalse(doc_paths.is_generated_page(page, "Future"))
+
+    def test_header_in_a_non_markdown_file_does_not_count(self):
+        page = self.write("Notes.txt", self.HEADER)
+        self.assertFalse(doc_paths.is_generated_page(page, "Future"))
+
+    def test_missing_file_is_not_generated(self):
+        self.assertFalse(doc_paths.is_generated_page(self.root / "gone.md", "Future"))
+
+    def test_prefix_is_the_start_of_the_wiki_marker_and_the_shell_copy(self):
+        wiki = (HERE.parent / "living-wiki" / "wiki.mjs").read_text(encoding="utf-8")
+        shell = (HERE / "convert.sh").read_text(encoding="utf-8")
+        self.assertIn("const MARKER = `" + doc_paths.GENERATED_PREFIX + "${DOCS_NAME}/.", wiki)
+        self.assertIn("'^" + doc_paths.GENERATED_PREFIX + "'", shell)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 SCRIPT = HERE / "docwatch.py"
@@ -18,6 +19,7 @@ SHIFTED = HERE.parent / "convert-docs" / "check-shifted-text.py"
 SPEC = importlib.util.spec_from_file_location("docwatch", SCRIPT)
 DOCWATCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DOCWATCH)
+DOC_PATHS = sys.modules["doc_paths"]
 
 LIBRARIES = {
     "": ["/sites/Main", "Main Documentation"],
@@ -240,6 +242,74 @@ class FutureFolder(Configured):
             body,
         )
         self.assertNotIn("old.doc", body)
+
+    HEADER = DOC_PATHS.GENERATED_PREFIX + "docs/. Edits here are overwritten. -->\n"
+
+    def wait(self, *names: str) -> None:
+        for name in names:
+            path = self.repo / "inbox" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"doc")
+
+    def test_issue_body_skips_the_wiki_page_beside_a_future_folder(self) -> None:
+        self.wait("SPEC/2-Agency.doc", "SPEC/Future/1-Home.doc")
+        page = self.repo / "inbox" / "SPEC" / "Future.md"
+        page.write_text(self.HEADER + "# Future\n", encoding="utf-8")
+        body = DOCWATCH.issue_body(None, self.repo)
+        self.assertNotIn("Future.md", body)
+        self.assertIn("`1-Home.doc`", body)
+        self.assertIn("`2-Agency.doc`", body)
+
+    def test_tracked_wiki_page_is_skipped_too(self) -> None:
+        self.wait("SPEC/Future/1-Home.doc")
+        page = self.repo / "inbox" / "SPEC" / "Future.md"
+        page.write_text("# Future\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "inbox"], check=True)
+        body = DOCWATCH.issue_body(None, self.repo)
+        self.assertNotIn("Future.md", body)
+        self.assertIn("`1-Home.doc`", body)
+
+    def test_todo_files_skips_any_markdown_under_the_generated_header(self) -> None:
+        self.wait("SPEC/2-Agency.doc")
+        (self.repo / "inbox" / "SPEC" / "Notes.md").write_text(
+            self.HEADER + "# Notes\n", encoding="utf-8")
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/2-Agency.doc"])
+
+    def test_future_named_page_with_no_folder_or_header_is_still_a_document(self) -> None:
+        (self.repo / "inbox" / "SPEC").mkdir(parents=True)
+        (self.repo / "inbox" / "SPEC" / "Future.md").write_text("# Future\n", encoding="utf-8")
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/Future.md"])
+
+    def test_wiki_page_beside_a_future_folder_with_no_header_is_skipped(self) -> None:
+        self.wait("SPEC/Future/1-Home.doc")
+        (self.repo / "inbox" / "SPEC" / "Future.md").write_text("# Future\n", encoding="utf-8")
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/Future/1-Home.doc"])
+
+    def test_headed_page_with_its_folder_gone_is_skipped(self) -> None:
+        self.wait("SPEC/2-Agency.doc")
+        (self.repo / "inbox" / "SPEC" / "Future.md").write_text(
+            self.HEADER + "# Future\n", encoding="utf-8")
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/2-Agency.doc"])
+
+    def test_the_configured_future_folder_name_is_used(self) -> None:
+        self.wait("SPEC/Later/1-Home.doc")
+        (self.repo / "inbox" / "SPEC" / "Later.md").write_text("# Later\n", encoding="utf-8")
+        with mock.patch.object(DOCWATCH, "FUTURE", "Later"):
+            self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/Later/1-Home.doc"])
+
+    def test_deleted_tracked_page_is_still_skipped_beside_its_folder(self) -> None:
+        self.wait("SPEC/Future/1-Home.doc")
+        page = self.repo / "inbox" / "SPEC" / "Future.md"
+        page.write_text("# Future\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "inbox"], check=True)
+        page.unlink()
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/Future/1-Home.doc"])
+
+    def test_deleted_tracked_file_is_still_listed(self) -> None:
+        self.wait("SPEC/2-Agency.doc")
+        subprocess.run(["git", "-C", str(self.repo), "add", "inbox"], check=True)
+        (self.repo / "inbox" / "SPEC" / "2-Agency.doc").unlink()
+        self.assertEqual(DOCWATCH.todo_files(self.repo), ["inbox/SPEC/2-Agency.doc"])
 
 
 class CheckConfig(unittest.TestCase):

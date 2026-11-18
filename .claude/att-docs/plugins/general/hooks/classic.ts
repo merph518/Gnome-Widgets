@@ -131,7 +131,7 @@ export function toolInput(e: Record<string, unknown>): Record<string, unknown> {
 }
 
 // Joins the outputs of scripts that answer one event: the first refusal wins, contexts
-// add up.
+// add up, and blocks add up so every reason reaches the model.
 export function combine(outputs: readonly (HookOutput | undefined)[]): HookOutput {
   const all: HookOutput = { context: [] }
   for (const one of outputs) {
@@ -142,7 +142,7 @@ export function combine(outputs: readonly (HookOutput | undefined)[]): HookOutpu
     all.deny ??= one.deny
     all.ask ??= one.ask
     all.allow ??= one.allow
-    all.block ??= one.block
+    if (one.block !== undefined) all.block = all.block === undefined ? one.block : `${all.block}\n\n${one.block}`
     all.stop ??= one.stop
     all.decision ??= one.decision
     all.sessionTitle ??= one.sessionTitle

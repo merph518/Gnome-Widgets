@@ -7,12 +7,18 @@ jump and bookmark names that way, glued to the visible label after them, and
 templates leave a hidden paragraph such as `Exi` between tables.
 
 A run is hidden when its own properties set `w:vanish` on, and shown when
-they set it off. When they say nothing about it, the styles decide: the
-character style and the paragraph's style each resolve through the styles they
-are based on, and since `w:vanish` is a toggle property, a style that turns it
-on cancels the other when both do. When neither style says, the document
-defaults decide. `w:val` of `0`, `false` or `off` turns it off. `w:specVanish`
-and `w:webHidden` are left alone.
+they set it off. When they say nothing about it, the styles decide. Three
+styles can speak for a run: the style of the table it sits in, its paragraph's
+style, and its character style, each read through the styles it is based on. A
+paragraph that names no style, or one the file does not hold, takes the
+paragraph style marked as the default, and a table takes the default table style
+the same way. A text box inside a table cell does not take the table's style.
+The document defaults give the starting value, and since `w:vanish` is a toggle
+property, each style that sets it the other way flips it: with the defaults off,
+an odd number of styles turning it on hides the run, and with the defaults on,
+an even number of styles turning it off does. The formatting a table style gives
+its header row or banded rows is not read. `w:val` of `0`, `false` or `off`
+turns it off. `w:specVanish` and `w:webHidden` are left alone.
 
 A run that holds a field character or a field instruction stays even when
 hidden, since Word still reads a field whose code is hidden.
@@ -85,22 +91,42 @@ def vanish(rpr) -> bool | None:
     return (flag.get(W + "val") or "true").lower() not in OFF
 
 
+def style_type(style) -> str:
+    """The type a style is for; one that names none is a paragraph style."""
+    return style.get(W + "type") or "paragraph"
+
+
 class Styles:
     def __init__(self, root):
         self.by_id = {}
+        # The style each type uses when none is named; the last one marked wins.
+        self.defaults = {}
         for style in [] if root is None else root.findall(W + "style"):
-            self.by_id[style.get(W + "styleId")] = style
+            style_id = style.get(W + "styleId")
+            if style_id is None:
+                continue
+            self.by_id[style_id] = style
+            if (style.get(W + "default") or "").lower() not in ("",) + OFF:
+                self.defaults[style_type(style)] = style_id
         defaults = None if root is None else root.find(f"{W}docDefaults/{W}rPrDefault/{W}rPr")
         self.default = bool(vanish(defaults))
 
-    def run_hidden(self, char_style, para_style) -> bool:
+    def applied(self, kind, style_id):
+        """The style a paragraph or table of type KIND uses when it names STYLE_ID."""
+        style = self.by_id.get(style_id)
+        if style is not None and style_type(style) == kind:
+            return style_id
+        return self.defaults.get(kind)
+
+    def run_hidden(self, char_style, para_style, table_style=None) -> bool:
         """What the styles and the defaults say for a run that says nothing itself."""
-        found = [value for value in (self.hidden(char_style), self.hidden(para_style))
-                 if value is not None]
-        if not found:
-            return self.default
-        # A toggle property: each style level that turns it on flips it.
-        return sum(found) % 2 == 1
+        hidden = self.default
+        # A toggle property: each style level that sets it the other way flips it.
+        for style in (table_style, para_style, char_style):
+            found = self.hidden(style)
+            if found is not None and found != self.default:
+                hidden = not hidden
+        return hidden
 
     def hidden(self, style_id) -> bool | None:
         seen = set()
@@ -120,6 +146,14 @@ def style_of(properties, tag):
     return None if element is None else element.get(W + "val")
 
 
+def enclosing_table(paragraph, parents):
+    """The table PARAGRAPH sits in, or None outside one or inside a text box."""
+    element = parents.get(paragraph)
+    while element is not None and element.tag not in (W + "tbl", W + "txbxContent"):
+        element = parents.get(element)
+    return element if element is not None and element.tag == W + "tbl" else None
+
+
 def drop_hidden(root, styles: Styles) -> int:
     """Removes every hidden run under root and returns how many went."""
     parents = {child: parent for parent in root.iter() for child in parent}
@@ -135,9 +169,15 @@ def drop_hidden(root, styles: Styles) -> int:
             paragraph = parents.get(run)
             while paragraph is not None and paragraph.tag != W + "p":
                 paragraph = parents.get(paragraph)
-            para_style = None if paragraph is None else style_of(
-                paragraph.find(W + "pPr"), "pStyle")
-            hidden = styles.run_hidden(style_of(rpr, "rStyle"), para_style)
+            para_style = table_style = None
+            if paragraph is not None:
+                para_style = styles.applied("paragraph", style_of(
+                    paragraph.find(W + "pPr"), "pStyle"))
+                table = enclosing_table(paragraph, parents)
+                if table is not None:
+                    table_style = styles.applied("table", style_of(
+                        table.find(W + "tblPr"), "tblStyle"))
+            hidden = styles.run_hidden(style_of(rpr, "rStyle"), para_style, table_style)
         if hidden:
             parents[run].remove(run)
             dropped += 1

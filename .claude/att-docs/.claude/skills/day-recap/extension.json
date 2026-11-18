@@ -1,0 +1,11 @@
+{
+  "base": "day-recap",
+  "repos": [
+    "merph518/Overmind-Mod",
+    "merph518/ATT-Test-Pack-Gen",
+    "merph518/Gnome-Widgets",
+    "merph518/Laundry-Bot",
+    "merph518/Playwright-Testing",
+    "merph518/personal"
+  ]
+}

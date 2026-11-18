@@ -1,0 +1,33 @@
+{
+  "name": "efficient-browser-use",
+  "description": "Shrinks the screenshots and other pictures tool results carry before Claude reads them, so browser work costs fewer tokens. Linux, with ImageMagick",
+  "version": "0.32.4",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "shrink: Claude reads a smaller picture. describe: a Haiku subagent writes the picture out in words and Claude reads those; text in a picture then reaches Claude as words, so a page can put instructions in front of it",
+      "default": "shrink"
+    },
+    "percent": {
+      "type": "number",
+      "title": "Scale, percent",
+      "description": "How big the picture Claude reads is, as a percent of the size the tool returned",
+      "default": 75
+    },
+    "minLongSide": {
+      "type": "number",
+      "title": "Smallest long side, px",
+      "description": "A picture is never made smaller than this on its long side, and one already this size or smaller is left alone",
+      "default": 768
+    },
+    "logDecisions": {
+      "type": "boolean",
+      "title": "Log every picture",
+      "description": "Write each picture's sizes to mods-logs/efficient-browser-use.log in the Claude Code configuration folder",
+      "default": false
+    }
+  }
+}

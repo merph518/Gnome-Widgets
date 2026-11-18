@@ -47,7 +47,7 @@ HERE = Path(__file__).resolve().parent
 CONVERT_DOCS = HERE.parent / "convert-docs"
 sys.path.insert(0, str(CONVERT_DOCS))
 import convert_config  # noqa: E402  the --config reader convert-docs keeps
-from doc_paths import hyphenated  # noqa: E402  the docs naming rule convert-docs keeps
+from doc_paths import hyphenated, is_generated_page  # noqa: E402  convert-docs naming, wiki-page rules
 
 PAGE = HERE / "page.js"
 CONVERT = CONVERT_DOCS / "convert.sh"
@@ -644,13 +644,21 @@ def in_todo(path: str) -> tuple[str, ...]:
 
 
 def todo_files(repo: Path) -> list[str]:
-    """Documents waiting in the todo root, outside convert.sh's own _done and _needs_merge."""
+    """Documents waiting in the todo root, outside convert.sh's own _done and _needs_merge.
+
+    A living-wiki page is not a document, so the page beside a suite's Future folder and
+    any Markdown file under the wiki's generated header are left out.
+    """
     out = subprocess.run(
         ["git", "-C", str(repo), "ls-files", "--cached", "--others", "--exclude-standard",
          TODO_ROOT],
         check=True, capture_output=True, text=True,
     ).stdout.splitlines()
-    return sorted(p for p in out if len(in_todo(p)) > 1 and not in_todo(p)[0][0] == "_")
+    return sorted(
+        p for p in out
+        if len(in_todo(p)) > 1 and not in_todo(p)[0][0] == "_"
+        and not is_generated_page(repo / p, FUTURE)
+    )
 
 
 def commit_day(path: str, repo: Path) -> str | None:

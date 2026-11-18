@@ -1,0 +1,7 @@
+{
+  "name": "runner-health",
+  "description": "Shows a row above the prompt when a self-hosted CI runner is stopped or offline, a job waits too long for one, or a runner disk is low",
+  "version": "0.32.4",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

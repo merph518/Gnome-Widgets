@@ -16,11 +16,45 @@ export type GeneralLoop = {
   reason?: string | null
 }
 
+// This session's oversee loop board, as `loop.py --session <id> board` prints it: the
+// issue being worked, the queue in serve order, and the finished issues, newest first.
+// A null field was empty or "-" in the file.
+export type GeneralBoard = {
+  session: string
+  state: string
+  repo: string | null
+  current: {
+    issue: number
+    title: string | null
+    phase: 'working' | 'waiting on runs'
+    branch: string | null
+    since: string | null
+  } | null
+  queued: {
+    issue: number
+    title: string | null
+    area: string | null
+    blockers: string | null
+    waits: string | null
+  }[]
+  finished: {
+    issue: number
+    title: string | null
+    status: string
+    pr: number | null
+    note: string | null
+    at: string | null
+  }[]
+  // Finished issues past the board's limit.
+  more: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     general: {
       session: GeneralSession | null
       loop: Shaped<GeneralLoop | null>
+      board: Shaped<GeneralBoard | null>
     }
   }
 }

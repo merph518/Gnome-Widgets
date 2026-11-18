@@ -34,5 +34,40 @@ class BulletGlyphTest(unittest.TestCase):
         self.assertEqual(STAMP.clean(text), text)
 
 
+class PagesLineTest(unittest.TestCase):
+    def layout(self, **kept):
+        return STAMP.pages.Layout(
+            10, [], "as LibreOffice lays the document out", **kept)
+
+    def test_a_plain_layout_names_its_source(self):
+        self.assertEqual(STAMP.pages_line(self.layout(), []),
+                         "- Pages: 10, as LibreOffice lays the document out")
+
+    def test_a_disagreement_is_named(self):
+        self.assertEqual(
+            STAMP.pages_line(self.layout(marked=6, stored=10), []),
+            "- Pages: 10, as LibreOffice lays the document out"
+            " (Word's last layout marked 6, its stored count says 10)")
+
+    def test_the_disagreement_comes_before_the_missed_pages(self):
+        self.assertEqual(
+            STAMP.pages_line(self.layout(marked=6, stored=10), [4]),
+            "- Pages: 10, as LibreOffice lays the document out"
+            " (Word's last layout marked 6, its stored count says 10),"
+            " no marker for page 4, whose opening text was not found")
+
+    def test_an_unread_picture_is_named_beside_the_missed_pages(self):
+        self.assertEqual(
+            STAMP.pages_line(self.layout(), [4], unread=1),
+            "- Pages: 10, as LibreOffice lays the document out,"
+            " no marker for page 4, whose opening text was not found,"
+            " and the document holds a picture whose text was not read,"
+            " which may be where it opens")
+
+    def test_an_unread_picture_with_every_page_found_says_nothing(self):
+        self.assertEqual(STAMP.pages_line(self.layout(), [], unread=1),
+                         "- Pages: 10, as LibreOffice lays the document out")
+
+
 if __name__ == "__main__":
     unittest.main()
