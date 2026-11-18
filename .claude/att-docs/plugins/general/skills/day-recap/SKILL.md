@@ -42,10 +42,8 @@ python3 <recap-script> --repo owner/name --repo owner/other --format spoken
 3. Needs the user: open pull requests with the review label that GitHub reports as
    mergeable and not draft.
 
-Sessions waiting on a question or prompt are not included. The voice bridge's session list
-(`speechctl sessions --json`) records only whether a session is busy, not whether it is
-waiting on the user, so there is no reliable source for it. When the user asks about
-sessions, use the voice bridge's own tools instead.
+Sessions waiting on a question or prompt are not included, because nothing the recap reads
+records whether a session is waiting on the user.
 
 ## How to say it
 

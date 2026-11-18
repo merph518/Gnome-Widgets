@@ -45,7 +45,6 @@ calls, naming the tool missing and the substitute used:
 | `EnterWorktree` | The Git fallback under Overrides, Section 3: a worktree at `.claude/worktrees/<name>` from `origin/main`. `.claude/worktrees/` is the one folder inside the main checkout that the main-checkout guard exempts |
 | `AskUserQuestion` | The harness's own ask tool, with the same rule: never ask only in reply text |
 | The Skill tool | Read the skill by its path under `.claude/skills/` or `plugins/*/skills/`, or by its `skill://<name>` URL, and follow it |
-| `session_title.py` | Skip the session title and status when the script is absent; the rename never gates the work |
 | `ListAgents` | Decide whether another session holds a unit or a pull request from the sources Section 3 lists: the issue's `In Progress` label, the open pull requests and their files, the oversee ledger and the file claims |
 
 ## Base
@@ -77,7 +76,7 @@ Harness substitutes. Never ask only in reply text: the user does not see it ther
 | `<shell-text-note>` | Under Overrides, Section 3 |
 | `<branch-types>` | `feat`, `fix`, `chore`, `docs`, `ci` |
 | `<default-branch>` | `main`. Never merge, except a pin-only pull request under Added gates, Post-merge pin; never push to `main`, never force-push |
-| `<follow-up-note>` | `gh issue create` in `merph518/Overmind`. When a write is refused, put the text in the pull request body under `Follow-ups` |
+| `<follow-up-note>` | `gh issue create` in `merph518/Overmind-Mod`. When a write is refused, put the text in the pull request body under `Follow-ups` |
 | `<sampling-note>` | Not applicable here, because nothing is dispatched; Section 6 below runs every affected test file |
 | `<writing-rules>` | `repo-writing`, under Added gates |
 | `<repo-constraints>` | None beyond the writing rules and the README rule under Repository notes |
@@ -143,13 +142,13 @@ There is no label script. Add a label with the response as the read-back; it lis
 issue's labels:
 
 ```bash
-gh api repos/merph518/Overmind/issues/<N>/labels -f "labels[]=In Progress"
+gh api repos/merph518/Overmind-Mod/issues/<N>/labels -f "labels[]=In Progress"
 ```
 
 Remove one the same way:
 
 ```bash
-gh api -X DELETE repos/merph518/Overmind/issues/<N>/labels/In%20Progress
+gh api -X DELETE repos/merph518/Overmind-Mod/issues/<N>/labels/In%20Progress
 ```
 
 A label that does not exist is never created. If the add is refused for that reason,
@@ -279,7 +278,7 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   merges. The one exception is a pin-only bump pull request, under Added gates, Post-merge
   pin.
 - `gh pr edit` fails on a Projects classic deprecation. Edit a body with
-  `gh api -X PATCH repos/merph518/Overmind/pulls/<n> -F "body=@<file>"`.
+  `gh api -X PATCH repos/merph518/Overmind-Mod/pulls/<n> -F "body=@<file>"`.
 - Mergeability: `gh pr view <n> --json mergeable,mergeStateStatus`. Resolve a conflict by
   merging `origin/main` into the branch, never by rebase plus force-push.
 - Self review: every change is reviewed, including the final fix (see Plan and review
@@ -331,14 +330,14 @@ A diff with no executable code (Markdown, JSON data) runs no test; the report sa
   and read it back:
 
   ```bash
-  gh api repos/merph518/Overmind/issues/<n>/labels -f "labels[]=Manual Review Needed"
+  gh api repos/merph518/Overmind-Mod/issues/<n>/labels -f "labels[]=Manual Review Needed"
   gh pr view <n> --json labels --jq '[.labels[].name]'
   ```
 
   A report that calls a pull request ready without the label reading back is wrong; fix
   the label first. A label on this session's own pull request whose checks are pending or
   red is wrong too: remove it. A commit pushed after the label is a new change: remove the label with
-  `gh api -X DELETE repos/merph518/Overmind/issues/<n>/labels/Manual%20Review%20Needed`
+  `gh api -X DELETE repos/merph518/Overmind-Mod/issues/<n>/labels/Manual%20Review%20Needed`
   (a 404 means it was not on yet) and add it again only once the review of that commit
   is clean and its checks have passed.
 - Ready check: at the start of every pass of a loop over issues, and before any final
@@ -431,19 +430,18 @@ done until it finishes or is skipped.
     that tag. Run nothing, and report the README's remove, add and install commands to the
     user, because removing the marketplace uninstalls the plugins this session runs from.
   - Otherwise run `claude plugin marketplace update att-docs`, then
-    `claude plugin update <name>@att-docs --scope user` for `att-docs`, `general` and
-    `voice`. Add the same update with `--scope project` or `--scope local` for each plugin
-    that `~/.claude/plugins/installed_plugins.json` lists for the main checkout's path: from
+    `claude plugin update <name>@att-docs --scope user` for `att-docs` and `general`.
+    Add the same update with `--scope project` or `--scope local` for each plugin that
+    `~/.claude/plugins/installed_plugins.json` lists for the main checkout's path: from
     a worktree the command reaches the main checkout's entry, and no command reaches a
-    worktree's own entry. A session in another repository with its own entries gets the
-    commands from the `voice` plugin's `SessionStart` hook, which reports an installed
-    plugin that is behind.
+    worktree's own entry. For each other repository with entries in that file, report the
+    same update commands, with that entry's scope, for the user to run there.
   - The update applies to sessions started afterward. Report what ran and its result.
 - **Find every repository that pins Overmind.** List the owner's repositories with
   `gh repo list merph518 --no-archived --limit 100 --json name --jq '.[].name'` (raise the
   limit when it returns 100 names) and keep each one whose lock names Overmind:
   `gh api repos/merph518/<name>/contents/.claude/att-docs.lock -H "Accept: application/vnd.github.raw"`
-  has a `repo=` line naming `merph518/Overmind` or an earlier location of it. A 404 means
+  has a `repo=` line naming `merph518/Overmind-Mod` or an earlier location of it. A 404 means
   the repository does not pin Overmind. Read the list fresh each time. Compare the
   result with `.github/consumers.json` and report drift both ways to the user: a repository
   that pins Overmind but is missing from the file, so it can be added, and a listed
@@ -517,7 +515,7 @@ done until it finishes or is skipped.
 release-please reads conventional commits on `main`. Never bump a version, and never
 edit `.release-please-manifest.json`, `CHANGELOG.md`, or a `plugin.json` version by hand.
 The one exception is a resync: when a tag was cut by hand and the manifest is behind it,
-a `chore:` pull request sets the manifest and the three `plugin.json` versions to that
+a `chore:` pull request sets the manifest and the two `plugin.json` versions to that
 tag. It changes no other version.
 
 ## Repository notes

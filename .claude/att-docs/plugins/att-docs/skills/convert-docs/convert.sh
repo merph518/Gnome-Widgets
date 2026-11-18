@@ -121,6 +121,11 @@ log() { printf '%s\n' "$*"; }
 # falls back to a raw HTML table whenever a cell holds a list, a second
 # paragraph, a line break, or a row or column span, and every one of those is
 # ordinary in the control tables these documents are built from.
+#
+# The writer numbers every list with digits, so a list Word letters a, b, c
+# would arrive as 1, 2, 3. The last filter writes Word's letter or roman numeral
+# into the item instead. It runs after the table filter, which has already
+# turned a cell's list into text.
 PANDOC_TO='gfm-raw_html-raw_attribute'
 
 run_pandoc() {
@@ -129,11 +134,15 @@ run_pandoc() {
     # The HTML reader keeps a div or a span as a structural node unless it is
     # told not to, and those are what the writer then has to render.
     html) from='html-native_divs-native_spans' ;;
-    # Pandoc counts and nests a Word list differently from Word, so the
-    # numbering is rewritten into a form it draws the way Word does. A file the
-    # rewrite cannot read, such as an RTF file tried here first, goes to Pandoc
-    # as it is.
+    # Word never prints its hidden text, and Pandoc writes it as any other
+    # text, so the hidden runs come out first. Then, since Pandoc counts and
+    # nests a Word list differently from Word, the numbering is rewritten into
+    # a form it draws the way Word does. A file a step cannot read, such as an
+    # RTF file tried here first, goes on as it is.
     docx)
+      if python3 "$HERE/hidden-text.py" "$input" "$WORK/visible.docx" 2>/dev/null; then
+        input="$WORK/visible.docx"
+      fi
       if python3 "$HERE/list-numbers.py" "$input" "$WORK/numbered.docx" 2>/dev/null; then
         input="$WORK/numbered.docx"
       fi
@@ -143,6 +152,7 @@ run_pandoc() {
     --columns=100 --wrap=auto \
     --lua-filter="$HERE/drop-images.lua" \
     --lua-filter="$HERE/flatten-tables.lua" \
+    --lua-filter="$HERE/list-markers.lua" \
     "$input" -o "$output" 2>>"$WORK/pandoc.err"
 }
 
@@ -274,13 +284,15 @@ spreadsheet_to_markdown() {
 
 # Turns one source file into Markdown, whatever it takes to get there. A route
 # that produces an intermediate the provenance ladder can read better than the
-# original leaves its path in READABLE.
+# original leaves its path in READABLE, and one whose intermediate counts the
+# lists as Word does leaves that path in NUMBERED.
 to_markdown() {
   local input="$1" output="$2"
   local extension="${input##*.}"
-  local base
+  local base numbered
 
   READABLE="$input"
+  NUMBERED="$input"
 
   case "$(printf '%s' "$extension" | tr '[:upper:]' '[:lower:]')" in
     docx|docm|odt|rtf)
@@ -297,7 +309,17 @@ to_markdown() {
       base="$(basename "${input%.*}").docx"
       [ -f "$WORK/doc/$base" ] || return 1
       READABLE="$WORK/doc/$base"
-      run_pandoc docx "$WORK/doc/$base" "$output"
+      # LibreOffice gives each override of a list a definition of its own, where
+      # Word keeps one count for the list, so the lists are read back from the
+      # original before Pandoc counts them. When that step fails, Pandoc reads
+      # LibreOffice's copy as it stands.
+      numbered="$WORK/doc/$base"
+      if python3 "$HERE/doc-lists.py" "$input" "$WORK/doc/$base" "$WORK/doc-lists.docx" \
+        2>/dev/null; then
+        numbered="$WORK/doc-lists.docx"
+        NUMBERED="$numbered"
+      fi
+      run_pandoc docx "$numbered" "$output"
       ;;
     htm|html)
       run_pandoc html "$input" "$output"
@@ -519,6 +541,11 @@ for suite_dir in "${suites[@]}"; do
     # Held before the secondary check below, which calls the same routes and
     # would otherwise leave its own intermediate here.
     primary_readable="$READABLE"
+    primary_numbered="$primary"
+    if [ "$NUMBERED" != "$primary" ]; then
+      primary_numbered="$WORK/primary-lists.${NUMBERED##*.}"
+      cp "$NUMBERED" "$primary_numbered"
+    fi
 
     # A PDF whose font carries no map back to characters reaches here as the
     # glyph codes themselves, which read as text to every other check. The
@@ -597,7 +624,11 @@ for suite_dir in "${suites[@]}"; do
     done
     paged="$(pages_source_of "${sources[@]}")"
     args+=(--pages-from "$paged")
-    [ "$paged" = "$primary" ] && args+=(--pages-renderable "$primary_readable")
+    # The ladder lays pages out from the copy whose lists the Markdown carries,
+    # so a page that opens on a renumbered item still finds its opening line.
+    renderable="$primary_readable"
+    [ "$primary_numbered" != "$primary" ] && renderable="$primary_numbered"
+    [ "$paged" = "$primary" ] && args+=(--pages-renderable "$renderable")
     if ! python3 "$HERE/stamp.py" --config "$CONFIG" --markdown "$body" \
       --out "$OUT/$suite/$page.md" --converted "$CONVERTED" "${args[@]}"; then
       log "     stamping failed, left in place"
@@ -608,11 +639,12 @@ for suite_dir in "${suites[@]}"; do
     # A rule cites the source's list numbers, so a converted list that counts
     # differently is reported. The document is still written: the numbers are a
     # thing to correct in the Markdown, not a reason to doubt the rest of it.
+    # A route that rebuilt the source's lists hands the check its rebuilt copy.
     case "$(printf '%s' "${primary##*.}" | tr '[:upper:]' '[:lower:]')" in
       docx|docm|doc|dot)
         status=0
-        listed="$(python3 "$HERE/check-list-numbers.py" "$OUT/$suite/$page.md" "$primary" \
-          2>&1)" || status=$?
+        listed="$(python3 "$HERE/check-list-numbers.py" "$OUT/$suite/$page.md" \
+          "$primary_numbered" 2>&1)" || status=$?
         if [ "$status" -eq 2 ]; then
           printf '%s\n' "$listed" | sed 's/^/     /'
           log "     list numbers differ from the source"

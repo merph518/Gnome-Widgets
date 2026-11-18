@@ -249,10 +249,10 @@ as A "$LIVE" finish 1 done - "ok"
 check "$(as A "$LIVE" next | first)" "EMPTY" "issues outside the milestone are never served"
 
 fresh
-mk 1 "Titled apart" "$RA" "Voice Bridge" | fixture
-as A "$LIVE" init --milestone Voice > /dev/null 2> "$SANDBOX/err"
+mk 1 "Titled apart" "$RA" "Wave Three" | fixture
+as A "$LIVE" init --milestone Wave > /dev/null 2> "$SANDBOX/err"
 check "$(order)" "" "a milestone title matches whole, not as a prefix"
-check "$(grep -c 'no open issue in milestone "Voice"' "$SANDBOX/err")" 1 \
+check "$(grep -c 'no open issue in milestone "Wave"' "$SANDBOX/err")" 1 \
   "an empty milestone warns on stderr"
 check "$(as A "$LIVE" next 2> /dev/null | first)" "EMPTY" "and next ends at EMPTY"
 

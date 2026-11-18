@@ -13,9 +13,9 @@
       "description": "Workflow skills that are not tied to one subject (implementing issues, working the backlog) and the repo hooks that read a repository's extension.json"
     },
     {
-      "name": "voice",
-      "source": "./plugins/voice",
-      "description": "The voice session hooks that feed Baton and the skill that answers a relayed voice request"
+      "name": "effort-optimizer",
+      "source": "./plugins/effort-optimizer",
+      "description": "Suggests a reasoning effort level for each prompt above the prompt, and switches to it on request or by itself in auto mode"
     }
   ]
 }

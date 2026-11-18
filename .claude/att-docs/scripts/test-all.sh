@@ -5,7 +5,9 @@
 #   bash scripts/test-all.sh --tests-only   run only the tests
 #   bash scripts/test-all.sh --checks-only  run only the static checks
 #
-# A test file is *.test.mjs (node --test), *_test.py (python3) or *_test.sh (bash).
+# A test file is *.test.mjs (node --test), *_test.py (python3), *_test.sh (bash), or a
+# plugin's hooks/*.test.tsx (claude plugin test on the plugin folder, skipped where the
+# claude command is not installed).
 # node_modules, .git and .claude/worktrees are skipped. A failing file does not stop
 # the run; the script prints one line per file and a summary, and exits 1 if anything
 # failed.
@@ -38,6 +40,7 @@ run_one() {
     node) node --test "$file" >"$log" 2>&1 </dev/null || status=$? ;;
     python) python3 "$file" >"$log" 2>&1 </dev/null || status=$? ;;
     bash) bash "$file" >"$log" 2>&1 </dev/null || status=$? ;;
+    mod) claude plugin test "$file" >"$log" 2>&1 </dev/null || status=$? ;;
   esac
   if [ "$status" -eq 0 ]; then
     echo "PASS  $file"
@@ -63,6 +66,12 @@ if [ "$run_tests" -eq 1 ]; then
   while IFS= read -r f; do run_one node "$f"; done < <(find_tests '*.test.mjs')
   while IFS= read -r f; do run_one python "$f"; done < <(find_tests '*_test.py')
   while IFS= read -r f; do run_one bash "$f"; done < <(find_tests '*_test.sh')
+  if command -v claude >/dev/null; then
+    while IFS= read -r f; do run_one mod "$f"; done < <(
+      find_tests '*.test.tsx' | grep '^plugins/[^/]*/hooks/' | cut -d/ -f1-2 | sort -u)
+  else
+    echo "SKIP  hooks module tests (no claude command)"
+  fi
   echo
   echo "Tests: $passed passed, $failed failed"
 fi
@@ -76,15 +85,6 @@ if [ "$run_checks" -eq 1 ]; then
     echo "Static checks: failed"
     failed=$((failed + 1))
     failed_names+=("static checks")
-  fi
-  echo
-  echo "== Skill tool names"
-  if python3 -I scripts/bridge-tools/skill_tools.py; then
-    echo "Skill tool names: passed"
-  else
-    echo "Skill tool names: failed"
-    failed=$((failed + 1))
-    failed_names+=("skill tool names")
   fi
 fi
 

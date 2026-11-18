@@ -1,7 +1,7 @@
 # Overmind
 
 The base for my Claude Code skills, at
-[merph518/Overmind](https://github.com/merph518/Overmind). Every skill I use lives
+[merph518/Overmind-Mod](https://github.com/merph518/Overmind-Mod). Every skill I use lives
 here once, in general form, and works without any particular repository. Each
 repository I work in extends the skills it needs with a thin layer of its own: its
 paths, its naming rules, its gates, its tracker. The skill itself is never edited in
@@ -59,8 +59,6 @@ This repository is private and for my own use.
 | `general` | `day-recap` | Recap the day across the configured repositories: what merged, what is still open, what needs you |
 | `general` | `wyatt-review-phase-2` | Fix every finding on a junior engineer's pull request on a pushed fix branch, one commit per fix, and write a wiki page that teaches what was wrong and why |
 | `general` | `azdo-stories` | Migrate named issues to AZDO User Stories, or named User Stories to issues, and follow a merged pull request through to its paired story, with every write the user's choice |
-| `voice` | `voice-bridge-hooks` | Session hooks that read replies aloud, announce held stops, and relay voice requests |
-| `voice` | `voice-request` | Answer a request the user spoke on their phone and Baton relayed |
 
 ## Layout
 
@@ -119,12 +117,10 @@ repository root, and the permission rules that let sessions file and comment on 
 issues without a prompt.
 
 Skills are grouped into plugins by subject. `att-docs` holds the documentation
-skills, `general` holds the workflow skills that serve any repository (implementing
-issues), and `voice` holds the hooks that feed Baton and the skill that answers a relayed
-request. All three install at user scope; `voice` is still its own group because its
-subject is different. Further groups sit beside them and
-follow the same layout and the same extension contract. A group's `hooks/hooks.json`
-registers hooks when the plugin is installed.
+skills, and `general` holds the workflow skills that serve any repository (implementing
+issues). Both install at user scope. Further groups sit beside them and follow the same
+layout and the same extension contract. A group's `hooks/hooks.json` names its hooks
+module, `hooks/register.tsx`, which registers its hooks when the plugin is installed.
 
 A skill links to a shared file with a relative path, `../../shared/<file>`. The link
 resolves the same way from a vendored copy and from a plugin cache.
@@ -156,30 +152,10 @@ parses, every `SKILL.md` has a `name` and a `description`, relative Markdown lin
 resolve, and every Python, JavaScript and shell file passes a syntax check. Pass
 `--tests-only` or `--checks-only` to run just one half.
 
-The same step runs `scripts/bridge-tools/skill_tools.py`, which compares the Baton tool
-and argument names in `README.md` and the two voice skills with `bridge-tools.json`, the
-tool list taken from Baton's definitions. A skill names a tool in a code span, and the
-arguments it takes in call form, as in `send(anyway)` or `read_pull_request(repo)`. The
-check fails on a tool or an argument that is not in the list, and on another Markdown file
-that names a Baton tool without being added to `SCANNED` in the script. It warns about
-an argument of a covered tool that no call form names. After a Baton release changes its
-tools, run `bash scripts/bridge-tools/refresh.sh` from a fetched Code Conductor checkout
-(`~/Code/Code-Conductor`, or pass its path), commit the new `bridge-tools.json`, and fix
-what the check then reports.
-
 The `test-all` check in `.github/workflows/ci.yml` runs this same command on every pull
 request and on each push to `main`. `shellcheck` also runs when it is installed, but
 its findings are advisory and never fail the run. The runners need `node`, `python3`,
 `jq` and `bash`.
-
-The same job runs `scripts/bridge-tools/drift.sh`, which compares `bridge-tools.json` with
-Baton's tool list at the main branch of the Code-Conductor repository. It clones that
-branch with a token that can read it, rebuilds the list with `refresh.sh` into a scratch
-file, and prints a warning that names each tool and argument that was added or removed. A
-difference never fails the job: it means `bridge-tools.json` is behind, so refresh it as
-above. A missing token, a failed clone, or a rebuild that fails prints a notice and skips
-the comparison. The script needs `gh`, `git`, `node`, `python3` and `timeout`. To run it
-by hand, use `GH_TOKEN=$(gh auth token) bash scripts/bridge-tools/drift.sh`.
 
 `.github/workflows/pack-compare.yml` is run by hand and compares two staged test packs on a
 desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files.
@@ -195,7 +171,7 @@ desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files
    lists the paths to keep; the copy then holds those paths plus `scripts/consumer`
    and `.gitattributes`.
 2. **Pin by tag and tree.** `.claude/att-docs.lock` is a plain `key=value` file
-   that records the repository (`merph518/Overmind`), the tag, the commit SHA, and
+   that records the repository (`merph518/Overmind-Mod`), the tag, the commit SHA, and
    the root tree SHA of the snapshot. A pruned copy also records `paths=` and
    `copy_tree=`, the tree of what was copied. The check script compares the tree of
    `.claude/att-docs` with the recorded one, so a hand edit, a stray file, or a
@@ -209,8 +185,8 @@ desktop runner. `docs/runners/RunnerRegistration.md` says how to stage the files
    settings so a second copy at a different version is not loaded.
 
 The repository name is read from the lock, so a move or rename of this repository
-changes one line there. A lock that still names an earlier location needs that line
-updated before its next sync.
+changes one line there. A lock that still names an earlier location moves to the new
+one in a pin pull request, under the check's move rule below.
 
 ### Sync and check scripts
 
@@ -276,9 +252,9 @@ A parent folder that is a symbolic link is refused. A sync refuses uncommitted o
 files under the folder, but removes ignored files there along with the old copy.
 The folder is always read as a literal path, and a name that starts with `:` is
 refused. The scripts need LF line endings, so the repository's `.gitattributes`
-sets `eol=lf` for `*.sh`, `*.py`, `*.mjs`, `*.template` and the extensionless
-`speechctl`; a consumer that uses `core.autocrlf` gets those rules for the vendored
-folder from the snapshot's `.gitattributes`, which every sync vendors as
+sets `eol=lf` for `*.sh`, `*.py`, `*.mjs` and `*.template`; a consumer that uses
+`core.autocrlf` gets those rules for the vendored folder from the snapshot's
+`.gitattributes`, which every sync vendors as
 `<prefix>/.gitattributes`, pruned copies included. The sync refuses a
 tag, URL, repository, or prefix that git or the filesystem could misread (an
 option, a refspec, `.git`, a folder that resolves outside the repository). A URL
@@ -287,7 +263,8 @@ given in `ATT_DOCS_URL` is used for the fetch and never written to the lock; onl
 
 The check also holds the lock to the pinned tag. It compares the vendored folder
 with `copy_tree=` when the lock has one, else with `tree=`, and then compares the lock
-with the lock at the base commit: `repo=`, `url=` and `prefix=` must be unchanged, and the
+with the lock at the base commit: `url=` and `prefix=` must be unchanged, `repo=` changes
+only under the move rule below, and the
 vendored tree cannot change unless `commit=` moves. When the lock and the vendored tree equal the
 base's, the check passes with no fetch. Otherwise it fetches `refs/tags/<tag>` at depth
 1 into a scratch repository and requires the tag's commit to equal `commit=` and the
@@ -307,6 +284,17 @@ wrapper passes its arguments through. These settings control the check:
 
 A mismatch between the tag and the lock fails in every mode that fetches.
 
+Moving `repo=` to a repository the source moved to passes only when the check can fetch
+from the new repository: it fails with `ATT_DOCS_REMOTE=off`, when the new repository
+cannot be fetched (in `try` mode too, so the job needs `OVERMIND_READ_TOKEN` for a private
+source), and when either lock has `url=`. Besides the pinned tag, the new repository must
+hold the base lock's tag at the base lock's commit, which shows it carries the same
+releases. `overmind-sync.sh` writes the new `repo=` when `ATT_DOCS_REPO` names it, and the
+pin script does the same with `PIN_REPO`. The check runs from the base commit, so the move
+takes two pins. The first pins a tag that holds this rule and leaves `repo=` as it is.
+The second moves `repo=`. `merge_pin_pr.py` never merges a pin that moves `repo=`; it is
+left for review.
+
 Moving `url=` or `prefix=` is a deliberate change: the check fails in the pull request
 that makes it, unless `ATT_DOCS_BASE` names a commit that already holds the new values.
 The check script that runs is the one at the base commit, so a change to the script
@@ -319,8 +307,8 @@ repository. These two commands work for a repository with no lock yet or a
 `key=value` lock; a repository with a JSON lock converts it first (below):
 
 ```
-git fetch --no-tags https://github.com/merph518/Overmind.git refs/tags/<tag>
-git show FETCH_HEAD:scripts/consumer/overmind-sync.sh | ATT_DOCS_REPO=merph518/Overmind bash -s -- <tag>
+git fetch --no-tags https://github.com/merph518/Overmind-Mod.git refs/tags/<tag>
+git show FETCH_HEAD:scripts/consumer/overmind-sync.sh | ATT_DOCS_REPO=merph518/Overmind-Mod bash -s -- <tag>
 ```
 
 Run the script from the tag being synced: it is the one that writes `copy_tree=`
@@ -336,50 +324,40 @@ rerunning it is safe. The sync then works from the converted lock.
 The cases for the three scripts are in `scripts/consumer/overmind-consumer_test.sh`.
 They run against a local repository in place of the network.
 
-A machine installs all three plugins at user scope, so every session on it has the
+A machine installs both plugins at user scope, so every session on it has the
 skills, including a session in this repository. The marketplace is pinned to a release
 tag with `#<tag>` after the repository name. This pins it the way `att-docs.lock` pins a
 vendored copy:
 
 ```
-claude plugin marketplace add merph518/Overmind#<tag>
+claude plugin marketplace add merph518/Overmind-Mod#<tag>
 claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
-claude plugin install voice@att-docs --scope user
 ```
 
 The pin moves by hand. To move it, remove the marketplace (which uninstalls its
-plugins), add it again with the new tag, and install the three plugins again:
+plugins), add it again with the new tag, and install both plugins again:
 
 ```
 claude plugin marketplace remove att-docs
-claude plugin marketplace add merph518/Overmind#<new tag>
+claude plugin marketplace add merph518/Overmind-Mod#<new tag>
 claude plugin install att-docs@att-docs --scope user
 claude plugin install general@att-docs --scope user
-claude plugin install voice@att-docs --scope user
 ```
 
 Adding the marketplace again without removing it keeps the old tag, and
 `claude plugin marketplace update` stays on the tag it was added with.
 
 A plugin stays at the version it was installed or last updated at. A release does not reach a
-machine until someone runs the commands above, so the `voice` plugin's `SessionStart` hook,
-`hooks/plugin_version_check.py`, checks for one when a session starts. It compares the
-version each `att-docs` plugin is installed at for the session's project with the newest
-version in the marketplace clone's `plugin.json` files. It also compares it with the newest
-`v*` release tag on the clone's origin. The tag lookup runs at most every six hours, never
-prompts for a credential, and gives up after three seconds.
-
-A plugin that is behind gets a message to the user and to the session. The message holds the
-commands for a pinned or an unpinned marketplace, in the scope the plugin is installed in. A
-new session after the update lists the new skills. A plugin that the project turns off in
-`enabledPlugins`, a version that cannot be read and a lookup that fails produce no message.
-The hook exists only in a `voice` plugin that already holds it, so the first update to a
-release with the hook is by hand.
+machine until someone runs the commands above. To see whether a machine is behind, compare
+the version each plugin from the `att-docs` marketplace is installed at, in
+`~/.claude/plugins/installed_plugins.json`, with the newest `v*` release tag. A new session
+after the update lists the new skills.
 
 A repository that vendors this one should turn the `att-docs` and `general` plugins off
 in its own `.claude/settings.json`, so their skills don't load a second time, possibly at a
-different version from the vendored copy. Add this block:
+different version from the vendored copy. A project setting overrides the user setting,
+so this block does it:
 
 ```json
 {
@@ -390,37 +368,15 @@ different version from the vendored copy. Add this block:
 }
 ```
 
-A project setting overrides the user setting. `voice` stays on, because its hooks are
-what give the repository's sessions the reply relay and spoken replies. A repository
-that also extends a `voice` skill loads both: the plugin's copy carries the `voice:`
-prefix, and the extension keeps the plain name.
-
 See [Install and manage plugins](https://code.claude.com/docs/en/discover-plugins)
 for the install scopes and the `#ref` form.
-
-The `voice` plugin registers the voice hooks, which feed Baton (the voice bridge service in
-`merph518/Code-Conductor`). Installed at user scope, it gives a
-session in any repository the reply relay, spoken replies and attention announcements,
-with no hook entries in the repository. A repository adds its own values with an extension file at
-`.claude/skills/voice-bridge-hooks/extension.json`. See the `voice-bridge-hooks`
-skill's Wiring section. A session can also be read in a voice of its own: the speech widget
-saves the choice as `<session id>.voice` in the hook's state folder, and the hook speaks that
-session's lines in it, falling back to the global voice when the name is not installed.
-
-Every `send` through Baton reaches a session as `Voice request: `, then a fixed
-header, then the phone voice chat's wording of what the user said. The header is a claim, not
-proof: it says Baton posted the message from the user's phone, explains why Claude
-Code labels it as from another session, and says the message is not the user's confirmation,
-approves no permission prompt and grants no escalation. A consumer needs the `voice` plugin
-installed and kept current with `claude plugin update voice@att-docs` after a version bump.
-`update_bridge` updates a Baton run from a checkout, along with the hooks it vendors (a
-packaged Baton is updated with apt), but the skill loads from the plugin install. Do not also copy `voice-request` into `.claude/skills/`. A vendored copy under
-`.claude/att-docs/` is not loaded as a skill.
 
 The `general` plugin registers repo hooks for pull request testing, merge-watch
 reminders, stray-file checks, tests and formatting on edit, and persistent implement
 loops. Hook settings live in `.claude/skills/repo-hooks/extension.json`. The loop and
 stray-file hooks are enabled by default; the others require a section in that file.
+While a session's oversee loop is active or paused, a row above the prompt shows it with
+a Pause or Resume button.
 A repository that vendors this one registers `plugins/general/hooks/run.sh` in its own
 settings. See the `repo-hooks` skill.
 
@@ -440,25 +396,6 @@ request opens. Claims are files in the main checkout's git directory, shared by
 worktrees and held while the claiming process runs, or for twelve hours when no process
 is named. The `implement` skill's `<claim-script>` placeholder names the command; a
 repository that leaves it out skips the claim checks.
-
-Baton, the voice bridge server, is in `merph518/Code-Conductor` under `baton/`. The extension
-file at `.claude/skills/voice-bridge-hooks/extension.json` also names Baton's repository
-values: `inProgressLabel`, `mainBranch`, `reviewLabel` and `startRequest` (with `<N>` for
-the issue number). A field left out keeps its default, and the repository the file sits in is
-the one Baton lists sessions under. A packaged Baton reports its version from `update_bridge`
-and is updated with apt; a Baton run from a Code Conductor checkout fast-forwards that
-checkout and restarts, and fast-forwards the served repository's checkout too when it is
-clean and on its main branch, since that repository's scripts and tool module are what Baton
-runs for it.
-
-A repository adds tools of its own with `"bridge": { "module": "<path>" }` in the same file.
-Baton imports that module, relative to the repository, and calls its
-`register(core)`, which returns `{ tools: [{ definition, call(args, context) }] }`. `core`
-holds `repoRoot()`, the extension file's `extension` fields, and a `helpers` object with
-Baton's own `runFile`, `runGh`, `runGit`, `spawnCaptured`, `ghJson`, `takeReadBack` and
-`readBackRefusal`, among others. `context` has the call's `paths`, `config`, `pages`, `now`,
-`gh`, `git` and `tracker`, plus any option the caller passes. A repository with no module is
-offered none of them.
 
 ## Extension contract
 
@@ -501,7 +438,6 @@ Scripts that ship here:
   through `config-read.py`, so they need only `python3`.
 - `acronym-guide`: scan, dictionary writer, term verifier
 - `living-wiki`: `wiki.mjs`
-- `voice-bridge-hooks`: the hook scripts
 - `repo-hooks`: the gate, reminder, test and format hooks, in `plugins/general/hooks/`
 
 ### Shims
@@ -547,7 +483,7 @@ and publishes the GitHub release with its changelog.
 
 A tag cut by hand, which only happens while the workflow is off, leaves the manifest
 behind it. A `chore:` pull request then sets `.release-please-manifest.json` and the
-three `plugin.json` versions to that tag, and release-please counts commits from there.
+two `plugin.json` versions to that tag, and release-please counts commits from there.
 
 The version comes from the commit subjects on `main`, written as conventional commits.
 While the version is below 1.0:
@@ -564,7 +500,7 @@ With a merge commit, each commit on the branch counts, and a subject that is not
 conventional commit is left out.
 
 `.release-please-manifest.json` holds the current version. Each release also writes it
-into the three `plugin.json` files, so every plugin carries the repository's version.
+into the two `plugin.json` files, so every plugin carries the repository's version.
 
 The workflow's token comes from the automation GitHub App, described under
 [Automation GitHub App](#automation-github-app).
@@ -622,6 +558,14 @@ given, must be listed in `.github/consumers.json`:
 ```bash
 gh workflow run pin-consumers.yml -f tag=v0.32.0
 gh workflow run pin-consumers.yml -f tag=v0.32.0 -f consumer=Gnome-Widgets
+```
+
+The optional `repo` input writes `repo=` in each lock, so the pin also moves the
+consumers to a repository the source moved to. Each consumer must already be on a tag
+whose check allows the move (see the move rule under the check):
+
+```bash
+gh workflow run pin-consumers.yml -f tag=v0.33.0 -f repo=merph518/Overmind-Mod
 ```
 
 The jobs read this private repository with the workflow's own token. The App token for

@@ -6,9 +6,9 @@ name: Release
 # release: the next run tags the merge and publishes the GitHub release.
 #
 # The token comes from the automation GitHub App, not GITHUB_TOKEN. A pull request
-# GITHUB_TOKEN opens starts no workflows, so the release pull request would show no
-# checks and the voice bridge would refuse to merge it. Until the App's client ID is
-# set as a repository variable the job skips, so main stays green before the App exists.
+# GITHUB_TOKEN opens starts no workflows, so the release pull request would run no
+# checks before it merges. Until the App's client ID is set as a repository variable the
+# job skips, so main stays green before the App exists.
 
 on:
   push:

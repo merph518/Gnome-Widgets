@@ -1,0 +1,15 @@
+{
+  "name": "effort-optimizer",
+  "description": "Suggests a reasoning effort level for each prompt and switches to it on request, or by itself in auto mode",
+  "version": "0.32.0",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "log": {
+      "type": "boolean",
+      "title": "Write a log",
+      "description": "Write each pick and each effort change to mods-logs/effort-optimizer.log in the Claude Code configuration folder",
+      "default": false
+    }
+  }
+}

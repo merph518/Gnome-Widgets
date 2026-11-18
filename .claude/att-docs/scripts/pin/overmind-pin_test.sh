@@ -294,6 +294,22 @@ OVERMIND_DIR="$UPP" pin v0.2.0 lambda > "$SANDBOX/out" 2>&1
 check "$?" 0 "a rerun from the completed checkout succeeds"
 check "$(pr_creates)" 1 "a rerun opens no second pull request"
 
+# PIN_REPO moves the lock's repo= along with the pin; the check proves the move against
+# the same checkout, which holds the base lock's tag. Without it the lock keeps its repo=.
+make_consumer mover v0.1.0
+PIN_REPO=acme/skills-mod pin v0.2.0 mover > "$SANDBOX/out" 2>&1
+check "$?" 0 "a pin with PIN_REPO succeeds"
+check "$(remote mover show "$BRANCH:.claude/att-docs.lock" | sed -n 's/^repo=//p')" acme/skills-mod "PIN_REPO moves repo="
+check "$(remote mover show "$BRANCH:.claude/att-docs.lock" | sed -n 's/^tag=//p')" v0.2.0 "PIN_REPO still moves the tag"
+make_consumer stayer v0.1.0
+pin v0.2.0 stayer > "$SANDBOX/out" 2>&1
+check "$(remote stayer show "$BRANCH:.claude/att-docs.lock" | sed -n 's/^repo=//p')" acme/skills "without PIN_REPO repo= stays"
+make_consumer badrepo v0.1.0
+PIN_REPO=bad pin v0.2.0 badrepo > "$SANDBOX/out" 2>&1
+check "$?" 2 "a PIN_REPO that is not owner/name exits 2"
+has "$(cat "$SANDBOX/out")" "refusing PIN_REPO 'bad'" "a bad PIN_REPO is named"
+check "$(remote badrepo branch --list | wc -l)" 1 "a bad PIN_REPO pushes nothing"
+
 # A tag whose changelog cannot be read fails the consumer before anything is pushed.
 git -C "$UP" rm -q CHANGELOG.md
 git -C "$UP" commit -q -m "drop the changelog"

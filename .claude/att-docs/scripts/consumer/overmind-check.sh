@@ -12,9 +12,16 @@
 # environment, then prefix= in the lock, then the defaults .claude/att-docs.lock and
 # .claude/att-docs. It compares the lock's copy_tree= when present, else tree=.
 #
-# The lock itself is held to the pinned tag: it cannot change repo=, url= or prefix=,
+# The lock itself is held to the pinned tag: it cannot change url= or prefix=,
 # cannot change the vendored tree without moving commit=, and a changed pin is compared with the tag in the
 # source repository, whose root tree must equal the lock's tree=.
+#
+# repo= changes only when the source moved to another repository. The move must be
+# checked against the new repository, so it fails with ATT_DOCS_REMOTE=off, when the new
+# repository cannot be fetched (in try mode too), and when url= is set in the lock,
+# because the fetch would then never reach the new repository. Besides the pinned tag,
+# the new repository must hold the base lock's tag at the base lock's commit, which shows
+# it carries the same releases.
 #
 # ATT_DOCS_BASE    the commit the lock is compared with; default: merge base with origin/main
 # ATT_DOCS_REMOTE  off: no fetch. try (default): a fetch that cannot complete warns and
@@ -107,6 +114,13 @@ if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$ROOT_TREE" =~ ^[0-9a-f]{40}$ ]]
   exit 1
 fi
 
+# usage: fetch_tag <tag>; fetches the tag from $url into the scratch repository at depth 1.
+fetch_tag() {
+  GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git -C "$tmp/src.git" -c http.lowSpeedLimit=1000 \
+    -c http.lowSpeedTime=30 fetch -q --no-tags --depth=1 -- "$url" "refs/tags/$1" \
+    < /dev/null 2> /dev/null
+}
+
 # Fetches the pinned tag into a scratch repository and compares its commit and root tree
 # with the lock's commit= and tree=. Returns 0 on a match, 1 on a mismatch, 2 when the
 # fetch cannot complete. Runs in a subshell, so the credential header and the scratch
@@ -135,9 +149,7 @@ remote_compare() {
     export "GIT_CONFIG_VALUE_$n=AUTHORIZATION: basic $basic"
     export GIT_CONFIG_COUNT=$((n + 1))
   fi
-  if ! GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git -C "$tmp/src.git" -c http.lowSpeedLimit=1000 \
-      -c http.lowSpeedTime=30 fetch -q --no-tags --depth=1 -- "$url" "refs/tags/$TAG" \
-      < /dev/null 2> /dev/null; then
+  if ! fetch_tag "$TAG"; then
     # Exit 2 from ls-remote means the remote answered and has no such tag.
     rc=0
     GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never git -c http.lowSpeedLimit=1000 \
@@ -186,6 +198,20 @@ remote_compare() {
       return 1
     fi
   fi
+  if [ -n "$MOVED_FROM" ]; then
+    # A moved repo= is proved by the base lock's tag, which the new repository must hold
+    # at the base lock's commit.
+    if ! fetch_tag "$BASE_TAG"; then
+      echo "att-docs: repo= moved from $MOVED_FROM to $REPO, but tag $BASE_TAG is not in $REPO"
+      return 1
+    fi
+    got_commit="$(git -C "$tmp/src.git" rev-parse 'FETCH_HEAD^{commit}')"
+    if [ "$got_commit" != "$BASE_COMMIT" ]; then
+      echo "att-docs: repo= moved from $MOVED_FROM to $REPO, but tag $BASE_TAG in $REPO is commit $got_commit"
+      echo "att-docs: the base lock pins commit $BASE_COMMIT"
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -198,6 +224,9 @@ case "$MODE" in
     ;;
 esac
 
+MOVED_FROM=""
+BASE_TAG=""
+BASE_COMMIT=""
 BASE="${ATT_DOCS_BASE:-}"
 if [ -z "$BASE" ]; then
   BASE="$(git merge-base HEAD origin/main 2>/dev/null || true)"
@@ -211,8 +240,25 @@ else
   BASE_TREE="$(git rev-parse "$BASE:$PREFIX" 2>/dev/null || true)"
   if [ -n "$BASE_LOCK" ]; then
     if [ "$(lock_value repo "$BASE_LOCK")" != "$REPO" ]; then
-      echo "att-docs: repo= is '$REPO', the base lock has '$(lock_value repo "$BASE_LOCK")'"
-      exit 1
+      MOVED_FROM="$(lock_value repo "$BASE_LOCK")"
+      BASE_TAG="$(lock_value tag "$BASE_LOCK")"
+      BASE_COMMIT="$(lock_value commit "$BASE_LOCK")"
+      if [ "$MODE" = off ]; then
+        echo "att-docs: repo= is '$REPO', the base lock has '$MOVED_FROM'"
+        echo "att-docs: a move to another repository is checked against the new repository; ATT_DOCS_REMOTE is off"
+        exit 1
+      fi
+      if [ -n "$(lock_value url "$BASE_LOCK")" ] || [ -n "$(lock_value url "$LOCK_TEXT")" ]; then
+        echo "att-docs: repo= is '$REPO', the base lock has '$MOVED_FROM', and url= is set"
+        echo "att-docs: remove url= to move to another repository"
+        exit 1
+      fi
+      if ! [[ "$MOVED_FROM" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] ||
+        ! [[ "$BASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$BASE_TAG" == *..* ]] ||
+        ! [[ "$BASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "att-docs: repo= is '$REPO', the base lock has '$MOVED_FROM', and its repo=, tag= or commit= is not valid"
+        exit 1
+      fi
     fi
     if [ "$(lock_value url "$BASE_LOCK")" != "$(lock_value url "$LOCK_TEXT")" ]; then
       echo "att-docs: url= is '$(lock_value url "$LOCK_TEXT")', the base lock has '$(lock_value url "$BASE_LOCK")'"
@@ -243,6 +289,11 @@ if [ "$MODE" != off ]; then
   if [ "$rc" -eq 1 ]; then
     exit 1
   elif [ "$rc" -ne 0 ]; then
+    if [ -n "$MOVED_FROM" ]; then
+      echo "att-docs: cannot fetch tag $TAG from $REPO, so its move from $MOVED_FROM is not proved"
+      echo "att-docs: load the OVERMIND_READ_TOKEN secret, a credential that reads $REPO"
+      exit 1
+    fi
     if [ "$MODE" = require ]; then
       echo "att-docs: cannot fetch tag $TAG from $REPO to prove the pin"
       echo "att-docs: load the OVERMIND_READ_TOKEN secret, a credential that reads $REPO"

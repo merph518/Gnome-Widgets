@@ -40,11 +40,11 @@ expect_fail() {
 
 # The upstream carries the scripts under test, as the real repository does.
 git init -q "$UP"
-mkdir -p "$UP/scripts/consumer" "$UP/plugins/general" "$UP/plugins/voice/skills" "$UP/plugins/other"
+mkdir -p "$UP/scripts/consumer" "$UP/plugins/general" "$UP/plugins/att-docs/skills" "$UP/plugins/other"
 cp "$HERE"/overmind-sync.sh "$HERE"/overmind-check.sh "$HERE"/overmind-lock-convert.sh \
   "$HERE"/wrapper-sync.sh.template "$HERE"/wrapper-check.sh.template "$UP/scripts/consumer/"
 echo one > "$UP/plugins/general/a.md"
-echo one > "$UP/plugins/voice/skills/v.md"
+echo one > "$UP/plugins/att-docs/skills/s.md"
 echo one > "$UP/plugins/other/o.md"
 git -C "$UP" add -A && git -C "$UP" commit -q -m one && git -C "$UP" tag v1
 echo two > "$UP/plugins/general/a.md"
@@ -163,11 +163,11 @@ expect_fail "a prefix outside the repository is refused" env ATT_DOCS_PREFIX=../
 
 # A pruned copy keeps only the listed paths plus the scripts.
 new_consumer pruned
-ATT_DOCS_PATHS="plugins/general plugins/voice/skills" sync v1 > /dev/null
-check "$(ls .claude/att-docs/plugins)" "$(printf 'general\nvoice')" "paths limits the copy"
+ATT_DOCS_PATHS="plugins/general plugins/att-docs/skills" sync v1 > /dev/null
+check "$(ls .claude/att-docs/plugins)" "$(printf 'att-docs\ngeneral')" "paths limits the copy"
 check "$([ -f .claude/att-docs/scripts/consumer/overmind-check.sh ] && echo yes)" yes \
   "a pruned copy still carries the scripts"
-check "$(lock_value paths)" "plugins/general plugins/voice/skills scripts/consumer" "paths is recorded"
+check "$(lock_value paths)" "plugins/general plugins/att-docs/skills scripts/consumer" "paths is recorded"
 git commit -q -m vendor
 check_pin > /dev/null && echo "ok   check passes on a pruned copy" ||
   { echo "FAIL check on a pruned copy"; fails=$((fails + 1)); }
@@ -347,7 +347,7 @@ new_consumer clearing
 ATT_DOCS_PATHS="plugins/general" sync v1 > /dev/null
 git commit -q -m pruned
 ATT_DOCS_PATHS="" sync v2 > /dev/null
-check "$(ls .claude/att-docs/plugins)" "$(printf 'general\nother\nvoice')" "an empty ATT_DOCS_PATHS gives a full copy"
+check "$(ls .claude/att-docs/plugins)" "$(printf 'att-docs\ngeneral\nother')" "an empty ATT_DOCS_PATHS gives a full copy"
 check "$(lock_value paths)" "" "a full copy records no paths"
 git commit -q -m full
 printf 'url=%s\n' "/nonexistent" >> .claude/att-docs.lock
@@ -416,18 +416,18 @@ CONV="$HERE/overmind-lock-convert.sh"
 SHA_A=62750eeaf29b13244a157d01d121426e558944f0
 SHA_B=4537f83fd3ed09179d04fe40273cfcdcfeb8fd7b
 cd "$SANDBOX" || exit 1
-printf '{\n  "repo": "merph518/Overmind",\n  "tag": "v0.14.2",\n  "commit": "%s",\n  "tree": "%s"\n}\n' \
+printf '{\n  "repo": "merph518/Overmind-Mod",\n  "tag": "v0.14.2",\n  "commit": "%s",\n  "tree": "%s"\n}\n' \
   "$SHA_A" "$SHA_B" > legacy.lock
-want="$(printf 'repo=merph518/Overmind\ntag=v0.14.2\ncommit=%s\ntree=%s' "$SHA_A" "$SHA_B")"
+want="$(printf 'repo=merph518/Overmind-Mod\ntag=v0.14.2\ncommit=%s\ntree=%s' "$SHA_A" "$SHA_B")"
 check "$("$CONV" legacy.lock -)" "$want" "convert prints a JSON lock as key=value"
 "$CONV" legacy.lock > /dev/null
 check "$(cat legacy.lock)" "$want" "convert rewrites the lock in place"
 check "$("$CONV" legacy.lock 2>&1; echo "rc=$?")" "$(printf 'legacy.lock is not JSON; nothing to convert\nrc=0')" \
   "convert leaves a key=value lock alone"
 check "$(cat legacy.lock)" "$want" "a second convert changes nothing"
-printf '{"repo":"a/b","tag":"v1","commit":"%s","tree":"%s","paths":["plugins/general","plugins/voice/skills"]}\n' \
+printf '{"repo":"a/b","tag":"v1","commit":"%s","tree":"%s","paths":["plugins/general","plugins/att-docs/skills"]}\n' \
   "$SHA_A" "$SHA_B" > oneline.lock
-check "$("$CONV" oneline.lock - | sed -n 's/^paths=//p')" "plugins/general plugins/voice/skills" \
+check "$("$CONV" oneline.lock - | sed -n 's/^paths=//p')" "plugins/general plugins/att-docs/skills" \
   "convert reads a one-line file and a paths array"
 printf '{"repo":"a/b","tag":"v1","commit":"abc","tree":"%s"}\n' "$SHA_B" > bad.lock
 expect_fail "convert rejects a short commit" "$CONV" bad.lock -
@@ -545,6 +545,51 @@ branch r9
 set_lock repo other/skills && commit_all
 pcheck 'remote 9 a changed repo fails offline' 1 'repo=' ATT_DOCS_REMOTE=off
 
+# A move to another repository: allowed only when the new source serves the new tag and
+# still holds the base lock's tag at the base lock's commit. ATT_DOCS_URL stands in for
+# the new repository. A copy without the base tag, and one whose base tag moved, fail.
+UP_NOV1="$SANDBOX/up-nov1"
+git clone -q --bare "$UP" "$UP_NOV1" && git -C "$UP_NOV1" tag -d v1 > /dev/null
+UP_FORK="$SANDBOX/up-fork"
+git clone -q --bare "$UP" "$UP_FORK"
+git -C "$UP_FORK" tag -f v1 "$(git -C "$UP_FORK" commit-tree 'v1^{tree}' -m fork)" > /dev/null
+move_v2() { ATT_DOCS_REPO=acme/skills-mod ATT_DOCS_URL="$SRC" bash "$HERE/overmind-sync.sh" v2 > /dev/null; }
+
+branch mv1
+move_v2 && commit_all
+check "$(lock_value repo)" acme/skills-mod 'move 1 the sync writes the new repo='
+pcheck 'move 1 a proven move passes in require' 0 'matches the pin v2' ATT_DOCS_REMOTE=require "$U"
+pcheck 'move 1 a proven move passes in try' 0 'matches the pin v2' ATT_DOCS_REMOTE=try "$U"
+pcheck 'move 2 a move with the remote unreachable fails in require' 1 'OVERMIND_READ_TOKEN' \
+  ATT_DOCS_REMOTE=require "$M"
+pcheck 'move 2 a move with the remote unreachable fails in try' 1 'is not proved' ATT_DOCS_REMOTE=try "$M"
+pcheck 'move 2 a move to a repository that does not exist fails in try' 1 'is not proved' \
+  ATT_DOCS_REMOTE=try "ATT_DOCS_URL=file://$SANDBOX/attacker"
+pcheck 'move 3 a move fails in off' 1 'checked against the new repository' ATT_DOCS_REMOTE=off
+pcheck 'move 4 a new repo without the base tag fails' 1 'tag v1 is not in acme/skills-mod' \
+  ATT_DOCS_REMOTE=require "ATT_DOCS_URL=file://$UP_NOV1"
+pcheck 'move 4 a new repo without the base tag fails in try' 1 'tag v1 is not in acme/skills-mod' \
+  ATT_DOCS_REMOTE=try "ATT_DOCS_URL=file://$UP_NOV1"
+pcheck 'move 5 a base tag at another commit fails' 1 'the base lock pins' \
+  ATT_DOCS_REMOTE=require "ATT_DOCS_URL=file://$UP_FORK"
+
+branch mv6
+printf 'url=%s\n' "$SRC" >> "$LOCK" && commit_all
+URL_BASE="$(git rev-parse HEAD)"
+set_lock repo acme/skills-mod && commit_all
+pcheck 'move 6 a move with url= in the lock fails' 1 'url=' \
+  -u ATT_DOCS_URL "ATT_DOCS_BASE=$URL_BASE" ATT_DOCS_REMOTE=require
+
+branch mv7
+move_v2 && commit_all
+hand_edit && relock && forge_commit && commit_all
+pcheck 'move 7 a hand edit with a move fails' 1 'is commit' ATT_DOCS_REMOTE=require "$U"
+
+branch mv8
+set_lock repo acme/skills-mod && commit_all
+pcheck 'move 8 a move that keeps the tag passes in require' 0 'matches the pin v1' \
+  ATT_DOCS_REMOTE=require "$U"
+
 branch r10
 set_lock tag v9 && commit_all
 pcheck 'remote 10 a tag absent from the remote fails in require' 1 'is not in' \
@@ -638,6 +683,9 @@ pcheck 'pruned 4 a hand edit with the lock unchanged fails' 1 'staged changes bu
 branch p6
 ATT_DOCS_URL="$SRC" bash "$HERE/overmind-sync.sh" v2 > /dev/null && commit_all
 pcheck 'pruned 5 a pruned sync to v2 passes in require' 0 'matches the pin v2' ATT_DOCS_REMOTE=require "$U"
+branch p6m
+ATT_DOCS_REPO=acme/skills-mod ATT_DOCS_URL="$SRC" bash "$HERE/overmind-sync.sh" v2 > /dev/null && commit_all
+pcheck 'pruned 5 a pruned move to v2 passes in require' 0 'matches the pin v2' ATT_DOCS_REMOTE=require "$U"
 
 # The lock's url=, prefix= and copy_tree=, a JSON base lock, and the wrapper's base handling.
 branch p7

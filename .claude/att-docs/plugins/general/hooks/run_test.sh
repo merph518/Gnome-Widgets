@@ -118,13 +118,15 @@ check "loop SessionStart still runs when only Stop is vendored" \
   "py --config $cfg $work/always {\"hook_event_name\":\"SessionStart\"}" \
   "$(CLAUDE_PROJECT_DIR=$work/always "$run" --default-on implementLoop probe.py <<<'{"hook_event_name":"SessionStart"}')"
 
-check "hooks.json names a section and script that exist" "" "$(
-  jq -r '.hooks[][].hooks[].command' "$here/hooks.json" |
-    sed -nE 's#.*run\.sh" (--default-on )?([A-Za-z]+) ([^ "]+).*#\2 \3#p' |
+check "register.tsx names a section and script that exist" "" "$(
+  grep -oE "args: \[('--default-on', )?'[A-Za-z]+', '[^']+'\]" "$here/register.tsx" |
+    sed -E "s/.*'([A-Za-z]+)', '([^']+)'\]/\1 \2/" |
     while read -r section script; do
       [[ -f $here/$script ]] || echo "missing $script"
       [[ -n $section ]] || echo "no section for $script"
     done
 )"
+check "register.tsx lists every hook script" "7" \
+  "$(grep -cE "args: \[('--default-on', )?'[A-Za-z]+', '[^']+'\]" "$here/register.tsx")"
 
 exit $fail

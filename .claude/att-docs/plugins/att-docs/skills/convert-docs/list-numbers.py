@@ -10,11 +10,15 @@ reaches the Markdown as a renumbered item or a sub-list at the left margin:
 - Word counts an item at a deeper level as though every shallower level above
   it had been used once, so an instance whose first item sits at level three
   draws `2.` on its first level-one item. Pandoc starts that item at 1.
+- Word starts a level whose definition names no start at 0, so the first item
+  of such a list is drawn `0.`. Pandoc starts it at 1.
 - Word nests a list by where it is drawn: a list of another definition,
   indented past the text of the item above it, reads as that item's sub-list.
   Pandoc nests by level alone, so it lands at the margin. An indented paragraph
   with no number between two items is part of the item above in Word, and a
   block quote that ends the list in Pandoc.
+- Word takes a paragraph whose numbering names no list, `w:numId` 0, out of
+  every list. Pandoc reads it as one more paragraph of the item above it.
 
 The rewrite walks the body in order, works out the number Word draws on each
 numbered paragraph and how deep it sits on the page, and gives the paragraph a
@@ -23,10 +27,35 @@ instance starts at the number Word draws, and an item keeps the instance
 before it only when Pandoc's own count lands on the same number. An indented
 paragraph inside a list is given an instance whose definition has no levels,
 which is how Pandoc's reader marks a paragraph that continues the item above.
+Pandoc joins such a paragraph to the last item it read. After a sub-list, that
+is the sub-list's last item, so a paragraph Word draws nearer the text of an
+item the sub-list is under is instead made the only item of a list one level
+under that item, which Pandoc nests there after the sub-list. That list starts
+at a number past any start Word takes, and list-markers.lua writes a list
+starting there as plain paragraphs. Both ends of that comparison follow the
+tab stops a paragraph sets itself: a tab ahead of the paragraph's first words
+carries them to the next stop, and an item's text starts at a stop set between
+its number and its hanging indent.
+A paragraph with no text between the item and that paragraph is given the
+instance with no levels: Pandoc ends the list at any paragraph outside it, and
+the paragraph meant to continue the item would land at the margin.
+
+A paragraph is inside the list when it starts at or past the text of the item
+above it. A hanging indent starts it at its first line, left of the rest of
+its text, unless it opens with a tab. Spaces typed ahead of its first words
+carry them right by about their width. One that starts short of the item's
+text ends the item, and numbering that names no list comes off it.
 
 Paragraphs in tables, headings, and levels drawn without a number are counted,
 since Word counts them, but left as they are: the table filter flattens a
 cell's list to text, and a heading's number is not written to the Markdown.
+
+A heading is the one exception when its own numbering, rather than its
+style's, puts it in a list whose item beside it on the page is an ordinary
+paragraph at the same level. Word draws it as one more item of that list, so
+its heading style comes off and it is numbered with the others. A list that
+also numbers a heading standing alone, or numbers headings through their
+style, numbers the document's sections, and its headings stay headings.
 
 Usage:
   list-numbers.py IN OUT
@@ -56,6 +85,14 @@ NEST_TOLERANCE = 90
 
 # Word's default tab stops, every half inch, in twentieths of a point.
 DEFAULT_TAB = 720
+
+# The number that starts the list made for a paragraph after a sub-list. Word
+# takes a start of 32767 at the most, so no list of the document's own starts
+# here. list-markers.lua holds the same number.
+UNNUMBERED_START = 32768
+
+# About the width Word gives a space in 12 point text, in twentieths of a point.
+SPACE = 60
 
 
 def val(element, name="val"):
@@ -191,7 +228,9 @@ class Numbering:
 
 
 def level_start(lvl):
-    return 1 if lvl is None else to_int(val(lvl.find(W + "start")), 1)
+    """The number a level starts at. A level that names no start counts from 0
+    in Word, so its first item is drawn `0.`."""
+    return 1 if lvl is None else to_int(val(lvl.find(W + "start")), 0)
 
 
 def level_format(lvl):
@@ -240,11 +279,13 @@ class WordCount:
 class Open:
     """An item on the page whose sub-lists are still open."""
 
-    def __init__(self, abstract_id, ilvl, text_pos, depth):
+    def __init__(self, abstract_id, ilvl, text_pos, depth, drawn):
         self.abstract_id = abstract_id
         self.ilvl = ilvl
         self.text_pos = text_pos
         self.depth = depth
+        # Where Word starts the text of the item's first line.
+        self.drawn = drawn
 
     def holds(self, abstract_id, ilvl, number_pos):
         if abstract_id == self.abstract_id:
@@ -256,12 +297,45 @@ def has_text(paragraph):
     return any((t.text or "").strip() for t in paragraph.iter(W + "t"))
 
 
+def ahead(paragraph):
+    """How many tabs and how many spaces come ahead of the paragraph's first words."""
+    tabs = spaces = 0
+    for run in paragraph.iter(W + "r"):
+        for child in run:
+            if child.tag == W + "tab":
+                tabs += 1
+            elif child.tag == W + "t" and child.text:
+                words = child.text.lstrip(" \u00a0")
+                spaces += len(child.text) - len(words)
+                if words:
+                    return tabs, spaces
+    return tabs, spaces
+
+
+def tab_stops(ppr):
+    """The tab stops a paragraph sets itself, left to right."""
+    tabs = None if ppr is None else ppr.find(W + "tabs")
+    if tabs is None:
+        return []
+    return sorted(to_int(val(tab, "pos")) for tab in tabs.findall(W + "tab")
+                  if val(tab) not in ("clear", "num"))
+
+
+def after_tab(pos, stops):
+    """Where a tab at pos carries the text: the next of the paragraph's own
+    stops, or Word's next default one."""
+    return next((stop for stop in stops if stop > pos),
+                (max(pos, 0) // DEFAULT_TAB + 1) * DEFAULT_TAB)
+
+
 class Rewriter:
     def __init__(self, numbering, styles):
         self.numbering = numbering
         self.styles = styles
         self.word = WordCount(numbering)
         self.open = []
+        # The paragraphs with no text read since the last one that had any.
+        self.blank = []
         # Pandoc's count, kept the way its reader keeps it: by instance and
         # level, forgetting every deeper level whenever it reads an item.
         self.pandoc = {}
@@ -269,6 +343,9 @@ class Rewriter:
         # the number it starts at).
         self.current = {}
         self.continuation_id = None
+        # The item Pandoc joins a continuing paragraph to, the last one it read,
+        # under the items it is nested in, outermost first.
+        self.joined = []
         self.next_abstract = 1 + max([to_int(k) for k in numbering.abstracts] or [0])
         self.next_num = 1 + max([to_int(k) for k in numbering.nums] or [0])
 
@@ -279,9 +356,63 @@ class Rewriter:
             elif child.tag == W + "tbl":
                 if not in_table:
                     self.open.clear()
+                    self.blank.clear()
                 self.walk(child, True)
             elif child.tag != W + "sectPr":
                 self.walk(child, in_table)
+
+    def unhead(self, body):
+        """Takes the heading style off each heading that sits in a list as one
+        of its items. Headings beside each other in one list are passed over
+        when looking for the ordinary item next to them."""
+        run, runs, sections = [], [], set()
+        for paragraph in blocks(body):
+            place = None if paragraph is None else self.place(paragraph)
+            if place == "empty":
+                continue
+            if place is not None and place[1] == "styled":
+                sections.add(place[0][0])
+                place = None
+            if run and (place is None or place[0] != run[-1][1]):
+                runs.append(run)
+                run = []
+            if place is not None:
+                run.append((paragraph, place[0], place[1]))
+        runs.append(run)
+        for run in runs:
+            if run and all(kind == "heading" for _, _, kind in run):
+                sections.add(run[0][1][0])
+        for run in runs:
+            if not run or run[0][1][0] in sections:
+                continue
+            if not any(kind == "item" for _, _, kind in run):
+                continue
+            for paragraph, _, kind in run:
+                if kind == "heading":
+                    ppr = paragraph.find(W + "pPr")
+                    ppr.remove(ppr.find(W + "pStyle"))
+
+    def place(self, paragraph):
+        """Where a body paragraph sits for unhead: "empty" for one with no text,
+        None for one outside a list, otherwise its (definition, level) and its
+        kind: "item" for an ordinary paragraph, "heading" for a heading its own
+        numbering put in the list, "styled" for one its style numbers."""
+        if not has_text(paragraph):
+            return "empty"
+        ppr = paragraph.find(W + "pPr")
+        style_id = val(ppr.find(W + "pStyle")) if ppr is not None else None
+        found = self.numbering_of(ppr, style_id)
+        if found is None or level_format(self.numbering.level(*found)) == "none":
+            return None
+        abstract_id, _ = self.numbering.abstract(found[0])
+        if not self.styles.is_heading(style_id):
+            return (abstract_id, found[1]), "item"
+        own = val(ppr.find(W + "numPr/" + W + "numId"))
+        from_style = self.styles.numbering(style_id)
+        if own is None or (
+                from_style and self.numbering.abstract(from_style[0])[0] == abstract_id):
+            return (abstract_id, found[1]), "styled"
+        return (abstract_id, found[1]), "heading"
 
     def numbering_of(self, ppr, style_id):
         num_pr = None if ppr is None else ppr.find(W + "numPr")
@@ -310,7 +441,10 @@ class Rewriter:
         if found is None:
             if not in_table and has_text(paragraph):
                 self.text(paragraph, ppr, style_id)
+            elif not in_table:
+                self.blank.append(paragraph)
             return
+        self.blank.clear()
         num_id, ilvl = found
         number = self.word.next(num_id, ilvl)
         lvl = self.numbering.level(num_id, ilvl)
@@ -331,21 +465,72 @@ class Rewriter:
         while self.open and not self.open[-1].holds(abstract_id, ilvl, number_pos):
             self.open.pop()
         depth = len(self.open)
-        self.open.append(Open(abstract_id, ilvl, text_pos, depth))
+        # A tab stop the paragraph sets between its number and its hanging
+        # indent is where Word starts the text of its first line.
+        drawn = next((stop for stop in tab_stops(ppr) if number_pos < stop < text_pos), text_pos)
+        self.open.append(Open(abstract_id, ilvl, text_pos, depth, drawn))
+        self.joined = list(self.open)
         self.number(ppr, lvl, fmt, number, depth)
 
     def text(self, paragraph, ppr, style_id):
+        blank, self.blank = self.blank, []
         if self.styles.is_heading(style_id):
             self.open.clear()
             return
-        _, left = self.positions(ppr, style_id)
+        # A hanging indent starts the paragraph left of the rest of its text,
+        # unless a tab carries its first words across to where the rest sits.
+        # Spaces typed ahead of them carry them part of the way.
+        first, left = self.positions(ppr, style_id)
+        tabs, spaces = ahead(paragraph)
+        if not tabs:
+            left = min(first + spaces * SPACE, left)
+        after_item = bool(self.open)
         while self.open and left < self.open[-1].text_pos - NEST_TOLERANCE:
             self.open.pop()
         if self.open:
-            if ppr is None:
-                ppr = ET.Element(W + "pPr")
-                paragraph.insert(0, ppr)
-            set_numbering(ppr, self.continuation(), self.open[-1].depth)
+            # Pandoc ends the list at a paragraph outside it, even one with no
+            # text, so the blank paragraphs between the item and the paragraph
+            # continuing it join the item too.
+            for continued in blank + [paragraph]:
+                ppr = continued.find(W + "pPr")
+                if ppr is None:
+                    ppr = ET.Element(W + "pPr")
+                    continued.insert(0, ppr)
+                if continued is not paragraph:
+                    set_numbering(ppr, self.continuation(), self.open[-1].depth)
+            # Pandoc joins a continuing paragraph to the last item it read.
+            # When a sub-list has ended, the paragraph belongs to the deepest
+            # of the items down to that one whose text is at least as near to
+            # where it starts as the text of the item above. A first-line
+            # indent moves where it starts, and so does each tab ahead of its
+            # first words, to the next tab stop.
+            start = max(first, left)
+            if first >= left:
+                for _ in range(tabs):
+                    start = after_tab(start, tab_stops(ppr))
+            kept = len(self.joined)
+            while kept > len(self.open) and (
+                    start - self.joined[kept - 2].drawn
+                    < self.joined[kept - 1].drawn - start):
+                kept -= 1
+            if kept == len(self.joined):
+                set_numbering(ppr, self.continuation(), self.open[-1].depth)
+            else:
+                del self.joined[kept:]
+                self.after_sub_list(ppr, self.joined[-1].depth + 1)
+        elif after_item and ppr is not None and ppr.find(W + "numPr") is not None and (
+                self.styles.numbering(style_id) is None):
+            # Numbering that names no list, as `w:numId` 0 does, takes the
+            # paragraph out of every list in Word. Pandoc reads it as one more
+            # paragraph of the item above, so here it comes off.
+            ppr.remove(ppr.find(W + "numPr"))
+
+    def after_sub_list(self, ppr, depth):
+        """Numbers a paragraph that follows a sub-list as the only item of a
+        list at the sub-list's depth, which Pandoc reads as one more block of
+        the item above. Pandoc forgets its deeper counts on it, as on any item."""
+        self.forget_below(depth)
+        set_numbering(ppr, self.instance(None, "decimal", None, UNNUMBERED_START, depth), depth)
 
     def number(self, ppr, lvl, fmt, number, depth):
         text = val(lvl.find(W + "lvlText")) if lvl is not None else None
@@ -398,6 +583,18 @@ class Rewriter:
         return num_id
 
 
+def blocks(parent):
+    """The paragraphs of the body outside tables in order, with None for each
+    table, which ends any list running into it."""
+    for child in parent:
+        if child.tag == W + "p":
+            yield child
+        elif child.tag == W + "tbl":
+            yield None
+        elif child.tag != W + "sectPr":
+            yield from blocks(child)
+
+
 def set_numbering(ppr, num_id, ilvl):
     num_pr = ppr.find(W + "numPr")
     if num_pr is None:
@@ -424,7 +621,9 @@ def rewrite(source, target):
     styles = Styles(ET.fromstring(parts["word/styles.xml"]) if "word/styles.xml" in parts else None)
     body = document.find(W + "body")
     if body is not None:
-        Rewriter(Numbering(numbering, styles), styles).walk(body)
+        rewriter = Rewriter(Numbering(numbering, styles), styles)
+        rewriter.unhead(body)
+        rewriter.walk(body)
     parts["word/document.xml"] = ET.tostring(document, encoding="UTF-8", xml_declaration=True)
     parts["word/numbering.xml"] = ET.tostring(numbering, encoding="UTF-8", xml_declaration=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as out:

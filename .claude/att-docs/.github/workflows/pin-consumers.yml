@@ -7,9 +7,10 @@ name: Pin consumers
 # One job per consumer, each with its own App token narrowed to that consumer, so a
 # failure in one never stops the others. The run fails if any job failed. The scripts and
 # the consumer list come from main, not from the tag, so a rerun for an old tag that
-# predates this automation still works. The tag is fetched from the same full checkout,
-# and its changelog supplies the notes. The jobs read Overmind with the workflow's own
-# token and write the consumer with the App token.
+# predates this automation still works. The repo input moves each lock's repo= to the
+# repository the source moved to; left empty, the locks keep theirs. The tag is fetched
+# from the same full checkout, and its changelog supplies the notes. The jobs read
+# Overmind with the workflow's own token and write the consumer with the App token.
 
 on:
   workflow_call:
@@ -23,6 +24,11 @@ on:
         type: string
         required: false
         default: ''
+      repo:
+        description: owner/name to write to repo= in each lock, to move it; empty keeps it
+        type: string
+        required: false
+        default: ''
   workflow_dispatch:
     inputs:
       tag:
@@ -31,6 +37,11 @@ on:
         required: true
       consumer:
         description: One consumer from .github/consumers.json, without the owner; empty for all
+        type: string
+        required: false
+        default: ''
+      repo:
+        description: owner/name to write to repo= in each lock, to move it; empty keeps it
         type: string
         required: false
         default: ''
@@ -64,6 +75,15 @@ jobs:
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::The tag must be vMAJOR.MINOR.PATCH, for example v1.2.3."
+            exit 1
+          fi
+
+      - name: Check the repository
+        env:
+          REPO: ${{ inputs.repo }}
+        run: |
+          if [ -n "$REPO" ] && ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::The repository must be owner/name, for example merph518/Overmind-Mod."
             exit 1
           fi
 
@@ -144,4 +164,5 @@ jobs:
           OVERMIND_DIR: ${{ github.workspace }}
           TAG: ${{ inputs.tag }}
           CONSUMER: ${{ matrix.consumer }}
+          PIN_REPO: ${{ inputs.repo }}
         run: bash scripts/pin/overmind-pin.sh "$TAG" "$CONSUMER"

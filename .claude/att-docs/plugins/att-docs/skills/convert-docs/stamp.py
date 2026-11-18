@@ -69,8 +69,10 @@ EMPTY_CELL = re.compile(r"(?<=\|)(\s*)\\(\s*)(?=\|)")
 HTML_ENTITY = re.compile(r"&nbsp;|&#160;|&#xa0;", re.IGNORECASE)
 
 # The bullet glyph a slide draws at the head of its own list item, left over
-# once the item is a Markdown list item that draws its own.
-LIST_BULLET_GLYPH = re.compile(r"^(\s*(?:[-*+]|\d+\.)\s+)[•·▪◦§o]\s*", re.MULTILINE)
+# once the item is a Markdown list item that draws its own. A letter `o` is a
+# glyph only when it stands alone; otherwise it opens a word such as "open".
+LIST_BULLET_GLYPH = re.compile(
+    r"^(\s*(?:[-*+]|\d+\.)\s+)(?:[•·▪◦§]\s*|o(?:[ \t]+|$))", re.MULTILINE)
 
 IMAGE_MD = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 IMAGE_HTML = re.compile(r"<img\b[^>]*/?>", re.IGNORECASE)

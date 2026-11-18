@@ -21,6 +21,10 @@
 #                    pinned with today's scripts. The tag itself is fetched from it, and the
 #                    changelog is read from the tag, never from the consumer.
 #   PIN_OWNER        owner of the consumers; default merph518
+#   PIN_REPO         owner/name written to repo= in each consumer's lock, to move it to a
+#                    repository the source moved to; default: keep the lock's repo=. The
+#                    consumer's check accepts the move only when its base copy of the check
+#                    script allows one and the new repository holds the base lock's tag.
 #   PIN_CLONE_BASE   where consumers are cloned from; default https://github.com
 #   GH_TOKEN         a token with contents and pull request write access to the consumers;
 #                    used for the clone and push as well as for gh
@@ -110,7 +114,9 @@ pin_one() {
   # Their output is kept: on a failure it is the diagnostic, and the last line, which
   # the summary shows, carries it too.
   local step_out
-  if ! step_out="$(ATT_DOCS_URL="$OVERMIND_DIR" bash "$OVERMIND_DIR/scripts/consumer/overmind-sync.sh" "$tag" 2>&1)"; then
+  local repo_env=()
+  if [ -n "${PIN_REPO:-}" ]; then repo_env=("ATT_DOCS_REPO=$PIN_REPO"); fi
+  if ! step_out="$(env "${repo_env[@]}" ATT_DOCS_URL="$OVERMIND_DIR" bash "$OVERMIND_DIR/scripts/consumer/overmind-sync.sh" "$tag" 2>&1)"; then
     fail_with "overmind-sync.sh failed" "$step_out"
     return 1
   fi
@@ -165,6 +171,10 @@ main() {
   shift
   if ! [[ "$tag" =~ $TAG_PATTERN ]]; then
     echo "refusing tag '$tag': expected vMAJOR.MINOR.PATCH" >&2
+    exit 2
+  fi
+  if [ -n "${PIN_REPO:-}" ] && ! [[ "$PIN_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    echo "refusing PIN_REPO '$PIN_REPO': expected <owner>/<name>" >&2
     exit 2
   fi
   for name in "$@"; do
