@@ -1,7 +1,7 @@
 {
   "name": "efficient-browser-use",
   "description": "Shrinks the screenshots and other pictures tool results carry before Claude reads them, so browser work costs fewer tokens. Linux, with ImageMagick",
-  "version": "0.32.4",
+  "version": "0.32.5",
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {

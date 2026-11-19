@@ -1,7 +1,7 @@
 {
   "name": "worktree-sweeper",
   "description": "Shows a band when worktrees are done and a pane that removes them with the checks worktree-cleanup.sh runs",
-  "version": "0.32.4",
+  "version": "0.32.5",
   "license": "MIT",
   "types": "./types/index.d.ts"
 }

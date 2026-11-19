@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.32.5](https://github.com/merph518/Overmind-Mod/compare/v0.32.4...v0.32.5) (2026-11-19)
+
+
+### Bug Fixes
+
+* count a text box fallback picture the drawing does not hold ([eec8f30](https://github.com/merph518/Overmind-Mod/commit/eec8f305851e7e84e78ee3b2f964b63bbae4d3e2))
+* count EMF+ picture text as unread only when no text record was read ([81aa8b9](https://github.com/merph518/Overmind-Mod/commit/81aa8b9a9f727d3ed0c7a728bb50f2e6235dff3c))
+* count EMF+ picture text as unread only when no text record was read ([#114](https://github.com/merph518/Overmind-Mod/issues/114)) ([cd610cc](https://github.com/merph518/Overmind-Mod/commit/cd610ccae4c9ce02b071ccb81206c2397a60988d))
+
 ## [0.32.4](https://github.com/merph518/Overmind-Mod/compare/v0.32.3...v0.32.4) (2026-11-18)
 
 

@@ -1,7 +1,7 @@
 {
   "name": "model-router",
   "description": "Picks each subagent's model: Haiku reads the task at agent.spawn and answers with a tier and a confidence, and the spawn moves up or down a tier when that confidence clears a bar. Logs each pick and the cost difference to mods-logs/savings.jsonl. Never changes the main chat's model",
-  "version": "0.32.4",
+  "version": "0.32.5",
   "license": "MIT",
   "userConfig": {
     "fastModel": {

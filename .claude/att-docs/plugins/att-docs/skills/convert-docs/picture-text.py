@@ -27,9 +27,18 @@ blank cell draws nothing, so the cells beside it keep their own columns.
 
 A picture with no text records, such as a line drawing or a bitmap, and every
 picture that is not an EMF or a WMF, is left as it is for the images filter. A
-picture whose text is there but cannot be read back as characters, because it
-is drawn as glyph indexes or only as EMF+ records, is left too, and counted as
-unread, so the run can say a picture held text that the Markdown does not.
+picture whose text is there but cannot be read back as characters is counted as
+unread, so the run can say a picture held text that the Markdown does not: text
+drawn as glyph indexes, and text drawn as EMF+ DrawString or DrawDriverString
+records in a picture none of whose text records were read. A picture that holds
+both forms usually draws the same text once in each, so its EMF+ records add
+nothing when its text records were read. A picture none of whose text was read
+is left for the images filter.
+
+A text box written twice, as a drawing and as its older fallback under one
+`mc:AlternateContent`, has the text of its pictures put back in both copies and
+counted once: a picture in the fallback is not counted when the drawing holds
+the same picture.
 
 Usage:
   picture-text.py IN OUT [--report FILE]
@@ -55,6 +64,7 @@ R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 V = "{urn:schemas-microsoft-com:vml}"
 REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 
 BODY = "word/document.xml"
 RELS = "word/_rels/document.xml.rels"
@@ -85,6 +95,7 @@ EMR_EXTTEXTOUTA = 83
 EMR_EXTTEXTOUTW = 84
 EMR_SMALLTEXTOUT = 108
 EMF_PLUS_DRAW_STRING = 0x401C
+EMF_PLUS_DRAW_DRIVER_STRING = 0x4036
 
 # WMF record functions.
 META_EOF = 0x0000
@@ -150,14 +161,15 @@ def is_wmf(data: bytes) -> bool:
     return kind in (1, 2) and header_words == 9
 
 
-def emf_plus_draws_string(data: bytes, start: int, end: int) -> bool:
-    """Whether an EMR_COMMENT holding EMF+ records holds a DrawString."""
+def emf_plus_draws_text(data: bytes, start: int, end: int) -> bool:
+    """Whether an EMR_COMMENT holding EMF+ records holds a DrawString or a
+    DrawDriverString."""
     at = start + 16
     if end - start < 16 or data[start + 12:start + 16] != b"EMF+":
         return False
     while at + 12 <= end:
         kind, _, size = struct.unpack_from("<HHI", data, at)
-        if kind == EMF_PLUS_DRAW_STRING:
+        if kind in (EMF_PLUS_DRAW_STRING, EMF_PLUS_DRAW_DRIVER_STRING):
             return True
         if size < 12:
             return False
@@ -175,6 +187,7 @@ def emf_text(data: bytes) -> Reading:
     font = 0.0
     align = 0
     window_y = viewport_y = 1
+    plus_text = False
     at = 0
     while at + 8 <= len(data):
         kind, size = struct.unpack_from("<II", data, at)
@@ -198,8 +211,7 @@ def emf_text(data: bytes) -> Reading:
                 if handle in fonts:
                     font = fonts[handle]
             elif kind == EMR_COMMENT:
-                if emf_plus_draws_string(data, at, end):
-                    reading.unread = True
+                plus_text = plus_text or emf_plus_draws_text(data, at, end)
             elif kind in (EMR_EXTTEXTOUTW, EMR_EXTTEXTOUTA):
                 x, y, count, offset, options = struct.unpack_from("<iiIII", data, at + 36)
                 dx_offset = struct.unpack_from("<I", data, at + 72)[0]
@@ -243,6 +255,9 @@ def emf_text(data: bytes) -> Reading:
         for text in reading.texts:
             text.y = -text.y
     reading.texts = [text for text in reading.texts if text.string.strip()]
+    # A picture holding both forms draws its text once in each.
+    if plus_text and not reading.texts:
+        reading.unread = True
     return reading
 
 
@@ -522,6 +537,9 @@ class Pass:
         self.readings: dict[str, Reading] = {}
         self.recovered = 0
         self.unread = 0
+        # The pictures already counted in the drawing form of the text box
+        # whose older copy is being read, so they count once.
+        self.counted: set[str] = set()
 
     def read(self, node) -> list[Reading]:
         """The text of each vector picture `node` holds whose text went in. A
@@ -535,10 +553,12 @@ class Pass:
             if name not in self.readings:
                 self.readings[name] = picture_text(self.parts[name])
             reading = self.readings[name]
-            if reading.unread:
+            counting = name not in self.counted
+            if reading.unread and counting:
                 self.unread += 1
             if reading.texts:
-                self.recovered += 1
+                if counting:
+                    self.recovered += 1
                 found.append(reading)
         return found
 
@@ -617,6 +637,25 @@ class Pass:
         return True
 
 
+def second_copies(root, media: dict[str, str]) -> dict:
+    """Each paragraph of an `mc:Fallback`, with the picture parts the
+    `mc:Choice` beside it holds. Word writes a text box in both forms, so a
+    picture in both is one picture."""
+    found = {}
+    for content in root.iter(MC + "AlternateContent"):
+        choice = content.find(MC + "Choice")
+        if choice is None:
+            continue
+        nodes = list(choice.iter())
+        ids = [node.get(R + "embed") for node in nodes if node.tag == A + "blip"]
+        ids += [node.get(R + "id") for node in nodes if node.tag == V + "imagedata"]
+        names = {media[rid] for rid in ids if rid in media}
+        for fallback in content.findall(MC + "Fallback"):
+            for paragraph in fallback.iter(W + "p"):
+                found[paragraph] = found.get(paragraph, set()) | names
+    return found
+
+
 def rewrite(source, target) -> tuple[int, int]:
     """Writes `target` and returns the pictures recovered and left unread."""
     with zipfile.ZipFile(source) as archive:
@@ -627,8 +666,10 @@ def rewrite(source, target) -> tuple[int, int]:
         keep_prefixes(parts[BODY])
         root = ET.fromstring(parts[BODY])
         parents = {child: parent for parent in root.iter() for child in parent}
+        copies = second_copies(root, rewrite_pass.media)
         changed = False
         for paragraph in [node for node in root.iter(W + "p")]:
+            rewrite_pass.counted = copies.get(paragraph, set())
             changed = rewrite_pass.paragraph(paragraph, parents) or changed
         if changed:
             parts[BODY] = ET.tostring(root, encoding="UTF-8", xml_declaration=True)

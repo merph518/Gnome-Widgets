@@ -165,8 +165,11 @@ starts over; it is off until turned on. See its [README](plugins/cache-clock/REA
 `review-queue` holds no skills, only a hooks module, `hooks/register.tsx`: a row above the
 prompt counts the open pull requests labeled `Manual Review Needed` in this repository
 and the repositories that pin it, and lists each one with its CI state and age, linked
-to the pull request. It reads them with `gh` every few minutes. See its
-[README](plugins/review-queue/README.md).
+to the pull request. It refreshes every 15 minutes as a backstop, and about 3 seconds
+after a shell command runs `gh pr` or adds or removes the label through `gh api`. A
+**Dismiss** button hides a pull request in every open chat until it is no longer listed.
+A pull request that closes while `scripts/catchup.py wait` runs leaves the band within
+about 10 seconds. See its [README](plugins/review-queue/README.md).
 
 `runner-health` holds no skills, only a hooks module: a row above the prompt shows when a
 self-hosted CI runner is stopped or offline, a job has waited too long for a runner, or a
