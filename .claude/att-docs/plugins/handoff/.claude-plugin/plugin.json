@@ -1,7 +1,7 @@
 {
   "name": "handoff",
   "description": "Writes a handoff of a long chat and starts a fresh chat from it, with secrets removed",
-  "version": "0.32.4",
+  "version": "0.32.5",
   "license": "MIT",
   "types": "./types/index.d.ts"
 }

@@ -82,6 +82,12 @@ def small_text(x, y, string):
     return record(PT.EMR_SMALLTEXTOUT, payload)
 
 
+def emf_plus(*kinds):
+    """An EMR_COMMENT holding one EMF+ record of each type given, each with no data."""
+    records = b"".join(struct.pack("<HHII", kind, 0, 12, 0) for kind in kinds)
+    return record(PT.EMR_COMMENT, struct.pack("<I", 4 + len(records)) + b"EMF+" + records)
+
+
 def emf(*records):
     return emf_header() + b"".join(records) + record(PT.EMR_EOF, bytes(12))
 
@@ -157,6 +163,45 @@ class ReadEmf(unittest.TestCase):
     def test_glyph_indexes_are_unread(self):
         reading = PT.emf_text(emf(text_w(0, 0, "AB", options=ETO_GLYPH_INDEX)))
         self.assertEqual(reading.texts, [])
+        self.assertTrue(reading.unread)
+
+    def test_text_drawn_only_as_emf_plus_is_unread(self):
+        for kind in (PT.EMF_PLUS_DRAW_STRING, PT.EMF_PLUS_DRAW_DRIVER_STRING):
+            with self.subTest(kind=hex(kind)):
+                reading = PT.emf_text(emf(emf_plus(0x4008, kind)))
+                self.assertEqual(reading.texts, [])
+                self.assertTrue(reading.unread)
+
+    def test_emf_plus_text_beside_text_records_that_were_read_is_not_unread(self):
+        for kind in (PT.EMF_PLUS_DRAW_STRING, PT.EMF_PLUS_DRAW_DRIVER_STRING):
+            with self.subTest(kind=hex(kind)):
+                reading = PT.emf_text(emf(emf_plus(kind), text_w(0, 0, "Hello")))
+                self.assertEqual([t.string for t in reading.texts], ["Hello"])
+                self.assertFalse(reading.unread)
+
+    def test_emf_plus_text_beside_only_blank_text_records_is_unread(self):
+        reading = PT.emf_text(emf(emf_plus(PT.EMF_PLUS_DRAW_STRING), text_w(0, 0, "  ")))
+        self.assertEqual(reading.texts, [])
+        self.assertTrue(reading.unread)
+
+    def test_emf_plus_records_that_draw_no_text_are_not_unread(self):
+        reading = PT.emf_text(emf(emf_plus(0x4008, 0x4015)))
+        self.assertFalse(reading.unread)
+
+    def test_a_comment_that_is_not_emf_plus_is_ignored(self):
+        reading = PT.emf_text(emf(record(PT.EMR_COMMENT, struct.pack("<I", 16) + b"GDIC"
+                                         + struct.pack("<HHII", PT.EMF_PLUS_DRAW_STRING,
+                                                       0, 12, 0))))
+        self.assertFalse(reading.unread)
+
+    def test_a_comment_too_short_to_name_emf_plus_is_ignored(self):
+        reading = PT.emf_text(emf(record(PT.EMR_COMMENT, struct.pack("<I", 4))))
+        self.assertFalse(reading.unread)
+
+    def test_glyph_indexes_beside_text_that_was_read_stay_unread(self):
+        reading = PT.emf_text(emf(text_w(0, 0, "Kept"),
+                                  text_w(0, 20, "AB", options=ETO_GLYPH_INDEX)))
+        self.assertEqual([t.string for t in reading.texts], ["Kept"])
         self.assertTrue(reading.unread)
 
     def test_blank_strings_are_dropped(self):
@@ -405,6 +450,67 @@ class Rewrite(unittest.TestCase):
         counts, text = self.convert(self.picture_docx([IMAGES.para(IMAGES.picture())], media))
         self.assertEqual(counts, (0, 1))
         self.assertEqual(text.strip(), "\\[Picture\\]")
+
+    def test_a_picture_drawing_its_text_both_as_emf_and_emf_plus_is_recovered(self):
+        media = emf(emf_plus(PT.EMF_PLUS_DRAW_STRING), text_w(0, 0, "Both ways"))
+        counts, text = self.convert(self.picture_docx([IMAGES.para(IMAGES.picture())], media))
+        self.assertEqual(counts, (1, 0))
+        self.assertEqual(text.strip(), "Both ways")
+
+    def test_text_drawn_only_as_emf_plus_is_unread_and_keeps_its_placeholder(self):
+        media = emf(emf_plus(PT.EMF_PLUS_DRAW_DRIVER_STRING))
+        counts, text = self.convert(self.picture_docx([IMAGES.para(IMAGES.picture())], media))
+        self.assertEqual(counts, (0, 1))
+        self.assertEqual(text.strip(), "\\[Picture\\]")
+
+    def text_box(self, choice=None, fallback=None):
+        """A run holding a text box under mc:AlternateContent, the drawing form
+        in its Choice and the older form in its Fallback, each holding the
+        paragraph given, or no Choice when none is given."""
+        mc = PT.MC[1:-1]
+        wps = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+        out = f'<w:r><mc:AlternateContent xmlns:mc="{mc}" xmlns:wps="{wps}">'
+        if choice is not None:
+            out += ('<mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:txbx><w:txbxContent>'
+                    + choice + "</w:txbxContent></wps:txbx></wps:wsp></w:drawing></mc:Choice>")
+        return (out + '<mc:Fallback><w:pict><v:shape id="box"><v:textbox><w:txbxContent>'
+                + fallback + "</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback>"
+                "</mc:AlternateContent></w:r>")
+
+    def rewritten(self, path):
+        out = self.dir / "out.docx"
+        counts = PT.rewrite(path, out)
+        with zipfile.ZipFile(out) as archive:
+            return counts, archive.read("word/document.xml").decode()
+
+    def test_a_text_box_written_in_both_forms_is_counted_once(self):
+        inside = IMAGES.para(IMAGES.picture())
+        box = self.text_box(choice=inside, fallback=inside)
+        path = self.picture_docx([IMAGES.para(IMAGES.run("Before") + box)],
+                                 emf(text_w(0, 0, "Boxed")))
+        counts, document = self.rewritten(path)
+        self.assertEqual(counts, (1, 0))
+        self.assertEqual(document.count("Boxed"), 2)
+
+    def test_unread_text_in_a_text_box_written_in_both_forms_is_counted_once(self):
+        inside = IMAGES.para(IMAGES.picture())
+        box = self.text_box(choice=inside, fallback=inside)
+        path = self.picture_docx([IMAGES.para(IMAGES.run("Before") + box)],
+                                 emf(text_w(0, 0, "AB", options=ETO_GLYPH_INDEX)))
+        self.assertEqual(self.rewritten(path)[0], (0, 1))
+
+    def test_a_fallback_picture_the_drawing_does_not_hold_is_counted(self):
+        box = self.text_box(choice=IMAGES.para(IMAGES.run("Words")),
+                            fallback=IMAGES.para(IMAGES.picture()))
+        path = self.picture_docx([IMAGES.para(IMAGES.run("Before") + box)],
+                                 emf(text_w(0, 0, "AB", options=ETO_GLYPH_INDEX)))
+        self.assertEqual(self.rewritten(path)[0], (0, 1))
+
+    def test_a_fallback_with_no_choice_is_counted(self):
+        box = self.text_box(fallback=IMAGES.para(IMAGES.picture()))
+        path = self.picture_docx([IMAGES.para(IMAGES.run("Before") + box)],
+                                 emf(text_w(0, 0, "Alone")))
+        self.assertEqual(self.rewritten(path)[0], (1, 0))
 
     def test_a_line_drawing_is_neither_recovered_nor_unread(self):
         counts, text = self.convert(self.picture_docx([IMAGES.para(IMAGES.picture())], emf()))

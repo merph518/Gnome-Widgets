@@ -35,7 +35,7 @@ none, ask the user rather than guessing.
 
 The scripts and the filters ship in this folder: `convert.sh`, `stamp.py`,
 `pages.py`, `slides.py`, `doc_paths.py`, `hidden-text.py`, `doc-lists.py`, `list-numbers.py`,
-`check-list-numbers.py`, `check-shifted-text.py`, `build-words.py`,
+`picture-text.py`, `check-list-numbers.py`, `check-shifted-text.py`, `build-words.py`,
 `check-doc-credentials.py`, `drop-images.lua`, `flatten-tables.lua`,
 `list-markers.lua`, and the
 config reader `convert_config.py`. A script that needs a root, a host, or a data
@@ -59,7 +59,7 @@ when it is not normal.
 calls `<stamp-script>` for the cleanup, the provenance block, and the page
 markers, which `<stamp-script>` gets from `<pages-script>`. Pandoc runs with
 three Lua filters: `<drop-images-filter>` for the nodes Markdown cannot carry,
-the placeholder each picture leaves, and the space a bookmark leaves at the
+the placeholder a picture leaves, and the space a bookmark leaves at the
 front of a paragraph,
 `<flatten-tables-filter>` for the ones that would force a table into raw HTML,
 and `list-markers.lua` for list labels Markdown cannot draw.
@@ -276,14 +276,52 @@ Nothing else answers. In particular:
 ## What the output may contain
 
 Markdown, and nothing else. No images are extracted and no `_assets` folder is
-written, so a link to a file that does not exist cannot be produced. Each
-picture leaves a plain-text placeholder where it was: `[picture]` inside a line
-of text, such as an icon quoted between quote marks, and `[Picture]` on a line
-of its own, such as a screen print. The picture's alt text follows a colon when
+written, so a link to a file that does not exist cannot be produced. A picture
+whose text is not put back, as below, leaves a plain-text placeholder where it
+was: `[picture]` inside a line of text, such as an icon quoted between quote
+marks, and `[Picture]` on a line of its own, such as a screen print. The picture's alt text follows a colon when
 the document gives one, apart from the description Word writes for itself.
 The Markdown escapes the brackets, `\[picture\]`, so the placeholder reads as
 text and never as a link. A picture with a caption keeps the caption under its
 placeholder.
+
+A vector picture, an EMF or a WMF file, holds the text it shows as text
+records, and a range pasted from a spreadsheet is often such a picture.
+`picture-text.py` runs after `list-numbers.py` on every route that reads a
+`docx`, `doc` and `dot` included, and puts that text in the body where the
+picture was:
+
+- Text records that line up in at least two rows and two columns become a pipe
+  table. In a picture of three or more lines, a gap between two lines more
+  than one and a half times the picture's usual line spacing splits it into
+  blocks, as a blank row between two ranges does, and each block that makes a
+  grid is a table of its own. The first row of each table is its header.
+- Text that makes no such grid becomes one line of text for each line of the
+  picture.
+- A picture inside a sentence becomes its words, in the sentence.
+
+The picture's alt text is not kept with the text put back, and a caption stays
+under it. A picture with no text records, and every raster picture, such as a
+PNG or a JPEG file, leaves its placeholder. Only the body of the document is
+read, so a picture in a header, a footer, or a footnote is not, and a file the
+step cannot read goes to Pandoc unchanged.
+
+Text a picture draws as glyph indexes, or in EMF+ DrawString or DrawDriverString
+records, is not read. When none of the picture's text was read, it leaves its
+placeholder. When part was, that part goes in and no placeholder is left.
+Either way the picture counts as holding text that was not read. A picture that
+draws text in EMF+ records usually draws the same text again as text records,
+so its EMF+ text counts as not read only when none of its text records were
+read. A text box that Word writes twice, once in the newer form and once in the
+older one, has the text of its pictures put back in both, and a picture in both
+counts once. The run log says `N picture(s) hold text that was not read,
+restore it by hand` under the document, where N counts pictures, and the run's
+totals count the document under `with picture text not read`. A document with
+text put back is counted under `with picture text put back`. In a document
+that holds such a picture, a `Pages` line that names a page whose opening text
+was not found also says that the document holds a picture whose text was not
+read, since that picture may be where the page opens. Read the picture in the
+source and type its text into the Markdown.
 
 Every file that lands has to satisfy all of this:
 
